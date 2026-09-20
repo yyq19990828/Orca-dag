@@ -18,7 +18,7 @@ import { existsSync, lstatSync, rmSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { AGENT_SKILL_DIRS, SKILL_NAME } from "./skill";
-import { COORDINATOR_TITLE, closeTerminal, listTerminals } from "./orca";
+import { COORDINATOR_TITLE, closeTerminal, listTerminals, parseCoordinatorTitle } from "./orca";
 
 export interface UninstallOptions {
   /** Print what would happen, change nothing. */
@@ -70,12 +70,23 @@ function isBrokenLink(path: string): boolean {
 /**
  * Close Orca terminals this viewer created.
  *
- * Both the coordinator loop's terminal and the `· adhoc N` one-shots carry the
- * same title prefix. A crashed viewer leaves them connected and still bound to
- * a Run, which fences the user's own agent — so cleaning them up is the part of
- * uninstall that actually unblocks someone.
+ * Both the coordinator loop's terminal and its one-shot `adhoc` helpers carry
+ * the same `orca-dag coordinator` title prefix (the stable contract — Phase 2
+ * appended workspace hash + instance id after it, older versions had nothing).
+ * A crashed viewer leaves them connected and still bound to a Run, which
+ * fences the user's own agent — so cleaning them up is the part of uninstall
+ * that actually unblocks someone.
+ *
+ * Each terminal is reported with the WORKSPACE it was coordinating (from the
+ * worktree it lives in, plus the title's hash segment) before it closes, so a
+ * multi-workspace user can see exactly whose coordinators went away.
+ *
+ * Exported (not private) because this sweep is uninstall's only surface that
+ * talks to a *live* runtime: its workspace-scoped discovery contract — close
+ * ours by title prefix, report each workspace, never touch foreign terminals —
+ * is exercised against the fake-CLI suite in `orca.test.ts`.
  */
-async function closeCoordinatorTerminals(dryRun: boolean, log: (line: string) => void): Promise<number> {
+export async function closeCoordinatorTerminals(dryRun: boolean, log: (line: string) => void): Promise<number> {
   let terminals;
   try {
     terminals = await listTerminals();
@@ -86,8 +97,15 @@ async function closeCoordinatorTerminals(dryRun: boolean, log: (line: string) =>
   }
   const ours = terminals.filter((t) => t.title.startsWith(COORDINATOR_TITLE));
   for (const t of ours) {
+    const info = parseCoordinatorTitle(t.title);
+    const scope =
+      info === null
+        ? "unrecognized title — closing anyway (prefix matched)"
+        : info.kind === "legacy"
+          ? "pre-workspace-scoped orca-dag"
+          : `workspace ${info.hash} (${t.worktreePath || "unknown path"})`;
     if (!dryRun) await closeTerminal(t.handle);
-    log(`${act(dryRun ? "would close" : "closed")}Orca terminal "${t.title}" (${t.handle})`);
+    log(`${act(dryRun ? "would close" : "closed")}Orca terminal "${t.title}" (${t.handle}) — ${scope}`);
   }
   return ours.length;
 }

@@ -1,35 +1,18 @@
-import express from "express";
-import cors from "cors";
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, extname, join } from "node:path";
-import {
-  OrcaCliError,
-  bindRun,
-  closeTerminal,
-  createRun,
-  createTempCoordinatorTerminal,
-  listGates,
-  listModels,
-  listRuns,
-  listTasks,
-  listTerminals,
-  resolveGate,
-  runOrca,
-  tasksToDag,
-} from "./orca";
-import { loadConfig, saveConfig } from "./config";
-import { coordinatorStatus, startCoordinator, stopCoordinator } from "./coordinator";
+import { dirname } from "node:path";
+import { runOrca, initOrcaRuntime, getOrcaRuntime, formatCommand, checkReadiness } from "./orca";
 import { loadEmbeddedAssets } from "./webAssets";
 import { describeSkillInstall, installSkill } from "./skill";
+import { createApp, listenLoopback } from "./app";
+import { createSecurityPolicy } from "./security";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const PORT = Number(process.env.PORT ?? 8787);
-// Directory used to resolve the `active` worktree for the coordinator terminal.
-const WORKSPACE_DIR = process.env.WORKSPACE_DIR ?? process.cwd();
-const WORKTREE = process.env.ORCA_WORKTREE ?? "active";
+// Raw env value, used ONLY by `uninstall` to locate this workspace's config
+// file — uninstall must work even when the directory is gone. The serve path
+// below resolves the real workspace via initOrcaRuntime().
+const RAW_WORKSPACE_DIR = process.env.WORKSPACE_DIR ?? process.cwd();
 
 // --- Subcommands ----------------------------------------------------------
 // Handled before anything else so `uninstall` and `--help` never bind a port,
@@ -50,11 +33,19 @@ Options:
   --dry-run                (uninstall) report what would be removed, change nothing
 
 Environment:
-  PORT=8787                port to serve on
+  PORT=8787                port to serve on (always bound to loopback 127.0.0.1)
   NO_OPEN=1                don't open a browser tab
   ORCA_DAG_NO_SKILL=1      same as --no-skill
   WORKSPACE_DIR=<path>     workspace to use instead of the current directory
-  ORCA_WORKTREE=active     Orca worktree selector for the coordinator terminal`);
+                           (must exist; used verbatim as the Orca worktree)
+  ORCA_WORKTREE=<selector> explicit Orca worktree selector; default is the
+                           exact workspace as path:<WORKSPACE_DIR>
+  ORCA_CLI_COMMAND="<cmd>" exact Orca CLI to run, quoted argv, no shell
+                           (default: orca, or orca-ide on Linux outside Orca)
+  ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1
+                           allow arbitrary custom harness commands (they run as
+                           shell lines inside worker terminals; the known agent
+                           ids — claude, codex, opencode, … — never need this)`);
   process.exit(0);
 }
 
@@ -63,259 +54,36 @@ if (argv.includes("uninstall")) {
   await runUninstall({
     dryRun: argv.includes("--dry-run"),
     purge: argv.includes("--purge"),
-    workspace: WORKSPACE_DIR,
+    workspace: RAW_WORKSPACE_DIR,
   });
   process.exit(0);
 }
 
-const app = express();
-app.use(cors());
-app.use(express.json({ limit: "2mb" }));
-
-/** Turn an Orca CLI failure into a response the UI can explain to the user. */
-function fail(res: express.Response, err: unknown): void {
-  const e = err as OrcaCliError;
-  const code = e?.code ?? null;
-  const status = code === "run_required" || code === "run_not_found" ? 409 : 500;
-  // Orca hands back the exact unblocking command for some refusals — most
-  // usefully `run-use --takeover-legacy` for a Run adopted by the 1.4.160
-  // migration, which plain `run-use` refuses while it still has live work.
-  const recovery = e?.recoveryCommand ?? null;
-  const message = recovery ? `${e.message}\n\nUnblock with: ${recovery}` : String(e?.message ?? err);
-  res.status(status).json({ error: message, code, recoveryCommand: recovery });
+// Resolve the Orca CLI + workspace identity ONCE for the whole process (Phase
+// 2): the executable/argv spec, the realpath'd workspace every CLI call runs
+// in, and the worktree selector derived from it. A bad WORKSPACE_DIR stops
+// startup here with an actionable message instead of misplacing a coordinator.
+try {
+  initOrcaRuntime();
+} catch (err) {
+  console.error(`orca-dag: ${String((err as Error).message ?? err)}`);
+  process.exit(1);
 }
+const runtime = getOrcaRuntime();
 
-/**
- * Run a mutating orchestration call as the bound coordinator.
- *
- * Mutations (`gate-resolve`, `dispatch`, `worker-start`, …) are rejected unless
- * the caller is the live Orca terminal currently bound to the Run, so we borrow
- * one. If the coordinator loop is already running we reuse its terminal;
- * otherwise we create one, bind, act, and close it again so we don't sit on the
- * Run's coordinator slot (which would keep the user's agent fenced).
- */
-async function asCoordinator<T>(runId: string, fn: (from: string) => Promise<T>): Promise<T> {
-  const live = coordinatorStatus();
-  if (live.running && live.coordinatorHandle && live.runId === runId) {
-    return fn(live.coordinatorHandle);
-  }
-  // NEVER reuse the loop's terminal here: rebinding it to another Run would
-  // fence the running coordinator, and the finally below would then close its
-  // terminal. A throwaway uniquely-titled terminal keeps the paths independent.
-  const handle = await createTempCoordinatorTerminal(WORKTREE);
-  try {
-    await bindRun(runId, handle);
-    return await fn(handle);
-  } finally {
-    await closeTerminal(handle);
-  }
-}
+// Per-process mutation token + custom-command policy. The web client fetches
+// the token once from /api/session and echoes it back on every mutation; see
+// security.ts for the threat model this closes and what it deliberately
+// doesn't.
+const policy = createSecurityPolicy();
 
-app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, workspace: WORKSPACE_DIR, worktree: WORKTREE });
-});
-
-/** Runs available to view. Tasks are Run-scoped since Orca 1.4.160. */
-app.get("/api/runs", async (_req, res) => {
-  try {
-    res.json({ runs: await listRuns() });
-  } catch (err) {
-    fail(res, err);
-  }
-});
-
-/** Create a new Run (and bind it just long enough to create it). */
-app.post("/api/runs", async (req, res) => {
-  const objective = String(req.body?.objective ?? "").trim();
-  if (!objective) {
-    res.status(400).json({ error: "objective required" });
-    return;
-  }
-  try {
-    // Throwaway terminal — see asCoordinator for why we never reuse the loop's.
-    const handle = await createTempCoordinatorTerminal(WORKTREE);
-    try {
-      res.json({ run: await createRun(objective, handle) });
-    } finally {
-      await closeTerminal(handle);
-    }
-  } catch (err) {
-    fail(res, err);
-  }
-});
-
-/**
- * The DAG of one Run. `?run=<id>` is required — an unscoped `task-list` fails
- * with `run_required` because this process is not a bound coordinator.
- */
-app.get("/api/dag", async (req, res) => {
-  const runId = String(req.query.run ?? "").trim();
-  if (!runId) {
-    res.status(400).json({ error: "run query parameter required", code: "run_required" });
-    return;
-  }
-  try {
-    const [tasks, gates] = await Promise.all([listTasks(runId), listGates(runId)]);
-    const { nodes, edges } = tasksToDag(tasks);
-    res.json({ runId, nodes, edges, gates, generatedAt: Date.now() });
-  } catch (err) {
-    fail(res, err);
-  }
-});
-
-/** Live terminals (running agent/shell sessions). */
-app.get("/api/terminals", async (_req, res) => {
-  try {
-    res.json({ terminals: await listTerminals() });
-  } catch (err) {
-    fail(res, err);
-  }
-});
-
-/**
- * Start the self-driven coordinator on one Run. It binds a coordinator terminal
- * (fencing any agent currently coordinating that Run) and then dispatches every
- * ready task in parallel until the DAG settles.
- */
-app.post("/api/run", async (req, res) => {
-  const runId = String(req.body?.runId ?? "").trim();
-  if (!runId) {
-    res.status(400).json({ error: "runId required", code: "run_required" });
-    return;
-  }
-  const harnessByTask = (req.body?.harnessByTask ?? {}) as Record<string, string>;
-  const modelByTask = (req.body?.modelByTask ?? {}) as Record<string, string>;
-  const defaultHarness = String(req.body?.defaultHarness ?? "claude").trim() || "claude";
-  const maxConcurrency = Math.max(1, Math.min(16, Number(req.body?.maxConcurrency) || 4));
-  try {
-    await startCoordinator({
-      runId,
-      harnessByTask,
-      modelByTask,
-      defaultHarness,
-      maxConcurrency,
-      worktree: WORKTREE,
-    });
-    res.json({ ok: true, ...coordinatorStatus() });
-  } catch (err) {
-    fail(res, err);
-  }
-});
-
-/** Stop the coordinator, tear down its workers, and release the Run. */
-app.post("/api/run-stop", async (_req, res) => {
-  try {
-    await stopCoordinator(true);
-    res.json({ ok: true });
-  } catch (err) {
-    fail(res, err);
-  }
-});
-
-/** Live coordinator status (running, bound Run, in-flight attempts). */
-app.get("/api/run-status", (_req, res) => {
-  res.json(coordinatorStatus());
-});
-
-/** Resolve a decision gate (human approval) — a Run-scoped mutation. */
-app.post("/api/gates/:id/resolve", async (req, res) => {
-  const resolution = String(req.body?.resolution ?? "").trim();
-  const runId = String(req.body?.runId ?? "").trim();
-  if (!resolution || !runId) {
-    res.status(400).json({ error: "resolution and runId required" });
-    return;
-  }
-  try {
-    await asCoordinator(runId, (from) => resolveGate(req.params.id, resolution, from));
-    res.json({ ok: true });
-  } catch (err) {
-    fail(res, err);
-  }
-});
-
-/**
- * Clear orchestration tasks.
- *
- * `orchestration reset` has NO `--run` flag: it wipes the whole local
- * orchestration database, every Run at once. That used to be "clear my graph"
- * back when tasks were global; it is now a much bigger hammer, so the caller
- * has to say so explicitly.
- */
-app.post("/api/reset", async (req, res) => {
-  if (req.body?.confirmAllRuns !== true) {
-    res.status(400).json({
-      error:
-        "orca orchestration reset clears tasks in ALL local Runs — it has no --run scope. " +
-        "Retry with confirmAllRuns: true to confirm.",
-      code: "confirm_required",
-    });
-    return;
-  }
-  try {
-    await runOrca(["orchestration", "reset", "--tasks"]);
-    res.json({ ok: true });
-  } catch (err) {
-    fail(res, err);
-  }
-});
-
-/** Viewer config (harness choices, concurrency, layout, last Run). */
-app.get("/api/config", async (_req, res) => {
-  res.json(await loadConfig(WORKSPACE_DIR));
-});
-
-app.put("/api/config", async (req, res) => {
-  try {
-    res.json(await saveConfig(WORKSPACE_DIR, req.body ?? {}));
-  } catch (err) {
-    fail(res, err);
-  }
-});
-
-/**
- * Models available for a harness, for the node model picker.
- *
- * Only opencode actually has an enumerable list (`opencode models`). claude/
- * codex/cursor return an empty array here — their models have no programmatic
- * source, so the UI offers free-text input for them instead.
- */
-app.get("/api/models/:harness", async (req, res) => {
-  const harness = String(req.params.harness ?? "").trim().toLowerCase();
-  try {
-    res.json({ harness, models: await listModels(harness) });
-  } catch (err) {
-    fail(res, err);
-  }
-});
-
-// --- Serve the built SPA -------------------------------------------------
-// Two sources, in priority order:
-//   1. assets embedded at `bun build --compile` time  → portable single binary
-//   2. a `web/dist` folder on disk                     → plain `npm run build && npm start`
-// In `npm run dev` neither is used: Vite serves the UI on :5173 and proxies /api.
-let servingUI = false;
 const embedded = await loadEmbeddedAssets();
-if (embedded.size > 0) {
-  const indexHtml = embedded.get("index.html");
-  app.use((req, res, next) => {
-    if (req.method !== "GET" || req.path.startsWith("/api/")) return next();
-    const key = req.path.replace(/^\/+/, "") || "index.html";
-    // Exact asset, else fall back to index.html for SPA client routes.
-    const hit = embedded.get(key) ?? (extname(key) ? undefined : indexHtml);
-    if (!hit) return next();
-    res.setHeader("Content-Type", hit.type);
-    res.setHeader("Cache-Control", key === "index.html" ? "no-cache" : "public, max-age=31536000, immutable");
-    res.end(hit.body);
-  });
-  servingUI = true;
-} else {
-  const distDir = join(__dirname, "..", "..", "web", "dist");
-  if (existsSync(distDir)) {
-    app.use(express.static(distDir));
-    app.get("*", (_req, res) => res.sendFile(join(distDir, "index.html")));
-    servingUI = true;
-  }
-}
+const { app, servingUI } = createApp({
+  workspaceDir: runtime.workspace.dir,
+  worktree: runtime.worktree,
+  policy,
+  embeddedAssets: embedded,
+});
 
 // `orca-dag` is meant to be the single command that makes the whole project
 // work, so starting the viewer also puts the DAG-building skill in front of
@@ -324,13 +92,27 @@ const skillReport = describeSkillInstall(
   await installSkill(__dirname, !argv.includes("--no-skill") && process.env.ORCA_DAG_NO_SKILL !== "1"),
 );
 
-app.listen(PORT, () => {
-  const url = `http://localhost:${PORT}`;
-  if (skillReport) console.log(skillReport);
-  console.log(`Orca DAG viewer → ${url}`);
-  console.log(`Workspace dir: ${WORKSPACE_DIR} (worktree: ${WORKTREE})`);
-  if (servingUI && process.env.NO_OPEN !== "1") void openBrowser(url);
+// Loopback-only, deliberately: this API drives orchestration mutations that
+// fence real agent terminals, so it must not be reachable from the LAN. The
+// resolved port is read back so PORT=0 picks a free one for tests.
+const server = await listenLoopback(app, Number(process.env.PORT ?? 8787));
+const addr = server.address();
+const port = typeof addr === "object" && addr ? addr.port : Number(process.env.PORT ?? 8787);
+const url = `http://localhost:${port}`;
+if (skillReport) console.log(skillReport);
+console.log(`Orca DAG viewer → ${url} (bound to 127.0.0.1)`);
+console.log(
+  `Orca CLI: ${formatCommand(runtime.command)} · workspace: ${runtime.workspace.dir} ` +
+    `(worktree: ${runtime.worktree}, id: ${runtime.workspace.hash}/${runtime.workspace.instanceId})`,
+);
+// Readiness is the UI's execution gate; print the verdict once at startup so
+// a view-only session is explained in the terminal too. Never fatal — the
+// /api/readiness route re-probes for the client.
+void checkReadiness().then((r) => {
+  if (r.executionEnabled) console.log(`Orca ${r.version} — execution enabled.`);
+  else console.log(`View-only: ${r.reason}`);
 });
+if (servingUI && process.env.NO_OPEN !== "1") void openBrowser(url);
 
 /**
  * Open the viewer URL. Prefers an Orca built-in browser tab (`orca tab create`)

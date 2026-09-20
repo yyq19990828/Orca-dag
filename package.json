@@ -15,6 +15,10 @@
     "build": "npm run build -w web",
     "build:binary": "node scripts/build-binary.mjs",
     "build:npm": "node scripts/build-npm.mjs",
+    "typecheck": "tsc -p server/tsconfig.json --noEmit && tsc -b web",
+    "test": "npm test -w server",
+    "check:skill": "node scripts/check-skill.mjs",
+    "check": "npm run check:skill && npm run typecheck && npm run test && npm run build",
     "release": "node scripts/release.mjs",
     "start": "npm run start -w server"
   },

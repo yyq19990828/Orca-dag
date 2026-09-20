@@ -271,6 +271,12 @@ body {
   border-color: #f6c7c1;
   background: var(--blush-wash);
 }
+/* reachable but view-only (readiness gate): steady amber, no alarm */
+.conn--warn {
+  color: #b37f16;
+  border-color: #eedeb4;
+  background: #fdf4e1;
+}
 
 /* ---------- layout (single full-width canvas) ---------- */
 .layout {
@@ -1365,6 +1371,13 @@ body {
   font-size: 12px;
   color: var(--ink-soft);
 }
+/* Inline note under a control (e.g. why "Custom…" is disabled). */
+.exec__hint {
+  font-family: var(--font-body);
+  font-size: 11px;
+  font-style: italic;
+  color: var(--ink-soft);
+}
 .exec__custom,
 .exec__num {
   font-family: var(--font-body);
@@ -2017,4 +2030,211 @@ body {
   background: var(--sky-wash);
   padding: 1px 6px;
   border-radius: 6px;
+}
+
+/* ---------- inbox (worker questions, escalations, cleanup debt) ---------- */
+/* Reuses the pinned-gate card; escalations get a coral border, debt cards a
+   pencil-grey one, so "answer me" and "decide for me" read differently. */
+.inbox__item--escalation {
+  border-color: var(--coral);
+  background: #fdf0ee;
+}
+.inbox__debt {
+  border-color: var(--line-strong);
+  background: #f6f4ee;
+}
+.inbox__debt::after {
+  border-color: var(--line-strong);
+  animation: none;
+  opacity: 0.4;
+}
+.inbox__meta {
+  margin-left: 8px;
+  font-size: 10.5px;
+  color: var(--ink-soft);
+  letter-spacing: 0;
+}
+.inbox__body {
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: -6px 0 10px;
+  max-height: 130px;
+  overflow: auto;
+}
+.inbox__reply {
+  align-items: stretch;
+}
+.inbox__input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  background: #fff;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 9px 7px 10px 6px;
+}
+.inbox__input:focus {
+  outline: none;
+  border-color: var(--sky);
+}
+.inbox__err {
+  pointer-events: auto;
+}
+
+/* settled-workers counter next to the running indicator — the visible half of
+   the §6.2 boundary: every settled worker reaches released/retained/closed. */
+.exec__settled {
+  margin-left: 8px;
+  padding: 2px 8px;
+  font-family: var(--font-display);
+  font-size: 11px;
+  color: #3e9a55;
+  background: #ebf7ee;
+  border: 1.5px solid var(--meadow);
+  border-radius: 8px 6px 9px 5px;
+}
+.exec__done {
+  color: #3e9a55;
+}
+.exec__done .exec__pulse {
+  animation: none;
+  background: var(--meadow);
+}
+
+/* explicit-Stop receipt: clean stops whisper, uncertain ones stay pinned */
+.exec__stop-report {
+  margin-top: 6px;
+  padding: 6px 10px;
+  font-size: 11.5px;
+  font-family: var(--font-display);
+  color: var(--ink-soft);
+  background: var(--paper);
+  border: 1.5px dashed var(--line-strong);
+  border-radius: 9px 7px 10px 6px;
+}
+.exec__stop-report--warn {
+  color: #c23b2e;
+  border-color: var(--coral);
+  background: #fdf0ee;
+}
+.exec__stop-unknowns {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  font-family: var(--font-mono, monospace);
+  font-size: 10.5px;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+/* --- Workers panel (Phase 5 observability) -------------------------------- */
+
+.workers__row + .workers__row {
+  border-top: 2px dashed var(--paper-edge, #d8d3c4);
+  margin-top: 6px;
+  padding-top: 6px;
+}
+
+.workers__toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 2px 0;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+
+.workers__liveness {
+  flex: none;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 2px solid currentColor;
+}
+
+/* Only the three renderable verdicts get colors; anything else renders
+   unverifiable and reads as "we don't know", not "it's dead". */
+.workers__liveness[data-verdict="live"] {
+  color: #3e9a55;
+}
+.workers__liveness[data-verdict="exited"] {
+  color: #c23b2e;
+}
+.workers__liveness[data-verdict="unverifiable"],
+.workers__liveness:not([data-verdict]) {
+  color: #8a857a;
+}
+
+.workers__task {
+  font-weight: 700;
+}
+
+.workers__detail {
+  margin-top: 6px;
+  display: grid;
+  gap: 4px;
+}
+
+.workers__output {
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #faf8f0;
+  border: 2px solid #e6e1d2;
+  border-radius: 8px;
+  padding: 8px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.workers__warn {
+  color: var(--mustard, #b37f16);
+}
+
+.workers__mismatch {
+  color: var(--coral, #c23b2e);
+}
+
+/* Phase 6: structured-read source picker in the workers panel. Kept native
+   (unlike DoodleSelect) — it is a tiny utility control, and the crayon look
+   for it would cost more than it says. */
+.workers__source {
+  font: inherit;
+  font-size: 12px;
+  color: #6b6557;
+  background: #faf8f0;
+  border: 2px solid #e6e1d2;
+  border-radius: 8px;
+  padding: 2px 6px;
+}
+
+/* Phase 6: the new-top-level placement editor stacks a repo picker and a
+   name input under the placement picker. */
+.node-panel__custom-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+
+.node-panel__retain {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
 }

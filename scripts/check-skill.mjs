@@ -43,6 +43,43 @@ if (text.slice(match[0].length).trim().length < 500) {
   errors.push("body is nearly empty — the skill teaches the whole orca orchestration workflow");
 }
 
+// --- Drift guards (Phase 7) ------------------------------------------------
+// The skill is a thin project workflow: command syntax and lifecycle rules
+// belong to the runtime-matched guide the CLI itself prints. Two ways it can
+// silently regress:
+//   1. someone deletes the guide-loading step, so agents trust stale copies;
+//   2. someone pastes copy-pasteable orchestration mutation command lines back
+//      in — they drift from the installed runtime and contradict the guide.
+// `docBody` = everything after the frontmatter (`body` above is frontmatter).
+const docBody = text.slice(match[0].length);
+
+if (!/skills\s+get\s+orchestration/.test(docBody)) {
+  errors.push(
+    "body never loads the runtime-matched orchestration guide (`skills get orchestration`) — " +
+      "the skill must delegate command syntax to the guide so installed instructions cannot drift from the runtime",
+  );
+}
+
+if (!/1\.4\.205/.test(docBody)) {
+  errors.push("body does not state the Orca 1.4.205 execution baseline");
+}
+
+// Copy-pasteable mutation command lines in fenced code blocks are exactly the
+// hard-coded guidance that bypasses runtime guide loading. Naming an operation
+// in prose is fine; spelling out its flags here is the duplication that drifts.
+const MUTATION_SUBCOMMAND =
+  /\borchestration\s+(run-create|task-create|task-update|gate-create|gate-resolve|dispatch|worker-start|worker-done|worker-stop|worker-abandon|worker-release|worker-retain|reset)\b/;
+for (const fence of docBody.matchAll(/```[^\n]*\n([\s\S]*?)```/g)) {
+  const hit = MUTATION_SUBCOMMAND.exec(fence[1]);
+  if (hit) {
+    errors.push(
+      `fenced code block hard-codes an orchestration \`${hit[1]}\` command line — ` +
+        "name the operation in prose and let `skills get orchestration` own the syntax",
+    );
+    break; // one complaint is enough to fail the check
+  }
+}
+
 if (errors.length) {
   for (const e of errors) console.error(`skill/SKILL.md: ${e}`);
   process.exit(1);

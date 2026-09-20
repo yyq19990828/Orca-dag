@@ -6,7 +6,7 @@
 // Why a staging directory instead of publishing a workspace package:
 // the repo root is a private npm-workspaces root (`server` + `web` are both
 // private), so nothing here is publishable as-is. We assemble a third,
-// dependency-free tree instead — esbuild inlines express/cors, so the tarball
+// dependency-free tree instead — esbuild inlines express, so the tarball
 // is one file plus the SPA and `npx orca-dag` costs a single download.
 //
 // Layout (the "../../web/dist" fallback in server/src/index.ts is what dictates
@@ -19,8 +19,8 @@
 //     web/dist/**           ← vite output, served from disk (no base64 embedding needed)
 //     README.md, README_zh.md, LICENSE, skill/SKILL.md
 //
-// Unlike `build-binary.mjs` this needs no Bun: the server only touches express,
-// cors and node: builtins, so a plain Node bundle runs everywhere `npx` does.
+// Unlike `build-binary.mjs` this needs no Bun: the server only touches express
+// and node: builtins, so a plain Node bundle runs everywhere `npx` does.
 
 import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -99,7 +99,7 @@ writeFileSync(
       repository: { type: "git", url: "git+https://github.com/ZinkLu/Orca-Orchestration.git" },
       homepage: "https://github.com/ZinkLu/Orca-Orchestration#readme",
       bugs: { url: "https://github.com/ZinkLu/Orca-Orchestration/issues" },
-      // No dependencies on purpose — express and cors are inlined by esbuild.
+      // No dependencies on purpose — express is inlined by esbuild.
     },
     null,
     2,

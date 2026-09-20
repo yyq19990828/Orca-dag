@@ -6,11 +6,11 @@ on:
   pull_request:
   workflow_dispatch:
 
-# The repo has no lint/test scripts (see AGENTS.md) — the checks that matter are
-# "does it still typecheck" and "does the thing users run actually boot".
+# The checks that matter: "does it still typecheck", "do the security tests
+# pass", and "does the thing users run actually boot".
 jobs:
   check:
-    name: Typecheck + package smoke test
+    name: Typecheck + tests + package smoke test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -22,16 +22,18 @@ jobs:
 
       - run: npm ci
 
-      - name: Validate skill frontmatter
-        run: node scripts/check-skill.mjs
+      # Dependency advisories: the plan requires no *fixable* high findings in
+      # compatible ranges (majors are deferred on purpose). Patch refreshes land
+      # via `npm audit fix`; a new advisory fails here until it is either
+      # patched in-range or explicitly explained in the release notes.
+      - name: Audit dependencies (no fixable high findings)
+        run: npm audit --audit-level=high
 
-      - name: Typecheck server
-        run: npx tsc -p server/tsconfig.json --noEmit
-
-      # `npm run build -w web` runs `tsc -b` before vite, so this is the web
-      # typecheck and the SPA build in one step.
-      - name: Typecheck + build web
-        run: npm run build -w web
+      # One gate, identical locally and in CI: skill validation (frontmatter +
+      # runtime-guide drift guards), server typecheck, server tests, web
+      # typecheck + build. Keep it in lockstep with the root `check` script.
+      - name: Check (skill + typecheck + tests + web build)
+        run: npm run check
 
       - name: Stage npm package
         run: node scripts/build-npm.mjs
@@ -49,12 +51,28 @@ jobs:
           npm install /tmp/orca-dag-*.tgz >/dev/null
           NO_OPEN=1 PORT=8899 npx orca-dag &
           for i in $(seq 1 30); do
-            curl -sf http://localhost:8899/api/health >/dev/null && break
+            curl -sf http://127.0.0.1:8899/api/health >/dev/null && break
             sleep 1
           done
-          curl -sf http://localhost:8899/api/health | tee /dev/stderr | grep -q '"ok":true'
-          curl -sf http://localhost:8899/ | grep -qi '<div id="root">'
+          curl -sf http://127.0.0.1:8899/api/health | tee /dev/stderr | grep -q '"ok":true'
+          curl -sf http://127.0.0.1:8899/ | grep -qi '<div id="root">'
           echo "✅ npx orca-dag boots and serves the SPA"
+
+          # Security contract of the packed artifact: loopback-only binding,
+          # token-gated mutations, and a session endpoint for the same-origin
+          # client. run-stop is a safe no-op mutation (idle coordinator), so it
+          # proves a *successful* authorized mutation without touching Orca.
+          ss -tln | grep -q '127.0.0.1:8899' && ! ss -tln | grep -qE '(0\.0\.0\.0|\*|::):8899'
+          echo "✅ server socket is loopback-only"
+          if curl -sf -X POST http://127.0.0.1:8899/api/run-stop >/dev/null 2>&1; then
+            echo "mutation without a token must not succeed" >&2; exit 1
+          fi
+          echo "✅ mutation without X-Orca-Dag-Token is refused"
+          # The token is 256 bits of base64url (43 chars, [A-Za-z0-9_-]).
+          TOKEN=$(curl -sf http://127.0.0.1:8899/api/session | sed -E 's/.*"token":"([A-Za-z0-9_-]{43})".*/\1/')
+          test -n "$TOKEN"
+          curl -sf -X POST -H "X-Orca-Dag-Token: $TOKEN" http://127.0.0.1:8899/api/run-stop | grep -q '"ok":true'
+          echo "✅ token-bearing mutation succeeds"
 
       # Startup writes the skill into the user's agent directories, so the
       # uninstall path has to keep taking it back — otherwise the install is a
@@ -67,6 +85,9 @@ jobs:
           cd /tmp/smoke
           HOME=/tmp/fakehome NO_OPEN=1 PORT=8897 timeout 5 ./node_modules/.bin/orca-dag || true
           test -f /tmp/fakehome/.claude/skills/orca-dag/SKILL.md
+          # The freshly installed skill must be the thin workflow that loads the
+          # runtime-matched orchestration guide — not a stale command copy.
+          grep -q 'skills get orchestration' /tmp/fakehome/.claude/skills/orca-dag/SKILL.md
           HOME=/tmp/fakehome ./node_modules/.bin/orca-dag uninstall | grep -q removed
           test ! -e /tmp/fakehome/.claude/skills/orca-dag
           echo "✅ install and uninstall stay symmetric"
@@ -99,8 +120,12 @@ jobs:
       - name: Check the binary starts
         run: |
           set -euo pipefail
+          # Throwaway HOME with a pre-existing agent skills dir: the binary must
+          # embed and install the *updated* thin skill, proving the compile-time
+          # embed (SKILL_MD) picked up the current skill/SKILL.md.
+          mkdir -p /tmp/binhome/.claude
           chmod +x dist/orca-dag-linux-x64
-          NO_OPEN=1 PORT=8898 ./dist/orca-dag-linux-x64 &
+          HOME=/tmp/binhome NO_OPEN=1 PORT=8898 ./dist/orca-dag-linux-x64 &
           for i in $(seq 1 30); do
             curl -sf http://localhost:8898/api/health >/dev/null && break
             sleep 1
@@ -109,4 +134,14 @@ jobs:
           # The binary serves its SPA from the base64 map embedded at compile
           # time, so this also proves the embedding step produced real assets.
           curl -sf http://localhost:8898/ | grep -qi '<div id="root">'
-          echo "✅ binary boots and serves the embedded SPA"
+          # Same for the skill: embedded, installed, and guide-loading.
+          test -f /tmp/binhome/.claude/skills/orca-dag/SKILL.md
+          grep -q 'skills get orchestration' /tmp/binhome/.claude/skills/orca-dag/SKILL.md
+          echo "✅ binary embeds and installs the updated thin skill"
+          # Same security contract as the npm package: loopback-only socket and
+          # token-gated mutations.
+          ss -tln | grep -q '127.0.0.1:8898'
+          if curl -sf -X POST http://localhost:8898/api/run-stop >/dev/null 2>&1; then
+            echo "mutation without a token must not succeed" >&2; exit 1
+          fi
+          echo "✅ binary boots, serves the embedded SPA, and is loopback + token locked"

@@ -2,10 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DagView } from "./components/DagView";
 import { ExecControls } from "./components/ExecControls";
 import { GatePanel } from "./components/GatePanel";
+import { InboxPanel, useInboxPoll } from "./components/InboxPanel";
 import { NodePanel } from "./components/NodePanel";
+import { RecoveryPanel } from "./components/RecoveryPanel";
+import { WorkerPanel } from "./components/WorkerPanel";
 import { RunPicker } from "./components/RunPicker";
 import { fetchDag, resetTasks } from "./api";
-import { initConfig, setLayout, setRunId, useConfig } from "./harness";
+import { initConfig, setLayout, setRunId, useConfig, useReadiness } from "./harness";
 import { LAYOUTS, STATUS_META, type DagResponse, type LayoutKind, type TaskStatus } from "./types";
 
 const EMPTY: DagResponse = { runId: "", nodes: [], edges: [], gates: [], generatedAt: 0 };
@@ -149,10 +152,18 @@ export default function App() {
   const [connError, setConnError] = useState<string | null>(null);
   const config = useConfig();
   const runId = config.runId;
+  // Execution gate (Phase 2): when the server's readiness probe says this
+  // Orca runtime can't execute (missing, or 1.4.160–1.4.204 view-only), the
+  // mutation controls disable themselves with the reason. Reads stay live.
+  const readiness = useReadiness();
+  const execOff = readiness !== null && !readiness.executionEnabled;
   const layout: LayoutKind = config.layout || "layered-lr";
   // bump to force a fresh auto-layout (discarding manual drags)
   const [reorgNonce, setReorgNonce] = useState(0);
   const timer = useRef<number | null>(null);
+  // Worker questions/escalations + cleanup debt (Phase 3). Polled separately
+  // from the DAG so an arriving question shows up within one tick.
+  const inbox = useInboxPoll();
 
   // hydrate harness/concurrency/layout/run config from the server-side file
   // once; RunPicker must not auto-pick a Run until this has settled, or its
@@ -212,6 +223,12 @@ export default function App() {
   const pctRun = ((counts.dispatched ?? 0) / total) * 100;
 
   async function onReset() {
+    // Mirror the readiness gate for a clear message; the server enforces it
+    // (503 execution_disabled) regardless.
+    if (execOff) {
+      alert(readiness?.reason ?? "Execution is unavailable on this Orca runtime.");
+      return;
+    }
     // `orca orchestration reset` has no --run flag: it clears the whole local
     // orchestration database, not just the Run on screen. Say so plainly.
     const ok = confirm(
@@ -270,12 +287,28 @@ export default function App() {
         <div className="topbar__right">
           <RunPicker runId={runId} onPick={pickRun} autoPick={hydrated} />
           <div
-            className={`conn ${connError ? "conn--bad" : "conn--ok"}`}
-            title={connError ?? "Connected to Orca"}
+            className={`conn ${connError ? "conn--bad" : execOff ? "conn--warn" : "conn--ok"}`}
+            title={
+              connError ??
+              (execOff
+                ? readiness?.reason ?? "Execution unavailable — view-only"
+                : readiness
+                  ? `Connected to Orca ${readiness.version ?? ""} · ${readiness.cli} (execution enabled)`
+                  : "Connected to Orca")
+            }
           >
-            {connError ? "Fetch failed" : "Orca connected"}
+            {connError ? "Fetch failed" : execOff ? "View-only" : "Orca connected"}
           </div>
-          <button className="btn btn--ghost" onClick={onReset} title="Clear tasks in all local Runs">
+          <button
+            className="btn btn--ghost"
+            onClick={onReset}
+            disabled={execOff}
+            title={
+              execOff
+                ? readiness?.reason ?? "Execution is unavailable"
+                : "Clear tasks in all local Runs"
+            }
+          >
             Clear tasks
           </button>
         </div>
@@ -364,7 +397,40 @@ export default function App() {
               </div>
             )}
 
-            <GatePanel gates={dag.gates} runId={runId} onResolved={refresh} />
+            <GatePanel
+              gates={dag.gates}
+              runId={runId}
+              onResolved={refresh}
+              disabled={execOff}
+              disabledReason={readiness?.reason}
+            />
+
+            {/* worker questions / escalations / cleanup debt — a run in
+                awaiting_input visibly waits here until a human answers */}
+            <InboxPanel
+              runId={runId}
+              pending={inbox.pending}
+              cleanupDebt={inbox.cleanupDebt}
+              onResolved={() => {
+                inbox.refresh();
+                refresh();
+              }}
+              disabled={execOff}
+              disabledReason={readiness?.reason}
+            />
+
+            {/* restart recovery (Phase 4): adopted Dispatches, unresolved
+                starts, and the explicit retry for positively failed ones */}
+            <RecoveryPanel
+              runId={runId}
+              onRetried={refresh}
+              disabled={execOff}
+              disabledReason={readiness?.reason}
+            />
+
+            {/* worker observability (Phase 5): liveness, attention, launch
+                preferences, bounded output, retain/release controls */}
+            <WorkerPanel runId={runId} disabled={execOff} disabledReason={readiness?.reason} />
 
             {/* keyed by node so switching selection replays the card's entrance */}
             {selected && (

@@ -4,12 +4,12 @@ English | [简体中文](README_zh.md)
 
 Split "planning by chatting with an agent" from "visualizing + executing" into two independent modules:
 
-1. **skill** (`skill/SKILL.md`): teaches **your own agent** (Claude Code / kimi / …) how to break a requirement down into an **Orca orchestration task DAG**, plus the graph-building conventions. The planning "brain" stays in your agent — **no embedded Claude Agent SDK**.
+1. **skill** (`skill/SKILL.md`): teaches **your own agent** (Claude Code / kimi / …) the project workflow — PRD → technical design → decompose into an **Orca orchestration task DAG**. It is deliberately thin about commands: it resolves the right Orca CLI, loads the **runtime-matched orchestration guide** (`orca skills get orchestration`), and delegates command syntax and lifecycle rules to that guide — installed instructions can't drift from your installed runtime. The planning "brain" stays in your agent — **no embedded Claude Agent SDK**.
 2. **viewer** (`server/` + `web/`, shipped as the `orca-dag` npm package and a standalone binary): connects to Orca's orchestration state and **visualizes the DAG live**; each node **picks its own harness** (claude / kimi / opencode / grok …) and optionally a **model**; click **"▶ Run with Orca"** and the viewer's built-in **self-driven coordinator** dispatches ready tasks **in parallel** along the dependencies to autonomous workers spun up on demand, until the whole graph is done.
 
 > Core flow: **agent builds the graph → pick a Run and per-node harnesses in the viewer → Run → the DAG executes in dependency-parallel**. To change a task or a dependency, have the agent redraw the DAG — Orca has no interface for editing a single task.
 >
-> ⚠️ **Requires Orca ≥ 1.4.160.** That release (2026-07-29, PR #9925) rewrote the whole orchestration contract; this project targets it and **no longer supports older Orca**.
+> ⚠️ **Requires Orca ≥ 1.4.205 to execute.** That's the supervised-worker execution floor; **1.4.160–1.4.204 stays view-only** (the DAG renders, execution controls disable themselves). Older than 1.4.160 — where the Run/Task/Dispatch contract (2026-07-29, PR #9925) landed — is unsupported.
 >
 > ⚠️ Why the viewer still acts as its own coordinator: not because `orca orchestration run` is buggy — that command (along with `coordinator-start`) has been **officially retired** (calling it has no side effects; it just says "go read the skill"). Orca **deliberately ships no scheduler** — the official skill's words: *"Agents still choose placement and concurrency; Orca does not schedule workers."* So the DAG loop belongs to the viewer, but **every step** inside that loop now uses Orca's own Run / Task / Dispatch primitives.
 
@@ -35,7 +35,7 @@ Split "planning by chatting with an agent" from "visualizing + executing" into t
 1. You chat in **your own agent**. It loads the `orca-dag` skill, opens a **Run** with `orca orchestration run-create`, then builds the tasks and dependencies into that Run via `task-create --deps …`.
 2. Open the viewer (`npx orca-dag`). Pick the Run in the top bar; it polls `orca orchestration task-list --run <id> --json` every 2 seconds, lays out with **dagre**, renders with **React Flow**, and recolors statuses live.
 3. In the viewer, pick a harness per node (or rely on a default fallback), set "Max parallel", and click **"▶ Run with Orca"**.
-4. The viewer's **coordinator loop** takes over: it binds one of its own Orca terminals as the Run's coordinator (gaining mutation authority), then on each tick finds every `ready` task and calls `orca orchestration worker-start --task <id> --agent <harness>` **in parallel** — **Orca itself** creates the worker terminal, waits for readiness, injects the dispatch, and returns a **Dispatch** (one attempt). The worker finishes with `worker_done --outcome` → Orca **automatically** marks the task and dispatch completed/failed → dependents flip to `ready` → repeat until the graph is done, then `worker-stop` reclaims the workers.
+4. The viewer's **coordinator loop** takes over: it binds one of its own Orca terminals as the Run's coordinator (gaining mutation authority), then on each tick finds every `ready` task and calls `orca orchestration worker-start --task <id> --agent <harness>` **in parallel** — **Orca itself** creates the worker terminal, waits for readiness, injects the dispatch, and returns a **Dispatch** (one attempt). The worker finishes with `worker_done --outcome` → Orca **automatically** marks the task and dispatch completed/failed → dependents flip to `ready` → repeat until the graph is done. Settled workers get their output archived, then the terminal is **released** by default, **reused** only for an immediate compatible follow-up (`worker-start --terminal`), or **retained** on explicit request.
 5. To change the plan: go back to the agent conversation and have it redraw the DAG.
 
 ### The Run / Task / Dispatch layers
@@ -56,11 +56,21 @@ Every Orca orchestration call goes through `resolveRunScope`:
 - **Reads** (`task-list` / `gate-list`) skip the consumer check as long as they pass `--run <id>` — **any process can read**. That's all the viewer's polling needs.
 - **Mutations** (`dispatch` / `gate-resolve` / `task-create` / `worker-start`) require the caller to **be the Orca terminal currently bound to that Run**, proven by resolving `--from <handle>` to a pane.
 
-The viewer is an ordinary process with no terminal identity, so every mutation would fail with `run_required`. The fix: the viewer opens its own Orca terminal titled `orca-dag coordinator`, binds it with `run-use`, and passes `--from` on every mutation. **Binding fences the previous coordinator** (usually the agent terminal that drew your graph), so the viewer asks for explicit confirmation before starting; the agent can reclaim the Run anytime with `orca orchestration run-use --id <run>`. On stop, the viewer closes that terminal and releases the Run.
+The viewer is an ordinary process with no terminal identity, so every mutation would fail with `run_required`. The fix: the viewer opens its own Orca terminal titled `orca-dag coordinator · <workspace-hash> · <instance-id>`, binds it with `run-use`, and passes `--from` on every mutation. **Binding fences the previous coordinator** (usually the agent terminal that drew your graph), so the viewer asks for explicit confirmation before starting; the agent can reclaim the Run anytime with `orca orchestration run-use --id <run>`. On stop, the viewer closes that terminal and releases the Run.
+
+The title's `<workspace-hash>` scopes the coordinator to one workspace: two viewers pointed at **different** workspaces each get their own coordinator terminal and never touch each other's, and a second viewer started on the **same** workspace refuses with a `coordinator_conflict` error (HTTP 409) instead of silently taking over or closing the first one's terminal.
+
+### Which Orca binary, which workspace, whether it can execute
+
+All of this is resolved **once at startup** and then never changes for the life of the process:
+
+- **The executable**, in this order: `ORCA_CLI_COMMAND` (exact quoted argv — parsed without a shell; pipes, redirections and `$()` are rejected rather than silently unexpanded) → `orca-dev` when `ORCA_DEV_REPO_ROOT` is set → `orca-ide` on **Linux outside an Orca terminal** (bare `orca` there is GNOME's screen reader, `/usr/bin/orca`) → plain `orca` otherwise. Every CLI call runs through that one spec with `shell: false`, in the workspace directory as cwd.
+- **The workspace**: `WORKSPACE_DIR` (default: the current directory) must exist and is resolved to its **real path** — symlinks and different spellings of the same directory collapse to one identity. It becomes the exact Orca worktree selector `path:<WORKSPACE_DIR>`, so a viewer started in directory A with `WORKSPACE_DIR=/abs/B` puts its coordinator **and its workers in B**. An explicit `ORCA_WORKTREE` still wins if you set it.
+- **Whether execution is allowed** (`GET /api/readiness`): **Orca ≥ 1.4.205** is required to run DAGs — that's where the supervised Dispatch contract landed. Orca **1.4.160–1.4.204 stays view-only**: the DAG, gates and statuses render fine, but the Run/gate/reset controls disable themselves with an upgrade pointer (and the server answers `503 execution_disabled` if a mutation is forced). If the CLI can't be found at all, readiness says so with the exact resolution it tried.
 
 ## Prerequisites
 
-- **Orca ≥ 1.4.160** (`result.runtime.appVersion` in `orca status --json`). The Run/Dispatch contract landed in 1.4.160; older versions lack `run-create` / `worker-start` and the viewer cannot run.
+- **Orca ≥ 1.4.160 for viewing, ≥ 1.4.205 for executing** (`result.runtime.appVersion` in `orca status --json`). The Run/Dispatch contract landed in 1.4.160; **execution** needs the supervised-worker contract from 1.4.205 — older runtimes work in view-only mode with the execution controls disabled. See [readiness](#which-orca-binary-which-workspace-whether-it-can-execute).
 - **The orchestration experimental feature is enabled**: Settings → Experimental.
 - **Orca is running**: `result.runtime.state` in `orca status --json` should be `"ready"`; otherwise run `orca open` first.
 - **The project is an Orca-managed worktree**: adding workers / executing requires the current directory to be a registered repo/worktree (else `orca terminal create` fails with `selector_not_found`). Register with `orca repo add <path>` or `orca worktree …`.
@@ -89,7 +99,7 @@ No Node on the machine? Grab a standalone binary from the [releases page](https:
 tar xzf orca-dag-darwin-arm64.tar.gz && sudo mv orca-dag /usr/local/bin/ && orca-dag
 ```
 
-Switches: `PORT` (default 8787), `NO_OPEN=1` (don't open the browser), `--no-skill` / `ORCA_DAG_NO_SKILL=1` (don't touch the agent skill directories), `WORKSPACE_DIR` (overrides the `active` worktree).
+Switches: `PORT` (default 8787), `NO_OPEN=1` (don't open the browser), `--no-skill` / `ORCA_DAG_NO_SKILL=1` (don't touch the agent skill directories), `WORKSPACE_DIR` (use another workspace instead of the current directory — must exist, becomes the exact `path:` worktree), `ORCA_WORKTREE` (explicit Orca worktree selector, overriding the `path:` default), `ORCA_CLI_COMMAND` (exact Orca CLI to run, as quoted argv with no shell — see [CLI/workspace resolution](#which-orca-binary-which-workspace-whether-it-can-execute)), `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1` (allow arbitrary custom harness commands — see [Security](#security-model)).
 
 Want the skill *without* the viewer, or managed by the standard tooling? `npx skills add ZinkLu/Orca-Orchestration --skill orca-dag --global` — the [open agent skills CLI](https://github.com/vercel-labs/skills), the same one `orca skills install` shells out to.
 
@@ -99,7 +109,7 @@ Want the skill *without* the viewer, or managed by the standard tooling? `npx sk
 npx orca-dag uninstall            # add --dry-run first if you want to see the list
 ```
 
-Removes the skill from every agent directory it was installed into and closes any `orca-dag coordinator` terminal a crashed viewer left bound to a Run (that one matters — a stale coordinator keeps your own agent fenced out). A skill directory you symlinked yourself is unlinked, never followed, so your checkout is safe.
+Removes the skill from every agent directory it was installed into and closes any `orca-dag coordinator` terminal a crashed viewer left bound to a Run, reporting the workspace (directory + hash) each terminal was coordinating before closing it (that cleanup matters — a stale coordinator keeps your own agent fenced out). A skill directory you symlinked yourself is unlinked, never followed, so your checkout is safe.
 
 Two things it won't delete on its own: `.orca-dag.config.json` (your per-node harness/model choices and canvas layout — pass `--purge` to drop it) and the program itself, since a running process can't remove its own binary. It prints the right command for that: `npm rm -g orca-dag`, `rm $(which orca-dag)`, or nothing at all if you only ever ran it through `npx`.
 
@@ -107,6 +117,7 @@ Two things it won't delete on its own: `.orca-dag.config.json` (your per-node ha
 
 ```bash
 npm install
+npm run check          # skill validation + typecheck + tests + web build (what CI runs)
 npm run dev            # frontend :5173 + backend :8787 (vite proxies /api) → http://localhost:5173
 npm run build:npm      # stage the publishable package → dist-npm/ (Node only)
 npm run build:binary   # portable single binary → dist/orca-dag (~100 MB, frontend embedded; needs Bun)
@@ -155,39 +166,76 @@ An end-to-end pass, starting from nothing installed:
 - **Switchable layout algorithms**: the "Layout" segment in the toolbar toggles **layered horizontal / vertical** (dagre / Sugiyama) and **force-directed** (Fruchterman–Reingold); **↻ Re-layout** reruns auto-layout (clearing manual drags). The choice persists.
 - **Drag to arrange**: nodes drag freely and hold their positions across live polling refreshes (only untouched nodes follow auto-layout).
 - **Execution animations**: `dispatched` (running) nodes get scribbled over and over with diagonal crayon strokes; edges flowing out of a running node start as a swimming dashed draft, then pencil strokes trace them solid toward the downstream node.
-- **Per-node harness**: click a node and pick `claude / kimi / opencode / grok / codex` or a custom command in its panel (persisted to the workspace's `.orca-dag.config.json`); nodes without an explicit choice fall back to the toolbar's **default harness**.
+- **Per-node harness**: click a node and pick `claude / kimi / opencode / grok / codex` or a custom command in its panel (persisted to the workspace's `.orca-dag.config.json`; custom commands additionally need `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1` — see the [security model](#security-model)); nodes without an explicit choice fall back to the toolbar's **default harness**.
 - **Per-node model override**: for harnesses that support it — opencode gets a dropdown enumerated from `opencode models`; claude / codex / cursor get free-text (passed via `worker-start --model`). Others run on their default model.
-- **▶ Run with Orca / ⏹ Stop** + **Max parallel**: start/stop the viewer's built-in self-driven coordinator; worker count follows the DAG's parallelism (whatever is ready runs together, capped by "Max parallel"), spun up on demand, reused while idle, reclaimed when done — **no manual worker management**. While running it shows "N workers".
+- **Per-node reasoning effort**: claude / codex / cursor additionally take an effort level, passed via `worker-start --effort` — it only applies when a model is set for that node (Orca's own contract), so clearing the model clears the effort.
+- **Per-node environment & exact placement**: a node can execute on a **saved connected environment** (`orca environment list`) while the Run stays on this server — the node panel offers Local (default) plus discovered environments, and for a remote one exactly the two placements Orca supports: an **exact existing workspace** (the full `id:<repo>::<path>` selector discovered on that environment) or a **new top-level worktree** (exact repo selector + explicit name). Remote `current`/`new-child` are never offered — they are ambiguous across servers, and the server refuses them before any Orca call. Model/effort controls hide for peers that don't advertise the capability.
+- **▶ Run with Orca / ⏹ Stop** + **Max parallel**: start/stop the viewer's built-in self-driven coordinator; worker count follows the DAG's parallelism (whatever is ready runs together, capped by "Max parallel") — **no manual worker management**. Settled workers have their output archived, then their terminal is released by default; it is handed to an immediate compatible follow-up (same harness, no model change) via `worker-start --terminal` when one is ready, and kept alive instead with the explicit **Retain for debugging** control. While running it shows "N workers".
 - **Approval gates**: after the agent runs `gate-create`, approve/reject buttons float over the DAG.
 - **Node details (read-only spec)**: click a node to see its spec / status / result. To change the spec or deps, have the agent redraw the DAG.
+- **Workers panel**: live fleet view per attempt — liveness (`live / unverifiable / exited`, with Orca's own reason), attention flags, agent-wait stage, execution host (local or the named environment; a disconnected host reads `unverifiable`, never `exited`, and the Dispatch is preserved), terminal accounting, requested vs effective model/effort (a mismatch is flagged), Orca's literal prescribed next action, and bounded output reading with cursor paging (a replaced output source restarts the read with a visible warning; transcript reads appear only where the peer advertises them).
 - **Hand-drawn crayon style**: 🖍️ SVG feTurbulence wobbled strokes on a cream sketchbook canvas.
+
+## Security model
+
+The viewer is a control plane into Orca — starting a Run fences whoever was coordinating it, and dispatch spawns real worker terminals — so it is locked down by default:
+
+- **Loopback only.** The server binds `127.0.0.1`, never all interfaces. Nothing on your LAN can reach it; there is no remote-listen mode.
+- **No CORS.** The API emits no `Access-Control-*` headers, so a page served from another origin cannot read a single byte of any response — including the token below.
+- **Per-process mutation token.** Every mutating request (`POST`/`PUT` under `/api`) must carry `X-Orca-Dag-Token`, a fresh 256-bit random value minted at process start. The web client fetches it from `GET /api/session` and retries once automatically if the server restarts (new token). Read-only endpoints (`GET`) stay token-free. A rejected mutation answers `403` before any route logic runs — no Orca command, no validation-oracle probing.
+- **Custom harness commands are opt-in.** Only known Orca agent ids (`claude`, `codex`, `opencode`, `gemini`, `grok`, `cursor`, `droid`, `kimi`) can be launched by default. Arbitrary commands (e.g. `aider`) are rejected with `custom_commands_disabled` unless the viewer was started with `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1`; the UI hides/disables "Custom…" accordingly. A stored custom value stays visible in `.orca-dag.config.json` — it just won't run until the flag is present.
+- **Strict request validation.** Run/task/gate ids, harness names, `provider/model` values, concurrency, and `{taskId: …}` maps are validated at the HTTP boundary, before anything becomes an Orca command-line argument.
+- **One resolved CLI spec, no shell.** The Orca executable (from `ORCA_CLI_COMMAND` or the platform rules) is parsed into plain argv once at startup — operators, redirections and substitutions in `ORCA_CLI_COMMAND` are rejected, not silently mis-run — and every call spawns with `shell: false`.
+
+## Readiness and view-only mode
+
+`GET /api/readiness` reports `{ cli, workspace, worktree, version, executionEnabled, reason }`. Execution — Run start, gate resolution, Run creation, task reset — is enabled only on **Orca ≥ 1.4.205**; on 1.4.160–1.4.204 the UI disables those controls (Run button reads "View-only", gate buttons dim with the reason, the top-bar badge turns amber) and the server answers `503 execution_disabled` to any mutation that slips through. Reads (DAG, runs, terminals, config) always stay available.
 
 ## HTTP API
 
+All `POST`/`PUT` routes require the `X-Orca-Dag-Token` header (see the security model above); `GET` routes are open on loopback.
+
 | Method | Path | Purpose |
 | --- | --- | --- |
+| `GET` | `/api/session` | Hand the same-origin client its per-process mutation token + the custom-command flag (`Cache-Control: no-store`) |
+| `GET` | `/api/readiness` | Resolved CLI, Orca version, and whether execution is enabled (with the actionable reason when not) |
 | `GET` | `/api/dag?run=<id>` | The Run's DAG: `{ runId, nodes, edges, gates, generatedAt }` |
 | `GET` | `/api/runs` | List orchestration Runs |
 | `POST` | `/api/runs` | `{ objective }`: create a Run (via a throwaway coordinator terminal) |
 | `GET` | `/api/terminals` | List Orca terminals |
-| `POST` | `/api/run` | `{ runId, harnessByTask?, modelByTask?, defaultHarness?, maxConcurrency? }`: start the self-driven coordinator |
+| `POST` | `/api/run` | `{ runId, harnessByTask?, modelByTask?, effortByTask?, retainByTask?, environmentByTask?, placementByTask?, defaultHarness?, maxConcurrency? }`: start the self-driven coordinator |
 | `POST` | `/api/run-stop` | Stop the coordinator and reclaim its workers |
-| `GET` | `/api/run-status` | Live coordinator status: `{ running, busy, attempts, error, … }` |
+| `GET` | `/api/run-status` | Live coordinator status: `{ running, busy, attempts, inbox, cleanupDebt, recovery, … }` |
+| `GET` | `/api/inbox` | The coordinator's pending questions/escalations + cleanup debt |
+| `POST` | `/api/messages/:id/reply` | `{ body, runId }`: answer a worker question/escalation |
 | `POST` | `/api/gates/:id/resolve` | `{ resolution, runId }`: resolve an approval gate |
+| `GET` | `/api/workers?run=<id>` | Normalized worker-list rows (liveness, terminal state, projection) |
+| `GET` | `/api/workers/:dispatchId/output` | Bounded output page (`?source=auto\|terminal\|transcript&cursor=&limit=`, limit clamped 1–200) |
+| `POST` | `/api/workers/:id/release` / `/retain` | Explicit post-settlement terminal release / retain-for-debugging |
+| `POST` | `/api/workers/:id/retry` | Re-place one positively failed attempt (same harness/model/effort/placement) |
 | `POST` | `/api/reset` | `{ confirmAllRuns: true }`: `orca orchestration reset --tasks` — clears tasks in **all** Runs |
 | `GET` | `/api/models/:harness` | Models selectable for a harness (currently only opencode enumerates) |
-| `GET` | `/api/config` | Viewer config (harness/model choices, max parallel, layout, last Run), stored in the workspace's `.orca-dag.config.json` |
+| `GET` | `/api/environments` | Saved connected environments (`environment list`), each with parsed `peer` capabilities the UI gates remote controls on |
+| `GET` | `/api/environments/:envId/worktrees?repo=` | Exact workspaces on one environment — full `id:<repoId>::<path>` selectors for the placement picker |
+| `GET` | `/api/environments/:envId/repos` | Repositories registered on one environment (for new-top-level placement) |
+| `GET` | `/api/environments/:envId/projects` | Project groupings visible on one environment |
+| `GET` | `/api/config` | Viewer config (harness/model/effort/retain/environment/placement choices, max parallel, layout, last Run), stored in the workspace's `.orca-dag.config.json` |
 | `PUT` | `/api/config` | Merge-write the viewer config |
 | `GET` | `/api/health` | Health check (returns the workspace directory) |
+
+Mutation routes that drive execution (`POST /api/runs`, `POST /api/run`, gate resolve, reset) additionally answer `503 execution_disabled` when readiness says the runtime can't execute — see [Readiness](#readiness-and-view-only-mode). Starting the coordinator against a workspace another viewer is already coordinating answers `409 coordinator_conflict`.
 
 ## Code layout
 
 ```
-skill/SKILL.md            graph-building conventions + spec-writing rules + how execution works + boundaries
+skill/SKILL.md            thin project workflow: PRD → design → task DAG → viewer; delegates command syntax to the runtime-matched guide (skills get orchestration)
 server/src/
-  index.ts                Express: dag / runs / run / run-stop / run-status / gates / reset / models / config; serves the SPA
-  coordinator.ts          self-driven coordinator loop: polls the DAG, fires ready tasks in parallel via worker-start
-  orca.ts                 orca CLI wrapper: task-list→DAG, worker-start/legacy/opencode workers, gates, terminals, models
+  index.ts                process entry: subcommands (--help / uninstall), CLI+workspace resolution, skill install, loopback listener
+  app.ts                  the Express app (createApp): readiness / dag / session / runs / run / run-stop / run-status / inbox / messages / gates / workers (list, output, release, retain, retry) / environments (list, worktrees, repos, projects) / reset / models / config + SPA serving
+  security.ts             loopback policy: per-process mutation token, request validation, custom-command gate
+  coordinator.ts          self-driven coordinator loop: polls the DAG, fires ready tasks via worker-start (local or --on environment), owns settlement + terminal reuse/retain/release, reconciles with worker-list --include-remote
+  orca.ts                 orca CLI wrapper: one resolved executable/argv + workspace, readiness/version gate, task-list→DAG, worker-start/reuse/legacy/opencode workers, environment discovery + peer capabilities + placement gates, worker-read, gates, terminals, models
+  orca.test.ts            resolution/readiness/conflict coverage (fake `orca` fixture)
   config.ts               viewer config persistence: .orca-dag.config.json in the workspace (/api/config)
   skill.ts                installs skill/SKILL.md into the agents on this machine, on startup
   uninstall.ts            `orca-dag uninstall`: the exact mirror of skill.ts, plus stale-terminal cleanup
@@ -196,27 +244,29 @@ web/src/
   App.tsx                 full-width DAG shell, 2s polling, hand-drawn SVG filter defs
   components/DagView.tsx     React Flow graph + status nodes (harness label, crayon animations)
   components/ExecControls.tsx default harness + max parallel + Run/Stop + live status
-  components/NodePanel.tsx    node details + per-node harness & model pickers
+  components/NodePanel.tsx    node details + per-node harness/model/effort pickers + environment/placement (exact workspace or new top-level) + retain-for-debugging
   components/GatePanel.tsx    approval-gate overlay
   components/RunPicker.tsx    Run selector + "New Run"
   components/DoodleSelect.tsx hand-drawn select (portal dropdown, search, keyboard nav)
-  harness.ts                reactive config store: per-node harness/model, default, max parallel, layout (persisted via /api/config)
+  components/WorkerPanel.tsx  fleet view: liveness/attention/launch prefs/output, retain & release controls
+  harness.ts                reactive config store: per-node harness/model/effort/retain/environment/placement, default, max parallel, layout (persisted via /api/config)
   layout.ts                 layout algorithms: dagre layered (LR/TB) + force-directed (Fruchterman–Reingold)
   types.ts / api.ts
 scripts/
   build-binary.mjs        vite build → embed assets + skill → bun --compile → dist/orca-dag
   build-npm.mjs           vite build → esbuild the server → dist-npm/ (the publishable `orca-dag` package)
   build-all-binaries.sh   every Bun target + archives + checksums (what the release workflow runs)
-  check-skill.mjs         guards SKILL.md's frontmatter, which the skills CLI installs by
+  check-skill.mjs         guards SKILL.md's frontmatter (which the skills CLI installs by) + rejects hard-coded CLI guidance that bypasses the runtime guide
   release.mjs             `npm run release <version>`: checks, tags, pushes — CI does the rest
 ```
 
 ## Design notes and boundaries
 
 - **The brain lives outside**: planning is done by the agent you already have (the skill provides the conventions); the viewer embeds no Claude Agent SDK.
-- **The viewer is its own coordinator**: Orca deliberately ships no scheduler, so `server/src/coordinator.ts` drives the loop with Orca's Run/Task/Dispatch primitives. Parallelism follows the DAG (everything ready fires together, capped by `maxConcurrency`); workers are spun up on demand, reused while idle, reclaimed at the end.
+- **The viewer is its own coordinator**: Orca deliberately ships no scheduler, so `server/src/coordinator.ts` drives the loop with Orca's Run/Task/Dispatch primitives. Parallelism follows the DAG (everything ready fires together, capped by `maxConcurrency`); settled workers have their output archived, then the terminal is **released** by default, **reused** only for an immediate compatible follow-up (same harness, no model change, via `worker-start --terminal`), or **retained** on explicit request — every settled terminal gets exactly one evidence-backed ownership decision, and an ambiguous release surfaces as debt instead of being retried blind.
 - **Workers must be autonomous agents**: hands-off execution requires the worker to run `orca orchestration send --type worker_done` on its own — otherwise it stalls on a permission prompt. `worker-start` launches Orca-configured TUI agents with their autonomous flags; for custom commands the legacy path uses `HARNESS_LAUNCH` in `orca.ts` (only `claude --dangerously-skip-permissions` is verified — add and verify flags for others before relying on them).
 - **The `dispatch --inject` quirk** (legacy path): it types the preamble into the agent's input box but often **doesn't submit it** (a readiness race). The coordinator waits ~2s after dispatch and sends an extra Enter; a stray Enter on already-submitted input is a harmless no-op.
 - **opencode goes through its own path**: `worker-start --agent opencode` opens the TUI but the injected preamble never lands, so the coordinator opens a bare shell, mints a tracking dispatch, and runs `opencode run --auto "$(cat <preamble>)"` (`--auto` is mandatory — the default permission policy silently auto-rejects tool calls).
+- **Remote placement is exact or it doesn't happen**: a node pinned to a saved environment starts via `worker-start --on <environment>` — and `--on` appears on that one call only; every later read, message, stop, and release addresses the **Dispatch ID** (the execution host owns the process, filesystem, transcript, stop, and cleanup facts). Only two placement forms exist remotely — an exact existing workspace selector discovered on that environment, or a new top-level worktree with an exact repo selector and an explicit name; remote `current`/`new-child` are refused at the HTTP boundary and again in the adapter, before any Orca call. There is no synthetic local fallback: an unknown environment or an unproven capability fails the start with its reason on record. Model/effort forwarding and structured transcript reads are gated on what the peer **advertises**; a disconnected host renders its workers `unverifiable` (never `exited`) and triggers no automatic stop/retry/release — reconnection restores liveness and the original Dispatch settles.
 - **Per-node harness/model live in a workspace config file**: Orca tasks have no harness/metadata field (`task-create` only takes spec/title/display-name/deps/parent), so the viewer stores harness and model choices, max parallel, and layout in `.orca-dag.config.json` at the workspace root (`server/src/config.ts`, `GET/PUT /api/config`) — surviving browser switches and cleared localStorage. The frontend's `harness.ts` is a reactive store that hydrates from the server and migrates old localStorage values once. At Run time the choices are passed to the backend as `harnessByTask` / `modelByTask`.
 - **Created tasks can't be edited**: `orca orchestration task-update` only changes `--status` / `--result` — **no interface to edit spec/title/deps**, and no single-task delete (`reset` clears everything, across all Runs). So "change a task" = **have the agent redraw the DAG in a fresh Run**.

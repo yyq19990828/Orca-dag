@@ -100,10 +100,35 @@ export const HARNESSES = [
 ] as const;
 export type Harness = (typeof HARNESSES)[number] | (string & {});
 
+/** Launch preferences for one attempt — requested (ours) vs effective (receipt echo). */
+export interface LaunchPrefsView {
+  agent: string | null;
+  model: string | null;
+  effort: string | null;
+  worktree: string | null;
+  terminal: string | null;
+  /** Saved environment the worker was placed on (Phase 6); null = local. */
+  on: string | null;
+}
+
+/** One page of bounded worker output (GET /api/workers/:id/output). */
+export interface WorkerOutputView {
+  dispatchId: string;
+  source: string;
+  cursor: string | null;
+  lines: string[];
+  contentComplete: boolean;
+  clipped: boolean;
+  warnings: string[];
+  /** True when the requested cursor pinned to a replaced source — the read restarted. */
+  sourceChanged: boolean;
+}
+
 /**
- * One in-flight attempt, mirroring an Orca Dispatch. `supervised` attempts were
- * started by `worker-start` and Orca tracks them; `legacy` ones were composed by
- * hand for a harness Orca doesn't recognize as a configured TUI agent.
+ * One in-flight (or settled) attempt, mirroring an Orca Dispatch. `supervised`
+ * attempts were started by `worker-start` and Orca tracks them; `legacy` ones
+ * were composed by hand for a harness Orca doesn't recognize as a configured
+ * TUI agent (their tracking Dispatch is unsupervised).
  */
 export interface RunAttempt {
   taskId: string;
@@ -111,14 +136,164 @@ export interface RunAttempt {
   mode: "supervised" | "legacy";
   dispatchId: string | null;
   handle: string | null;
+  startedAt: number;
   /** Orca fails the task after 3 consecutive attempt failures. */
   failureCount: number;
   lastHeartbeatAt: string | null;
+  /** Liveness verdict from the last worker-list reconciliation. */
+  liveness: string | null;
+  /** The runtime's own reason for that verdict (Phase 5). */
+  livenessReason: string | null;
+  /** Fleet attention flags — e.g. `failure`, `root_completion` (Phase 5). */
+  attention: { categories: string[]; requiresAction: boolean } | null;
+  /** Agent-wait evidence: stage + activity the fleet last reported (Phase 5). */
+  stage: { worker: string; dispatch: string; detail: string | null; activity: string } | null;
+  /** Terminal accounting Orca last reported for this Dispatch (Phase 5). */
+  fleetTerminalState: string | null;
+  /** The worker terminal the fleet last reported (Phase 5). */
+  agentTerminalHandle: string | null;
+  /**
+   * Execution host that owns this worker's process/output facts (Phase 6):
+   * `{kind:"local",id:"local"}` or the saved environment. Null = never
+   * reported — placement renders unknown, never "local by assumption".
+   */
+  host: { kind: string; id: string } | null;
+  /** What this viewer asked for at start (Phase 5). */
+  requested: LaunchPrefsView;
+  /** What the runtime echoed back — null/absent fields mean unknown (Phase 5). */
+  effective: LaunchPrefsView | null;
+  /** The settled Dispatch whose terminal this attempt reused (Phase 5). */
+  reuseOf: string | null;
+  /** Orca-authoritative settlement (worker_done or terminal task status). */
+  settled: boolean;
+  outcome: "succeeded" | "failed" | null;
+  settledVia: "worker_done" | "task_status" | "start_failed" | null;
+  settledAt: number | null;
+  /** Post-settlement terminal ownership decision. */
+  terminalDecision:
+    | "pending"
+    | "released"
+    | "retained"
+    | "closed"
+    | "reused"
+    | "not_needed"
+    | "release_pending"
+    | "release_unknown"
+    | "close_failed";
+  terminalDetail: string | null;
+  /** Tail of archived output, captured before release. */
+  output: {
+    source: string;
+    lines: string[];
+    contentComplete: boolean;
+    clipped: boolean;
+    cursor: string | null;
+    warnings: string[];
+    sourceChanged: boolean;
+  } | null;
+  // --- Phase 4: recovery + idempotency ---
+  /** Adopted from Orca state at coordinator start instead of started here. */
+  adopted: boolean;
+  /** The Dispatch this attempt explicitly retries (set by the user's retry). */
+  retriedFrom: string | null;
+  /**
+   * The durable retry-request id of an in-flight start, retained until its
+   * outcome is known. Null once the start resolved (success or receipt).
+   */
+  startRequestId: string | null;
+  /** Latest worker-start receipt — evidence for failed starts and retries. */
+  startReceipt: WorkerStartReceiptView | null;
+  /**
+   * The literal recovery action Orca prescribes. Followed only when `argv`
+   * is non-empty; null/empty argv means "no prescribed action" — never
+   * invented.
+   */
+  nextAction: { kind: string; argv: string[] } | null;
 }
 
-/** Live status of the self-driven coordinator. */
+/** Full worker-start receipt (Phase 4 item 1), preserved for the UI. */
+export interface WorkerStartReceiptView {
+  ok: boolean;
+  taskId: string | null;
+  dispatchId: string | null;
+  /** Echo of the durable --retry-request id the start ran under. */
+  requestId: string | null;
+  status: string | null;
+  /** Stage reached (or in-flight when it failed). */
+  stage: string | null;
+  /** The stage that failed, on a failed start. */
+  failedStage: string | null;
+  setup: string | null;
+  /** Resources a failed start left behind, verbatim. */
+  residualResources: unknown;
+  /** Orca's own prescribed recovery commands, verbatim. */
+  recoveryCommands: string[];
+}
+
+/** What startup recovery found and did (Phase 4 items 4-7). */
+export interface RecoverySummaryView {
+  at: number;
+  /** Dispatches adopted as still-active (counted against concurrency). */
+  activeAdopted: string[];
+  /** Positively settled Dispatches adopted with an owed ownership decision. */
+  settledAdopted: string[];
+  /** Rows we could not verify — surfaced, never acted on destructively. */
+  unverifiable: string[];
+  /** Already-decided rows (released/retained) left exactly as Orca holds them. */
+  leftDecided: number;
+}
+
+/** A worker question/escalation waiting on a human reply. */
+export interface PendingInboxItem {
+  messageId: string;
+  kind: "question" | "escalation";
+  from: string;
+  subject: string;
+  body: string;
+  createdAt: string;
+  taskId: string | null;
+}
+
+/** Cleanup work the coordinator refuses to guess its way through. */
+export interface CleanupDebtItem {
+  key: string;
+  kind:
+    | "release_unknown"
+    | "release_pending"
+    | "close_failed"
+    | "coordinator_close_failed"
+    | "stop_unknown"
+    | "reclaimable";
+  dispatchId: string | null;
+  handle: string | null;
+  detail: string | null;
+}
+
+/** One per-Dispatch row of the explicit Stop report. */
+export interface StopResultEntry {
+  target: string;
+  kind: "supervised" | "legacy_terminal" | "tracking_dispatch" | "coordinator_terminal";
+  result: string;
+  detail: string | null;
+}
+
+/**
+ * Live status of the self-driven coordinator. `phase` follows the plan §6.3
+ * state machine (`recovering` is reserved for Phase 4); `inbox.pending` are
+ * the questions/escalations the run is waiting on; `cleanupDebt` blocks
+ * completion until resolved.
+ */
 export interface RunStatus {
   running: boolean;
+  phase:
+    | "idle"
+    | "binding"
+    | "running"
+    | "awaiting_input"
+    | "stopping"
+    | "completed"
+    | "recovering"
+    | "error";
   /** The Run this coordinator bound itself to. */
   runId: string | null;
   /** The Orca terminal the coordinator borrows for mutating calls. */
@@ -127,7 +302,21 @@ export interface RunStatus {
   error: string | null;
   startedAt: number;
   lastTick: number;
+  lastReconciledAt: number;
+  completedAt: number | null;
   attempts: RunAttempt[];
+  inbox: {
+    pending: PendingInboxItem[];
+    pendingDeliveryId: string | null;
+    recent: { id: string; type: string; from: string; subject: string; createdAt: string }[];
+    lastAckedDeliveryId: string | null;
+  };
+  cleanupDebt: CleanupDebtItem[];
+  lastStopReport: { results: StopResultEntry[]; clean: boolean } | null;
+  /** Dispatched tasks this coordinator never started (Phase 4 adopts them). */
+  unownedDispatches: string[];
+  /** What startup recovery found and did — present after every coordinator start. */
+  recovery: RecoverySummaryView | null;
 }
 
 /**
@@ -144,6 +333,17 @@ export interface ViewerConfig {
    * --model`); empty string / absent means the agent's default model.
    */
   modelByTask: Record<string, string>;
+  /** Per-task reasoning effort — only ever set alongside a model (Phase 5). */
+  effortByTask: Record<string, string>;
+  /**
+   * Per-task retain-for-debugging: a settled worker's terminal is kept alive
+   * and visible until manually released (Phase 5).
+   */
+  retainByTask: Record<string, boolean>;
+  /** Per-task saved-environment selectors; absent/empty = local (Phase 6). */
+  environmentByTask: Record<string, string>;
+  /** Per-task exact placement; absent = current (Phase 6). */
+  placementByTask: Record<string, PlacementSpec>;
   maxConcurrency: number;
   layout: LayoutKind | "";
   /** Last Run the user was viewing; restored on reload. */
@@ -163,3 +363,85 @@ export const MODEL_PICKER: Record<string, ModelPickerKind> = {
   codex: "text",
   cursor: "text",
 };
+
+/**
+ * Harnesses that accept `worker-start --effort` (Phase 5). Orca's contract:
+ * effort requires a model, and opencode (the legacy path) has no effort flag —
+ * so the effort picker renders only for these, and only when a model is set.
+ */
+export const EFFORT_SUPPORTED: ReadonlySet<string> = new Set(["claude", "codex", "cursor"]);
+
+/** Common reasoning-effort levels. Orca owns the authoritative list per model. */
+export const EFFORT_LEVELS = ["low", "medium", "high"] as const;
+
+// --- Phase 6: saved environments, peer capabilities, exact placement ---------
+
+/**
+ * One exact placement choice, mirrored from server/src/config.ts. The two
+ * remote-capable shapes (existing selector / new-top-level descriptor) are
+ * the only ones the UI offers for a remote environment; remote `current` and
+ * `new-child` are deliberately inexpressible here.
+ */
+export type PlacementSpec =
+  | { kind: "current" }
+  | { kind: "existing"; selector: string }
+  | { kind: "new-top-level"; repo: string; name: string };
+
+/** Which remote operations a peer advertised (parsed server-side). */
+export interface PeerCapabilitiesView {
+  modelEffort: boolean;
+  transcriptRead: boolean;
+  fleetSnapshot: boolean;
+  /** Everything the peer advertised, verbatim (null = nothing/unknown). */
+  raw: string[] | null;
+}
+
+/** One saved Orca runtime environment (GET /api/environments). */
+export interface OrcaEnvironmentView {
+  id: string;
+  name: string;
+  /** Reachability as reported; null = unknown (renders unverifiable). */
+  connected: boolean | null;
+  /** Advertised capability names, verbatim. */
+  capabilities: string[] | null;
+  version: string | null;
+  /** Parsed gates the UI disables controls on. */
+  peer: PeerCapabilitiesView;
+}
+
+/** One exact workspace on an environment (GET /api/environments/:id/worktrees). */
+export interface OrcaWorktreeView {
+  id: string;
+  repoId: string | null;
+  path: string | null;
+  displayName: string | null;
+  branch: string | null;
+  hostId: string | null;
+  parentWorktreeId: string | null;
+  isMainWorktree: boolean | null;
+}
+
+/** One repository registered on an environment (GET /api/environments/:id/repos). */
+export interface OrcaRepoView {
+  id: string;
+  path: string | null;
+  displayName: string | null;
+  kind: string | null;
+  hostId: string | null;
+}
+
+/**
+ * Server-side readiness probe (Phase 2): which Orca CLI was resolved, what
+ * version it reports, and whether the viewer may execute at all. When
+ * `executionEnabled` is false, `reason` carries the actionable explanation
+ * shown by the disabled Run/gate/reset controls (e.g. Orca 1.4.160–1.4.204 is
+ * view-only: execution needs 1.4.205+).
+ */
+export interface OrcaReadiness {
+  cli: string;
+  workspace: string;
+  worktree: string;
+  version: string | null;
+  executionEnabled: boolean;
+  reason: string | null;
+}
