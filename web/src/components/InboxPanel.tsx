@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { releaseWorker, replyToMessage, retainWorker } from "../api";
+import { timeAgo } from "../format";
 import type { CleanupDebtItem, PendingInboxItem } from "../types";
 
 /**
@@ -23,13 +24,6 @@ const DEBT_LABEL: Record<CleanupDebtItem["kind"], string> = {
   stop_unknown: "Stop outcome unknown",
   reclaimable: "Reclaimable worker left",
 };
-
-function timeAgo(iso: string): string {
-  const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  return `${Math.floor(s / 3600)}h ago`;
-}
 
 export function InboxPanel({
   runId,

@@ -508,3 +508,64 @@ describe("Phase 6: safe group messaging boundaries", () => {
     assert.match(String(json.error), /live coordinator/);
   });
 });
+
+// --- Integration: remaining HTTP boundaries ----------------------------------
+//
+// Phase 7 review found four routes whose boundary behavior had no direct
+// test: the group-audience discovery read, the retain/retry worker mutations,
+// and the model-list endpoint. As everywhere above, the assertions fire on
+// token/validation ordering — BEFORE any Orca call — so they hold with or
+// without an `orca`/`opencode` executable on PATH.
+
+describe("integration: remaining HTTP boundaries", () => {
+  it("validates Run scope on the group-audience discovery read", async () => {
+    const missing = await call("GET", "/api/audiences");
+    assert.equal(missing.status, 400);
+    assert.equal(missing.json.code, "run_required");
+
+    const malformed = await call("GET", "/api/audiences?run=../escape");
+    assert.equal(malformed.status, 400);
+    assert.equal(malformed.json.code, "invalid_input");
+  });
+
+  it("degrades audience discovery to an empty list, never a 500, and labels the degraded provenance", async () => {
+    // Whether or not an `orca` CLI exists, the response must keep its shape:
+    // audiences is an array (empty when discovery fails) and any discovery
+    // failure is reported as a field, not an error status — the picker stays
+    // renderable and the user sees WHY it is empty.
+    const res = await call("GET", "/api/audiences?run=run_boundary_check");
+    assert.equal(res.status, 200);
+    assert.equal(res.json.runId, "run_boundary_check");
+    assert.equal(res.json.coordinatorActive, false, "nothing coordinates a Run in this test app");
+    assert.ok(Array.isArray(res.json.audiences));
+  });
+
+  it("protects worker retention with the token and validates the dispatch id before any Orca work", async () => {
+    const noToken = await call("POST", "/api/workers/ctx_boundary/retain", {});
+    assert.equal(noToken.status, 403);
+    assert.equal(noToken.json.code, "invalid_token");
+
+    const malformed = await call("POST", "/api/workers/bad%20id/retain", {}, policy.token);
+    assert.equal(malformed.status, 400);
+    assert.equal(malformed.json.code, "invalid_input");
+  });
+
+  it("protects worker retry with the token and validates the id before any Orca work", async () => {
+    const noToken = await call("POST", "/api/workers/task_boundary/retry", {});
+    assert.equal(noToken.status, 403);
+    assert.equal(noToken.json.code, "invalid_token");
+
+    const malformed = await call("POST", "/api/workers/bad%20id/retry", {}, policy.token);
+    assert.equal(malformed.status, 400);
+    assert.equal(malformed.json.code, "invalid_input");
+  });
+
+  it("returns the non-enumerable harness model list without a CLI and normalizes the harness name", async () => {
+    // claude/codex/cursor have no programmatic model list (the UI falls back
+    // to free text), so this needs no `orca` and no `opencode` on PATH.
+    const res = await call("GET", "/api/models/CLAUDE");
+    assert.equal(res.status, 200);
+    assert.equal(res.json.harness, "claude");
+    assert.deepEqual(res.json.models, []);
+  });
+});

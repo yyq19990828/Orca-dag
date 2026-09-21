@@ -7,6 +7,7 @@ import {
   retryWorker,
 } from "../api";
 import type { ActivityEvent, ActivitySnapshot } from "../types";
+import { formatTimestamp, isUrgent, priorityLabel } from "../format";
 
 type ActivityFilter = "all" | "coordinator" | "agents" | "needs_reply";
 
@@ -20,18 +21,6 @@ const EMPTY: ActivitySnapshot = {
   inboxWindow: null,
   generatedAt: 0,
 };
-
-function clock(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(date);
-}
 
 function technicalJson(event: ActivityEvent): string {
   return JSON.stringify(
@@ -52,18 +41,6 @@ function technicalJson(event: ActivityEvent): string {
     null,
     2,
   );
-}
-
-/** Only Orca's own high/urgent priorities may render the urgent flag. */
-const URGENT_PRIORITIES = new Set(["high", "urgent"]);
-
-function isUrgent(event: ActivityEvent): boolean {
-  return event.priority != null && URGENT_PRIORITIES.has(event.priority.trim().toLowerCase());
-}
-
-function priorityLabel(event: ActivityEvent): string {
-  const normalized = event.priority?.trim().toLowerCase();
-  return normalized === "urgent" ? "Urgent" : "High priority";
 }
 
 function provenanceLabel(event: ActivityEvent): { text: string; title: string } | null {
@@ -306,7 +283,7 @@ export function ActivityPanel({
                   {event.actor.harness && (
                     <span>{event.actor.harness}{event.actor.model ? ` · ${event.actor.model}` : ""}</span>
                   )}
-                  <time dateTime={event.createdAt}>{clock(event.createdAt)}</time>
+                  <time dateTime={event.createdAt}>{formatTimestamp(event.createdAt)}</time>
                 </div>
                 <h3>{event.title}</h3>
                 {event.threadId && (

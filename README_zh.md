@@ -163,6 +163,8 @@ npm run release 0.2.0  # 打 tag 并推送；CI 负责发 npm + 把各平台二�
 ## viewer 能做什么
 
 - **按 workspace 隔离的 Run 选择器**：Orca 的 Run 注册表是全局的，但 viewer 只显示任务创建者身份与当前 workspace 匹配的 Run（以及该 workspace 已保存/刚创建的空 Run）。紧凑选择器以稳定的 `run_*` 编号为主信息，objective 作为次级说明。**＋ Create Run** 会从当前 workspace 创建一个空 Run 并立即选中。
+- **Run 健康徽标**：选中的 Run 始终报告它的归属状态 —— **viewer 自己协调**、**外部协调中**、**无绑定** 或 **内部不一致**（Orca 自身记录相互矛盾），并给出按来源的计数，读取失败时显示警告（读取失败绝不是悄悄当零处理）。任务为空但仍有消息的 Run 会被解释成这种情况，而不是看起来像渲染故障。
+- **运行时能力矩阵**：只读面板展示连接的 Orca 运行时**明确通告**的能力与 1.4.206 规范能力 id 的对照 —— 有旧别名的注明别名，未知名称与缺失字段一律显示 "Not advertised" 并保持关闭。支持与否绝不从版本号推断。
 - **实时可视化** DAG，节点状态 `pending / ready / dispatched / completed / failed / blocked` 映射颜色；每个节点角上标着它的 harness。
 - **布局算法切换**：顶栏 "Layout" 段控可切**横向/纵向分层**（dagre / Sugiyama）与**力导向**（Fruchterman–Reingold）；**↻ Re-layout** 一键重新自动布局（清除手动拖拽）。选择会持久化。
 - **层级与依赖分离**：Task 的 `parent_id` 会被保留，并以安静的点线括弧（子端带圆环）呈现——与铅笔依赖箭头刻意采用不同的视觉语法。父子关系绝不等于依赖：它不影响就绪判定，也不参与布局；顶栏开关（**Hide/Show parent links**）可在影响可读性时隐藏它。
@@ -171,6 +173,8 @@ npm run release 0.2.0  # 打 tag 并推送；CI 负责发 npm + 把各平台二�
 - **执行动画**：`dispatched`（执行中）节点用蜡笔斜纹从左上到右下一遍遍「涂鸦」；从执行中节点流出的连线先是游动的虚线草稿，再有铅笔笔触从本节点向下游一遍遍「描」成实线。
 - **显式主代理阶段**：每个 Run 可以手动标记一个代表主 agent 的语义阶段。该节点会叠加醒目的靛蓝双层外框与金色 `★ Lead` 徽标，同时保留原有状态颜色。这只是 viewer 元数据，不会改变 Orca 的 coordinator 权限。
 - **独立 Stage 卡片 + Activity / Chat 通信中心**：选中节点后，右侧纸张卡片单独显示设置；通信则占用专用左侧栏，DAG 自动缩放到剩余画布。Activity 保留 SSE 实时时间线（含有界轮询回退、筛选、实际运行信息和可展开技术证据）；Chat 把同一份 Run 作用域事件流按阶段分组并记录双向通信：worker 成功启动后形成 coordinator 的派工气泡，worker 上报显示在另一侧，待处理问题可以直接回复，也可以向 Orca 已验证仍存活的活跃 Dispatch 主动发送持久化指导（过期、已落定或无法验证的尝试会被拒绝）。聊天气泡下方是有界的实时 check 流：主编排器每轮检查都会留下 receipt，包括空检查、收到的消息类型、失败或重放、耗时，以及运行时实际观察到的 agent/model/activity 摘要；heartbeat/status 只更新这个运行态区域，不再伪装成重复聊天消息。日志功能出现前的历史派工会明确标注为根据 Task spec 恢复。界面中的“已发送”只代表 Orca 已接受持久化入队，不代表 worker 已阅读。
+- **忠实的会话语义**：Chat 保留 Orca 的线程身份（回复引用并关联原始提问），如实渲染每条消息的**优先级**徽标与**已读/未读**状态 —— "已发送"只代表 Orca 接受了持久化入队，绝不代表 worker 已读；当全局 Orca inbox 窗口饱和时会警告**"历史可能不完整"**，而不是假装可见的行就是全部（只有真正观察到边界时才渲染警告；没有警告也不是完整性的证明）。
+- **协调者群发（刻意的、可审计的广播）**：一条消息发给 `@all` 或 Orca 发现的 worktree 受众，受众来自新鲜发现的下拉选择 —— 绝不是自由填写的收件人。发送需要变更 token、预览过的受众、显式确认，并且本 viewer 必须是该 Run 的**活跃协调者**；生命周期信号类型（`worker_done`、`heartbeat`）在任何 Orca 调用之前就被拒绝。
 - **每节点选 harness**：点节点在面板里选 `claude / kimi / opencode / grok / codex` 或自定义命令（持久化到 workspace 的 `.orca-dag.config.json`；自定义命令还需要 `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1`，见[安全模型](#安全模型)）；没单独设的节点用顶栏的**默认 harness** 兜底。
 - **每节点选模型**：支持的 harness 才有 —— opencode 用 `opencode models` 枚举出下拉框；claude / codex / cursor 是自由文本（通过 `worker-start --model` 传入）。其余 harness 用各自的默认模型。
 - **每节点推理力度（effort）**：claude / codex / cursor 还可选 effort 档位，通过 `worker-start --effort` 传入 —— 只有该节点设置了模型才生效（Orca 的契约），清掉模型会一并清掉 effort。
@@ -206,6 +210,8 @@ viewer 是直通 Orca 的控制面 —— 启动 Run 会 fence 掉原本的 coor
 | --- | --- | --- |
 | `GET` | `/api/session` | 把本进程的 mutation token + 自定义命令开关交给同源客户端（`Cache-Control: no-store`） |
 | `GET` | `/api/readiness` | 解析出的 CLI、Orca 版本，以及是否允许执行（不允许时附上可操作的原因） |
+| `GET` | `/api/capabilities` | 运行时能力矩阵：运行时信息加每个能力的 `supported / alias / absent` 状态 —— 未知能力照样列出并保持关闭 |
+| `GET` | `/api/run-health?run=<id>` | 单个 Run 的归属与健康：状态（`viewer-owned / external / unbound / inconsistent`）、协调者句柄、计数与按来源的警告 |
 | `GET` | `/api/dag?run=<id>` | 该 Run 的 DAG：`{ runId, nodes, edges, hierarchy, gates, readyWave, readiness, generatedAt }` |
 | `GET` | `/api/runs` | 列出精确归属于当前 workspace 的 Run（依据任务创建者的 worktree 身份判定） |
 | `POST` | `/api/runs` | `{ objective }`：在当前 workspace 新建一个空 Run（走一次性 coordinator 终端） |
@@ -217,8 +223,11 @@ viewer 是直通 Orca 的控制面 —— 启动 Run 会 fence 掉原本的 coor
 | `GET` | `/api/activity?run=<id>&after=&limit=` | 严格归属一个 Run 的可读 Activity、每阶段 fleet 运行态及有界实时 coordinator check receipt |
 | `GET` | `/api/activity/stream?run=<id>` | 严格归属一个 Run 的实时 SSE 快照；浏览器失败时退回有界轮询 |
 | `POST` | `/api/messages/:id/reply` | `{ body, runId }`：回答 worker 的问题/升级 |
+| `GET` | `/api/audiences?run=<id>` | 该 Run 群发受众的预览（`@all` + 已发现的 worktree），带 `coordinatorActive` 与按来源的发现错误 —— 发现失败退化为空列表，绝不猜测收件人 |
+| `POST` | `/api/messages/group` | `{ runId, audience, body, subject?, type?, priority? }`：向白名单受众发送一条经确认的协调者广播；生命周期类型报 `forbidden_group_type`，未发现的 worktree 报 `unknown_audience`，非协调者报 `409 not_running` |
 | `POST` | `/api/gates/:id/resolve` | `{ resolution, runId }`：解决审批门 |
 | `GET` | `/api/workers?run=<id>` | 该 Run 完整、游标分页且包含远程记录的 worker 历史（存活状态、终端状态、projection），也是启动参数锁定的持久证据 |
+| `GET` | `/api/workers/:dispatchId?run=<id>` | 单个 worker 的持久行加 `worker-show` 证据（Dispatch/Worker 记录、PTY 事实、带 agent-wait 证据的精确 worker 观察）—— 通过比对接收里的 runId 实现 Run 划界；独立于协调者循环，viewer 重启后历史 worker 依然可查 |
 | `GET` | `/api/workers/:dispatchId/output` | 有界输出分页（`?source=auto\|terminal\|transcript&cursor=&limit=`，limit 钳制 1–200） |
 | `GET` | `/api/requests?run=<id>` | 本工作区已记录变更请求的有界审计列表，按 Run 划界（未记录作用域的行保留并标注；其他 Run 的行只计数不列出） |
 | `GET` | `/api/requests/:requestId?run=<id>` | 单条账本行加一次全新的只读 `request-show` 探测：`{ state: completed\|pending\|absent\|unknown, interpretation, outcome }` —— 绝不重放变更 |

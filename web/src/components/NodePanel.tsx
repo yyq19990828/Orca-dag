@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { fetchEnvironmentRepos, fetchEnvironmentWorktrees, fetchEnvironments, fetchModels } from "../api";
+import { formatDateTime } from "../format";
 import {
   effectiveHarness,
   getDefaultHarness,
@@ -70,16 +71,17 @@ function resultExcerpt(body: string): { text: string; clipped: boolean } {
   return { text, clipped: true };
 }
 
+/**
+ * A worker result's completion stamp, or null when absent/unparseable — the
+ * caller renders nothing rather than a fabricated date. Formatting itself is
+ * delegated to the shared `formatDateTime` so the label can't drift from the
+ * other panels.
+ */
 function resultTime(value: string | undefined): string | null {
   if (!value) return null;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return null;
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
+  return formatDateTime(value);
 }
 
 function ResultSummary({ raw }: { raw: string }) {

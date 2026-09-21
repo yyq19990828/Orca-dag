@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { fetchRequestDetail, fetchRequests } from "../api";
+import { formatTimestamp } from "../format";
 import type { RequestLedgerRowView, RequestReceiptView } from "../types";
 
 /**
@@ -16,18 +17,6 @@ import type { RequestLedgerRowView, RequestReceiptView } from "../types";
  * (`settledLocally`) is labeled as exactly that — a hint, never authority.
  * The panel renders only once there is something audited to show.
  */
-
-function clock(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(date);
-}
 
 function shortId(id: string): string {
   return id.length > 12 ? `${id.slice(0, 12)}…` : id;
@@ -153,7 +142,7 @@ export function RequestAuditPanel({ runId }: { runId: string }) {
                   {row.taskId ? ` · ${row.taskId}` : ""}
                   {row.dispatchId ? ` · ${row.dispatchId}` : ""}
                   {` · ${row.runId === null ? "scope unknown" : row.runId}`}
-                  {` · ${clock(row.updatedAt)}`}
+                  {` · ${formatTimestamp(row.updatedAt)}`}
                 </span>
                 <span className="audit__hint">{isOpen ? "▲" : "Inspect"}</span>
               </button>
@@ -169,7 +158,7 @@ export function RequestAuditPanel({ runId }: { runId: string }) {
                     </div>
                   )}
                   <div className="inbox__meta">
-                    Probed {clock(receipt.probedAt)} ·{" "}
+                    Probed {formatTimestamp(receipt.probedAt)} ·{" "}
                     {row.settledLocally === true
                       ? "the viewer observed a definitive outcome during the call"
                       : row.settledLocally === false

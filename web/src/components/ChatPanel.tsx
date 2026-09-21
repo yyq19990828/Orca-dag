@@ -1,7 +1,9 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { fetchAudiencePreview, replyToMessage, sendGroupMessage, sendTaskMessage } from "../api";
+import { formatClock, formatDateTime, isUrgent, priorityLabel } from "../format";
 import { useDecisionDialog } from "./DecisionDialog";
-import { DoodleSelect, type DoodleOption } from "./DoodleSelect";import type {
+import { DoodleSelect, type DoodleOption } from "./DoodleSelect";
+import type {
   ActivityEvent,
   ActivitySnapshot,
   AudiencePreviewResponse,
@@ -40,48 +42,13 @@ type TimelineItem =
   | { kind: "event"; event: ActivityEvent; at: number }
   | TimelineCheckGroup;
 
-function clock(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
-}
-
-function dayAndTime(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
-}
-
 function messageBody(event: ActivityEvent): string {
   return event.summary;
-}
-
-/** Only Orca's own high/urgent priorities may render the urgent flag. */
-const URGENT_PRIORITIES = new Set(["high", "urgent"]);
-
-function priorityLabel(event: ActivityEvent): string {
-  const normalized = event.priority?.trim().toLowerCase();
-  if (normalized === "urgent") return "Urgent";
-  if (normalized === "low") return "Low priority";
-  if (normalized === "normal") return "Normal priority";
-  return "High priority";
 }
 
 /** Orca priorities a group send may carry; "normal" renders no chip at all. */
 const GROUP_PRIORITIES = ["low", "normal", "high", "urgent"] as const;
 type GroupPriority = (typeof GROUP_PRIORITIES)[number];
-
-function isUrgent(event: ActivityEvent): boolean {
-  return event.priority != null && URGENT_PRIORITIES.has(event.priority.trim().toLowerCase());
-}
 
 /**
  * A group bubble shows its requested priority whenever it is anything other
@@ -598,7 +565,7 @@ export function ChatPanel({
         <div className="chat-checkpoint__copy">
           <div className="chat-checkpoint__head">
             <strong>{checkGroupTitle(group.receipts)}</strong>
-            <time dateTime={new Date(receipt.checkedAt).toISOString()}>{clock(new Date(receipt.checkedAt).toISOString())}</time>
+            <time dateTime={new Date(receipt.checkedAt).toISOString()}>{formatClock(new Date(receipt.checkedAt).toISOString())}</time>
           </div>
           {important && detail && <span className="chat-checkpoint__summary">{detail}</span>}
           <details className="chat-checkpoint__details">
@@ -616,7 +583,7 @@ export function ChatPanel({
                   <article className="chat-checkpoint__receipt" key={`${item.checkedAt}:${item.sequence}`}>
                     <header>
                       <span>{group.receipts.length > 1 ? `Check ${index + 1} of ${group.receipts.length}` : "Check record"}</span>
-                      <time dateTime={itemIso}>{dayAndTime(itemIso)}</time>
+                      <time dateTime={itemIso}>{formatDateTime(itemIso)}</time>
                     </header>
                     <dl className="chat-checkpoint__facts">
                       <div>
@@ -756,7 +723,7 @@ export function ChatPanel({
                           title="Has unread messages"
                         />
                       )}
-                      <time dateTime={conversation.latestAt}>{clock(conversation.latestAt)}</time>
+                      <time dateTime={conversation.latestAt}>{formatClock(conversation.latestAt)}</time>
                     </span>
                     <span className="chat-thread__preview">
                       {latest
@@ -815,7 +782,7 @@ export function ChatPanel({
                 <article className="chat-message chat-message--outgoing chat-message--brief">
                   <div className="chat-message__meta">
                     <strong>Coordinator</strong>
-                    <time dateTime={selected.task.createdAt}>{dayAndTime(selected.task.createdAt)}</time>
+                    <time dateTime={selected.task.createdAt}>{formatDateTime(selected.task.createdAt)}</time>
                   </div>
                   <h3>Assigned this stage</h3>
                   <small>Recovered from Task history</small>
@@ -842,7 +809,7 @@ export function ChatPanel({
                   <div key={event.id} className={`chat-message chat-message--system chat-message--${event.severity}`}>
                     <span>{event.title}</span>
                     <p>{messageBody(event)}</p>
-                    <time dateTime={event.createdAt}>{dayAndTime(event.createdAt)}</time>
+                    <time dateTime={event.createdAt}>{formatDateTime(event.createdAt)}</time>
                   </div>
                 ) : (
                   <article
@@ -880,7 +847,7 @@ export function ChatPanel({
                           Unread
                         </span>
                       )}
-                      <time dateTime={event.createdAt}>{dayAndTime(event.createdAt)}</time>
+                      <time dateTime={event.createdAt}>{formatDateTime(event.createdAt)}</time>
                     </div>
                     {(() => {
                       const parent = replyContextOf(event, contextById);
@@ -929,7 +896,7 @@ export function ChatPanel({
                     : coordinatorActive ? "Scheduling stages and checking the Run inbox" : "Run-level activity only"}
                 </span>
                 <span className="chat-runtime-summary__meta">
-                  {lastCheck ? `Last check ${clock(new Date(lastCheck.checkedAt).toISOString())}` : "No checks yet"}
+                  {lastCheck ? `Last check ${formatClock(new Date(lastCheck.checkedAt).toISOString())}` : "No checks yet"}
                   {selectedChecks.length > 0 && ` · ${selectedChecks.length} total`}
                 </span>
               </section>
