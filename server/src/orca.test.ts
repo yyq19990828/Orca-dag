@@ -24,6 +24,8 @@ import {
   listEnvironments,
   listProjects,
   listRepos,
+  listRunMessages,
+  listWorkspaceRuns,
   listWorkers,
   listWorktrees,
   normalizeLiveness,
@@ -38,6 +40,7 @@ import {
   resolveWorktreeSelector,
   resolveWorkspace,
   runOrca,
+  sendCoordinatorMessage,
   showEnvironment,
   startSupervisedWorker,
 } from "./orca";
@@ -100,7 +103,17 @@ function writeScript(
     repos?: unknown[];
     worktrees?: unknown[];
     projects?: unknown[];
+    /** Workspace-scope discovery: global Runs + per-Run Task creator rows. */
+    runs?: unknown[];
+    runsById?: Record<string, unknown>;
+    inboxMessages?: unknown[];
+    tasksByRun?: Record<string, unknown[]>;
     workers?: unknown[];
+    /** Cursor-keyed worker-list receipts; `__first__` is the no-cursor page. */
+    workerPages?: Record<
+      string,
+      { workers?: unknown[]; page?: { hasMore?: boolean; nextCursor?: string | null } }
+    >;
   },
 ): void {
   writeFileSync(scriptPath, JSON.stringify(conf));
@@ -146,7 +159,30 @@ if (args[0] === "environment" && args[1] === "show") {
 if (args[0] === "repo" && args[1] === "list") out.result = { repos: conf.repos ?? [] };
 if (args[0] === "worktree" && args[1] === "list") out.result = { worktrees: conf.worktrees ?? [] };
 if (args[0] === "project" && args[1] === "list") out.result = { projects: conf.projects ?? [] };
-if (args[0] === "orchestration" && args[1] === "worker-list") out.result = { workers: conf.workers ?? [] };
+if (args[0] === "orchestration" && args[1] === "run-list") out.result = { runs: conf.runs ?? [] };
+if (args[0] === "orchestration" && args[1] === "run-show") {
+  const id = args[args.indexOf("--id") + 1];
+  out.result = { run: conf.runsById?.[id] };
+}
+if (args[0] === "orchestration" && args[1] === "inbox") {
+  const limitAt = args.indexOf("--limit");
+  const limit = limitAt >= 0 ? Number(args[limitAt + 1]) : 100;
+  const messages = conf.inboxMessages ?? [];
+  out.result = { messages: messages.slice(0, limit), count: Math.min(messages.length, limit) };
+}
+if (args[0] === "orchestration" && args[1] === "task-list") {
+  const runAt = args.indexOf("--run");
+  const runId = runAt >= 0 ? args[runAt + 1] : "";
+  out.result = { tasks: conf.tasksByRun?.[runId] ?? [] };
+}
+if (args[0] === "orchestration" && args[1] === "worker-list") {
+  const cursorAt = args.indexOf("--cursor");
+  const cursor = cursorAt >= 0 ? args[cursorAt + 1] : "__first__";
+  out.result = (conf.workerPages && conf.workerPages[cursor]) ?? {
+    workers: conf.workers ?? [],
+    page: { hasMore: false, nextCursor: null },
+  };
+}
 if (args[0] === "orchestration" && args[1] === "worker-start") out.result = conf.workerStart ?? {};
 if (args[0] === "orchestration" && args[1] === "worker-read") {
   const wr = conf.workerRead;
@@ -1330,6 +1366,149 @@ describe("environment discovery (Phase 6, fake CLI)", () => {
   });
 });
 
+describe("workspace-scoped Run discovery", () => {
+  it("keeps exact-workspace Runs and explicit empty Runs, excluding other directories", async () => {
+    useRuntime({ workspace: root });
+    let timestamp = 10;
+    const run = (id: string, legacy = 0) => ({
+      id,
+      objective: id,
+      coordinator_handle: null,
+      consumer_generation: 1,
+      legacy,
+      created_at: `2026-09-21T00:00:${String(timestamp--).padStart(2, "0")}Z`,
+      updated_at: "2026-09-21T00:00:00Z",
+    });
+    writeScript({
+      runs: [
+        run("run_here"),
+        run("run_foreign"),
+        run("run_prefix_trap"),
+        run("run_empty_here"),
+        run("run_unknown"),
+        run("run_legacy_local", 1),
+      ],
+      tasksByRun: {
+        run_here: [
+          { created_by_process_incarnation: `repo_local::${root}@@branch:incarnation` },
+        ],
+        run_foreign: [
+          { created_by_process_incarnation: "repo_remote::/srv/other-project@@main:incarnation" },
+        ],
+        // A sibling whose path merely starts with this workspace must not pass
+        // the exact `::<realpath>@@` boundary check.
+        run_prefix_trap: [
+          { created_by_process_incarnation: `repo_other::${root}-copy@@main:incarnation` },
+        ],
+        run_unknown: [{ created_by_process_incarnation: null }],
+      },
+    });
+
+    const scoped = await listWorkspaceRuns(root, ["run_empty_here"]);
+    assert.deepEqual(scoped.map((item) => item.id), ["run_here", "run_empty_here"]);
+
+    const taskCalls = readLog().filter((call) => call.argv[1] === "task-list");
+    assert.ok(taskCalls.length >= 4);
+    assert.ok(taskCalls.every((call) => call.argv.includes("--brief")));
+    assert.ok(
+      !taskCalls.some((call) => call.argv.includes("run_empty_here")),
+      "explicit empty Runs need no Task probe",
+    );
+    assert.ok(
+      !taskCalls.some((call) => call.argv.includes("run_legacy_local")),
+      "legacy tombstone is filtered before workspace probing",
+    );
+  });
+});
+
+describe("Run-scoped message history", () => {
+  const message = (id: string, runId: string) => ({
+    id,
+    run_id: runId,
+    delivery_contract: "at_least_once",
+    from_handle: "term_worker",
+    to_handle: "term_coordinator",
+    subject: "Progress",
+    body: "Still working.",
+    type: "status",
+    priority: "normal",
+    thread_id: null,
+    payload: null,
+    created_at: "2026-09-21T00:00:00Z",
+    delivered_at: null,
+  });
+
+  it("reads the global bidirectional inbox without rebinding and filters mixed Run rows", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      inboxMessages: [
+        message("msg_a", "run_a"),
+        { ...message("msg_out", "run_a"), from_handle: "run:run_a", to_handle: "dispatch:ctx_a" },
+        message("msg_b", "run_b"),
+        null,
+      ],
+    });
+
+    const rows = await listRunMessages("run_a");
+    assert.deepEqual(rows.map((row) => row.id), ["msg_a", "msg_out"]);
+    const calls = readLog();
+    const inbox = calls.find((call) => call.argv[1] === "inbox");
+    assert.ok(inbox);
+    assert.ok(inbox.argv.includes("--limit"));
+    assert.ok(!calls.some((call) => call.argv[1] === "run-use"), "history reads never fence a coordinator");
+  });
+
+  it("reads an empty Run even when it has no coordinator mailbox", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      inboxMessages: [message("msg_other", "run_other")],
+    });
+
+    assert.deepEqual(await listRunMessages("run_empty"), []);
+    assert.ok(readLog().some((call) => call.argv[1] === "inbox"));
+  });
+});
+
+describe("coordinator follow-up messaging", () => {
+  it("addresses the authoritative Dispatch and preserves message identity without a shell", async () => {
+    useRuntime({ workspace: root });
+    writeScript({});
+
+    await sendCoordinatorMessage({
+      runId: "run_a",
+      taskId: "task_a",
+      dispatchId: "ctx_a",
+      from: "term_coordinator",
+      subject: "Coordinator guidance",
+      body: "Please run the focused regression test; do not widen scope.",
+    });
+
+    const call = readLog().find((entry) => entry.argv[1] === "send");
+    assert.ok(call, "send call missing");
+    assert.deepEqual(call.argv, [
+      "orchestration",
+      "send",
+      "--to",
+      "dispatch:ctx_a",
+      "--run",
+      "run_a",
+      "--from",
+      "term_coordinator",
+      "--subject",
+      "Coordinator guidance",
+      "--body",
+      "Please run the focused regression test; do not widen scope.",
+      "--type",
+      "status",
+      "--task-id",
+      "task_a",
+      "--dispatch-id",
+      "ctx_a",
+      "--json",
+    ]);
+  });
+});
+
 describe("listWorkers --include-remote (Phase 6, fake CLI)", () => {
   it("passes --include-remote and preserves the row's execution host", async () => {
     useRuntime({ workspace: root });
@@ -1360,5 +1539,280 @@ describe("listWorkers --include-remote (Phase 6, fake CLI)", () => {
     assert.equal(rows[0].projection?.liveness?.verdict, "unverifiable");
     const call = readLog().find((c) => c.argv[1] === "worker-list")!;
     assert.ok(call.argv.includes("--include-remote"));
+  });
+
+  it("follows opaque cursors across empty pages and preserves legacy + remote rows", async () => {
+    useRuntime({ workspace: root });
+    const cursor1 = "opaque+/= cursor one";
+    const cursor2 = "eyJzbmFwc2hvdCI6Mn0=";
+    writeScript({
+      workerPages: {
+        __first__: {
+          workers: [
+            {
+              dispatchId: "ctx_legacy",
+              taskId: "task_legacy",
+              runId: "run_pages",
+              workerState: "unsupervised",
+              dispatchStatus: "completed",
+              agentTerminalHandle: null,
+              terminalState: "retained",
+              projection: { host: { kind: "local", id: "local" } },
+            },
+          ],
+          page: { hasMore: true, nextCursor: cursor1 },
+        },
+        [cursor1]: {
+          workers: [],
+          page: { hasMore: true, nextCursor: cursor2 },
+        },
+        [cursor2]: {
+          workers: [
+            {
+              dispatchId: "ctx_remote",
+              taskId: "task_remote",
+              runId: "run_pages",
+              workerState: "supervised",
+              dispatchStatus: "dispatched",
+              agentTerminalHandle: null,
+              terminalState: "active",
+              projection: {
+                host: { kind: "environment", id: "env_remote" },
+                liveness: { verdict: "unverifiable", reason: "fleet contact lost" },
+              },
+            },
+          ],
+          page: { hasMore: false, nextCursor: null },
+        },
+      },
+    });
+
+    const rows = await listWorkers("run_pages", { includeRemote: true });
+    assert.deepEqual(
+      rows.map((row) => [row.dispatchId, row.taskId, row.workerState]),
+      [
+        ["ctx_legacy", "task_legacy", "unsupervised"],
+        ["ctx_remote", "task_remote", "supervised"],
+      ],
+    );
+    assert.equal(rows[1].projection?.liveness?.verdict, "unverifiable");
+
+    const calls = readLog().filter((call) => call.argv[1] === "worker-list");
+    assert.equal(calls.length, 3);
+    for (const call of calls) {
+      assert.ok(call.argv.includes("--include-remote"));
+      assert.deepEqual(call.argv.slice(call.argv.indexOf("--limit"), call.argv.indexOf("--limit") + 2), [
+        "--limit",
+        "100",
+      ]);
+    }
+    assert.equal(calls[1].argv[calls[1].argv.indexOf("--cursor") + 1], cursor1);
+    assert.equal(calls[2].argv[calls[2].argv.indexOf("--cursor") + 1], cursor2);
+  });
+
+  it("rejects a receipt missing the workers array", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      workerPages: {
+        __first__: { page: { hasMore: false, nextCursor: null } },
+      },
+    });
+    await assert.rejects(listWorkers("run_missing_workers"), (err: unknown) => {
+      assert.ok(err instanceof OrcaCliError);
+      assert.equal(err.code, "invalid_pagination");
+      assert.match(err.message, /workers must be an array/);
+      return true;
+    });
+  });
+
+  it("rejects a receipt missing the page envelope", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      workerPages: {
+        __first__: { workers: [] },
+      },
+    });
+    await assert.rejects(listWorkers("run_missing_page"), (err: unknown) => {
+      assert.ok(err instanceof OrcaCliError);
+      assert.equal(err.code, "invalid_pagination");
+      assert.match(err.message, /page must be an object/);
+      return true;
+    });
+  });
+
+  it("rejects a worker row whose durable identity fields are malformed", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      workerPages: {
+        __first__: {
+          workers: [{ dispatchId: "", taskId: "task_malformed", runId: "run_malformed" }],
+          page: { hasMore: false, nextCursor: null },
+        },
+      },
+    });
+    await assert.rejects(listWorkers("run_malformed"), (err: unknown) => {
+      assert.ok(err instanceof OrcaCliError);
+      assert.equal(err.code, "invalid_pagination");
+      assert.match(err.message, /workers\[0\]\.dispatchId must be a non-empty string/);
+      return true;
+    });
+  });
+
+  it("rejects a worker row that leaks from another Run", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      workers: [
+        {
+          dispatchId: "ctx_in_scope",
+          taskId: "task_in_scope",
+          runId: "run_scope",
+          workerState: "supervised",
+          dispatchStatus: "dispatched",
+          agentTerminalHandle: null,
+          terminalState: "active",
+          projection: null,
+        },
+        {
+          dispatchId: "ctx_other_run",
+          taskId: "task_other_run",
+          runId: "run_other",
+          workerState: "supervised",
+          dispatchStatus: "dispatched",
+          agentTerminalHandle: null,
+          terminalState: "active",
+          projection: null,
+        },
+      ],
+    });
+
+    await assert.rejects(listWorkers("run_scope", { includeRemote: true }), (err: unknown) => {
+      assert.ok(err instanceof OrcaCliError);
+      assert.equal(err.code, "invalid_pagination");
+      assert.match(err.message, /workers\[1\]\.runId/);
+      assert.match(err.message, /run_other/);
+      return true;
+    });
+  });
+
+  it("refuses a pagination receipt that claims more rows without a cursor", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      workerPages: {
+        __first__: { workers: [], page: { hasMore: true, nextCursor: null } },
+      },
+    });
+    await assert.rejects(listWorkers("run_broken"), (err: unknown) => {
+      assert.ok(err instanceof OrcaCliError);
+      assert.equal(err.code, "invalid_pagination");
+      assert.match(err.message, /without a usable page\.nextCursor/);
+      return true;
+    });
+  });
+
+  it("refuses a contradictory terminal page instead of silently dropping its cursor", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      workerPages: {
+        __first__: { workers: [], page: { hasMore: false, nextCursor: "stale-cursor" } },
+      },
+    });
+    await assert.rejects(listWorkers("run_broken"), (err: unknown) => {
+      assert.ok(err instanceof OrcaCliError);
+      assert.equal(err.code, "invalid_pagination");
+      assert.match(err.message, /hasMore=false with a nextCursor/);
+      return true;
+    });
+  });
+
+  it("requires a boolean hasMore and an explicit terminal null cursor", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      workerPages: {
+        __first__: {
+          workers: [],
+          page: { hasMore: "false" as unknown as boolean, nextCursor: null },
+        },
+      },
+    });
+    await assert.rejects(listWorkers("run_bad_has_more"), (err: unknown) => {
+      assert.ok(err instanceof OrcaCliError);
+      assert.equal(err.code, "invalid_pagination");
+      assert.match(err.message, /page\.hasMore must be a boolean/);
+      return true;
+    });
+
+    writeScript({
+      workerPages: {
+        __first__: { workers: [], page: { hasMore: false } },
+      },
+    });
+    await assert.rejects(listWorkers("run_missing_cursor"), (err: unknown) => {
+      assert.ok(err instanceof OrcaCliError);
+      assert.equal(err.code, "invalid_pagination");
+      assert.match(err.message, /page\.nextCursor is required/);
+      return true;
+    });
+  });
+
+  it("serves complete, remote-inclusive accounting from /api/workers", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      workerPages: {
+        __first__: {
+          workers: [
+            {
+              dispatchId: "ctx_local",
+              taskId: "task_local",
+              runId: "run_api",
+              workerState: "unsupervised",
+              dispatchStatus: "completed",
+              agentTerminalHandle: null,
+              terminalState: "retained",
+              projection: null,
+            },
+          ],
+          page: { hasMore: true, nextCursor: "api-next" },
+        },
+        "api-next": {
+          workers: [
+            {
+              dispatchId: "ctx_remote_api",
+              taskId: "task_remote",
+              runId: "run_api",
+              workerState: "supervised",
+              dispatchStatus: "dispatched",
+              agentTerminalHandle: null,
+              terminalState: "active",
+              projection: { host: { kind: "environment", id: "env_remote" } },
+            },
+          ],
+          page: { hasMore: false, nextCursor: null },
+        },
+      },
+    });
+    const policy = createSecurityPolicy({});
+    const { app } = createApp({
+      workspaceDir: root,
+      worktree: `path:${root}`,
+      policy,
+      embeddedAssets: null,
+    });
+    const apiServer = await listenLoopback(app, 0);
+    try {
+      const addr = apiServer.address();
+      assert.ok(addr && typeof addr === "object");
+      const response = await fetch(`http://127.0.0.1:${addr.port}/api/workers?run=run_api`);
+      assert.equal(response.status, 200);
+      const body = (await response.json()) as { workers: Array<{ taskId: string }> };
+      assert.deepEqual(body.workers.map((row) => row.taskId), ["task_local", "task_remote"]);
+    } finally {
+      apiServer.closeAllConnections();
+      await new Promise<void>((resolve) => apiServer.close(() => resolve()));
+    }
+
+    const calls = readLog().filter((call) => call.argv[1] === "worker-list");
+    assert.equal(calls.length, 2);
+    assert.ok(calls.every((call) => call.argv.includes("--include-remote")));
+    assert.ok(calls.every((call) => call.argv.includes("run_api")), "every page stays scoped to the Run");
   });
 });

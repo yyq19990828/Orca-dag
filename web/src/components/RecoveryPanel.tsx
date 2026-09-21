@@ -50,8 +50,11 @@ export function RecoveryPanel({
     };
   }, [pollMs]);
 
-  const recovery = status?.recovery ?? null;
-  const attempts = status?.attempts ?? [];
+  // `/api/run-status` is process-local. Never render Run A's recovery while
+  // the inspector is showing Run B.
+  const scopedStatus = status?.runId === runId ? status : null;
+  const recovery = scopedStatus?.recovery ?? null;
+  const attempts = scopedStatus?.attempts ?? [];
 
   // Failed starts whose receipt is the release/retry evidence.
   const failedStarts = attempts.filter(

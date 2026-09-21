@@ -110,6 +110,16 @@ describe("mutation token", () => {
     assert.equal(status, 200);
     assert.equal(json.ok, true);
   });
+
+  it("protects proactive coordinator messages with the same mutation token", async () => {
+    const { status, json } = await call(
+      "POST",
+      "/api/tasks/task_a/messages",
+      { runId: "run_a", body: "Please verify the focused test." },
+    );
+    assert.equal(status, 403);
+    assert.equal(json.code, "invalid_token");
+  });
 });
 
 describe("strict request validation", () => {
@@ -167,6 +177,28 @@ describe("strict request validation", () => {
     assert.equal(status, 400);
     assert.equal(json.code, "run_required");
   });
+
+  it("validates /api/workers Run scope before invoking Orca", async () => {
+    const missing = await call("GET", "/api/workers");
+    assert.equal(missing.status, 400);
+    assert.equal(missing.json.code, "run_required");
+
+    const malformed = await call("GET", "/api/workers?run=../escape");
+    assert.equal(malformed.status, 400);
+    assert.equal(malformed.json.code, "invalid_input");
+  });
+
+  it("requires explicit Run scope for Inbox and Activity reads", async () => {
+    for (const path of ["/api/inbox", "/api/activity", "/api/activity/stream"]) {
+      const missing = await call("GET", path);
+      assert.equal(missing.status, 400, path);
+      assert.equal(missing.json.code, "run_required", path);
+    }
+
+    const malformed = await call("GET", "/api/activity?run=../escape");
+    assert.equal(malformed.status, 400);
+    assert.equal(malformed.json.code, "invalid_input");
+  });
 });
 
 describe("config API", () => {
@@ -203,6 +235,45 @@ describe("config API", () => {
     const { status, json } = await call("PUT", "/api/config", { effortByTask: { task_1: "high" } }, policy.token);
     assert.equal(status, 200);
     assert.deepEqual(json.effortByTask, { task_1: "high" });
+  });
+
+  it("persists one explicit lead Task per Run and validates both ids", async () => {
+    const good = await call(
+      "PUT",
+      "/api/config",
+      { leadTaskByRun: { run_a: "task_lead_a", run_b: "task_lead_b" } },
+      policy.token,
+    );
+    assert.equal(good.status, 200);
+    assert.deepEqual(good.json.leadTaskByRun, {
+      run_a: "task_lead_a",
+      run_b: "task_lead_b",
+    });
+
+    const badRun = await call(
+      "PUT",
+      "/api/config",
+      { leadTaskByRun: { "../run": "task_1" } },
+      policy.token,
+    );
+    assert.equal(badRun.status, 400);
+
+    const badTask = await call(
+      "PUT",
+      "/api/config",
+      { leadTaskByRun: { run_a: "../task" } },
+      policy.token,
+    );
+    assert.equal(badTask.status, 400);
+
+    const nonStringTask = await call(
+      "PUT",
+      "/api/config",
+      { leadTaskByRun: { run_a: 42 } },
+      policy.token,
+    );
+    assert.equal(nonStringTask.status, 400);
+    assert.equal(nonStringTask.json.code, "invalid_input");
   });
 });
 

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { resolveGate } from "../api";
 import type { Gate } from "../types";
+import { useDecisionDialog } from "./DecisionDialog";
 
 /**
  * Pending decision gates. Resolving one is a Run-scoped mutation, so the server
@@ -24,6 +25,7 @@ export function GatePanel({
   disabled?: boolean;
   disabledReason?: string | null;
 }) {
+  const dialog = useDecisionDialog();
   const [busyId, setBusyId] = useState<string | null>(null);
   const pending = gates.filter((g) => g.status === "pending" || g.status === "open" || !g.resolution);
 
@@ -36,7 +38,11 @@ export function GatePanel({
       await resolveGate(gate.id, resolution, runId);
       onResolved();
     } catch (err) {
-      alert(`Gate resolution failed: ${String((err as Error).message ?? err)}`);
+      await dialog.alert({
+        title: "Gate resolution failed",
+        message: String((err as Error).message ?? err),
+        tone: "danger",
+      });
     } finally {
       setBusyId(null);
     }

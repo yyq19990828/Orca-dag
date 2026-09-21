@@ -45,6 +45,13 @@ export interface ViewerConfig {
   layout?: string;
   /** Last Run the user was looking at — tasks are Run-scoped since Orca 1.4.160. */
   runId?: string;
+  /**
+   * Explicit semantic lead stage for each Run. This is viewer-only metadata:
+   * it highlights the Task that represents the main-agent phase, but it does
+   * not grant coordinator authority or change the DAG. Never infer this role
+   * from graph order or creator handles — those describe different concepts.
+   */
+  leadTaskByRun?: Record<string, string>;
   /** Per-task opt-out from automatic release (plan §7.3); absence = release. */
   retainByTask?: Record<string, boolean>;
 }
@@ -193,6 +200,25 @@ function sanitize(raw: unknown): ViewerConfig {
   }
   if (typeof r.runId === "string" && r.runId.trim()) {
     out.runId = r.runId.trim();
+  }
+  // Lead-stage metadata is a Run -> Task map rather than the Task -> value
+  // maps above. Rebuild it field-by-field for the same reason: config files
+  // are hand-editable and old/new viewer versions share them, so malformed
+  // entries are ignored without making the rest of the config unreadable.
+  // Missing remains missing (and therefore means "no lead stages") so merely
+  // loading an older file never invents a migration rewrite.
+  if (
+    r.leadTaskByRun &&
+    typeof r.leadTaskByRun === "object" &&
+    !Array.isArray(r.leadTaskByRun)
+  ) {
+    const map: Record<string, string> = {};
+    for (const [runId, taskId] of Object.entries(r.leadTaskByRun as Record<string, unknown>)) {
+      if (runId.trim() && typeof taskId === "string" && taskId.trim()) {
+        map[runId.trim()] = taskId.trim();
+      }
+    }
+    out.leadTaskByRun = map;
   }
   return out;
 }

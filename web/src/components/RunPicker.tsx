@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { createRun, fetchRuns } from "../api";
 import type { OrcaRun } from "../types";
 import { DoodleSelect } from "./DoodleSelect";
+import { useDecisionDialog } from "./DecisionDialog";
 
 /**
  * Run selector.
@@ -27,6 +28,7 @@ export function RunPicker({
   autoPick?: boolean;
   disabled?: boolean;
 }) {
+  const dialog = useDecisionDialog();
   const [runs, setRuns] = useState<OrcaRun[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -50,7 +52,14 @@ export function RunPicker({
   }, [load]);
 
   async function onCreate() {
-    const objective = prompt("Objective for the new Run:");
+    const objective = await dialog.prompt({
+      title: "Create a new Run",
+      message: "A Run is an orchestration namespace for one task graph. Give this one a concise objective.",
+      fieldLabel: "Objective",
+      placeholder: "What should this Run accomplish?",
+      confirmLabel: "Create Run",
+      required: true,
+    });
     if (!objective?.trim()) return;
     setCreating(true);
     setErr(null);
@@ -76,20 +85,20 @@ export function RunPicker({
         disabled={disabled || runs.length === 0}
         placeholder="(no Runs)"
         emptyText="(no Runs)"
-        title={current ? `${current.id} · ${current.objective}` : "Pick a Run"}
+        title={current ? `${current.id}\n${current.objective || "No objective"}` : "Pick a Run"}
         options={runs.map((r) => ({
           value: r.id,
-          label: r.objective || r.id,
-          hint: r.id,
+          label: r.id,
+          hint: r.objective || "No objective",
         }))}
       />
       <button
         className="btn btn--ghost"
         onClick={onCreate}
         disabled={disabled || creating}
-        title="Create a new Run (the namespace orchestration tasks live in)"
+        title="Create an empty Run in this workspace and select it"
       >
-        ＋ New Run
+        ＋ Create Run
       </button>
       {err && <span className="exec__err">⚠️ {err}</span>}
     </div>

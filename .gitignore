@@ -9,3 +9,4 @@ server/src/generated/
 .env.local
 server/.sessions/
 .orca-dag.config.json
+.orca-dag.activity.jsonl

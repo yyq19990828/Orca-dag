@@ -156,6 +156,8 @@ const SCRIBBLE_FADE_STEP = 0.05;
 type TaskNodeData = {  label: string;
   status: TaskStatus;
   selected: boolean;
+  /** Viewer-only semantic ownership; never changes DAG or Orca authority. */
+  lead: boolean;
   harness: string;
   dir: "LR" | "TB";
   /** paint order on first draw — staggers the entrance so the DAG "grows" */
@@ -191,14 +193,24 @@ function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
   }, [dispatched, legs.length, cycle]);
   return (
     <div
+      role="group"
       className={[
         "task-node",
         data.selected ? "task-node--selected" : "",
+        data.lead ? "task-node--lead" : "",
         data.pop ? "task-node--pop" : "",
       ]
         .filter(Boolean)
         .join(" ")}
       data-status={data.status}
+      title={
+        data.lead
+          ? "Lead stage — semantic main-agent ownership; Orca coordinator authority is shown separately"
+          : undefined
+      }
+      aria-label={`${data.label}. ${meta.label}. Harness ${data.harness}.${
+        data.lead ? " Lead stage: semantic main-agent ownership." : ""
+      }`}
       onAnimationEnd={(event) => {
         if (event.target === event.currentTarget && event.animationName === "node-in") {
           // React Flow may take its first handle measurement while the card is
@@ -218,6 +230,17 @@ function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
         } as CSSProperties
       }
     >
+      {data.lead && (
+        <>
+          <span className="task-node__lead-ring" aria-hidden="true" />
+          <span
+            className="task-node__lead-badge"
+            title="Semantic main-agent ownership; not Orca coordinator authority"
+          >
+            <span aria-hidden="true">★</span> Lead
+          </span>
+        </>
+      )}
       {/* a real hand scrawl draws itself over and over while the task runs;
           completed/failed nodes keep the same scrawl frozen at its final
           frame — fully coloured in, no animation, still their own hand */}
@@ -472,16 +495,20 @@ function Confetti() {
 
 function Flow({
   dag,
+  leadTaskId,
   selectedId,
   onSelect,
   layout,
   reorgNonce,
+  fitNonce,
 }: {
   dag: DagResponse;
+  leadTaskId: string | null;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   layout: LayoutKind;
   reorgNonce: number;
+  fitNonce: number;
 }) {
   const rf = useReactFlow();
   const config = useConfig();
@@ -498,6 +525,7 @@ function Flow({
   const seenDag = useRef<DagResponse | null>(null);
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<TaskNodeData>>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const handledFitNonce = useRef(fitNonce);
 
   // Switching layout algorithm or asking for a re-org discards manual drags so
   // the graph snaps fully to the fresh auto-layout. Declared before the layout
@@ -530,6 +558,7 @@ function Flow({
         label: n.label,
         status: n.status,
         selected: n.id === selectedId,
+        lead: n.id === leadTaskId,
         harness: effectiveHarness(n.id),
         dir,
         index: i,
@@ -579,7 +608,7 @@ function Flow({
       });
     });
     setEdges(laid.edges);
-  }, [dag, selectedId, layout, reorgNonce, config, setNodes, setEdges]);
+  }, [dag, leadTaskId, selectedId, layout, reorgNonce, config, setNodes, setEdges]);
 
   // Auto-fit when the node count changes, so live status polls don't yank the
   // viewport while the user is inspecting (or dragging).
@@ -597,6 +626,17 @@ function Flow({
     const t = window.setTimeout(() => rf.fitView({ padding: 0.22, duration: 400 }), 90);
     return () => window.clearTimeout(t);
   }, [layout, reorgNonce, rf]);
+
+  // Opening, closing or resizing the communication rail changes the canvas
+  // viewport but not the DAG layout. Reframe the existing positions after the
+  // flex layout settles; do not reuse reorgNonce because that intentionally
+  // clears the user's manually dragged positions.
+  useEffect(() => {
+    if (fitNonce === handledFitNonce.current) return;
+    handledFitNonce.current = fitNonce;
+    const t = window.setTimeout(() => rf.fitView({ padding: 0.22, duration: 320 }), 90);
+    return () => window.clearTimeout(t);
+  }, [fitNonce, rf]);
 
   const onNodeDragStart = useCallback((_e: unknown, node: Node) => {
     draggingId.current = node.id;
@@ -654,10 +694,12 @@ function Flow({
 
 export function DagView(props: {
   dag: DagResponse;
+  leadTaskId: string | null;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   layout: LayoutKind;
   reorgNonce: number;
+  fitNonce: number;
 }) {
   return (
     <ReactFlowProvider>

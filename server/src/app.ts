@@ -14,11 +14,14 @@ import {
   listModels,
   listProjects,
   listRepos,
-  listRuns,
+  listRunMessages,
+  listWorkspaceRuns,
   listTasks,
   listTerminals,
   listWorkers,
   listWorktrees,
+  normalizeLiveness,
+  parseWorkerDonePayload,
   parsePeerCapabilities,
   readWorkerOutput,
   releaseWorker,
@@ -26,6 +29,7 @@ import {
   resolveGate,
   retainWorker,
   runOrca,
+  sendCoordinatorMessage,
   tasksToDag,
   type OrcaReadiness,
 } from "./orca";
@@ -55,6 +59,12 @@ import {
   ValidationError,
   type SecurityPolicy,
 } from "./security";
+import {
+  ActivityJournal,
+  buildActivitySnapshot,
+  createViewerActivity,
+  type ActivitySnapshot,
+} from "./activity";
 
 /**
  * The Express app, extracted from index.ts so it can be constructed and tested
@@ -100,7 +110,13 @@ function fail(res: express.Response, err: unknown): void {
       ? 409
       : code === "coordinator_conflict"
         ? 409 // another live viewer owns this workspace's coordinator slot
-        : code === "not_running" || code === "retry_not_allowed" || code === "retry_target_not_found"
+        : code === "not_running" ||
+            code === "active_dispatch_required" ||
+            code === "dispatch_not_active" ||
+            code === "inbox_item_not_found" ||
+            code === "message_not_found" ||
+            code === "retry_not_allowed" ||
+            code === "retry_target_not_found"
           ? 409 // Phase 4 safe-retry refusals: the state forbids it, not the request shape
           : 500;
   // Orca hands back the exact unblocking command for some refusals — most
@@ -151,9 +167,112 @@ async function asCoordinator<T>(runId: string, worktree: string, fn: (from: stri
   }
 }
 
+/**
+ * Recover the durable identity behind a worker question before journaling the
+ * reply. Live-loop replies already carry this evidence in the pending inbox;
+ * stopped-Run replies must prove the message belongs to the requested Run via
+ * the Run-scoped global inbox before the throwaway coordinator may mutate it.
+ */
+async function resolveReplyIdentity(
+  runId: string,
+  messageId: string,
+  seed?: { taskId?: string | null; dispatchId?: string | null },
+): Promise<{ taskId: string | null; dispatchId: string | null }> {
+  let taskId = seed?.taskId ?? null;
+  let dispatchId = seed?.dispatchId ?? null;
+  let source: Awaited<ReturnType<typeof listRunMessages>>[number] | null = null;
+
+  if (!seed || !taskId || !dispatchId) {
+    source = (await listRunMessages(runId)).find((message) => message.id === messageId) ?? null;
+    if (!source && !seed) {
+      throw new OrcaCliError(
+        `Message ${messageId} does not belong to Run ${runId} or is no longer available.`,
+        "message_not_found",
+      );
+    }
+  }
+
+  if (source) {
+    const payload = parseWorkerDonePayload(source);
+    taskId ??= payload?.taskId ?? null;
+    dispatchId ??= payload?.dispatchId ?? null;
+  }
+
+  // Some older worker messages omit payload identity. A scoped fleet row can
+  // fill the gap; absence stays null rather than being guessed from a task's
+  // saved configuration.
+  if (!taskId || !dispatchId) {
+    const rows = await listWorkers(runId, { includeRemote: true });
+    const row = rows.find(
+      (candidate) =>
+        (dispatchId !== null && candidate.dispatchId === dispatchId) ||
+        (taskId !== null && candidate.taskId === taskId) ||
+        (taskId === null && dispatchId === null && source?.from_handle === candidate.agentTerminalHandle),
+    );
+    taskId ??= row?.taskId ?? null;
+    dispatchId ??= row?.dispatchId ?? null;
+  }
+  return { taskId, dispatchId };
+}
+
 export function createApp(opts: CreateAppOptions): { app: express.Express; servingUI: boolean } {
   const { workspaceDir, worktree, policy } = opts;
   const readiness = opts.readiness ?? checkReadiness;
+  // Run records have no workspace field. Remember empty Runs created through
+  // this viewer until their first Task supplies durable creator-worktree
+  // evidence (or the selected Run is persisted in workspace config).
+  const viewerCreatedRunIds = new Set<string>();
+  const activityJournal = new ActivityJournal(workspaceDir);
+  const activityCache = new Map<string, { at: number; value: Promise<ActivitySnapshot> }>();
+
+  /**
+   * One bounded, strictly Run-scoped activity projection. Message history is
+   * the expensive read (`orchestration inbox`), so concurrent HTTP/SSE consumers share
+   * a short cache window. The returned snapshot is still rebuilt frequently
+   * enough to match the viewer's existing two-second freshness contract.
+   */
+  const loadActivity = (runId: string, force = false): Promise<ActivitySnapshot> => {
+    const cached = activityCache.get(runId);
+    if (!force && cached && Date.now() - cached.at < 1_200) return cached.value;
+    const value = (async () => {
+      const status = coordinatorStatus();
+      const [tasks, messages, workers, config, history] = await Promise.all([
+        listTasks(runId),
+        listRunMessages(runId).catch(() => []),
+        listWorkers(runId, { includeRemote: true }).catch(() => []),
+        loadConfig(workspaceDir),
+        activityJournal.listHistory(runId),
+      ]);
+      return buildActivitySnapshot({
+        runId,
+        tasks,
+        messages,
+        workers,
+        leadTaskId: config.leadTaskByRun?.[runId] ?? null,
+        status,
+        journal: history.events,
+        persistedChecks: history.checks,
+      });
+    })();
+    activityCache.set(runId, { at: Date.now(), value });
+    value.catch(() => {
+      if (activityCache.get(runId)?.value === value) activityCache.delete(runId);
+    });
+    return value;
+  };
+
+  const recordActivity = async (event: ReturnType<typeof createViewerActivity>): Promise<void> => {
+    try {
+      await activityJournal.append(event);
+    } catch {
+      // The journal is explanatory UI state, not part of Orca's lifecycle
+      // transaction. A full disk or torn auxiliary file must never turn a
+      // successful worker action into an ambiguous HTTP failure that invites
+      // the user to repeat the mutation.
+    } finally {
+      activityCache.delete(event.runId);
+    }
+  };
 
   /**
    * Execution gate (Phase 2): mutating orchestration routes refuse to run
@@ -201,11 +320,18 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
     }),
   );
 
-  /** Runs available to view. Tasks are Run-scoped since Orca 1.4.160. */
+  /**
+   * Runs available to this exact workspace. Orca's registry is global, so the
+   * adapter derives scope from Task creator identities; see listWorkspaceRuns.
+   */
   app.get(
     "/api/runs",
     route(async (_req, res) => {
-      res.json({ runs: await listRuns() });
+      const configuredRunId = (await loadConfig(workspaceDir)).runId;
+      const explicitIds = configuredRunId
+        ? [...viewerCreatedRunIds, configuredRunId]
+        : [...viewerCreatedRunIds];
+      res.json({ runs: await listWorkspaceRuns(workspaceDir, explicitIds) });
     }),
   );
 
@@ -224,7 +350,9 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       // Throwaway terminal — see asCoordinator for why we never reuse the loop's.
       const handle = await createTempCoordinatorTerminal(worktree);
       try {
-        res.json({ run: await createRun(objective, handle) });
+        const run = await createRun(objective, handle);
+        viewerCreatedRunIds.add(run.id);
+        res.json({ run });
       } finally {
         await closeTerminal(handle);
       }
@@ -394,7 +522,32 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         retainByTask: retainByTask ?? undefined,
         environmentByTask: environmentByTask ?? undefined,
         placementByTask: placementByTask ?? undefined,
+        onActivity: async (event) => {
+          await recordActivity(
+            createViewerActivity({
+              runId: event.runId,
+              kind: event.kind,
+              title: event.title,
+              summary: event.summary,
+              detail: event.detail,
+              taskId: event.taskId,
+              dispatchId: event.dispatchId,
+            }),
+          );
+        },
+        onCheck: async (receipt) => {
+          await activityJournal.appendCheck(runId, receipt);
+          activityCache.delete(runId);
+        },
       });
+      await recordActivity(
+        createViewerActivity({
+          runId,
+          kind: "dispatch_started",
+          title: "Coordinator started this Run",
+          summary: `Scheduling ready stages with up to ${maxConcurrency} worker${maxConcurrency === 1 ? "" : "s"}.`,
+        }),
+      );
       res.json({ ok: true, ...coordinatorStatus() });
     }),
   );
@@ -409,7 +562,19 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
     "/api/run-stop",
     requireToken(policy),
     route(async (_req, res) => {
+      const before = coordinatorStatus();
       const report = await stopCoordinator();
+      if (before.runId) {
+        await recordActivity(
+          createViewerActivity({
+            runId: before.runId,
+            kind: "status",
+            title: "Coordinator stopped this Run",
+            summary: report.clean ? "Every worker and coordinator resource reached a known state." : "Some cleanup outcomes remain unknown.",
+            severity: report.clean ? "info" : "warning",
+          }),
+        );
+      }
       res.json({ ok: true, clean: report.clean, results: report.results });
     }),
   );
@@ -420,8 +585,11 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
   });
 
   /**
-   * Worker accounting for one Run (plan §7.2): normalized worker-list rows —
-   * terminal state, liveness verdict, outcome. Read-only, token-free.
+   * Complete worker accounting for one Run: normalized worker-list rows across
+   * every cursor page, including connected-server observations. This endpoint
+   * is also the UI's durable "has this Task ever started?" source, so omitting
+   * remote or older rows would incorrectly unlock immutable launch settings.
+   * Read-only, token-free.
    */
   app.get(
     "/api/workers",
@@ -431,7 +599,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         res.status(400).json({ error: "run query parameter required", code: "run_required" });
         return;
       }
-      res.json({ workers: await listWorkers(runId) });
+      res.json({ workers: await listWorkers(runId, { includeRemote: true }) });
     }),
   );
 
@@ -471,9 +639,103 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
    * data; this one exists so the panel can poll it without dragging the whole
    * attempt projection across the wire every 2s.
    */
-  app.get("/api/inbox", (_req, res) => {
+  app.get("/api/inbox", (req, res) => {
+    const runId = validateId(req.query.run, "run");
+    if (!runId) {
+      res.status(400).json({ error: "run query parameter required", code: "run_required" });
+      return;
+    }
     const status = coordinatorStatus();
-    res.json({ inbox: status.inbox, cleanupDebt: status.cleanupDebt, phase: status.phase });
+    if (status.runId !== runId) {
+      res.json({
+        runId,
+        inbox: { pending: [], pendingDeliveryId: null, recent: [], lastAckedDeliveryId: null },
+        cleanupDebt: [],
+        phase: "idle",
+      });
+      return;
+    }
+    res.json({ runId, inbox: status.inbox, cleanupDebt: status.cleanupDebt, phase: status.phase });
+  });
+
+  /** Human-readable, Run-scoped history. `after` returns only newer rows. */
+  app.get(
+    "/api/activity",
+    route(async (req, res) => {
+      const runId = validateId(req.query.run, "run");
+      if (!runId) {
+        res.status(400).json({ error: "run query parameter required", code: "run_required" });
+        return;
+      }
+      const rawLimit = typeof req.query.limit === "string" ? Number(req.query.limit) : 200;
+      const limit = Number.isInteger(rawLimit) ? Math.max(1, Math.min(500, rawLimit)) : 200;
+      const after = typeof req.query.after === "string" ? req.query.after : null;
+      const snapshot = await loadActivity(runId);
+      let events = snapshot.events;
+      let reset = false;
+      if (after) {
+        const index = events.findIndex((event) => event.id === after);
+        if (index >= 0) events = events.slice(0, index);
+        else reset = true;
+      }
+      res.json({
+        ...snapshot,
+        events: events.slice(0, limit),
+        nextCursor: snapshot.events[0]?.id ?? after,
+        hasMore: events.length > limit,
+        reset,
+      });
+    }),
+  );
+
+  /**
+   * Live Activity snapshots through SSE. Full snapshots keep reconnect and
+   * deletion semantics simple, while the server-side cache prevents each
+   * client from spawning its own global-inbox polling storm.
+   */
+  app.get("/api/activity/stream", (req, res) => {
+    let runId: string | null;
+    try {
+      runId = validateId(req.query.run, "run");
+    } catch (err) {
+      fail(res, err);
+      return;
+    }
+    if (!runId) {
+      res.status(400).json({ error: "run query parameter required", code: "run_required" });
+      return;
+    }
+    res.status(200);
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders();
+    let closed = false;
+    let lastSignature = "";
+    const send = async () => {
+      try {
+        const snapshot = await loadActivity(runId!);
+        const signature = JSON.stringify([
+          snapshot.events[0]?.id ?? "empty",
+          snapshot.events.length,
+          snapshot.pendingCount,
+          snapshot.events.slice(0, 20).map((event) => [event.id, event.createdAt, event.groupedCount]),
+        ]);
+        if (signature !== lastSignature && !closed) {
+          lastSignature = signature;
+          res.write(`id: ${snapshot.events[0]?.id ?? snapshot.generatedAt}\n`);
+          res.write(`data: ${JSON.stringify(snapshot)}\n\n`);
+        }
+      } catch (err) {
+        if (!closed) res.write(`event: error\ndata: ${JSON.stringify({ error: String((err as Error).message ?? err) })}\n\n`);
+      }
+    };
+    void send();
+    const timer = setInterval(() => void send(), 2_000);
+    req.on("close", () => {
+      closed = true;
+      clearInterval(timer);
+    });
   });
 
   /**
@@ -497,12 +759,121 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       await requireExecutionEnabled();
       const live = coordinatorStatus();
       if (live.running && live.runId === runId && live.coordinatorHandle) {
+        // Capture the Run-scoped conversation before answerInboxItem removes
+        // it from the pending inbox. Preserve Task/Dispatch identity in the
+        // optimistic journal row so it renders in the correct thread before
+        // the global Orca inbox observes and supersedes that row.
+        const pending = live.inbox.pending.find((item) => item.messageId === messageId);
+        const identity = await resolveReplyIdentity(runId, messageId, pending);
         await answerInboxItem(messageId, body);
+        await recordActivity(
+          createViewerActivity({
+            runId,
+            kind: "reply",
+            title: "Coordinator replied to a worker",
+            summary: body,
+            taskId: identity.taskId,
+            dispatchId: identity.dispatchId,
+          }),
+        );
         res.json({ ok: true, via: "coordinator" });
         return;
       }
+      const identity = await resolveReplyIdentity(runId, messageId);
       await asCoordinator(runId, worktree, (from) => replyToMessage(messageId, body, from));
+      await recordActivity(
+        createViewerActivity({
+          runId,
+          kind: "reply",
+          title: "Coordinator replied to a worker",
+          summary: body,
+          taskId: identity.taskId,
+          dispatchId: identity.dispatchId,
+        }),
+      );
       res.json({ ok: true, via: "adhoc" });
+    }),
+  );
+
+  /**
+   * Send proactive coordinator guidance to one active Task attempt.
+   *
+   * Unlike a reply, this has no pending worker question to anchor authority,
+   * so it is deliberately available only while THIS viewer owns the Run's
+   * live coordinator terminal. Borrowing a throwaway terminal here would fence
+   * a real coordinator merely because somebody opened an old Run in Chat.
+   */
+  app.post(
+    "/api/tasks/:taskId/messages",
+    requireToken(policy),
+    route(async (req, res) => {
+      const taskId = validateId(req.params.taskId, "task id");
+      const runId = validateId(req.body?.runId, "runId");
+      const body = validateText(req.body?.body, "body", 20000);
+      if (!taskId || !runId || !body) {
+        res.status(400).json({ error: "body and runId required" });
+        return;
+      }
+      await requireExecutionEnabled();
+      const live = coordinatorStatus();
+      if (!live.running || live.runId !== runId || !live.coordinatorHandle) {
+        throw new OrcaCliError(
+          "This viewer is not the live coordinator for the selected Run; it cannot send worker guidance.",
+          "not_running",
+        );
+      }
+      // Keep the explicit Run check even though the adapter passes `--run`:
+      // this boundary should fail closed if a mixed-version CLI ever returns
+      // an unscoped or foreign row in a supposedly scoped receipt.
+      const task = (await listTasks(runId)).find(
+        (candidate) => candidate.id === taskId && candidate.run_id === runId,
+      );
+      if (!task || task.status !== "dispatched" || !task.dispatch_id) {
+        throw new OrcaCliError(
+          "Coordinator guidance requires a Task with an active Dispatch.",
+          "active_dispatch_required",
+        );
+      }
+
+      // Task rows can briefly lag the fleet after settlement, and a remote
+      // host can disappear while the Dispatch id remains on the Task. Refuse
+      // unless Orca's remote-inclusive accounting currently proves both an
+      // active Dispatch and a live worker; never send guidance into an
+      // unverifiable or already-settled attempt.
+      const worker = (await listWorkers(runId, { includeRemote: true })).find(
+        (candidate) =>
+          candidate.runId === runId &&
+          candidate.taskId === taskId &&
+          candidate.dispatchId === task.dispatch_id &&
+          candidate.dispatchStatus === "dispatched" &&
+          normalizeLiveness(candidate.projection?.liveness?.verdict) === "live",
+      );
+      if (!worker) {
+        throw new OrcaCliError(
+          "Coordinator guidance requires Orca to verify that the Task Dispatch is still active and live.",
+          "active_dispatch_required",
+        );
+      }
+
+      await sendCoordinatorMessage({
+        runId,
+        taskId,
+        dispatchId: task.dispatch_id,
+        from: live.coordinatorHandle,
+        subject: "Coordinator guidance",
+        body,
+      });
+      await recordActivity(
+        createViewerActivity({
+          runId,
+          kind: "status",
+          title: "Coordinator sent guidance",
+          summary: body,
+          taskId,
+          dispatchId: task.dispatch_id,
+        }),
+      );
+      res.json({ ok: true, dispatchId: task.dispatch_id });
     }),
   );
 
@@ -525,6 +896,19 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       // Fold the receipt into the coordinator projection — a KNOWN terminal
       // state resolves the attempt + its debt; unknown/pending keeps them.
       noteManualRelease(dispatchId, receipt.state);
+      const live = coordinatorStatus();
+      if (live.runId) {
+        await recordActivity(
+          createViewerActivity({
+            runId: live.runId,
+            kind: "release",
+            dispatchId,
+            title: "Coordinator released a worker",
+            summary: `Terminal ownership is ${receipt.state}.`,
+            severity: receipt.state === "released" || receipt.state === "already_released" ? "success" : "warning",
+          }),
+        );
+      }
       res.json({ ok: true, receipt });
     }),
   );
@@ -544,6 +928,18 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       await requireExecutionEnabled();
       const receipt = await retainWorker(dispatchId);
       noteManualRelease(dispatchId, receipt.state);
+      const live = coordinatorStatus();
+      if (live.runId) {
+        await recordActivity(
+          createViewerActivity({
+            runId: live.runId,
+            kind: "release",
+            dispatchId,
+            title: "Coordinator retained a worker",
+            summary: "The terminal remains available for debugging.",
+          }),
+        );
+      }
       res.json({ ok: true, receipt });
     }),
   );
@@ -568,6 +964,19 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       }
       await requireExecutionEnabled();
       const result = await retryWorker(id);
+      const live = coordinatorStatus();
+      if (live.runId) {
+        await recordActivity(
+          createViewerActivity({
+            runId: live.runId,
+            kind: "dispatch_started",
+            taskId: result.taskId,
+            dispatchId: result.dispatchId,
+            title: "Coordinator retried a failed stage",
+            summary: `Retry of ${result.retriedFrom ?? id}.`,
+          }),
+        );
+      }
       res.json({ ok: true, ...result });
     }),
   );
@@ -669,6 +1078,22 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       // in the file waiting to fail a future run.
       validateEnvironmentTaskMap(body.environmentByTask, "environmentByTask");
       validatePlacementTaskMap(body.placementByTask, "placementByTask");
+      // One semantic lead Task per Run. It is presentation metadata rather
+      // than an Orca mutation, but both sides of the map are still real Orca
+      // ids and receive the same strict HTTP-boundary validation as Task maps.
+      validateTaskValueMap(
+        body.leadTaskByRun,
+        "leadTaskByRun",
+        { maxKeys: 500, valueKind: "task id" },
+        (v) => {
+          if (typeof v !== "string") {
+            throw new ValidationError("leadTaskByRun task id must be a string");
+          }
+          const taskId = validateId(v, "leadTaskByRun task id");
+          if (!taskId) throw new ValidationError("leadTaskByRun task id must not be empty");
+          return taskId;
+        },
+      );
       res.json(await saveConfig(workspaceDir, body));
     }),
   );

@@ -342,6 +342,13 @@ export interface OrcaTask {
   id: string;
   parent_id: string | null;
   created_by_terminal_handle: string | null;
+  /**
+   * Runtime identity of the process that created the Task. Orca embeds the
+   * exact worktree identity here (`<repo>::<realpath>@@<incarnation>`), which
+   * is the only durable workspace evidence available to a lightweight Run:
+   * Run records themselves deliberately carry no repo/worktree field.
+   */
+  created_by_process_incarnation?: string | null;
   spec: string;
   status: TaskStatus;
   deps: string;
@@ -542,6 +549,59 @@ export async function listRuns(): Promise<OrcaRun[]> {
 }
 
 /**
+ * List only Runs that belong to this viewer's exact workspace.
+ *
+ * Orca's Run registry is intentionally process-global: `run-list` has no
+ * workspace selector and a Run record contains no placement metadata. Tasks
+ * do retain their creator process identity, including the real worktree path,
+ * so the viewer derives scope from that durable evidence instead of leaking
+ * unrelated projects into the picker. `includeRunIds` covers the two honest
+ * empty-Run cases, where no Task exists yet: the workspace's persisted current
+ * Run and Runs just created by this viewer process.
+ *
+ * `--brief` keeps the discovery read bounded without dropping creator fields.
+ * The small worker pool avoids spawning up to 50 Orca processes at once.
+ */
+export async function listWorkspaceRuns(
+  workspaceDir: string,
+  includeRunIds: Iterable<string> = [],
+): Promise<OrcaRun[]> {
+  const runs = await listRuns();
+  const included = new Set([...includeRunIds].filter(Boolean));
+  const belongs = new Set<string>(included);
+  const marker = `::${workspaceDir}@@`;
+  let nextIndex = 0;
+
+  const inspect = async (): Promise<void> => {
+    while (nextIndex < runs.length) {
+      const run = runs[nextIndex++];
+      if (included.has(run.id)) continue;
+      try {
+        const tasks = await listTasks(run.id, { brief: true });
+        if (
+          tasks.some(
+            (task) =>
+              typeof task.created_by_process_incarnation === "string" &&
+              task.created_by_process_incarnation.includes(marker),
+          )
+        ) {
+          belongs.add(run.id);
+        }
+      } catch {
+        // A Run may disappear between run-list and task-list, or a connected
+        // server may be transiently unavailable. Unknown scope fails closed:
+        // never show a possibly foreign Run in this workspace's picker.
+      }
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(8, runs.length) }, () => inspect()),
+  );
+  return runs.filter((run) => belongs.has(run.id));
+}
+
+/**
  * Create a Run and bind it to `from`. `run-create` requires a live Orca
  * terminal (it derives the coordinator pane from `--from`).
  */
@@ -586,13 +646,18 @@ export async function showRun(runId: string): Promise<OrcaRun | null> {
 // --- Read paths (no coordinator terminal needed) ---------------------------
 
 /** Fetch a Run's tasks. Requires `--run`: an unscoped call fails `run_required`. */
-export async function listTasks(runId: string): Promise<OrcaTask[]> {
-  const result = await runOrca<{ tasks: OrcaTask[] }>([
+export async function listTasks(
+  runId: string,
+  opts: { brief?: boolean } = {},
+): Promise<OrcaTask[]> {
+  const args = [
     "orchestration",
     "task-list",
     "--run",
     runId,
-  ]);
+  ];
+  if (opts.brief) args.push("--brief");
+  const result = await runOrca<{ tasks: OrcaTask[] }>(args);
   return result.tasks ?? [];
 }
 
@@ -1123,6 +1188,14 @@ export interface OrcaMessage {
   payload: string | null;
   created_at: string;
   delivered_at: string | null;
+  /**
+   * Global `orchestration inbox` includes this durable read marker. It is not
+   * present on every older runtime/check receipt, so consumers must treat an
+   * absent value as unknown rather than unread. The Activity projection uses
+   * only a positive marker to reconstruct externally-consumed coordinator
+   * checks; it never infers a check from absence.
+   */
+  read?: 0 | 1 | boolean;
 }
 
 /** A FIFO Delivery: the unit the coordinator processes and acknowledges. */
@@ -1182,6 +1255,40 @@ export interface CheckInboxOpts {
   ack?: string;
 }
 
+const ORCHESTRATION_INBOX_LIMIT = 5_000;
+
+/**
+ * Read the durable, bidirectional message history for one Run without
+ * consuming a Delivery.
+ *
+ * `check --all` only reads the selected recipient's mailbox, which means a
+ * coordinator mailbox contains worker -> coordinator messages but cannot show
+ * coordinator -> Dispatch messages sent by `reply` or `send`. Orca's global
+ * `orchestration inbox` surface includes both directions and survives closed
+ * terminals, so it is the correct transcript source for Chat. The command has
+ * no Run selector or pagination; request a deliberately generous bounded
+ * window, then treat the exact `run_id` comparison below as a security and
+ * correctness boundary. A mixed-workspace row must never appear in this Run.
+ */
+export async function listRunMessages(runId: string): Promise<OrcaMessage[]> {
+  const result = await runOrca<{ messages?: unknown[] }>([
+    "orchestration",
+    "inbox",
+    "--limit",
+    String(ORCHESTRATION_INBOX_LIMIT),
+  ]);
+  if (!Array.isArray(result.messages)) {
+    throw new OrcaCliError("inbox returned an invalid messages receipt", "invalid_message_history");
+  }
+  return result.messages.filter(
+    (row): row is OrcaMessage =>
+      Boolean(row) &&
+      typeof row === "object" &&
+      !Array.isArray(row) &&
+      (row as { run_id?: unknown }).run_id === runId,
+  );
+}
+
 /**
  * Consume (or acknowledge-then-consume) the coordinator's FIFO inbox.
  *
@@ -1203,6 +1310,47 @@ export function checkInbox(opts: CheckInboxOpts): Promise<OrcaDelivery> {
 /** Reply to a question/escalation from the coordinator (marks it handled). */
 export async function replyToMessage(messageId: string, body: string, from: string): Promise<void> {
   await runOrca(["orchestration", "reply", "--id", messageId, "--body", body, "--from", from]);
+}
+
+/**
+ * Send durable, attempt-specific guidance from the live coordinator.
+ *
+ * A terminal handle is intentionally not accepted as the destination. Orca's
+ * stable address is the Dispatch: remote execution may move the process while
+ * `dispatch:<id>` continues to route to the authoritative attempt. A successful
+ * receipt proves enqueue only; it never proves that the worker read the note.
+ */
+export async function sendCoordinatorMessage(opts: {
+  runId: string;
+  taskId: string;
+  dispatchId: string;
+  subject: string;
+  body: string;
+  from: string;
+  threadId?: string;
+}): Promise<Record<string, unknown>> {
+  const args = [
+    "orchestration",
+    "send",
+    "--to",
+    `dispatch:${opts.dispatchId}`,
+    "--run",
+    opts.runId,
+    "--from",
+    opts.from,
+    "--subject",
+    opts.subject,
+    "--body",
+    opts.body,
+    "--type",
+    "status",
+    "--task-id",
+    opts.taskId,
+    "--dispatch-id",
+    opts.dispatchId,
+  ];
+  if (opts.threadId) args.push("--thread-id", opts.threadId);
+  return runOrca<Record<string, unknown>>(args);
 }
 
 /** Terminal accounting state of one worker, from `worker-list`. */
@@ -1257,6 +1405,13 @@ export interface OrcaWorkerRow {
       /** Execution server the row reports (Phase 6); absent = unknown. */
       on?: string | null;
     } | null;
+    /**
+     * Current Orca builds also expose provider identity independently of the
+     * optional launch echo. This matters for externally-started workers: the
+     * viewer has no saved harness preference for them, but can still display
+     * the runtime-observed agent/model without guessing from its defaults.
+     */
+    provider?: { id?: string | null; model?: string | null } | null;
   } | null;
 }
 
@@ -1276,16 +1431,119 @@ export async function listWorkers(
   runId: string,
   opts: { terminalState?: string; includeRemote?: boolean } = {},
 ): Promise<OrcaWorkerRow[]> {
-  const args = ["orchestration", "worker-list", "--run", runId];
-  if (opts.terminalState) args.push("--terminal-state", opts.terminalState);
-  // Phase 6: local fleet state is all worker-list reads by default; remote
-  // workers (started with --on) are only visible with --include-remote, and
-  // every remote row the host cannot observe reads unverifiable — never a
-  // synthetic exit. The coordinator reconciles WITH this flag so a remote
-  // Dispatch stays owned by its execution host through disconnect/reconnect.
-  if (opts.includeRemote) args.push("--include-remote");
-  const result = await runOrca<{ workers?: OrcaWorkerRow[] }>(args);
-  return result.workers ?? [];
+  const workers: OrcaWorkerRow[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | null = null;
+
+  /** Fail closed: an incomplete receipt must never look like empty history. */
+  const invalidReceipt = (message: string): never => {
+    throw new OrcaCliError(`worker-list returned an invalid receipt: ${message}`, "invalid_pagination");
+  };
+
+  // worker-list is capped at 100 rows per receipt. That cap matters for more
+  // than fleet dashboards: a row is the durable proof that a Task has ever
+  // dispatched, so returning only the newest page could make an older Task's
+  // launch controls editable after a viewer restart. Preserve the historical
+  // array contract for every caller while following Orca's opaque cursor
+  // byte-for-byte until the snapshot is exhausted.
+  for (let pageNumber = 0; pageNumber < 10_000; pageNumber += 1) {
+    const args = ["orchestration", "worker-list", "--run", runId];
+    if (opts.terminalState) args.push("--terminal-state", opts.terminalState);
+    // Phase 6: local fleet state is all worker-list reads by default; remote
+    // workers (started with --on) are only visible with --include-remote, and
+    // every remote row the host cannot observe reads unverifiable — never a
+    // synthetic exit. The coordinator reconciles WITH this flag so a remote
+    // Dispatch stays owned by its execution host through disconnect/reconnect.
+    if (opts.includeRemote) args.push("--include-remote");
+    args.push("--limit", "100");
+    if (cursor) args.push("--cursor", cursor);
+
+    const result = await runOrca<unknown>(args);
+    if (!result || typeof result !== "object" || Array.isArray(result)) {
+      invalidReceipt("result must be an object");
+    }
+    const receipt = result as Record<string, unknown>;
+    if (!Array.isArray(receipt.workers)) {
+      invalidReceipt("workers must be an array");
+    }
+    const page = receipt.page;
+    if (!page || typeof page !== "object" || Array.isArray(page)) {
+      invalidReceipt("page must be an object");
+    }
+    const pageObject = page as Record<string, unknown>;
+    if (typeof pageObject.hasMore !== "boolean") {
+      invalidReceipt("page.hasMore must be a boolean");
+    }
+    if (!Object.prototype.hasOwnProperty.call(pageObject, "nextCursor")) {
+      invalidReceipt("page.nextCursor is required");
+    }
+    const hasMore = pageObject.hasMore as boolean;
+    const rawNext = pageObject.nextCursor;
+    if (rawNext !== null && typeof rawNext !== "string") {
+      invalidReceipt("page.nextCursor must be a string or null");
+    }
+    const nextCursor = typeof rawNext === "string" && rawNext.length > 0 ? rawNext : null;
+    if (hasMore && !nextCursor) {
+      invalidReceipt(
+        "page.hasMore=true reported more pages without a usable page.nextCursor; refusing to return truncated accounting.",
+      );
+    }
+    if (!hasMore && rawNext !== null) {
+      invalidReceipt("page.hasMore=false with a nextCursor is inconsistent; refusing to return an ambiguous page.");
+    }
+
+    const workerRows = receipt.workers as unknown[];
+    for (const [index, rawWorker] of workerRows.entries()) {
+      if (!rawWorker || typeof rawWorker !== "object" || Array.isArray(rawWorker)) {
+        invalidReceipt(`workers[${index}] must be an object`);
+      }
+      const worker = rawWorker as Record<string, unknown>;
+      for (const field of ["dispatchId", "taskId", "runId"] as const) {
+        if (typeof worker[field] !== "string" || worker[field].trim().length === 0) {
+          invalidReceipt(`workers[${index}].${field} must be a non-empty string`);
+        }
+      }
+      // The --run flag is the authoritative scope, but keep the adapter's
+      // returned contract honest even if a mixed-version/connected-server CLI
+      // accidentally leaks a row from another Run. Rejecting (rather than
+      // silently dropping) the row is important: otherwise the caller could
+      // mistake partial history for complete accounting and unlock a Task.
+      if (worker.runId !== runId) {
+        invalidReceipt(`workers[${index}].runId ${JSON.stringify(worker.runId)} does not match ${JSON.stringify(runId)}`);
+      }
+      workers.push(worker as unknown as OrcaWorkerRow);
+    }
+
+    if (!hasMore) {
+      return workers;
+    }
+    if (nextCursor === null) {
+      // This is also checked above so the receipt is rejected before any
+      // cursor is followed; the explicit branch narrows the opaque cursor for
+      // TypeScript and keeps the invariant obvious to future edits.
+      invalidReceipt(
+        "page.hasMore=true reported more pages without a usable page.nextCursor; refusing to return truncated accounting.",
+      );
+    }
+    // `invalidReceipt` above is `never`, but the value is derived from an
+    // unknown JSON envelope and TypeScript cannot carry that refinement across
+    // the closure; the cast records the checked invariant without changing
+    // the opaque cursor bytes.
+    const pageCursor = nextCursor as string;
+    if (seenCursors.has(pageCursor)) {
+      throw new OrcaCliError(
+        "worker-list repeated page.nextCursor; refusing an infinite pagination loop.",
+        "invalid_pagination",
+      );
+    }
+    seenCursors.add(pageCursor);
+    cursor = pageCursor;
+  }
+
+  throw new OrcaCliError(
+    "worker-list exceeded the defensive 10,000-page limit; refusing to return truncated accounting.",
+    "invalid_pagination",
+  );
 }
 
 /** Receipt shape shared by worker-release / worker-retain. */
@@ -2580,7 +2838,7 @@ async function startOpencodeWorker(opts: {
   // Dispatch for tracking only (no --inject). This mints a real dispatch_id,
   // without which the preamble below would still carry the ctx_preview
   // placeholder and worker_done could never settle.
-  await runOrca([
+  const tracking = await runOrca<Record<string, unknown>>([
     "orchestration",
     "dispatch",
     "--task",
@@ -2592,6 +2850,7 @@ async function startOpencodeWorker(opts: {
     "--from",
     opts.from,
   ]);
+  const dispatchId = readDispatchId(tracking);
 
   // Fetch the preamble. After the tracking dispatch it embeds the real
   // dispatch_id and the worker handle (`--from <handle>`), which the worker
@@ -2620,7 +2879,7 @@ async function startOpencodeWorker(opts: {
   const cmd = `opencode run --auto${modelArg} "$(cat ${preambleFile})"`;
   await runOrca(["terminal", "send", "--terminal", handle, "--text", cmd, "--enter"]);
 
-  return { mode: "legacy", dispatchId: null, handle, receipt: null, replayed: false, adopted: false };
+  return { mode: "legacy", dispatchId, handle, receipt: null, replayed: false, adopted: false };
 }
 
 /**
@@ -2664,6 +2923,7 @@ export async function startLegacyWorker(opts: {
   const handle = created.terminal?.handle;
   if (!handle) throw new OrcaCliError("orca terminal create returned no worker handle");
   opts.onHandle?.(handle);
+  let dispatchId: string | null = null;
 
   try {
     await runOrca([
@@ -2694,7 +2954,8 @@ export async function startLegacyWorker(opts: {
   ];
 
   try {
-    await runOrca([...base, "--inject"]);
+    const dispatched = await runOrca<Record<string, unknown>>([...base, "--inject"]);
+    dispatchId = readDispatchId(dispatched);
     // `--inject` types the preamble into the TUI but does not reliably submit
     // it — the text can sit unsent in the input box. Settle, then press Enter.
     // A stray Enter on an already-submitted input is a harmless no-op.
@@ -2703,7 +2964,8 @@ export async function startLegacyWorker(opts: {
   } catch (err) {
     if ((err as OrcaCliError).code !== "agent_unconfigured") throw err;
     // Bare shell: dispatch for tracking, then deliver the preamble manually.
-    await runOrca(base);
+    const dispatched = await runOrca<Record<string, unknown>>(base);
+    dispatchId = readDispatchId(dispatched);
     const shown = await runOrca<{ preamble?: string }>([
       "orchestration",
       "dispatch-show",
@@ -2726,7 +2988,7 @@ export async function startLegacyWorker(opts: {
     }
   }
 
-  return { mode: "legacy", dispatchId: null, handle, receipt: null, replayed: false, adopted: false };
+  return { mode: "legacy", dispatchId, handle, receipt: null, replayed: false, adopted: false };
 }
 
 function sleep(ms: number): Promise<void> {

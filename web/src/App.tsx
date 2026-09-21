@@ -1,18 +1,40 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { DagView } from "./components/DagView";
 import { ExecControls } from "./components/ExecControls";
+import { ActivityPanel } from "./components/ActivityPanel";
+import { ChatPanel } from "./components/ChatPanel";
 import { GatePanel } from "./components/GatePanel";
-import { InboxPanel, useInboxPoll } from "./components/InboxPanel";
 import { NodePanel } from "./components/NodePanel";
 import { RecoveryPanel } from "./components/RecoveryPanel";
 import { WorkerPanel } from "./components/WorkerPanel";
 import { RunPicker } from "./components/RunPicker";
-import { fetchDag, resetTasks } from "./api";
-import { initConfig, setLayout, setRunId, useConfig, useReadiness } from "./harness";
-import { LAYOUTS, STATUS_META, type DagResponse, type LayoutKind, type TaskStatus } from "./types";
+import { useDecisionDialog } from "./components/DecisionDialog";
+import { fetchDag, fetchRunStatus, fetchWorkers, resetTasks } from "./api";
+import { initConfig, setLayout, setLeadTask, setRunId, useConfig, useReadiness } from "./harness";
+import {
+  LAYOUTS,
+  STATUS_META,
+  type ActivitySnapshot,
+  type DagResponse,
+  type LayoutKind,
+  type RunStatus,
+  type TaskStatus,
+} from "./types";
 
 const EMPTY: DagResponse = { runId: "", nodes: [], edges: [], gates: [], generatedAt: 0 };
+const EMPTY_ACTIVITY: ActivitySnapshot = {
+  runId: "",
+  events: [],
+  presence: [],
+  checks: [],
+  pendingCount: 0,
+  truncated: false,
+  generatedAt: 0,
+};
 const POLL_MS = 2000;
+const COMMUNICATION_MIN_WIDTH = 380;
+const COMMUNICATION_MAX_WIDTH = 820;
+const CANVAS_MIN_WIDTH = 320;
 
 /**
  * Hand-drawn wobble filters — the whole "drawn with a crayon" illusion.
@@ -147,8 +169,16 @@ function HandDrawnDefs() {
 }
 
 export default function App() {
+  const dialog = useDecisionDialog();
   const [dag, setDag] = useState<DagResponse>(EMPTY);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [stageOpen, setStageOpen] = useState(false);
+  const [communicationOpen, setCommunicationOpen] = useState(false);
+  const [communicationWidth, setCommunicationWidth] = useState<number | null>(null);
+  const [communicationResizing, setCommunicationResizing] = useState(false);
+  const [communicationTab, setCommunicationTab] = useState<"activity" | "chat">("activity");
+  const [activityPending, setActivityPending] = useState(0);
+  const [activitySnapshot, setActivitySnapshot] = useState<ActivitySnapshot>(EMPTY_ACTIVITY);
   const [connError, setConnError] = useState<string | null>(null);
   const config = useConfig();
   const runId = config.runId;
@@ -160,11 +190,38 @@ export default function App() {
   const layout: LayoutKind = config.layout || "layered-lr";
   // bump to force a fresh auto-layout (discarding manual drags)
   const [reorgNonce, setReorgNonce] = useState(0);
+  // Unlike reorgNonce, this asks React Flow to reframe the current positions
+  // without discarding nodes the user has manually dragged.
+  const [canvasFitNonce, setCanvasFitNonce] = useState(0);
+  const communicationRef = useRef<HTMLElement | null>(null);
+  const communicationResize = useRef<{
+    pointerId: number;
+    startX: number;
+    startWidth: number;
+  } | null>(null);
   const timer = useRef<number | null>(null);
-  // Worker questions/escalations + cleanup debt (Phase 3). Polled separately
-  // from the DAG so an arriving question shows up within one tick.
-  const inbox = useInboxPoll();
-
+  const executionTimer = useRef<number | null>(null);
+  // Worker accounting is durable, but any individual poll can briefly fail or
+  // return an incomplete response while Orca reconnects. Keep evidence
+  // monotonic per Run for this page session: once a Task has a Dispatch, no
+  // later empty/error response may make its launch controls editable again.
+  const startedByRun = useRef<Map<string, Set<string>>>(new Map());
+  const [startedRevision, setStartedRevision] = useState(0);
+  const [runStatus, setRunStatus] = useState<RunStatus | null>(null);
+  // Starting a Run has a deliberate blind window: the server sets its
+  // coordinator to binding before it can report a bound runId. ExecControls
+  // raises this synchronously before POST /api/run so launch controls freeze
+  // during binding and recovery instead of waiting for the next poll.
+  const [startingRunId, setStartingRunId] = useState<string | null>(null);
+  const [workerHistoryLoading, setWorkerHistoryLoading] = useState(false);
+  const [workerHistoryError, setWorkerHistoryError] = useState<string | null>(null);
+  const selectedRunRef = useRef(runId);
+  selectedRunRef.current = runId;
+  const dagRequestSeq = useRef(0);
+  const dagAppliedSeq = useRef(0);
+  const executionPollSeq = useRef(0);
+  const workersAppliedSeq = useRef(0);
+  const statusAppliedSeq = useRef(0);
   // hydrate harness/concurrency/layout/run config from the server-side file
   // once; RunPicker must not auto-pick a Run until this has settled, or its
   // fallback would overwrite the stored choice with "newest"
@@ -181,17 +238,88 @@ export default function App() {
     setLayout(kind);
   }
 
+  function requestCanvasFit() {
+    setCanvasFitNonce((nonce) => nonce + 1);
+  }
+
+  function openCommunication() {
+    if (!communicationOpen) {
+      if (communicationWidth === null) setCommunicationWidth(clampCommunicationWidth(620));
+      requestCanvasFit();
+    }
+    setCommunicationOpen(true);
+  }
+
+  function closeCommunication() {
+    if (communicationOpen) requestCanvasFit();
+    setCommunicationOpen(false);
+  }
+
+  function clampCommunicationWidth(width: number): number {
+    const workspaceWidth = communicationRef.current?.parentElement?.getBoundingClientRect().width ?? window.innerWidth;
+    // Below the overlay breakpoint the graph no longer needs a permanent
+    // reserve beside the panel; leave only the paper margin used by CSS.
+    const reserve = window.matchMedia("(max-width: 900px)").matches ? 18 : CANVAS_MIN_WIDTH;
+    const upper = Math.max(280, Math.min(COMMUNICATION_MAX_WIDTH, workspaceWidth - reserve));
+    const lower = Math.min(COMMUNICATION_MIN_WIDTH, upper);
+    return Math.round(Math.min(Math.max(width, lower), upper));
+  }
+
+  function beginCommunicationResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!communicationRef.current) return;
+    communicationResize.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: communicationRef.current.getBoundingClientRect().width,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setCommunicationResizing(true);
+    event.preventDefault();
+  }
+
+  function moveCommunicationResize(event: ReactPointerEvent<HTMLDivElement>) {
+    const resize = communicationResize.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    setCommunicationWidth(clampCommunicationWidth(resize.startWidth + event.clientX - resize.startX));
+  }
+
+  function endCommunicationResize(event: ReactPointerEvent<HTMLDivElement>) {
+    const resize = communicationResize.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    communicationResize.current = null;
+    setCommunicationResizing(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    requestCanvasFit();
+  }
+
   const refresh = useCallback(async () => {
-    if (!runId) {
+    const requestedRun = runId;
+    const seq = ++dagRequestSeq.current;
+    if (!requestedRun) {
       setDag(EMPTY);
       return;
     }
     try {
-      const next = await fetchDag(runId);
+      const next = await fetchDag(requestedRun);
+      // A Run switch does not cancel an already-issued request. Also reject
+      // older same-Run polls and any malformed response whose scope disagrees
+      // with the request; neither may paint Run A over the selected Run B.
+      if (
+        selectedRunRef.current !== requestedRun ||
+        seq < dagAppliedSeq.current ||
+        next.runId !== requestedRun
+      ) {
+        return;
+      }
+      dagAppliedSeq.current = seq;
       setDag(next);
       setConnError(null);
     } catch (e) {
-      setConnError(String((e as Error).message ?? e));
+      if (selectedRunRef.current === requestedRun && seq >= dagAppliedSeq.current) {
+        setConnError(String((e as Error).message ?? e));
+      }
     }
   }, [runId]);
 
@@ -203,21 +331,112 @@ export default function App() {
     };
   }, [refresh]);
 
+  const refreshExecutionState = useCallback(async () => {
+    const requestedRun = runId;
+    if (!requestedRun) {
+      setRunStatus(null);
+      setWorkerHistoryLoading(false);
+      setWorkerHistoryError(null);
+      return;
+    }
+
+    const seq = ++executionPollSeq.current;
+    const [workersResult, statusResult] = await Promise.allSettled([
+      fetchWorkers(requestedRun),
+      fetchRunStatus(),
+    ]);
+
+    // A Run switch does not cancel an already-issued fetch. Ignore its result
+    // rather than letting Run A's history or process status leak into Run B.
+    if (selectedRunRef.current !== requestedRun) return;
+
+    if (seq >= workersAppliedSeq.current) {
+      workersAppliedSeq.current = seq;
+      setWorkerHistoryLoading(false);
+      if (workersResult.status === "fulfilled") {
+        const known = startedByRun.current.get(requestedRun) ?? new Set<string>();
+        let changed = false;
+        for (const worker of workersResult.value) {
+          if (!worker.taskId || known.has(worker.taskId)) continue;
+          known.add(worker.taskId);
+          changed = true;
+        }
+        startedByRun.current.set(requestedRun, known);
+        if (changed) setStartedRevision((n) => n + 1);
+        setWorkerHistoryError(null);
+      } else {
+        setWorkerHistoryError(String((workersResult.reason as Error)?.message ?? workersResult.reason));
+      }
+    }
+
+    // Status is process-local rather than Run-scoped at the endpoint. Store
+    // the latest response, then apply it below only when its runId matches.
+    if (statusResult.status === "fulfilled" && seq >= statusAppliedSeq.current) {
+      statusAppliedSeq.current = seq;
+      setRunStatus(statusResult.value);
+    }
+  }, [runId]);
+
+  useEffect(() => {
+    setWorkerHistoryLoading(Boolean(runId));
+    setWorkerHistoryError(null);
+    refreshExecutionState();
+    executionTimer.current = window.setInterval(refreshExecutionState, POLL_MS);
+    return () => {
+      if (executionTimer.current) window.clearInterval(executionTimer.current);
+    };
+  }, [refreshExecutionState, runId]);
+
   // switching Run invalidates the current selection
   const pickRun = useCallback((id: string) => {
     setRunId(id);
     setSelectedId(null);
+    setStageOpen(false);
+    setActivityPending(0);
+    setActivitySnapshot({ ...EMPTY_ACTIVITY, runId: id });
+    // Do not leave the previous Run's graph visible during the new Run's
+    // request. `visibleDag` below also guards the render in the same frame.
+    setDag(EMPTY);
+    setConnError(null);
   }, []);
 
-  const counts = dag.nodes.reduce<Record<string, number>>((acc, n) => {
+  const selectStage = useCallback((id: string | null) => {
+    setSelectedId(id);
+    setStageOpen(Boolean(id));
+  }, []);
+
+  const onRunStarting = useCallback((id: string) => {
+    setStartingRunId(id);
+  }, []);
+
+  const onRunStartFinished = useCallback((id: string, status: RunStatus | null) => {
+    setStartingRunId((current) => (current === id ? null : current));
+    // A start can finish after the user has switched Runs. Do not let its
+    // receipt become status for the newly selected Run; the normal poll will
+    // reconcile that Run independently.
+    if (status && selectedRunRef.current === id) setRunStatus(status);
+  }, []);
+
+  // Until the selected Run's first scoped response arrives, an old Run's DAG
+  // is not displayable under the new Run. This complements the request guards
+  // above for the one render between setRunId and the effect cleanup.
+  const visibleDag = dag.runId === runId ? dag : EMPTY;
+  const counts = visibleDag.nodes.reduce<Record<string, number>>((acc, n) => {
     acc[n.status] = (acc[n.status] ?? 0) + 1;
     return acc;
   }, {});
 
-  const selected = dag.nodes.find((n) => n.id === selectedId) ?? null;
+  const selected = visibleDag.nodes.find((n) => n.id === selectedId) ?? null;
+  const startedTaskIds = useMemo(
+    () => new Set(runId ? startedByRun.current.get(runId) ?? [] : []),
+    [runId, startedRevision],
+  );
+  const selectedRunExecuting = Boolean(runStatus?.running && runStatus.runId === runId);
+  const selectedRunStarting = startingRunId === runId;
+  const leadTaskId = runId ? config.leadTaskByRun[runId] ?? null : null;
 
   // the toolbar's bottom edge doubles as a crayon progress strip
-  const total = dag.nodes.length || 1;
+  const total = visibleDag.nodes.length || 1;
   const pctDone = ((counts.completed ?? 0) / total) * 100;
   const pctFail = ((counts.failed ?? 0) / total) * 100;
   const pctRun = ((counts.dispatched ?? 0) / total) * 100;
@@ -226,23 +445,35 @@ export default function App() {
     // Mirror the readiness gate for a clear message; the server enforces it
     // (503 execution_disabled) regardless.
     if (execOff) {
-      alert(readiness?.reason ?? "Execution is unavailable on this Orca runtime.");
+      await dialog.alert({
+        title: "Execution unavailable",
+        message: readiness?.reason ?? "Execution is unavailable on this Orca runtime.",
+      });
       return;
     }
     // `orca orchestration reset` has no --run flag: it clears the whole local
     // orchestration database, not just the Run on screen. Say so plainly.
-    const ok = confirm(
-      "⚠️ Clear tasks in ALL local Orca Runs?\n\n" +
-        "orca orchestration reset --tasks has no --run scope — it deletes tasks in every Run, " +
-        "not just the graph on screen. This cannot be undone.",
-    );
+    const ok = await dialog.confirm({
+      title: "Clear tasks in every local Run?",
+      message:
+        "Orca's reset command has no Run scope. It deletes tasks in every local Run, " +
+        "not only the graph on screen. This cannot be undone.",
+      confirmLabel: "Clear all tasks",
+      cancelLabel: "Keep tasks",
+      tone: "danger",
+    });
     if (!ok) return;
     try {
       await resetTasks();
       setSelectedId(null);
+      setStageOpen(false);
       refresh();
     } catch (err) {
-      alert(`Reset failed: ${String(err)}`);
+      await dialog.alert({
+        title: "Task reset failed",
+        message: String(err),
+        tone: "danger",
+      });
     }
   }
 
@@ -317,23 +548,34 @@ export default function App() {
       <div className="layout">
         <section className="pane pane--dag">
           <div className="dag-toolbar">
-            <div className="legend">
-              {(Object.keys(STATUS_META) as TaskStatus[]).map((s) => (
-                <span
-                  key={s}
-                  className={`legend__item${counts[s] ? " legend__item--live" : ""}`}
-                  data-status={s}
-                >
-                  <span className="legend__dot" style={{ background: STATUS_META[s].color }} />
-                  {STATUS_META[s].label}
-                  {/* keyed by value so the badge re-pops each time it changes */}
-                  {counts[s] ? (
-                    <b className="legend__n" key={counts[s]}>
-                      {counts[s]}
-                    </b>
-                  ) : null}
-                </span>
-              ))}
+            <div className="dag-toolbar__left">
+              <button
+                type="button"
+                className={`btn btn--activity${communicationOpen ? " active" : ""}`}
+                aria-pressed={communicationOpen}
+                onClick={openCommunication}
+              >
+                Activity / Chat
+                {activityPending > 0 && <span className="activity-badge">{activityPending}</span>}
+              </button>
+              <div className="legend">
+                {(Object.keys(STATUS_META) as TaskStatus[]).map((s) => (
+                  <span
+                    key={s}
+                    className={`legend__item${counts[s] ? " legend__item--live" : ""}`}
+                    data-status={s}
+                  >
+                    <span className="legend__dot" style={{ background: STATUS_META[s].color }} />
+                    {STATUS_META[s].label}
+                    {/* keyed by value so the badge re-pops each time it changes */}
+                    {counts[s] ? (
+                      <b className="legend__n" key={counts[s]}>
+                        {counts[s]}
+                      </b>
+                    ) : null}
+                  </span>
+                ))}
+              </div>
             </div>
             <div className="dag-toolbar__right">
               <div className="layout-ctl">
@@ -360,12 +602,17 @@ export default function App() {
                 </button>
               </div>
               <span className="dag-toolbar__meta">
-                {dag.nodes.length} tasks · {dag.edges.length} deps
+                {visibleDag.nodes.length} tasks · {visibleDag.edges.length} deps
               </span>
               <ExecControls
                 runId={runId}
-                taskIds={dag.nodes.map((n) => n.id)}
+                taskIds={visibleDag.nodes.map((n) => n.id)}
                 readyCount={counts.ready ?? 0}
+                startingRunId={startingRunId}
+                workerHistoryLoading={workerHistoryLoading}
+                workerHistoryError={workerHistoryError}
+                onRunStarting={onRunStarting}
+                onRunStartFinished={onRunStartFinished}
               />
             </div>
 
@@ -377,65 +624,157 @@ export default function App() {
             </div>
           </div>
 
-          <div className="dag-canvas">
-            <DagView
-              dag={dag}
-              selectedId={selectedId}
-              onSelect={setSelectedId}
-              layout={layout}
-              reorgNonce={reorgNonce}
-            />
+          <div className="dag-workspace">
+            {/* Activity and Chat are two readings of the same live snapshot.
+                Keep this mounted while closed so unread counts and the Chat
+                conversation list stay warm without opening a second stream.
+                The communication surface is a real left rail, not a canvas
+                overlay, so the graph always receives its own usable area. */}
+            <aside
+              ref={communicationRef}
+              className={`communication-center${communicationOpen ? "" : " communication-center--closed"}${communicationResizing ? " communication-center--resizing" : ""}`}
+              aria-label="Run communication center"
+              aria-hidden={!communicationOpen}
+              style={{ width: communicationWidth === null ? undefined : `${communicationWidth}px` }}
+            >
+                <header className="communication-center__header">
+                  <div className="communication-center__tabs" role="tablist" aria-label="Communication view">
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={communicationTab === "activity"}
+                      className={communicationTab === "activity" ? "active" : ""}
+                      onClick={() => setCommunicationTab("activity")}
+                    >
+                      Activity
+                      {activityPending > 0 && <span className="activity-badge">{activityPending}</span>}
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={communicationTab === "chat"}
+                      className={communicationTab === "chat" ? "active" : ""}
+                      onClick={() => setCommunicationTab("chat")}
+                    >
+                      Chat
+                      {activityPending > 0 && <span className="activity-badge">{activityPending}</span>}
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    className="communication-center__close"
+                    aria-label="Close communication center"
+                    onClick={closeCommunication}
+                  >
+                    ✕
+                  </button>
+                </header>
 
-            {!runId && (
-              <div className="empty-run">
-                <p className="empty-run__title">Pick a Run first</p>
-                <p className="empty-run__body">
-                  Since Orca 1.4.160 tasks belong to a Run — they are no longer global. Pick one with
-                  the Run dropdown in the top-right, or have your agent run{" "}
-                  <code>orca orchestration run-create</code> to start a new one.
-                </p>
-              </div>
-            )}
+                <div className="communication-center__body">
+                  <div hidden={communicationTab !== "activity"}>
+                    <ActivityPanel
+                        runId={runId}
+                        onSelectTask={(taskId) => selectStage(taskId)}
+                        onResolved={refresh}
+                        onPendingCount={setActivityPending}
+                        onSnapshot={setActivitySnapshot}
+                        disabled={execOff}
+                        disabledReason={readiness?.reason}
+                      />
+                    <details className="communication-center__operations">
+                        <summary>Operational details</summary>
+                        <GatePanel
+                          gates={visibleDag.gates}
+                          runId={runId}
+                          onResolved={refresh}
+                          disabled={execOff}
+                          disabledReason={readiness?.reason}
+                        />
+                        <RecoveryPanel
+                          runId={runId}
+                          onRetried={refresh}
+                          disabled={execOff}
+                          disabledReason={readiness?.reason}
+                        />
+                        <WorkerPanel runId={runId} disabled={execOff} disabledReason={readiness?.reason} />
+                    </details>
+                  </div>
+                  <div hidden={communicationTab !== "chat"} className="communication-center__chat">
+                    <ChatPanel
+                      runId={runId}
+                      snapshot={activitySnapshot}
+                      tasks={visibleDag.nodes}
+                      leadTaskId={leadTaskId}
+                      onSelectTask={(taskId) => selectStage(taskId)}
+                      onResolved={refresh}
+                      coordinatorActive={selectedRunExecuting}
+                      disabled={execOff}
+                      disabledReason={readiness?.reason}
+                    />
+                  </div>
+                </div>
+                <div
+                  className="communication-center__resize"
+                  role="separator"
+                  aria-label="Resize communication panel"
+                  aria-orientation="vertical"
+                  aria-valuemin={280}
+                  aria-valuemax={COMMUNICATION_MAX_WIDTH}
+                  aria-valuenow={communicationWidth ?? undefined}
+                  tabIndex={0}
+                  title="Drag or use Left/Right arrow keys to resize"
+                  onPointerDown={beginCommunicationResize}
+                  onPointerMove={moveCommunicationResize}
+                  onPointerUp={endCommunicationResize}
+                  onPointerCancel={endCommunicationResize}
+                  onKeyDown={(event) => {
+                    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+                    const current = communicationWidth ?? communicationRef.current?.getBoundingClientRect().width ?? 440;
+                    setCommunicationWidth(clampCommunicationWidth(current + (event.key === "ArrowRight" ? 32 : -32)));
+                    requestCanvasFit();
+                    event.preventDefault();
+                  }}
+                />
+            </aside>
 
-            <GatePanel
-              gates={dag.gates}
-              runId={runId}
-              onResolved={refresh}
-              disabled={execOff}
-              disabledReason={readiness?.reason}
-            />
+            <div className="dag-canvas">
+              <DagView
+                dag={visibleDag}
+                leadTaskId={leadTaskId}
+                selectedId={selectedId}
+                onSelect={selectStage}
+                layout={layout}
+                reorgNonce={reorgNonce}
+                fitNonce={canvasFitNonce}
+              />
 
-            {/* worker questions / escalations / cleanup debt — a run in
-                awaiting_input visibly waits here until a human answers */}
-            <InboxPanel
-              runId={runId}
-              pending={inbox.pending}
-              cleanupDebt={inbox.cleanupDebt}
-              onResolved={() => {
-                inbox.refresh();
-                refresh();
-              }}
-              disabled={execOff}
-              disabledReason={readiness?.reason}
-            />
+              {!runId && (
+                <div className="empty-run">
+                  <p className="empty-run__title">Pick a Run first</p>
+                  <p className="empty-run__body">
+                    Since Orca 1.4.160 tasks belong to a Run — they are no longer global. Pick one with
+                    the Run dropdown in the top-right, or have your agent run{" "}
+                    <code>orca orchestration run-create</code> to start a new one.
+                  </p>
+                </div>
+              )}
 
-            {/* restart recovery (Phase 4): adopted Dispatches, unresolved
-                starts, and the explicit retry for positively failed ones */}
-            <RecoveryPanel
-              runId={runId}
-              onRetried={refresh}
-              disabled={execOff}
-              disabledReason={readiness?.reason}
-            />
-
-            {/* worker observability (Phase 5): liveness, attention, launch
-                preferences, bounded output, retain/release controls */}
-            <WorkerPanel runId={runId} disabled={execOff} disabledReason={readiness?.reason} />
-
-            {/* keyed by node so switching selection replays the card's entrance */}
-            {selected && (
-              <NodePanel key={selected.id} node={selected} onClose={() => setSelectedId(null)} />
-            )}
+              {selected && stageOpen && (
+                <NodePanel
+                  key={selected.id}
+                  node={selected}
+                  runId={runId}
+                  isLead={selected.id === leadTaskId}
+                  onLeadChange={(taskId) => setLeadTask(runId, taskId)}
+                  permanentlyLocked={startedTaskIds.has(selected.id)}
+                  temporarilyLocked={selectedRunExecuting}
+                  coordinatorStarting={selectedRunStarting}
+                  workerHistoryLoading={workerHistoryLoading}
+                  workerHistoryError={workerHistoryError}
+                  onClose={() => setStageOpen(false)}
+                />
+              )}
+            </div>
           </div>
         </section>
       </div>

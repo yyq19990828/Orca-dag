@@ -29,6 +29,7 @@ import {
   stopWorkerReceipt,
   taskUpdate,
   type OrcaMessage,
+  type OrcaDelivery,
   type OrcaTask,
   type OrcaWorkerRow,
   type StartedWorker,
@@ -192,6 +193,8 @@ export interface PendingInboxItem {
   body: string;
   createdAt: string;
   taskId: string | null;
+  /** Dispatch identity from the worker payload, when the sender supplied it. */
+  dispatchId?: string | null;
 }
 
 /** Work this coordinator could not finish deciding — blocks completion. */
@@ -256,6 +259,67 @@ export interface StartOpts {
   placementByTask?: Record<string, PlacementSpec>;
   /** Inbox wait per loop iteration. Tests shrink this; production blocks ~3s. */
   tickWaitMs?: number;
+  /**
+   * Optional viewer-history sink. It receives only coordinator actions that
+   * already succeeded in Orca; failure to persist explanatory UI history must
+   * never turn a live worker into a failed or ambiguous attempt.
+   */
+  onActivity?: (event: CoordinatorActivityNotice) => Promise<void>;
+  /**
+   * Best-effort sink for meaningful check receipts. The coordinator still
+   * keeps every recent pass in memory for live presence, while the viewer
+   * persists only deliveries, errors/recoveries, and agent-state changes.
+   */
+  onCheck?: (receipt: CoordinatorCheckReceipt) => Promise<void>;
+}
+
+export interface CoordinatorActivityNotice {
+  kind: "dispatch_started";
+  runId: string;
+  taskId: string;
+  dispatchId: string | null;
+  title: string;
+  summary: string;
+  detail: string;
+}
+
+/**
+ * One visible receipt for the coordinator's rolling `check --wait` pass.
+ *
+ * Every recent pass stays in a bounded in-memory operational trace. The
+ * viewer may additionally persist meaningful receipts (deliveries,
+ * errors/recoveries, and agent-state changes); repetitive empty checks remain
+ * memory-only so presence telemetry cannot grow into an endless transcript.
+ */
+export interface CoordinatorCheckReceipt {
+  sequence: number;
+  checkedAt: number;
+  durationMs: number;
+  deliveryId: string | null;
+  messageCount: number;
+  messageTypes: string[];
+  replayed: boolean;
+  timedOut: boolean;
+  error: string | null;
+  agents: CoordinatorCheckAgentSummary[];
+  /** Native viewer-loop receipt, or a check proven indirectly from durable Orca state. */
+  source?: "viewer_loop" | "external_inferred";
+  /** Human-readable provenance for inferred receipts; null/absent on native checks. */
+  evidence?: string | null;
+}
+
+export interface CoordinatorCheckAgentSummary {
+  taskId: string;
+  dispatchId: string | null;
+  liveness: "live" | "unverifiable" | "exited";
+  activity: string | null;
+  detail: string | null;
+  attention: string[];
+  agent: string;
+  model: string | null;
+  effort: string | null;
+  outcome: "succeeded" | "failed" | null;
+  observedAt: string | null;
 }
 
 /**
@@ -308,6 +372,9 @@ interface State {
   unownedDispatches: string[];
   /** Last startup recovery summary (Phase 4); null when this instance never recovered. */
   recovery: RecoverySummary | null;
+  /** Recent check receipts for the live Chat trace, oldest first. */
+  checks: CoordinatorCheckReceipt[];
+  checkSequence: number;
 }
 
 /** How long each loop iteration blocks in `check --wait` (production default). */
@@ -325,6 +392,8 @@ const RECENT_MESSAGES_MAX = 30;
 const PROCESSED_MESSAGES_MAX = 2000;
 /** Bounded receipt history per attempt across explicit retries (Phase 4). */
 const START_RECEIPTS_MAX = 5;
+/** About three minutes at the default cadence; enough context without noise. */
+const CHECK_RECEIPTS_MAX = 60;
 
 const state: State = {
   running: false,
@@ -348,6 +417,8 @@ const state: State = {
   lastStopReport: null,
   unownedDispatches: [],
   recovery: null,
+  checks: [],
+  checkSequence: 0,
 };
 
 /** Reset every coordinator field. Test scaffolding only — never call while a loop is live. */
@@ -373,6 +444,8 @@ export function resetCoordinatorForTests(): void {
   state.lastStopReport = null;
   state.unownedDispatches = [];
   state.recovery = null;
+  state.checks = [];
+  state.checkSequence = 0;
 }
 
 export function coordinatorStatus() {
@@ -443,8 +516,16 @@ export function coordinatorStatus() {
     lastStopReport: state.lastStopReport,
     unownedDispatches: [...state.unownedDispatches],
     recovery: state.recovery,
+    checks: state.checks.map((receipt) => ({
+      ...receipt,
+      messageTypes: [...receipt.messageTypes],
+      agents: receipt.agents.map((agent) => ({ ...agent, attention: [...agent.attention] })),
+    })),
   };
 }
+
+/** Public read model consumed by HTTP and the activity normalizer. */
+export type CoordinatorStatus = ReturnType<typeof coordinatorStatus>;
 
 /**
  * Bind the Run and start the dispatch loop.
@@ -471,6 +552,8 @@ export async function startCoordinator(opts: StartOpts): Promise<void> {
   state.cleanupDebt = [];
   state.unownedDispatches = [];
   state.recovery = null;
+  state.checks = [];
+  state.checkSequence = 0;
   state.startedAt = Date.now();
 
   try {
@@ -908,27 +991,96 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function briefTaskSpec(spec: string): string {
+  const normalized = spec.replace(/\s+/g, " ").trim();
+  if (!normalized) return "The coordinator assigned this stage without an additional brief.";
+  const sentence = normalized.match(/^.*?[.!?](?:\s|$)/)?.[0]?.trim() ?? normalized;
+  return sentence.length > 220 ? `${sentence.slice(0, 217).trimEnd()}...` : sentence;
+}
+
+async function emitCoordinatorActivity(event: CoordinatorActivityNotice): Promise<void> {
+  const sink = state.opts?.onActivity;
+  if (!sink) return;
+  try {
+    await sink(event);
+  } catch {
+    // The worker is already live at this point. Reclassifying that successful
+    // start as failed would invite an unsafe duplicate Dispatch, so the viewer
+    // journal remains deliberately best-effort and lifecycle-neutral.
+  }
+}
+
+async function emitCoordinatorCheck(receipt: CoordinatorCheckReceipt): Promise<void> {
+  const sink = state.opts?.onCheck;
+  if (!sink) return;
+  try {
+    await sink(receipt);
+  } catch {
+    // Check history is explanatory UI state, never orchestration authority.
+    // A journal failure must not stop inbox processing or worker settlement.
+  }
+}
+
+function checkAgentState(receipt: CoordinatorCheckReceipt): string {
+  return JSON.stringify(
+    receipt.agents.map((agent) => ({
+      taskId: agent.taskId,
+      dispatchId: agent.dispatchId,
+      liveness: agent.liveness,
+      activity: agent.activity,
+      detail: agent.detail,
+      attention: agent.attention,
+      agent: agent.agent,
+      model: agent.model,
+      effort: agent.effort,
+      outcome: agent.outcome,
+    })),
+  );
+}
+
+export function shouldPersistCoordinatorCheck(
+  receipt: CoordinatorCheckReceipt,
+  previous: CoordinatorCheckReceipt | undefined,
+): boolean {
+  if (!previous) return true;
+  if (receipt.messageCount > 0) return true;
+  if (receipt.error !== previous.error) return true;
+  return checkAgentState(receipt) !== checkAgentState(previous);
+}
+
 async function loop(): Promise<void> {
   const waitMs = state.opts?.tickWaitMs ?? CHECK_WAIT_MS;
   while (state.running) {
-    const iterStart = Date.now();    try {
+    const iterStart = Date.now();
+    let delivery: OrcaDelivery | null = null;
+    let passError: string | null = null;
+    try {
       // Rolling inbox wait: block (bounded) for worker_done/escalation/question
       // mail instead of sleeping through it. Nothing pending → timedOut batch.
-      const delivery = await checkInbox({
+      delivery = await checkInbox({
         from: state.coordinatorHandle!,
         types: WAKE_TYPES,
         waitMs,
       });
       await processDelivery(delivery);
     } catch (e) {
-      state.error = String((e as Error).message ?? e);
+      passError = String((e as Error).message ?? e);
+      state.error = passError;
     }
-    if (!state.running) break;
-    try {
-      await reconcile();
-    } catch (e) {
-      state.error = String((e as Error).message ?? e);
+    if (state.running) {
+      try {
+        await reconcile();
+      } catch (e) {
+        const detail = String((e as Error).message ?? e);
+        passError = passError ? `${passError}; reconcile: ${detail}` : detail;
+        state.error = detail;
+      }
     }
+    // Capture AFTER reconciliation so each receipt carries the freshest
+    // worker-list projection the same check pass observed. A failed or empty
+    // check is still recorded: both are meaningful coordinator health facts.
+    const check = recordCheckReceipt(delivery, iterStart, passError);
+    if (check.persist) await emitCoordinatorCheck(check.receipt);
     if (!state.running) break;
     // In production `check --wait` consumed the interval already; this floor
     // only matters when the check returned instantly (empty inbox fast path,
@@ -936,6 +1088,43 @@ async function loop(): Promise<void> {
     const elapsed = Date.now() - iterStart;
     if (elapsed < waitMs) await sleep(waitMs - elapsed);
   }
+}
+
+function recordCheckReceipt(
+  delivery: OrcaDelivery | null,
+  startedAt: number,
+  error: string | null,
+): { receipt: CoordinatorCheckReceipt; persist: boolean } {
+  const previous = state.checks.at(-1);
+  const checkedAt = Date.now();
+  const receipt: CoordinatorCheckReceipt = {
+    sequence: ++state.checkSequence,
+    checkedAt,
+    durationMs: Math.max(0, checkedAt - startedAt),
+    deliveryId: delivery?.deliveryId ?? null,
+    messageCount: delivery?.messages.length ?? 0,
+    messageTypes: [...new Set((delivery?.messages ?? []).map((message) => message.type))],
+    replayed: delivery?.replayed ?? false,
+    timedOut: delivery?.timedOut ?? false,
+    error,
+    source: "viewer_loop",
+    evidence: null,
+    agents: [...state.attempts.values()].map((attempt) => ({
+      taskId: attempt.taskId,
+      dispatchId: attempt.dispatchId,
+      liveness: normalizeLiveness(attempt.liveness),
+      activity: attempt.stage?.activity ?? null,
+      detail: attempt.stage?.detail ?? null,
+      attention: [...(attempt.attention?.categories ?? [])],
+      agent: attempt.effective?.agent ?? attempt.harness,
+      model: attempt.effective?.model ?? null,
+      effort: attempt.effective?.effort ?? null,
+      outcome: attempt.outcome,
+      observedAt: attempt.lastHeartbeatAt,
+    })),
+  };
+  state.checks = [...state.checks, receipt].slice(-CHECK_RECEIPTS_MAX);
+  return { receipt, persist: shouldPersistCoordinatorCheck(receipt, previous) };
 }
 
 /** True if this message was already handled (replayed Delivery row). */
@@ -979,6 +1168,16 @@ async function processDelivery(delivery: {
       }
       case "question":
       case "escalation":
+        {
+        const payload = parseWorkerDonePayload(message);
+        const payloadTaskId = payload?.taskId ?? null;
+        const payloadDispatchId = payload?.dispatchId ?? null;
+        const relatedAttempt = [...state.attempts.values()].find(
+          (attempt) =>
+            (payloadDispatchId !== null && attempt.dispatchId === payloadDispatchId) ||
+            (payloadDispatchId === null && payloadTaskId !== null && attempt.taskId === payloadTaskId) ||
+            (payloadDispatchId === null && payloadTaskId === null && attempt.handle === message.from_handle),
+        );
         state.inbox = [
           ...state.inbox.filter((i) => i.messageId !== message.id),
           {
@@ -988,13 +1187,15 @@ async function processDelivery(delivery: {
             subject: message.subject,
             body: message.body,
             createdAt: message.created_at,
-            taskId: parseWorkerDonePayload(message)?.taskId ?? null,
+            taskId: payloadTaskId ?? relatedAttempt?.taskId ?? null,
+            dispatchId: payloadDispatchId ?? relatedAttempt?.dispatchId ?? null,
           },
         ];
         // Hold the Delivery open: it must not be acknowledged while a human
         // question inside it is unanswered (it replays until then).
         if (delivery.deliveryId) state.pendingDeliveryId = delivery.deliveryId;
         break;
+        }
       case "heartbeat":
         noteHeartbeat(message);
         break;
@@ -1272,6 +1473,21 @@ async function reconcile(): Promise<void> {
       attempt.attention = row.projection?.attention ?? null;
       attempt.stage = row.projection?.stage ?? null;
       attempt.host = row.projection?.host ?? attempt.host;
+      // The start receipt may omit its normalized effective fields even when
+      // Orca's durable fleet projection later reports the applied launch.
+      // Fold that runtime echo into the attempt so each check receipt can name
+      // the observed agent/model/effort without falling back to user intent.
+      const launch = row.projection?.launch;
+      if (launch) {
+        attempt.effective = {
+          agent: launch.agent ?? attempt.effective?.agent ?? null,
+          model: launch.model ?? attempt.effective?.model ?? null,
+          effort: launch.effort ?? attempt.effective?.effort ?? null,
+          worktree: launch.worktree ?? attempt.effective?.worktree ?? null,
+          terminal: launch.terminal ?? attempt.effective?.terminal ?? null,
+          on: launch.on ?? attempt.effective?.on ?? null,
+        };
+      }
     } else if (attempt.requested.on) {
       // Phase 6 disconnect rule: a REMOTE Dispatch with no fleet row means the
       // execution host is not currently reporting. The Dispatch is preserved
@@ -1903,6 +2119,16 @@ async function startOne(
       };
     }
     attempt.startRequestId = null; // outcome known — the id is no longer pending
+    const taskSpec = typeof task.spec === "string" ? task.spec : "";
+    await emitCoordinatorActivity({
+      kind: "dispatch_started",
+      runId,
+      taskId: task.id,
+      dispatchId: attempt.dispatchId,
+      title: "Assigned this stage",
+      summary: briefTaskSpec(taskSpec),
+      detail: taskSpec,
+    });
   } catch (err) {
     // Phase 4 item 8: the old "delete the attempt and retry next tick" behavior
     // is GONE. A failed start stays in the projection with its receipt — the

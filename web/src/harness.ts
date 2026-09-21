@@ -23,6 +23,7 @@ const DEFAULTS: ViewerConfig = {
   retainByTask: {},
   environmentByTask: {},
   placementByTask: {},
+  leadTaskByRun: {},
   maxConcurrency: 4,
   layout: "",
   runId: "",
@@ -130,6 +131,9 @@ export async function initConfig(): Promise<void> {
     // keys, and hydration must NOT invent them (local/current stays default).
     environmentByTask: asHarnessMap(server.environmentByTask) ?? {},
     placementByTask: asPlacementMap(server.placementByTask) ?? {},
+    // Viewer-only semantic ownership. One map entry naturally enforces at
+    // most one lead Task per Run, while old config files simply hydrate empty.
+    leadTaskByRun: asHarnessMap(server.leadTaskByRun) ?? {},
     maxConcurrency: asConcurrency(server.maxConcurrency) ?? DEFAULTS.maxConcurrency,
     layout: asLayout(server.layout) || asLayout(localStorage.getItem(LAYOUT_KEY)) || "",
     runId: asString(server.runId) || localStorage.getItem(RUN_KEY) || "",
@@ -327,6 +331,20 @@ export function setNodePlacement(taskId: string, placement: PlacementSpec | null
   if (placement) placementByTask[taskId] = placement;
   else delete placementByTask[taskId];
   update({ placementByTask });
+}
+
+/** Semantic lead stage for one Run; unrelated to live Orca coordinator authority. */
+export function getLeadTask(runId: string): string | null {
+  return config.leadTaskByRun[runId] ?? null;
+}
+
+/** Setting a lead replaces only this Run's prior choice; null clears it. */
+export function setLeadTask(runId: string, taskId: string | null): void {
+  if (!runId) return;
+  const leadTaskByRun = { ...config.leadTaskByRun };
+  if (taskId) leadTaskByRun[runId] = taskId;
+  else delete leadTaskByRun[runId];
+  update({ leadTaskByRun });
 }
 
 export function getDefaultHarness(): string {

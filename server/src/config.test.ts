@@ -134,3 +134,51 @@ describe("config: environmentByTask + placementByTask (Phase 6)", () => {
     assert.equal(loaded.runId, "run_1", "the rest of the file still loads");
   });
 });
+
+describe("config: leadTaskByRun", () => {
+  it("round-trips one explicit lead Task per Run", async () => {
+    await saveConfig(dir, {
+      leadTaskByRun: { run_a: "task_lead_a", run_b: "task_lead_b" },
+    });
+    const loaded = await loadConfig(dir);
+    assert.deepEqual(loaded.leadTaskByRun, {
+      run_a: "task_lead_a",
+      run_b: "task_lead_b",
+    });
+  });
+
+  it("replaces the submitted map so clearing one Run preserves the others", async () => {
+    await saveConfig(dir, {
+      leadTaskByRun: { run_a: "task_lead_a", run_b: "task_lead_b" },
+    });
+    await saveConfig(dir, { leadTaskByRun: { run_b: "task_lead_b" } });
+    assert.deepEqual((await loadConfig(dir)).leadTaskByRun, {
+      run_b: "task_lead_b",
+    });
+  });
+
+  it("loads an older config without inventing lead-stage metadata", async () => {
+    writeFileSync(
+      join(dir, ".orca-dag.config.json"),
+      JSON.stringify({ defaultHarness: "claude", runId: "run_old" }),
+    );
+    const loaded = await loadConfig(dir);
+    assert.equal(loaded.leadTaskByRun, undefined);
+    assert.equal(loaded.runId, "run_old");
+  });
+
+  it("drops malformed lead entries while keeping valid Run-to-Task pairs", async () => {
+    writeFileSync(
+      join(dir, ".orca-dag.config.json"),
+      JSON.stringify({
+        leadTaskByRun: {
+          run_ok: " task_ok ",
+          run_empty: "   ",
+          run_number: 42,
+          "": "task_blank_run",
+        },
+      }),
+    );
+    assert.deepEqual((await loadConfig(dir)).leadTaskByRun, { run_ok: "task_ok" });
+  });
+});

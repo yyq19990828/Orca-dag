@@ -37,32 +37,170 @@ const CUSTOM = "__custom__";
 const KNOWN = HARNESSES as readonly string[];
 const CUSTOM_OFF_HINT = "Custom commands are disabled — start the viewer with ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1";
 
+interface WorkerReportResult {
+  provenance?: string;
+  outcome?: string;
+  subject?: string;
+  body?: string;
+  completedAt?: string;
+  reportedBy?: string;
+  completedBy?: string;
+  messageId?: string;
+  filesModified?: string[];
+  reportPath?: string | null;
+}
+
+function parseWorkerReport(raw: string): WorkerReportResult | null {
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    return value as WorkerReportResult;
+  } catch {
+    return null;
+  }
+}
+
+function resultExcerpt(body: string): { text: string; clipped: boolean } {
+  const normalized = body.replace(/\s+/g, " ").trim();
+  if (normalized.length <= 420) return { text: normalized, clipped: false };
+  const candidate = normalized.slice(0, 420);
+  const sentenceEnd = Math.max(candidate.lastIndexOf(". "), candidate.lastIndexOf("。"));
+  const text = sentenceEnd > 180 ? candidate.slice(0, sentenceEnd + 1) : candidate.trimEnd();
+  return { text, clipped: true };
+}
+
+function resultTime(value: string | undefined): string | null {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function ResultSummary({ raw }: { raw: string }) {
+  const report = parseWorkerReport(raw);
+  if (!report) return <p className="node-panel__result-text">{raw}</p>;
+
+  const outcome = report.outcome?.trim() || "reported";
+  const body = typeof report.body === "string" ? resultExcerpt(report.body) : null;
+  const files = Array.isArray(report.filesModified)
+    ? report.filesModified.filter((file): file is string => typeof file === "string" && Boolean(file.trim()))
+    : [];
+  const completedAt = resultTime(report.completedAt);
+  return (
+    <section className="node-result" data-outcome={outcome} aria-label="Stage result summary">
+      <div className="node-result__head">
+        <span className="node-result__outcome">{outcome.replaceAll("_", " ")}</span>
+        {completedAt && <time dateTime={report.completedAt}>{completedAt}</time>}
+      </div>
+      <strong>{report.subject?.trim() || "Worker report"}</strong>
+      {body?.text && <p>{body.text}</p>}
+      {files.length > 0 && (
+        <div className="node-result__files">
+          <span>{files.length} file{files.length === 1 ? "" : "s"} modified</span>
+          <ul>
+            {files.map((file) => <li key={file}><code>{file}</code></li>)}
+          </ul>
+        </div>
+      )}
+      {report.reportPath && <p className="node-result__report">Report: <code>{report.reportPath}</code></p>}
+      <details className="node-result__details">
+        <summary>{body?.clipped ? "Full report and technical details" : "Technical details"}</summary>
+        {body?.clipped && <p>{report.body}</p>}
+        <dl>
+          {report.reportedBy && <><dt>Reported by</dt><dd><code>{report.reportedBy}</code></dd></>}
+          {!report.reportedBy && report.completedBy && <><dt>Completed by</dt><dd><code>{report.completedBy}</code></dd></>}
+          {report.messageId && <><dt>Message</dt><dd><code>{report.messageId}</code></dd></>}
+          {report.provenance && <><dt>Provenance</dt><dd>{report.provenance.replaceAll("_", " ")}</dd></>}
+        </dl>
+        <pre>{JSON.stringify(report, null, 2)}</pre>
+      </details>
+    </section>
+  );
+}
+
+interface NodePanelProps {
+  node: DagNode;
+  runId: string;
+  isLead: boolean;
+  onLeadChange: (taskId: string | null) => void;
+  /** Evidence accumulated from worker-list for this Run during this page session. */
+  permanentlyLocked: boolean;
+  /** The selected Run's coordinator has an immutable launch-plan snapshot. */
+  temporarilyLocked: boolean;
+  /** The selected Run is binding/recovering before its status has a runId. */
+  coordinatorStarting: boolean;
+  workerHistoryLoading: boolean;
+  workerHistoryError: string | null;
+  onClose: () => void;
+}
+
 /**
  * Node detail + per-node harness. The description/deps are read-only (Orca can't
  * rewrite a stored spec — to change the plan, ask your agent to redraw the DAG).
  * The harness is this node's choice of agent when the coordinator fires it.
  */
-export function NodePanel({ node, onClose }: { node: DagNode; onClose: () => void }) {
+export function NodePanel({
+  node,
+  runId,
+  isLead,
+  onLeadChange,
+  permanentlyLocked,
+  temporarilyLocked,
+  coordinatorStarting,
+  workerHistoryLoading,
+  workerHistoryError,
+  onClose,
+}: NodePanelProps) {
   const meta = STATUS_META[node.status];
   useConfig(); // re-render when the default harness (or this node's) changes
   const { customCommandsAllowed: customOk } = useFlags(); // gates the "Custom…" option
+  // A current Dispatch, completed Task, or failed Task is a conservative
+  // session-local fallback while worker-list is loading. The durable worker
+  // set supplied by App covers settled history after a viewer restart.
+  const fallbackPermanentLock =
+    node.dispatchId !== null || node.status === "completed" || node.status === "failed";
+  const historyLocked = workerHistoryLoading || Boolean(workerHistoryError);
+  const launchLocked =
+    permanentlyLocked || fallbackPermanentLock || temporarilyLocked || coordinatorStarting || historyLocked;
+  const permanentLock = permanentlyLocked || fallbackPermanentLock;
+  const lockReason = permanentLock
+    ? "Launch settings locked after the first Dispatch. Safe retry preserves the original launch plan."
+    : temporarilyLocked
+      ? "Launch settings are frozen while this Run is executing. Stop the coordinator to edit Tasks that have not started."
+      : coordinatorStarting
+        ? "Launch settings are frozen while this Run is starting. Wait for coordinator binding and recovery to finish before editing."
+        : workerHistoryError
+          ? "Launch settings are locked while Dispatch history could not be verified. Wait for worker history to recover before editing."
+          : workerHistoryLoading
+            ? "Launch settings are locked while Dispatch history is loading. Wait for worker history to finish before editing."
+      : null;
   const stored = getNodeHarness(node.id);
   const [sel, setSel] = useState(stored === null ? INHERIT : KNOWN.includes(stored) ? stored : CUSTOM);
   const [custom, setCustom] = useState(stored && !KNOWN.includes(stored) ? stored : "");
+  const [specExpanded, setSpecExpanded] = useState(false);
 
   useEffect(() => {
     const s = getNodeHarness(node.id);
     setSel(s === null ? INHERIT : KNOWN.includes(s) ? s : CUSTOM);
     setCustom(s && !KNOWN.includes(s) ? s : "");
+    // A newly selected stage starts compact even if the previous stage's
+    // description was expanded. The explicit button preserves accessibility.
+    setSpecExpanded(false);
   }, [node.id]);
 
   function pick(v: string) {
+    if (launchLocked) return;
     setSel(v);
     if (v === INHERIT) setNodeHarness(node.id, null);
     else if (v !== CUSTOM) setNodeHarness(node.id, v);
   }
   function pickCustom(v: string) {
-    if (!customOk) return; // server would 403 anyway; keep the stored value intact
+    if (!customOk || launchLocked) return; // keep the stored value intact while locked
     setCustom(v);
     setNodeHarness(node.id, v.trim() || null);
   }
@@ -116,11 +254,13 @@ export function NodePanel({ node, onClose }: { node: DagNode; onClose: () => voi
   }, [envId]);
 
   function pickEnvironment(v: string) {
+    if (launchLocked) return;
     // "" = Local. setNodeEnvironment clears a stale placement with the env.
     setNodeEnvironment(node.id, v || null);
   }
 
   function pickPlacement(p: PlacementSpec | null) {
+    if (launchLocked) return;
     setNodePlacement(node.id, p);
   }
 
@@ -164,11 +304,63 @@ export function NodePanel({ node, onClose }: { node: DagNode; onClose: () => voi
         <code>{node.id}</code>
       </div>
 
+      <div className="node-panel__lead" aria-live="polite">
+        {isLead ? (
+          <>
+            <div className="node-panel__lead-state">
+              <span aria-hidden="true">★</span>
+              <span>
+                <strong>Lead stage</strong>
+                <small>Semantic main-agent ownership for Run {runId}</small>
+              </span>
+            </div>
+            <button
+              type="button"
+              className="node-panel__lead-clear"
+              onClick={() => onLeadChange(null)}
+              aria-label={`Clear lead stage for ${node.label}`}
+            >
+              Clear
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            className="node-panel__lead-mark"
+            onClick={() => onLeadChange(node.id)}
+            aria-pressed="false"
+            title="Mark this Task as the semantic lead stage; this does not change Orca coordinator authority"
+          >
+            <span aria-hidden="true">☆</span> Mark as lead stage
+          </button>
+        )}
+      </div>
+
+      {workerHistoryLoading && (
+        <div className="node-panel__history" role="status">
+          Checking Dispatch history…
+        </div>
+      )}
+      {workerHistoryError && (
+        <div className="node-panel__history node-panel__history--warn" role="status">
+          Could not verify Dispatch history; launch settings remain locked until verification recovers.
+        </div>
+      )}
+
+      {lockReason && (
+        <div className="node-panel__lock" role="note">
+          <span aria-hidden="true">🔒</span>
+          <span>{lockReason}</span>
+        </div>
+      )}
+
       <div className="node-panel__field">
         <span className="node-panel__key">Harness (which agent runs this node)</span>
         <DoodleSelect
           value={sel}
           onChange={pick}
+          disabled={launchLocked}
+          title={launchLocked ? lockReason ?? "Launch settings are locked" : undefined}
           options={[
             { value: INHERIT, label: `Default (${getDefaultHarness()})` },
             ...HARNESSES.map((h) => ({ value: h, label: h })),
@@ -193,7 +385,7 @@ export function NodePanel({ node, onClose }: { node: DagNode; onClose: () => voi
             value={custom}
             placeholder="command, e.g. aider"
             onChange={(e) => pickCustom(e.target.value)}
-            disabled={!customOk}
+            disabled={!customOk || launchLocked}
           />
         )}
         {sel === CUSTOM && !customOk && (
@@ -209,6 +401,7 @@ export function NodePanel({ node, onClose }: { node: DagNode; onClose: () => voi
         <DoodleSelect
           value={envId ?? ""}
           onChange={pickEnvironment}
+          disabled={launchLocked}
           loading={envs === null}
           options={[
             { value: "", label: `Local (this server)` },
@@ -238,12 +431,14 @@ export function NodePanel({ node, onClose }: { node: DagNode; onClose: () => voi
           <DoodleSelect
             value={placement?.kind === "existing" ? `existing:${placement.selector}` : placement?.kind === "new-top-level" ? "new-top-level" : ""}
             onChange={(v) => {
+              if (launchLocked) return;
               if (v.startsWith("existing:")) pickPlacement({ kind: "existing", selector: v.slice("existing:".length) });
               else if (v === "new-top-level") {
                 const repo = repos?.[0]?.id ?? "";
                 pickPlacement(repo ? { kind: "new-top-level", repo, name: `${node.id.slice(0, 24)}-wt` } : null);
               } else pickPlacement(null);
             }}
+            disabled={launchLocked}
             loading={worktrees === null || repos === null}
             options={[
               { value: "", label: "(pick a workspace…)" },
@@ -267,6 +462,7 @@ export function NodePanel({ node, onClose }: { node: DagNode; onClose: () => voi
               <DoodleSelect
                 value={placement.repo}
                 onChange={(repo) => pickPlacement({ ...placement, repo })}
+                disabled={launchLocked}
                 loading={repos === null}
                 options={(repos ?? []).map((r) => ({ value: r.id, label: r.displayName ?? r.id }))}
               />
@@ -275,9 +471,11 @@ export function NodePanel({ node, onClose }: { node: DagNode; onClose: () => voi
                 value={placement.name}
                 placeholder="worktree name"
                 onChange={(e) => {
+                  if (launchLocked) return;
                   const name = e.target.value.trim();
                   pickPlacement(name ? { ...placement, name } : null);
                 }}
+                disabled={launchLocked}
               />
               <span className="node-panel__hint">New independent top-level worktree: exact repo + explicit name.</span>
             </div>
@@ -302,7 +500,10 @@ export function NodePanel({ node, onClose }: { node: DagNode; onClose: () => voi
           {picker === "select" ? (
             <DoodleSelect
               value={model ?? ""}
-              onChange={(v) => setNodeModel(node.id, v || null)}
+              onChange={(v) => {
+                if (!launchLocked) setNodeModel(node.id, v || null);
+              }}
+              disabled={launchLocked}
               loading={openCodeModels === null}
               options={[
                 { value: "", label: "(default model)" },
@@ -315,6 +516,7 @@ export function NodePanel({ node, onClose }: { node: DagNode; onClose: () => voi
               value={model ?? ""}
               placeholder={`model name, e.g. ${effHarness === "claude" ? "opus" : effHarness === "codex" ? "o3" : "<model>"}`}
               onChange={(e) => setNodeModel(node.id, e.target.value.trim() || null)}
+              disabled={launchLocked}
             />
           )}
         </div>
@@ -330,7 +532,10 @@ export function NodePanel({ node, onClose }: { node: DagNode; onClose: () => voi
           <span className="node-panel__key">Effort ({effHarness})</span>
           <DoodleSelect
             value={getNodeEffort(node.id) ?? ""}
-            onChange={(v) => setNodeEffort(node.id, v || null)}
+            onChange={(v) => {
+              if (!launchLocked) setNodeEffort(node.id, v || null);
+            }}
+            disabled={launchLocked}
             options={[
               { value: "", label: "(default effort)" },
               ...EFFORT_LEVELS.map((e) => ({ value: e, label: e })),
@@ -369,8 +574,25 @@ export function NodePanel({ node, onClose }: { node: DagNode; onClose: () => voi
       )}
 
       <div className="node-panel__field">
-        <span className="node-panel__key">Spec</span>
-        <p className="node-panel__spec-ro">{node.spec}</p>
+        <div className="node-panel__spec-head">
+          <span className="node-panel__key">Spec</span>
+          <button
+            type="button"
+            className="node-panel__spec-toggle"
+            aria-expanded={specExpanded}
+            aria-controls={`stage-spec-${node.id}`}
+            onClick={() => setSpecExpanded((open) => !open)}
+          >
+            {specExpanded ? "Collapse" : "Expand"}
+          </button>
+        </div>
+        <p
+          id={`stage-spec-${node.id}`}
+          className={`node-panel__spec-ro${specExpanded ? " node-panel__spec-ro--expanded" : ""}`}
+          title={specExpanded ? undefined : node.spec}
+        >
+          {node.spec}
+        </p>
         <span className="node-panel__hint">
           To change the spec or deps, have your agent redraw the DAG in a fresh Run.
         </span>
@@ -379,7 +601,7 @@ export function NodePanel({ node, onClose }: { node: DagNode; onClose: () => voi
       {node.result && (
         <div className="node-panel__field">
           <span className="node-panel__key">Result</span>
-          <pre className="node-panel__result">{node.result}</pre>
+          <ResultSummary raw={node.result} />
         </div>
       )}
     </aside>

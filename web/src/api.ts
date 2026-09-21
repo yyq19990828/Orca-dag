@@ -1,4 +1,5 @@
 import type {
+  ActivitySnapshot,
   DagResponse,
   OrcaEnvironmentView,
   OrcaReadiness,
@@ -9,6 +10,7 @@ import type {
   RunStatus,
   StopResultEntry,
   ViewerConfig,
+  WorkerAccountingView,
   WorkerOutputView,
 } from "./types";
 
@@ -138,6 +140,22 @@ export async function fetchRunStatus(): Promise<RunStatus> {
   return get<RunStatus>("/api/run-status");
 }
 
+/** Readable, strictly Run-scoped coordinator/worker history. */
+export async function fetchActivity(runId: string): Promise<ActivitySnapshot> {
+  return get<ActivitySnapshot>(`/api/activity?run=${encodeURIComponent(runId)}`);
+}
+
+/**
+ * Durable worker accounting for one Run. Every returned Task id is evidence
+ * that the Task has started at least once, regardless of liveness or outcome.
+ */
+export async function fetchWorkers(runId: string): Promise<WorkerAccountingView[]> {
+  const { workers } = await get<{ workers: WorkerAccountingView[] }>(
+    `/api/workers?run=${encodeURIComponent(runId)}`,
+  );
+  return workers ?? [];
+}
+
 /**
  * Resolved Orca CLI + version + whether execution is allowed. The server
  * resolves both once at startup, so this is fetched once per page load — a
@@ -182,6 +200,11 @@ export async function stopRun(): Promise<{ clean: boolean; results: StopResultEn
 /** Reply to a worker question/escalation (the run's inbox). */
 export async function replyToMessage(id: string, body: string, runId: string): Promise<void> {
   await post(`/api/messages/${encodeURIComponent(id)}/reply`, { body, runId });
+}
+
+/** Send durable coordinator guidance to the Task's current active Dispatch. */
+export async function sendTaskMessage(taskId: string, body: string, runId: string): Promise<void> {
+  await post(`/api/tasks/${encodeURIComponent(taskId)}/messages`, { body, runId });
 }
 
 /** Explicitly release a settled worker terminal (resolves cleanup debt). */

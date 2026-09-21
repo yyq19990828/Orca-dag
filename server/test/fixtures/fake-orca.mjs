@@ -97,6 +97,14 @@ function landSupervised(taskId, runId) {
     // carries the SAME handle — the identity reuse tests assert with.
     agentTerminal: reuseHandle ?? `term_w${state.seq.dispatch}`,
     retryOf: flag("--retry-of") ?? null,
+    launch: {
+      agent: flag("--agent") ?? null,
+      model: flag("--model") ?? null,
+      effort: flag("--effort") ?? null,
+      worktree: flag("--worktree") ?? null,
+      terminal: reuseHandle ?? null,
+      on: flag("--on") ?? null,
+    },
     // Phase 6: `--on` records the execution environment on the Dispatch row —
     // worker-list reports such rows through projection.host and (as the real
     // runtime does) hides them from a plain local fleet listing.
@@ -249,6 +257,7 @@ function workerRows(runId, terminalStateFilter) {
           return raw;
         })(),
         attention: null,
+        launch: d.launch ?? null,
       },
     }));
   if (terminalStateFilter) rows = rows.filter((r) => r.terminalState === terminalStateFilter);
@@ -288,7 +297,12 @@ if (ns === "orchestration" && verb === "task-list") {
     },
   });
 } else if (ns === "orchestration" && verb === "worker-list") {
-  ok({ workers: workerRows(flag("--run"), flag("--terminal-state")) });
+  const workers = workerRows(flag("--run"), flag("--terminal-state"));
+  // The real worker-list receipt always carries an explicit page envelope,
+  // even for a terminal one-page result. Keep the shared fixture honest so
+  // callers can fail closed on missing pagination metadata without weakening
+  // coordinator tests that do not exercise multiple pages.
+  ok({ workers, page: { limit: 100, total: workers.length, hasMore: false, nextCursor: null } });
 } else if (ns === "orchestration" && verb === "check") {
   const box = state.mailboxes?.[flag("--terminal")] ?? [];
   const ack = flag("--ack");
@@ -317,6 +331,29 @@ if (ns === "orchestration" && verb === "task-list") {
       ok(emptyDelivery());
     }
   }
+} else if (ns === "orchestration" && verb === "send") {
+  const target = flag("--to") ?? "";
+  const dispatchId = target.startsWith("dispatch:") ? target.slice("dispatch:".length) : null;
+  const dispatch = dispatchId ? state.dispatches?.[dispatchId] : null;
+  if (!dispatch || dispatch.status !== "dispatched") {
+    fail("dispatch_not_active", `no active dispatch ${dispatchId ?? target}`);
+  }
+  state.seq ??= {};
+  state.seq.message = (state.seq.message ?? 0) + 1;
+  const sent = {
+    id: `msg_sent_${state.seq.message}`,
+    run_id: flag("--run"),
+    task_id: flag("--task-id"),
+    dispatch_id: flag("--dispatch-id"),
+    to: target,
+    from: flag("--from"),
+    subject: flag("--subject"),
+    body: flag("--body"),
+    type: flag("--type"),
+  };
+  state.sentMessages ??= [];
+  state.sentMessages.push(sent);
+  ok({ message: sent });
 } else if (ns === "orchestration" && verb === "reply") {
   const id = flag("--id");
   for (const box of Object.values(state.mailboxes ?? {})) {

@@ -9,8 +9,11 @@ import {
   noteManualRelease,
   resetCoordinatorForTests,
   retryWorker,
+  shouldPersistCoordinatorCheck,
   startCoordinator,
   stopCoordinator,
+  type CoordinatorActivityNotice,
+  type CoordinatorCheckReceipt,
   type StartOpts,
   type StopReport,
 } from "./coordinator";
@@ -444,6 +447,15 @@ describe("two-wave DAG: dependency order, concurrency cap, completion boundary",
     assert.equal(attempt("task_ccc").outcome, "failed");
     assert.deepEqual(status.cleanupDebt, [], "no cleanup debt at completion");
     assert.ok(status.completedAt !== null && status.completedAt > 0);
+    assert.ok(status.checks.length > 0, "every rolling inbox pass leaves a bounded receipt");
+    assert.ok(status.checks.some((receipt) => receipt.messageCount === 0), "empty checks remain visible");
+    assert.ok(
+      status.checks.some((receipt) => receipt.messageTypes.includes("worker_done")),
+      "message-bearing checks retain their readable message types",
+    );
+    const agentSnapshot = status.checks.flatMap((receipt) => receipt.agents).find((agent) => agent.taskId === "task_aaa");
+    assert.ok(agentSnapshot, "a check receipt carries a compact per-agent snapshot");
+    assert.equal(agentSnapshot.agent, "claude");
 
     // Boundary clause 4: the coordinator itself queried the fleet and refused
     // to complete while anything was reclaimable — so a completed phase plus
@@ -520,8 +532,17 @@ describe("worker_done validation", () => {
 describe("heartbeat handling", () => {
   it("records heartbeats as liveness evidence and never as completion", async () => {
     const runId = "run_beat";
+    const persistedChecks: CoordinatorCheckReceipt[] = [];
     await singleTaskState(runId);
-    await startCoordinator(baseOpts(runId));
+    await startCoordinator(
+      baseOpts(runId, {
+        modelByTask: { task_aaa: "gpt-check" },
+        effortByTask: { task_aaa: "max" },
+        onCheck: async (receipt) => {
+          persistedChecks.push(receipt);
+        },
+      }),
+    );
     await waitFor(() => (calls("worker-start").length === 1 ? true : null), "worker to start");
     const dispatchId = await dispatchIdOf("task_aaa");
     await injectMail([
@@ -539,7 +560,142 @@ describe("heartbeat handling", () => {
     await waitFor(() => (attempt("task_aaa").lastHeartbeatAt === "2026-01-01T00:00:05Z" ? true : null), "heartbeat recorded");
     assert.equal(attempt("task_aaa").settled, false, "a heartbeat is not completion");
     assert.notEqual(coordinatorStatus().phase, "completed");
+    const checkedAgent = await waitFor(
+      () =>
+        coordinatorStatus().checks
+          .flatMap((receipt) => receipt.agents)
+          .find((agent) => agent.taskId === "task_aaa" && agent.model === "gpt-check") ?? null,
+      "runtime launch echo in a check receipt",
+    );
+    assert.equal(checkedAgent.agent, "claude");
+    assert.equal(checkedAgent.effort, "max");
+    await waitFor(
+      () =>
+        persistedChecks.some((receipt) => receipt.messageTypes.includes("heartbeat"))
+          ? true
+          : null,
+      "heartbeat delivery check to persist",
+    );
+    const heartbeatCheck = persistedChecks.find((receipt) => receipt.messageTypes.includes("heartbeat"))!;
+    const quietSame = {
+      ...heartbeatCheck,
+      checkedAt: heartbeatCheck.checkedAt + 1,
+      messageCount: 0,
+      messageTypes: [],
+      deliveryId: null,
+    };
+    const quietPrevious = { ...quietSame, checkedAt: quietSame.checkedAt - 1 };
+    assert.equal(
+      shouldPersistCoordinatorCheck(quietSame, quietPrevious),
+      false,
+      "an identical empty check remains memory-only",
+    );
+    assert.equal(
+      shouldPersistCoordinatorCheck(
+        { ...quietSame, agents: quietSame.agents.map((agent) => ({ ...agent, detail: "new tool call" })) },
+        quietPrevious,
+      ),
+      true,
+      "an agent-state change is meaningful",
+    );
+    assert.equal(
+      shouldPersistCoordinatorCheck({ ...quietSame, error: "connection lost" }, quietPrevious),
+      true,
+      "a new error is meaningful",
+    );
     await stopCoordinator();
+  });
+});
+
+describe("bidirectional coordinator chat", () => {
+  it("records a Task assignment only after its worker start succeeds", async () => {
+    const runId = "run_assignment";
+    await singleTaskState(runId);
+    await mutateState((state) => {
+      state.tasks.task_aaa.spec = "Target: add the focused regression test. Constraints: keep scope narrow.";
+    });
+    const events: CoordinatorActivityNotice[] = [];
+    await startCoordinator(
+      baseOpts(runId, {
+        onActivity: async (event) => {
+          events.push(event);
+        },
+      }),
+    );
+
+    await waitFor(() => (events.length === 1 ? true : null), "assignment activity");
+    assert.equal(events[0].kind, "dispatch_started");
+    assert.equal(events[0].taskId, "task_aaa");
+    assert.match(String(events[0].dispatchId), /^ctx_s/);
+    assert.equal(events[0].title, "Assigned this stage");
+    assert.match(String(events[0].detail), /focused regression test/);
+  });
+
+  it("sends proactive guidance to an active Dispatch and journals the confirmed enqueue", async () => {
+    const { call } = await startApp();
+    const runId = "run_guidance";
+    await singleTaskState(runId);
+    await startCoordinator(baseOpts(runId));
+    await waitFor(() => (calls("worker-start").length === 1 ? true : null), "worker to start");
+    const dispatchId = await dispatchIdOf("task_aaa");
+
+    const sent = await call("POST", "/api/tasks/task_aaa/messages", {
+      runId,
+      body: "Please add the missing edge-case assertion.",
+    });
+    assert.equal(sent.status, 200);
+    assert.equal(sent.json.dispatchId, dispatchId);
+    assert.equal(calls("send").length, 1);
+    const sendArgv = calls("send")[0].argv;
+    assert.deepEqual(sendArgv.slice(sendArgv.indexOf("--to"), sendArgv.indexOf("--to") + 2), [
+      "--to",
+      `dispatch:${dispatchId}`,
+    ]);
+    assert.deepEqual(sendArgv.slice(sendArgv.indexOf("--task-id"), sendArgv.indexOf("--task-id") + 2), [
+      "--task-id",
+      "task_aaa",
+    ]);
+
+    const activity = await call("GET", `/api/activity?run=${runId}`);
+    assert.equal(activity.status, 200);
+    const events = (activity.json.events as Array<Record<string, unknown>>) ?? [];
+    const guidance = events.find((event) => event.title === "Coordinator sent guidance");
+    assert.ok(guidance, "confirmed outbound guidance must appear in activity");
+    assert.equal(guidance.direction, "coordinator_to_agent");
+    assert.equal(guidance.taskId, "task_aaa");
+
+    const sendCount = calls("send").length;
+    const wrongRun = await call("POST", "/api/tasks/task_aaa/messages", {
+      runId: "run_someone_else",
+      body: "This must not cross the Run boundary.",
+    });
+    assert.equal(wrongRun.status, 409);
+    assert.equal(wrongRun.json.code, "not_running");
+    assert.equal(calls("send").length, sendCount, "wrong-Run guidance is refused before send");
+
+    await mutateState((state) => {
+      const task = state.tasks.task_aaa;
+      const dispatch = state.dispatches[task.dispatch_id];
+      task.status = "completed";
+      dispatch.status = "completed";
+      dispatch.terminalState = "reclaimable";
+    });
+    const settled = await call("POST", "/api/tasks/task_aaa/messages", {
+      runId,
+      body: "This must not target a settled Dispatch.",
+    });
+    assert.equal(settled.status, 409);
+    assert.equal(settled.json.code, "active_dispatch_required");
+    assert.equal(calls("send").length, sendCount, "settled guidance is refused before send");
+
+    await stopCoordinator();
+    const refused = await call("POST", "/api/tasks/task_aaa/messages", {
+      runId,
+      body: "This must not be sent after the coordinator stops.",
+    });
+    assert.equal(refused.status, 409);
+    assert.equal(refused.json.code, "not_running");
+    assert.equal(calls("send").length, sendCount, "refusal happens before Orca send");
   });
 });
 
@@ -601,8 +757,9 @@ describe("questions hold the Delivery open", () => {
     // question — wait for it rather than racing the same tick.
     await waitFor(() => (coordinatorStatus().phase === "awaiting_input" ? true : null), "awaiting_input while the question is open");
 
-    // GET /api/inbox exposes it for the panel.
-    const inbox = await call("GET", "/api/inbox");
+    // The compatibility Inbox view is explicitly Run-scoped, just like the
+    // Activity surface that replaces it in the web client.
+    const inbox = await call("GET", `/api/inbox?run=${runId}`);
     assert.equal(inbox.status, 200);
     assert.equal((inbox.json.inbox as any).pending.length, 1);
 
@@ -613,9 +770,39 @@ describe("questions hold the Delivery open", () => {
 
     assert.equal(calls("reply").length, 1);
     assert.deepEqual(calls("reply")[0].argv.slice(2, 7), ["--id", "msg_question", "--body", "sqlite is fine", "--from"]);
+    const activity = await call("GET", `/api/activity?run=${runId}`);
+    assert.equal(activity.status, 200);
+    const events = (activity.json.events as Array<Record<string, unknown>>) ?? [];
+    const replyEvent = events.find((event) => event.title === "Coordinator replied to a worker");
+    assert.ok(replyEvent, "the successful reply must be journaled");
+    assert.equal(replyEvent.taskId, "task_aaa");
+    assert.equal(replyEvent.dispatchId, dispatchId);
     await waitFor(() => (ackCalls(deliveryId).length > 0 ? true : null), "delivery ack after reply");
     assert.equal(ackCalls(deliveryId).length, 1, "acked exactly once");
     await waitFor(() => (coordinatorStatus().phase === "completed" ? true : null), "completion after reply");
+  });
+
+  it("refuses guidance when Orca marks the active Dispatch unverifiable", async () => {
+    const { call } = await startApp();
+    const runId = "run_guidance_unverifiable";
+    await singleTaskState(runId);
+    await startCoordinator(baseOpts(runId));
+    await waitFor(() => (calls("worker-start").length === 1 ? true : null), "worker to start");
+    const dispatchId = await dispatchIdOf("task_aaa");
+    await mutateState((state) => {
+      state.livenessOverride ??= {};
+      state.livenessOverride[dispatchId] = "unverifiable";
+    });
+
+    const before = calls("send").length;
+    const refused = await call("POST", "/api/tasks/task_aaa/messages", {
+      runId,
+      body: "Do not send this while the worker is unverifiable.",
+    });
+    assert.equal(refused.status, 409);
+    assert.equal(refused.json.code, "active_dispatch_required");
+    assert.equal(calls("send").length, before, "unverifiable Dispatches are refused before send");
+    await stopCoordinator();
   });
 
   it("surfaces escalations the same way and blocks completion until answered", async () => {
@@ -799,7 +986,15 @@ describe("legacy (opencode) lane settlement", () => {
   it("closes its proven viewer-created terminal and settles the unsupervised tracking dispatch without worker-stop, then completes", async () => {
     const runId = "run_legacy";
     await singleTaskState(runId);
-    await startCoordinator(baseOpts(runId, { harnessByTask: { task_aaa: "opencode" } }));
+    const events: CoordinatorActivityNotice[] = [];
+    await startCoordinator(
+      baseOpts(runId, {
+        harnessByTask: { task_aaa: "opencode" },
+        onActivity: async (event) => {
+          events.push(event);
+        },
+      }),
+    );
 
     // Legacy start: bare shell + tracking dispatch + preamble typed in.
     await waitFor(() => (calls("dispatch").length === 1 ? true : null), "tracking dispatch");
@@ -813,6 +1008,8 @@ describe("legacy (opencode) lane settlement", () => {
     await waitFor(() => (attempt("task_aaa").mode === "legacy" ? true : null), "legacy attempt recorded");
     await waitFor(() => (attempt("task_aaa").handle !== null ? true : null), "viewer-created terminal recorded");
     await waitFor(() => (attempt("task_aaa").dispatchId !== null ? true : null), "tracking dispatch adopted");
+    await waitFor(() => (events.length === 1 ? true : null), "legacy assignment activity");
+    assert.equal(events[0].dispatchId, attempt("task_aaa").dispatchId);
     const legacyHandle = attempt("task_aaa").handle!;
 
     // The worker settles itself (its preamble sends worker_done from its own

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchRunStatus, startRun, stopRun } from "../api";
 import { DoodleSelect } from "./DoodleSelect";
+import { useDecisionDialog } from "./DecisionDialog";
 import {
   getMaxConcurrency,
   effortMap,
@@ -37,13 +38,26 @@ export function ExecControls({
   runId,
   taskIds,
   readyCount = 0,
+  startingRunId = null,
+  workerHistoryLoading = false,
+  workerHistoryError = null,
+  onRunStarting,
+  onRunStartFinished,
 }: {
   /** Run to execute. Mutations are Run-scoped since Orca 1.4.160. */
   runId: string;
   taskIds: string[];
   /** ready-but-unfired tasks — the Run button nudges itself when there are any */
   readyCount?: number;
+  /** Local App signal raised before POST /api/run can report a bound runId. */
+  startingRunId?: string | null;
+  /** Worker history is the durable launch-lock source; uncertainty fails closed. */
+  workerHistoryLoading?: boolean;
+  workerHistoryError?: string | null;
+  onRunStarting?: (runId: string) => void;
+  onRunStartFinished?: (runId: string, status: RunStatus | null) => void;
 }) {
+  const dialog = useDecisionDialog();
   const config = useConfig();
   const { customCommandsAllowed: customOk } = useFlags();
   // Execution gate (Phase 2): the server probes the resolved Orca CLI once.
@@ -81,17 +95,35 @@ export function ExecControls({
     return () => window.clearInterval(t);
   }, [poll]);
 
-  const running = status?.running ?? false;
-  const phase = status?.phase ?? "idle";
+  // The status endpoint is process-local and can describe another selected
+  // Run. Only a matching runId grants this panel running/stop authority.
+  const ownStatus = status?.runId === runId ? status : null;
+  const otherRunStatus =
+    status?.running && status.runId && status.runId !== runId ? status : null;
+  const running = ownStatus?.running ?? false;
+  const starting = startingRunId === runId;
+  const anotherRunStarting = Boolean(startingRunId && startingRunId !== runId);
+  const phase = ownStatus?.phase ?? (starting ? "binding" : "idle");
+  const historyLockReason = workerHistoryError
+    ? "Launch settings are locked while Dispatch history could not be verified. Wait for worker history to recover before editing."
+    : workerHistoryLoading
+      ? "Launch settings are locked while Dispatch history is loading. Wait for worker history to finish before editing."
+      : null;
+  const launchLockReason = running
+    ? "Launch settings are frozen while this Run is executing. Stop the coordinator to edit Tasks that have not started."
+    : starting
+      ? "Launch settings are frozen while this Run is starting. Wait for coordinator binding and recovery to finish before editing."
+      : historyLockReason;
+  const launchLocked = running || starting || Boolean(historyLockReason);
   const resolvedDefault = defHarness === CUSTOM ? custom.trim() : defHarness;
   // Dispatch.failure_count > 0 means Orca already retried this attempt.
-  const retrying = (status?.attempts ?? []).filter((a) => !a.settled && a.failureCount > 0).length;
+  const retrying = (ownStatus?.attempts ?? []).filter((a) => !a.settled && a.failureCount > 0).length;
   // Settlement/ownership bookkeeping worth surfacing while the loop runs.
-  const settled = (status?.attempts ?? []).filter((a) => a.settled).length;
-  const released = (status?.attempts ?? []).filter((a) =>
+  const settled = (ownStatus?.attempts ?? []).filter((a) => a.settled).length;
+  const released = (ownStatus?.attempts ?? []).filter((a) =>
     ["released", "retained", "closed"].includes(a.terminalDecision),
   ).length;
-  const stopReport = status?.lastStopReport ?? null;
+  const stopReport = ownStatus?.lastStopReport ?? null;
   const stopUncertain = stopReport?.results.filter((r) => r.result === "unknown") ?? [];
 
   /** Short human label for the coordinator's §6.3 phase. */
@@ -107,6 +139,7 @@ export function ExecControls({
   };
 
   function pickDefault(h: string) {
+    if (launchLocked) return;
     if (h === CUSTOM) {
       setForceCustom(true);
       return;
@@ -130,6 +163,18 @@ export function ExecControls({
       setErr("Pick a default harness");
       return;
     }
+    if (launchLocked) {
+      setErr(launchLockReason ?? "Launch settings are temporarily locked.");
+      return;
+    }
+    if (anotherRunStarting) {
+      setErr(`Run ${startingRunId} is already starting in this viewer.`);
+      return;
+    }
+    if (otherRunStatus) {
+      setErr(`Run ${otherRunStatus.runId} is already executing in this viewer. Pick that Run to stop it.`);
+      return;
+    }
     // Mirror the server's custom-command policy for a fast, clear error — the
     // server re-checks (403) regardless, so this is UX, not the real gate.
     if (!customOk) {
@@ -143,19 +188,25 @@ export function ExecControls({
     }
     // Binding is the only way to get mutation authority on a Run, and it fences
     // whoever held it — usually the agent terminal that drew this DAG.
-    const ok = confirm(
-      "Starting execution binds this Run's coordinator to the viewer.\n\n" +
-        "Any agent terminal currently coordinating the Run gets fenced (its orchestration " +
-        "mutations start failing with consumer_fenced). It can take the Run back anytime with " +
-        "orca orchestration run-use --id " +
-        runId +
-        ".\n\nContinue?",
-    );
+    const ok = await dialog.confirm({
+      title: "Let Viewer coordinate this Run?",
+      message:
+        "Starting execution transfers coordinator authority to the Viewer. Any agent terminal " +
+        "currently coordinating this Run will be fenced, so its orchestration mutations will fail " +
+        "with consumer_fenced. It can take authority back with:\n\n" +
+        `orca orchestration run-use --id ${runId}`,
+      confirmLabel: "Start Run",
+      cancelLabel: "Not now",
+    });
     if (!ok) return;
 
     if (defHarness === CUSTOM) setDefaultHarness(resolvedDefault);
+    // Raise the App-level lock before the request: the server's binding and
+    // recovery phases intentionally precede the first status with runId.
+    onRunStarting?.(runId);
     setBusy(true);
     setErr(null);
+    let startedStatus: RunStatus | null = null;
     try {
       const s = await startRun(
         runId,
@@ -171,15 +222,18 @@ export function ExecControls({
         environmentMap(taskIdsRef.current),
         placementMap(taskIdsRef.current),
       );
+      startedStatus = s;
       setStatus(s);
     } catch (e) {
       setErr(String((e as Error).message ?? e));
     } finally {
       setBusy(false);
+      onRunStartFinished?.(runId, startedStatus);
     }
   }
 
   async function stop() {
+    if (!running) return;
     setBusy(true);
     setErr(null);
     try {
@@ -200,7 +254,7 @@ export function ExecControls({
           size="sm"
           value={defHarness}
           onChange={pickDefault}
-          disabled={running}
+          disabled={launchLocked}
           options={[
             ...HARNESSES.map((h) => ({ value: h, label: h })),
             // "Custom…" only exists while the server allows custom commands —
@@ -223,8 +277,10 @@ export function ExecControls({
             className="exec__custom"
             value={custom}
             placeholder="command"
-            onChange={(e) => setCustom(e.target.value)}
-            disabled={running || !customOk}
+            onChange={(e) => {
+              if (!launchLocked) setCustom(e.target.value);
+            }}
+            disabled={launchLocked || !customOk}
           />
         )}
         {defHarness === CUSTOM && !customOk && <span className="exec__hint">{CUSTOM_OFF_HINT}</span>}
@@ -238,8 +294,10 @@ export function ExecControls({
           min={1}
           max={16}
           value={config.maxConcurrency}
-          onChange={(e) => setMaxConcurrency(Number(e.target.value) || 1)}
-          disabled={running}
+          onChange={(e) => {
+            if (!launchLocked) setMaxConcurrency(Number(e.target.value) || 1);
+          }}
+          disabled={launchLocked}
         />
       </label>
 
@@ -249,11 +307,11 @@ export function ExecControls({
             ⏹ Stop
           </button>
           <span className="exec__running">
-            <span className="exec__pulse" /> {PHASE_LABEL[phase] ?? phase} · {status?.busy ?? 0} worker
-            {(status?.busy ?? 0) === 1 ? "" : "s"}
+            <span className="exec__pulse" /> {PHASE_LABEL[phase] ?? phase} · {ownStatus?.busy ?? 0} worker
+            {(ownStatus?.busy ?? 0) === 1 ? "" : "s"}
             {/* one bead per in-flight Dispatch, breathing out of phase */}
             <span className="exec__beads" aria-hidden="true">
-              {Array.from({ length: Math.min(status?.busy ?? 0, 8) }, (_, i) => (
+              {Array.from({ length: Math.min(ownStatus?.busy ?? 0, 8) }, (_, i) => (
                 <i key={i} style={{ animationDelay: `${i * 0.14}s` }} />
               ))}
             </span>
@@ -267,21 +325,37 @@ export function ExecControls({
             {retrying > 0 && <b className="exec__retry">↻ {retrying} retrying</b>}
           </span>
         </div>
+      ) : starting ? (
+        <div className="exec__live">
+          <span className="exec__running">
+            <span className="exec__pulse" /> Binding and recovering…
+          </span>
+        </div>
       ) : phase === "completed" ? (
         <div className="exec__live">
-          <button className="btn btn--run" onClick={run} disabled={busy || !runId || execOff} title="Run again">
+          <button
+            className="btn btn--run"
+            onClick={run}
+            disabled={busy || launchLocked || anotherRunStarting || Boolean(otherRunStatus) || !runId || execOff}
+            title="Run again"
+          >
             ▶ Run again
           </button>
-          <span className="exec__running exec__done" title={status?.completedAt ? `Completed at ${new Date(status.completedAt).toLocaleTimeString()}` : undefined}>
-            ✓ Completed · {status?.attempts.length ?? 0} worker
-            {(status?.attempts.length ?? 0) === 1 ? "" : "s"} released
+          <span
+            className="exec__running exec__done"
+            title={ownStatus?.completedAt ? `Completed at ${new Date(ownStatus.completedAt).toLocaleTimeString()}` : undefined}
+          >
+            ✓ Completed · {ownStatus?.attempts.length ?? 0} worker
+            {(ownStatus?.attempts.length ?? 0) === 1 ? "" : "s"} released
           </span>
         </div>
       ) : (
         <button
           className={`btn btn--run${readyCount > 0 && !busy && !execOff ? " btn--attract" : ""}`}
           onClick={run}
-          disabled={busy || taskIds.length === 0 || !runId || execOff}
+          disabled={
+            busy || launchLocked || anotherRunStarting || Boolean(otherRunStatus) || taskIds.length === 0 || !runId || execOff
+          }
           title={
             execOff
               ? readiness?.reason ?? "Execution is unavailable on this Orca runtime"
@@ -313,7 +387,24 @@ export function ExecControls({
 
       {execOff && <span className="exec__hint">🔒 {readiness?.reason}</span>}
 
-      {(err || status?.error) && <span className="exec__err">⚠️ {err || status?.error}</span>}
+      {launchLockReason && <span className="exec__hint">🔒 {launchLockReason}</span>}
+      {workerHistoryError && (
+        <span className="exec__hint">
+          ⚠️ Dispatch history could not be verified; launch settings remain locked until verification recovers.
+        </span>
+      )}
+      {otherRunStatus && (
+        <span className="exec__hint">
+          🔒 Run <code>{otherRunStatus.runId}</code> is executing; its Stop control appears when you select that Run.
+        </span>
+      )}
+      {anotherRunStarting && !otherRunStatus && (
+        <span className="exec__hint">
+          🔒 Run <code>{startingRunId}</code> is binding in this viewer; select it after startup to inspect or stop it.
+        </span>
+      )}
+
+      {(err || ownStatus?.error) && <span className="exec__err">⚠️ {err || ownStatus?.error}</span>}
     </div>
   );
 }

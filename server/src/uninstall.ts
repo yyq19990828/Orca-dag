@@ -19,11 +19,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { AGENT_SKILL_DIRS, SKILL_NAME } from "./skill";
 import { COORDINATOR_TITLE, closeTerminal, listTerminals, parseCoordinatorTitle } from "./orca";
+import { ACTIVITY_FILE } from "./activity";
 
 export interface UninstallOptions {
   /** Print what would happen, change nothing. */
   dryRun: boolean;
-  /** Also delete the workspace's `.orca-dag.config.json`. */
+  /** Also delete workspace-owned viewer config and activity history. */
   purge: boolean;
   /** Directory whose `.orca-dag.config.json` --purge targets. */
   workspace: string;
@@ -119,22 +120,25 @@ export async function runUninstall(opts: UninstallOptions): Promise<void> {
   const skills = removeSkills(opts.dryRun, log);
   const terminals = await closeCoordinatorTerminals(opts.dryRun, log);
 
-  let config = 0;
-  const configPath = join(opts.workspace, ".orca-dag.config.json");
-  if (existsSync(configPath)) {
+  let workspaceFiles = 0;
+  const persisted = [
+    { path: join(opts.workspace, ".orca-dag.config.json"), label: "harness/model/layout choices" },
+    { path: join(opts.workspace, ACTIVITY_FILE), label: "viewer activity history" },
+  ];
+  for (const item of persisted) {
+    if (!existsSync(item.path)) continue;
     if (opts.purge) {
       try {
-        if (!opts.dryRun) rmSync(configPath);
-        log(`${act(opts.dryRun ? "would remove" : "removed")}${configPath}`);
-        config++;
+        if (!opts.dryRun) rmSync(item.path);
+        log(`${act(opts.dryRun ? "would remove" : "removed")}${item.path}`);
+        workspaceFiles++;
       } catch (err) {
-        log(`${act("failed")}${configPath}: ${String((err as Error)?.message ?? err)}`);
+        log(`${act("failed")}${item.path}: ${String((err as Error)?.message ?? err)}`);
       }
     } else {
-      // Per-node harness/model choices and canvas positions are real user work,
-      // and this is only ever *one* workspace's copy — deleting it by default
-      // would be a surprise, so it takes an explicit flag.
-      log(`${act("kept")}${configPath} — your harness/model/layout choices (delete with --purge)`);
+      // These files are one workspace's real user state. Deleting them by
+      // default would turn uninstall into an unexpected history eraser.
+      log(`${act("kept")}${item.path} — ${item.label} (delete with --purge)`);
     }
   }
 
@@ -143,7 +147,7 @@ export async function runUninstall(opts: UninstallOptions): Promise<void> {
 
   console.log(
     `\n${opts.dryRun ? "Would remove" : "Removed"}: ${skills} skill install(s), ${terminals} Orca terminal(s)` +
-      (config ? ", 1 config file" : "") + ".",
+      (workspaceFiles ? `, ${workspaceFiles} workspace file(s)` : "") + ".",
   );
 
   // A process cannot delete the program it is running from, so the last step is

@@ -100,7 +100,9 @@ export function WorkerPanel({
     }
   }
 
-  const attempts = status?.attempts ?? [];
+  // The status endpoint describes the one process-local coordinator, so its
+  // attempts are displayable only under the same selected Run.
+  const attempts = status?.runId === runId ? status.attempts : [];
   if (!runId || attempts.length === 0) return null;
 
   return (

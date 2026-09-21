@@ -125,6 +125,17 @@ export interface WorkerOutputView {
 }
 
 /**
+ * The durable identity fields the launch-lock UI needs from one worker-list
+ * row. The server may return richer fleet accounting, but existence of a
+ * Task-linked row alone proves that its launch plan has already been used.
+ */
+export interface WorkerAccountingView {
+  dispatchId: string;
+  taskId: string;
+  runId: string;
+}
+
+/**
  * One in-flight (or settled) attempt, mirroring an Orca Dispatch. `supervised`
  * attempts were started by `worker-start` and Orca tracks them; `legacy` ones
  * were composed by hand for a harness Orca doesn't recognize as a configured
@@ -269,6 +280,107 @@ export interface CleanupDebtItem {
   detail: string | null;
 }
 
+/** One readable row in the Run-scoped coordinator/worker activity history. */
+export interface ActivityEvent {
+  id: string;
+  runId: string;
+  taskId: string | null;
+  dispatchId: string | null;
+  direction: "coordinator_to_agent" | "agent_to_coordinator" | "system";
+  actor: {
+    role: "coordinator" | "lead" | "worker" | "system";
+    label: string;
+    harness: string | null;
+    model: string | null;
+  };
+  kind:
+    | "dispatch_started"
+    | "status"
+    | "heartbeat"
+    | "question"
+    | "reply"
+    | "worker_done"
+    | "escalation"
+    | "gate"
+    | "recovery"
+    | "release"
+    | "cleanup_debt"
+    | "unknown";
+  severity: "info" | "success" | "warning" | "error";
+  title: string;
+  summary: string;
+  detail: string | null;
+  createdAt: string;
+  groupedCount: number;
+  actionable: null | {
+    kind: "reply" | "release" | "retain" | "retry";
+    targetId: string;
+  };
+  technical: {
+    messageId?: string;
+    terminalHandle?: string;
+    payload?: unknown;
+    argv?: string[];
+    provenance: "orca_message" | "fleet" | "coordinator" | "viewer_journal";
+  };
+}
+
+/** Full Activity snapshot. Every row is guaranteed to belong to `runId`. */
+export interface ActivitySnapshot {
+  runId: string;
+  events: ActivityEvent[];
+  presence: StagePresence[];
+  /** Recent receipts from the live coordinator's rolling inbox checks. */
+  checks: CoordinatorCheckReceipt[];
+  pendingCount: number;
+  truncated: boolean;
+  generatedAt: number;
+}
+
+export interface CoordinatorCheckReceipt {
+  sequence: number;
+  checkedAt: number;
+  durationMs: number;
+  deliveryId: string | null;
+  messageCount: number;
+  messageTypes: string[];
+  replayed: boolean;
+  timedOut: boolean;
+  error: string | null;
+  agents: CoordinatorCheckAgentSummary[];
+  source?: "viewer_loop" | "external_inferred";
+  evidence?: string | null;
+}
+
+export interface CoordinatorCheckAgentSummary {
+  taskId: string;
+  dispatchId: string | null;
+  liveness: "live" | "unverifiable" | "exited";
+  activity: string | null;
+  detail: string | null;
+  attention: string[];
+  agent: string;
+  model: string | null;
+  effort: string | null;
+  outcome: "succeeded" | "failed" | null;
+  observedAt: string | null;
+}
+
+/** Compact worker-list facts used by the Chat header, never a transcript. */
+export interface StagePresence {
+  taskId: string;
+  dispatchId: string;
+  liveness: "live" | "unverifiable" | "exited";
+  activity: string | null;
+  detail: string | null;
+  outcome: string | null;
+  attention: string[];
+  agent: string | null;
+  model: string | null;
+  effort: string | null;
+  observedAt: string | null;
+}
+
 /** One per-Dispatch row of the explicit Stop report. */
 export interface StopResultEntry {
   target: string;
@@ -344,6 +456,8 @@ export interface ViewerConfig {
   environmentByTask: Record<string, string>;
   /** Per-task exact placement; absent = current (Phase 6). */
   placementByTask: Record<string, PlacementSpec>;
+  /** Explicit semantic lead stage for each Run; presentation metadata only. */
+  leadTaskByRun: Record<string, string>;
   maxConcurrency: number;
   layout: LayoutKind | "";
   /** Last Run the user was viewing; restored on reload. */

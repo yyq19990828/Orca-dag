@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { DecisionDialogProvider } from "./components/DecisionDialog";
 import { initSession } from "./api";
 import "./styles.css";
 
@@ -15,7 +16,9 @@ initSession()
   .finally(() => {
     ReactDOM.createRoot(document.getElementById("root")!).render(
       <React.StrictMode>
-        <App />
+        <DecisionDialogProvider>
+          <App />
+        </DecisionDialogProvider>
       </React.StrictMode>,
     );
   });
