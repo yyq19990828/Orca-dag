@@ -557,6 +557,170 @@ describe("human-readable activity projection", () => {
     assert.equal(snapshot.events[0].actor.harness, "codex");
     assert.equal(snapshot.events[0].createdAt, "1970-01-01T00:00:00.000Z");
   });
+
+  it("carries thread_id, priority and tri-state read evidence through normalization", () => {
+    const question = message({
+      id: "q1",
+      type: "question",
+      subject: "Question",
+      body: "Ship now or after review?",
+      priority: "urgent",
+      thread_id: null,
+      read: 0,
+      created_at: "2026-09-21T00:00:01Z",
+    });
+    const reply = message({
+      id: "r1",
+      from_handle: "run:run_a",
+      to_handle: "dispatch:ctx_stage",
+      type: "status",
+      subject: "Re: Question",
+      body: "After review.",
+      priority: "normal",
+      thread_id: "q1",
+      payload: null,
+      created_at: "2026-09-21T00:00:02Z",
+      // read marker absent on this row on purpose (older runtime)
+    });
+    const { read: _omitted, ...replyWithoutMarker } = reply;
+    const ack = message({
+      id: "ack1",
+      type: "status",
+      subject: "Round acknowledged",
+      body: "Understood.",
+      priority: "normal",
+      thread_id: "q1",
+      read: 1,
+      created_at: "2026-09-21T00:00:03Z",
+    });
+
+    const snapshot = buildActivitySnapshot({
+      runId: "run_a",
+      tasks: [task()],
+      workers: [worker()],
+      messages: [question, replyWithoutMarker as OrcaMessage, ack],
+    });
+    const byId = new Map(snapshot.events.map((event) => [event.id, event]));
+
+    const questionEvent = byId.get("q1")!;
+    assert.equal(questionEvent.priority, "urgent");
+    assert.equal(questionEvent.read, false, "an explicit unread marker is evidence, keep it");
+    assert.equal(questionEvent.threadId, null);
+
+    const replyEvent = byId.get("r1")!;
+    assert.equal(replyEvent.threadId, "q1", "the durable reply keeps Orca's own thread id");
+    assert.equal(replyEvent.read, null, "an absent read marker is UNKNOWN, never unread");
+    assert.equal(replyEvent.priority, "normal");
+    assert.equal(replyEvent.direction, "coordinator_to_agent");
+
+    const ackEvent = byId.get("ack1")!;
+    assert.equal(ackEvent.threadId, "q1");
+    assert.equal(ackEvent.read, true);
+  });
+
+  it("treats malformed thread and priority fields as absent rather than guessing", () => {
+    const broken = {
+      ...message(),
+      id: "msg_broken_meta",
+      thread_id: 42,
+      priority: 7,
+      read: "yes",
+    } as unknown as OrcaMessage;
+    const snapshot = buildActivitySnapshot({
+      runId: "run_a",
+      tasks: [task()],
+      workers: [worker()],
+      messages: [broken],
+    });
+    const event = snapshot.events[0];
+    assert.equal(event.threadId, null);
+    assert.equal(event.priority, null);
+    assert.equal(event.read, null);
+  });
+
+  it("reports the global inbox window with saturation before Run filtering", () => {
+    const base = { runId: "run_a", tasks: [task()], workers: [worker()] };
+    const notSaturated = buildActivitySnapshot({
+      ...base,
+      messages: [message()],
+      inboxWindow: { limit: 100, observed: 40, saturated: false },
+    });
+    assert.deepEqual(notSaturated.inboxWindow, { limit: 100, observed: 40, saturated: false });
+
+    // Saturation is global evidence: foreign rows filled the window even
+    // though this Run only has one row — and foreign rows still never leak.
+    const saturated = buildActivitySnapshot({
+      ...base,
+      messages: [message(), message({ id: "msg_foreign", run_id: "run_other" })],
+      inboxWindow: { limit: 2, observed: 2, saturated: true },
+    });
+    assert.equal(saturated.inboxWindow?.saturated, true);
+    assert.equal(saturated.events.length, 1);
+    assert.ok(saturated.events.every((event) => event.runId === "run_a"));
+
+    // A failed history read passes no window at all: completeness is unknown.
+    const unknownWindow = buildActivitySnapshot({ ...base, messages: [] });
+    assert.equal(unknownWindow.inboxWindow, null);
+  });
+
+  it("labels provenance across durable rows, journal rows and inferred checks", () => {
+    const journal = createViewerActivity({
+      runId: "run_a",
+      kind: "reply",
+      title: "Coordinator replied to a worker",
+      summary: "Accepted.",
+      taskId: "task_stage",
+      dispatchId: "ctx_stage",
+      threadId: "q1",
+    });
+    const settled = worker();
+    settled.workerState = "succeeded";
+    settled.dispatchStatus = "completed";
+    settled.terminalState = "released";
+    settled.projection = {
+      ...settled.projection!,
+      outcome: "succeeded",
+      liveness: { verdict: "exited", reason: null },
+    };
+    const durableQuestion = message({
+      id: "q1",
+      type: "question",
+      subject: "Question",
+      created_at: "2026-09-21T00:00:01Z",
+      read: 1,
+    });
+    const durableDone = message({
+      id: "done1",
+      type: "worker_done",
+      subject: "Complete",
+      payload: JSON.stringify({ taskId: "task_stage", dispatchId: "ctx_stage", outcome: "succeeded" }),
+      created_at: "2026-09-21T00:00:02Z",
+      read: 1,
+    });
+    const snapshot = buildActivitySnapshot({
+      runId: "run_a",
+      tasks: [task()],
+      workers: [settled],
+      messages: [durableQuestion, durableDone],
+      journal: [journal],
+    });
+    const byId = new Map(snapshot.events.map((event) => [event.id, event]));
+    assert.equal(byId.get("q1")?.technical.provenance, "orca_message");
+    assert.equal(byId.get("done1")?.technical.provenance, "orca_message");
+    const journalRow = [...byId.values()].find((event) => event.technical.provenance === "viewer_journal")!;
+    assert.ok(journalRow, "the journal row survives dedupe (durable reply not in yet)");
+    assert.equal(journalRow.threadId, "q1");
+    assert.equal(journalRow.read, null, "journal rows carry no read evidence");
+    assert.equal(journalRow.priority, null);
+
+    // The settled worker + read batch reconstruct ONE check, and it says so:
+    // never presented as a native viewer-loop receipt.
+    assert.equal(snapshot.checks.length, 1);
+    assert.equal(snapshot.checks[0].source, "external_inferred");
+    assert.match(snapshot.checks[0].evidence ?? "", /Inferred from Orca's read marker/i);
+    assert.equal(snapshot.checks[0].durationMs, 0);
+    assert.match(snapshot.checks[0].deliveryId ?? "", /^inferred:/);
+  });
 });
 
 describe("viewer activity journal", () => {
@@ -590,6 +754,39 @@ describe("viewer activity journal", () => {
       assert.equal(history.events[0].summary, "A");
       assert.deepEqual(history.checks.map((receipt) => receipt.checkedAt), [1_000]);
       assert.deepEqual(await journal.list("run_a"), history.events, "legacy event-only reads stay compatible");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("hydrates pre-Phase-3 journal rows with explicit unknown conversation metadata", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "orca-dag-activity-legacy-"));
+    try {
+      // A row written by an older viewer: no threadId/priority/read fields.
+      const legacy = {
+        id: "viewer:legacy:row",
+        runId: "run_a",
+        taskId: "task_stage",
+        dispatchId: "ctx_stage",
+        direction: "coordinator_to_agent",
+        actor: { role: "coordinator", label: "Coordinator", harness: null, model: null },
+        kind: "reply",
+        severity: "info",
+        title: "Coordinator replied to a worker",
+        summary: "Accepted.",
+        detail: null,
+        createdAt: "2026-09-21T00:00:00Z",
+        groupedCount: 1,
+        actionable: null,
+        technical: { provenance: "viewer_journal" },
+      };
+      const journal = new ActivityJournal(dir);
+      const { appendFile } = await import("node:fs/promises");
+      await appendFile(journal.path, `${JSON.stringify(legacy)}\n`, "utf8");
+      const [event] = await journal.list("run_a");
+      assert.equal(event.threadId, null);
+      assert.equal(event.priority, null);
+      assert.equal(event.read, null, "absent fields hydrate to unknown, never unread");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

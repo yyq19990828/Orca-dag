@@ -1255,11 +1255,42 @@ export interface CheckInboxOpts {
   ack?: string;
 }
 
-const ORCHESTRATION_INBOX_LIMIT = 5_000;
+export const ORCHESTRATION_INBOX_LIMIT = 5_000;
+
+/**
+ * Evidence about the bounded global `orchestration inbox` window a history
+ * read came from (Phase 3). Orca's inbox command has no Run selector and no
+ * pagination, so this viewer can only observe a window — and must say so:
+ * a saturated window means older messages may exist that no read can reach,
+ * which is exactly the case where "history looks complete" would be a lie.
+ */
+export interface OrcaInboxWindow {
+  /** The window size this viewer requested (the CLI applies the same cap). */
+  limit: number;
+  /** Rows the global window returned BEFORE Run filtering. */
+  observed: number;
+  /**
+   * True when the global window came back full. The selected Run may still
+   * have few rows in it — saturation is a property of the global stream, and
+   * it is the only honest trigger for an "older history may be missing"
+   * warning. A window below the limit proves nothing beyond "everything the
+   * runtime currently returns fits", which is why completeness is claimed
+   * only within the observed window.
+   */
+  saturated: boolean;
+}
+
+/** One Run-scoped history read plus the window evidence it was observed in. */
+export interface OrcaMessagePage {
+  /** Strictly this Run's rows, filtered by exact `run_id` comparison. */
+  messages: OrcaMessage[];
+  window: OrcaInboxWindow;
+}
 
 /**
  * Read the durable, bidirectional message history for one Run without
- * consuming a Delivery.
+ * consuming a Delivery, together with the global-window metadata the UI needs
+ * to disclose history completeness (Phase 3 / epic A6).
  *
  * `check --all` only reads the selected recipient's mailbox, which means a
  * coordinator mailbox contains worker -> coordinator messages but cannot show
@@ -1267,26 +1298,45 @@ const ORCHESTRATION_INBOX_LIMIT = 5_000;
  * `orchestration inbox` surface includes both directions and survives closed
  * terminals, so it is the correct transcript source for Chat. The command has
  * no Run selector or pagination; request a deliberately generous bounded
- * window, then treat the exact `run_id` comparison below as a security and
- * correctness boundary. A mixed-workspace row must never appear in this Run.
+ * window, count the rows BEFORE Run filtering (foreign rows occupy the window
+ * too — a saturated window is global evidence, not a per-Run one), then treat
+ * the exact `run_id` comparison as a security and correctness boundary. A
+ * mixed-workspace row must never appear in this Run.
  */
-export async function listRunMessages(runId: string): Promise<OrcaMessage[]> {
+export async function listRunMessagePage(
+  runId: string,
+  opts?: { limit?: number },
+): Promise<OrcaMessagePage> {
+  const limit = opts?.limit ?? ORCHESTRATION_INBOX_LIMIT;
   const result = await runOrca<{ messages?: unknown[] }>([
     "orchestration",
     "inbox",
     "--limit",
-    String(ORCHESTRATION_INBOX_LIMIT),
+    String(limit),
   ]);
   if (!Array.isArray(result.messages)) {
     throw new OrcaCliError("inbox returned an invalid messages receipt", "invalid_message_history");
   }
-  return result.messages.filter(
+  // Counted before filtering: another Run's traffic filling the window hides
+  // THIS Run's older rows exactly as much as this Run's own traffic would.
+  const observed = result.messages.length;
+  const messages = result.messages.filter(
     (row): row is OrcaMessage =>
       Boolean(row) &&
       typeof row === "object" &&
       !Array.isArray(row) &&
       (row as { run_id?: unknown }).run_id === runId,
   );
+  return { messages, window: { limit, observed, saturated: observed >= limit } };
+}
+
+/**
+ * Message rows only — the page for callers (reply identity, health counts)
+ * that do not render history completeness. Kept as a thin wrapper so the
+ * window evidence lives in exactly one place.
+ */
+export async function listRunMessages(runId: string): Promise<OrcaMessage[]> {
+  return (await listRunMessagePage(runId)).messages;
 }
 
 /**

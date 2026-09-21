@@ -439,6 +439,15 @@ export interface ActivityEvent {
   detail: string | null;
   createdAt: string;
   groupedCount: number;
+  /**
+   * Orca conversation metadata carried through from the inbox row (Phase 3).
+   * `threadId` is present only on rows Orca itself threads (replies);
+   * `read` is tri-state — true (durable read marker), false (explicit
+   * unread marker), null/absent (unknown — never rendered as unread).
+   */
+  threadId: string | null;
+  priority: string | null;
+  read: boolean | null;
   actionable: null | {
     kind: "reply" | "release" | "retain" | "retry";
     targetId: string;
@@ -452,6 +461,16 @@ export interface ActivityEvent {
   };
 }
 
+/** Evidence about the bounded global Orca inbox window a history came from. */
+export interface InboxWindow {
+  /** Window size the server requested from `orchestration inbox`. */
+  limit: number;
+  /** Rows the global window returned before Run filtering. */
+  observed: number;
+  /** True when the window came back full — older Run history may be missing. */
+  saturated: boolean;
+}
+
 /** Full Activity snapshot. Every row is guaranteed to belong to `runId`. */
 export interface ActivitySnapshot {
   runId: string;
@@ -461,6 +480,12 @@ export interface ActivitySnapshot {
   checks: CoordinatorCheckReceipt[];
   pendingCount: number;
   truncated: boolean;
+  /**
+   * Global-inbox window evidence for the message history; null when the
+   * history read failed, in which case completeness is unknown and the UI
+   * makes no claim either way.
+   */
+  inboxWindow: InboxWindow | null;
   generatedAt: number;
 }
 

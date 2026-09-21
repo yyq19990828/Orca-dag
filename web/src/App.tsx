@@ -32,6 +32,7 @@ const EMPTY_ACTIVITY: ActivitySnapshot = {
   checks: [],
   pendingCount: 0,
   truncated: false,
+  inboxWindow: null,
   generatedAt: 0,
 };
 const POLL_MS = 2000;

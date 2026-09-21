@@ -15,6 +15,7 @@ import {
   listProjects,
   listRepos,
   listRunMessages,
+  listRunMessagePage,
   listWorkspaceRuns,
   listTasks,
   listTerminals,
@@ -242,9 +243,14 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
     if (!force && cached && Date.now() - cached.at < 1_200) return cached.value;
     const value = (async () => {
       const status = coordinatorStatus();
-      const [tasks, messages, workers, config, history] = await Promise.all([
+      // Phase 3: the history read reports the global-inbox window it observed
+      // (rows counted BEFORE Run filtering + whether the window came back
+      // full). A failed read leaves the window null — completeness is then
+      // unknown, which the UI renders as no claim instead of a false "all
+      // history present".
+      const [tasks, page, workers, config, history] = await Promise.all([
         listTasks(runId),
-        listRunMessages(runId).catch(() => []),
+        listRunMessagePage(runId).catch(() => ({ messages: [], window: null })),
         listWorkers(runId, { includeRemote: true }).catch(() => []),
         loadConfig(workspaceDir),
         activityJournal.listHistory(runId),
@@ -277,7 +283,8 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       return buildActivitySnapshot({
         runId,
         tasks,
-        messages,
+        messages: page.messages,
+        inboxWindow: page.window,
         workers,
         leadTaskId: config.leadTaskByRun?.[runId] ?? null,
         status,
@@ -959,6 +966,10 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
             summary: body,
             taskId: identity.taskId,
             dispatchId: identity.dispatchId,
+            // The durable reply Orca serializes for this message carries
+            // thread_id = messageId; mirror that on the optimistic row so its
+            // reply context survives until the inbox row supersedes it.
+            threadId: messageId,
           }),
         );
         res.json({ ok: true, via: "coordinator" });
@@ -974,6 +985,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
           summary: body,
           taskId: identity.taskId,
           dispatchId: identity.dispatchId,
+          threadId: messageId,
         }),
       );
       res.json({ ok: true, via: "adhoc" });

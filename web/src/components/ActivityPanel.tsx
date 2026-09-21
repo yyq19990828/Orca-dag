@@ -17,6 +17,7 @@ const EMPTY: ActivitySnapshot = {
   checks: [],
   pendingCount: 0,
   truncated: false,
+  inboxWindow: null,
   generatedAt: 0,
 };
 
@@ -38,6 +39,11 @@ function technicalJson(event: ActivityEvent): string {
       messageId: event.technical.messageId,
       taskId: event.taskId,
       dispatchId: event.dispatchId,
+      threadId: event.threadId,
+      priority: event.priority,
+      // Tri-state: null survives JSON round-trip so "unknown" stays distinct
+      // from an explicit false in the diagnostic dump.
+      read: event.read === null ? null : event.read,
       terminalHandle: event.technical.terminalHandle,
       provenance: event.technical.provenance,
       argv: event.technical.argv,
@@ -46,6 +52,37 @@ function technicalJson(event: ActivityEvent): string {
     null,
     2,
   );
+}
+
+/** Only Orca's own high/urgent priorities may render the urgent flag. */
+const URGENT_PRIORITIES = new Set(["high", "urgent"]);
+
+function isUrgent(event: ActivityEvent): boolean {
+  return event.priority != null && URGENT_PRIORITIES.has(event.priority.trim().toLowerCase());
+}
+
+function priorityLabel(event: ActivityEvent): string {
+  const normalized = event.priority?.trim().toLowerCase();
+  return normalized === "urgent" ? "Urgent" : "High priority";
+}
+
+function provenanceLabel(event: ActivityEvent): { text: string; title: string } | null {
+  switch (event.technical.provenance) {
+    case "viewer_journal":
+      return {
+        text: "Viewer journal",
+        title: "Recorded locally by this viewer; the authoritative Orca record supersedes it",
+      };
+    case "coordinator":
+      return {
+        text: "Coordinator projection",
+        title: "Derived from this viewer coordinator's own accounting, not an Orca message row",
+      };
+    default:
+      // `orca_message` is the authoritative default and needs no label;
+      // `fleet` rows are presence data, not chat history.
+      return null;
+  }
 }
 
 /**
@@ -219,6 +256,15 @@ export function ActivityPanel({
       {snapshot.truncated && (
         <div className="activity__notice">Showing the latest 500 orchestration messages.</div>
       )}
+      {snapshot.inboxWindow?.saturated && (
+        // Saturation is global-window evidence, so the warning fires even when
+        // this Run shows only a handful of messages — few rows here do not
+        // mean the Run's history was always this short.
+        <div className="activity__notice activity__notice--warning" role="status">
+          ⚠ History may be incomplete: the global Orca inbox window is full ({snapshot.inboxWindow.observed} of{" "}
+          {snapshot.inboxWindow.limit} rows), so older messages for this Run may be missing.
+        </div>
+      )}
       {error && <div className="activity__error" role="status">⚠ {error}</div>}
 
       <div className="activity__timeline" aria-live="polite">
@@ -239,12 +285,35 @@ export function ActivityPanel({
                 <div className="activity-event__meta">
                   <span className="activity-event__actor">{event.actor.label}</span>
                   {event.actor.role === "lead" && <span className="activity-event__lead">★ Lead</span>}
+                  {(() => {
+                    const provenance = provenanceLabel(event);
+                    return provenance ? (
+                      <span className="activity-event__flag" title={provenance.title}>
+                        {provenance.text}
+                      </span>
+                    ) : null;
+                  })()}
+                  {isUrgent(event) && (
+                    <span className="activity-event__flag activity-event__flag--urgent" title={`Orca priority: ${event.priority}`}>
+                      {priorityLabel(event)}
+                    </span>
+                  )}
+                  {event.read === false && (
+                    <span className="activity-event__flag activity-event__flag--unread" title="Durable unread marker in the Orca inbox">
+                      Unread
+                    </span>
+                  )}
                   {event.actor.harness && (
                     <span>{event.actor.harness}{event.actor.model ? ` · ${event.actor.model}` : ""}</span>
                   )}
                   <time dateTime={event.createdAt}>{clock(event.createdAt)}</time>
                 </div>
                 <h3>{event.title}</h3>
+                {event.threadId && (
+                  // Reply relationships render only from Orca's own thread_id;
+                  // without it no linkage is claimed.
+                  <p className="activity-event__thread">↩ Part of thread {event.threadId}</p>
+                )}
                 <p>{event.summary}</p>
                 {event.groupedCount > 1 && (
                   <span className="activity-event__grouped">{event.groupedCount} similar heartbeats grouped</span>

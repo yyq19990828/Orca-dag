@@ -22,6 +22,10 @@ interface Conversation {
   events: ActivityEvent[];
   pending: ActivityEvent[];
   latestAt: string;
+  /** Durable evidence only: some row in this thread is explicitly unread. */
+  unread: boolean;
+  /** Any row in this thread carries a high/urgent Orca priority. */
+  urgent: boolean;
 }
 
 interface TimelineCheckGroup {
@@ -56,6 +60,31 @@ function dayAndTime(iso: string): string {
 
 function messageBody(event: ActivityEvent): string {
   return event.summary;
+}
+
+/** Only Orca's own high/urgent priorities may render the urgent flag. */
+const URGENT_PRIORITIES = new Set(["high", "urgent"]);
+
+function isUrgent(event: ActivityEvent): boolean {
+  return event.priority != null && URGENT_PRIORITIES.has(event.priority.trim().toLowerCase());
+}
+
+function priorityLabel(event: ActivityEvent): string {
+  const normalized = event.priority?.trim().toLowerCase();
+  return normalized === "urgent" ? "Urgent" : "High priority";
+}
+
+/**
+ * Compact thread context (Phase 3): a reply bubble quotes the message Orca
+ * threaded it to. The lookup is deliberately evidence-gated — without both a
+ * `threadId` on the reply and the referenced row in this Run's history, no
+ * relationship is claimed (parent rows can age out of the bounded inbox
+ * window, which renders as no context, never as a guessed one).
+ */
+function replyContextOf(event: ActivityEvent, byId: Map<string, ActivityEvent>): ActivityEvent | null {
+  if (!event.threadId) return null;
+  const parent = byId.get(event.threadId);
+  return parent && parent.id !== event.id ? parent : null;
 }
 
 function isAgentProgressSignal(event: ActivityEvent): boolean {
@@ -337,6 +366,8 @@ export function ChatPanel({
           events: sorted,
           pending: sorted.filter((event) => event.actionable?.kind === "reply"),
           latestAt: sorted.at(-1)?.createdAt ?? task?.createdAt ?? "",
+          unread: sorted.some((event) => event.read === false),
+          urgent: sorted.some((event) => isUrgent(event)),
         };
       })
       .sort((a, b) => {
@@ -368,6 +399,14 @@ export function ChatPanel({
   }, [conversations, selectedId]);
 
   const selected = conversations.find((conversation) => conversation.id === selectedId) ?? null;
+  // Phase 3 history completeness: a saturated global window means rows older
+  // than the window may be missing for EVERY Run — including one with only a
+  // handful of messages. A failed history read leaves inboxWindow null and
+  // renders no claim at all (absence is unknown, not incomplete).
+  const historyWarning = snapshot.inboxWindow?.saturated
+    ? `The global Orca inbox window is full (${snapshot.inboxWindow.observed} of ${snapshot.inboxWindow.limit} rows), so older messages for this Run may be missing.`
+    : null;
+  const contextById = new Map((selected?.events ?? []).map((event) => [event.id, event]));
   const replyTarget = selected?.pending.at(-1) ?? null;
   const progressEvent = selected
     ? [...selected.events].reverse().find(isAgentProgressSignal) ?? null
@@ -533,6 +572,12 @@ export function ChatPanel({
   if (conversations.length === 0) {
     return (
       <div className="chat__empty">
+        {historyWarning && (
+          <div className="chat-history-warning" role="status">
+            <strong>History may be incomplete.</strong>
+            <span>{historyWarning}</span>
+          </div>
+        )}
         Conversations appear here when the coordinator dispatches work or an agent sends an update.
       </div>
     );
@@ -574,6 +619,14 @@ export function ChatPanel({
                     <span className="chat-thread__topline">
                       <strong>{conversation.label}</strong>
                       {isSystem && <span className="chat-thread__system-label">System</span>}
+                      {conversation.unread && (
+                        <span
+                          className="chat-thread__unread"
+                          role="img"
+                          aria-label="Has unread messages"
+                          title="Has unread messages"
+                        />
+                      )}
                       <time dateTime={conversation.latestAt}>{clock(conversation.latestAt)}</time>
                     </span>
                     <span className="chat-thread__preview">
@@ -584,6 +637,11 @@ export function ChatPanel({
                           (conversation.task ? "Coordinator assigned the stage brief" : "No messages")}
                     </span>
                   </span>
+                  {conversation.urgent && (
+                    <span className="chat-thread__urgent" aria-label="Contains high-priority or urgent messages" title="Contains high-priority or urgent messages">
+                      !
+                    </span>
+                  )}
                   {conversation.pending.length > 0 && (
                     <span className="chat-thread__badge" aria-label={`${conversation.pending.length} replies needed`}>
                       {conversation.pending.length}
@@ -616,6 +674,14 @@ export function ChatPanel({
             </header>
 
             <div className="chat__messages" aria-live="polite">
+              {historyWarning && (
+                <div className="chat-history-warning" role="status">
+                  <strong aria-hidden="true">⚠</strong>
+                  <span>
+                    <strong>History may be incomplete.</strong> {historyWarning}
+                  </span>
+                </div>
+              )}
               {selected.task && !hasRecordedAssignment && (
                 <article className="chat-message chat-message--outgoing chat-message--brief">
                   <div className="chat-message__meta">
@@ -647,12 +713,41 @@ export function ChatPanel({
                 ) : (
                   <article
                     key={event.id}
-                    className={`chat-message ${outgoing ? "chat-message--outgoing" : "chat-message--incoming"} chat-message--${event.kind} chat-message--${event.severity}`}
+                    className={`chat-message ${outgoing ? "chat-message--outgoing" : "chat-message--incoming"} chat-message--${event.kind} chat-message--${event.severity}${isUrgent(event) ? " chat-message--urgent" : ""}`}
                   >
                     <div className="chat-message__meta">
                       <strong>{eventActor(event)}</strong>
+                      {/* Provenance stays visible: a locally journaled row is
+                          this viewer's own record, superseded by the
+                          authoritative Orca message once it lands. */}
+                      {event.technical.provenance === "viewer_journal" && (
+                        <span className="chat-message__provenance" title="Recorded locally by this viewer; the authoritative Orca message supersedes it">
+                          Viewer journal
+                        </span>
+                      )}
+                      {isUrgent(event) && (
+                        <span className="chat-message__priority" title={`Orca priority: ${event.priority}`}>
+                          {priorityLabel(event)}
+                        </span>
+                      )}
+                      {/* Tri-state read evidence: only an explicit unread
+                          marker renders "Unread" — an absent marker stays
+                          unknown and renders nothing at all. */}
+                      {event.read === false && (
+                        <span className="chat-message__read" title="Durable unread marker in the Orca inbox">
+                          Unread
+                        </span>
+                      )}
                       <time dateTime={event.createdAt}>{dayAndTime(event.createdAt)}</time>
                     </div>
+                    {(() => {
+                      const parent = replyContextOf(event, contextById);
+                      return parent ? (
+                        <div className="chat-message__reply-context" title={`In reply to ${parent.title}`}>
+                          <span aria-hidden="true">↩</span> Re: {parent.title} — {parent.summary}
+                        </div>
+                      ) : null;
+                    })()}
                     <h3>{eventHeading(event)}</h3>
                     <p>{messageBody(event)}</p>
                     {event.groupedCount > 1 && <small>{event.groupedCount} similar updates grouped</small>}

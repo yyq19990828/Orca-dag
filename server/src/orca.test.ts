@@ -27,7 +27,9 @@ import {
   listEnvironments,
   listProjects,
   listRepos,
+  ORCHESTRATION_INBOX_LIMIT,
   listRunMessages,
+  listRunMessagePage,
   listWorkspaceRuns,
   listWorkers,
   listWorktrees,
@@ -1590,6 +1592,45 @@ describe("Run-scoped message history", () => {
     assert.ok(inbox);
     assert.ok(inbox.argv.includes("--limit"));
     assert.ok(!calls.some((call) => call.argv[1] === "run-use"), "history reads never fence a coordinator");
+  });
+
+  it("reports the global window with saturation judged BEFORE Run filtering", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      inboxMessages: [
+        message("msg_a1", "run_a"),
+        message("msg_a2", "run_a"),
+        message("msg_b1", "run_b"),
+      ],
+    });
+
+    // Three global rows fill a 3-row window: the Run has only its 2 rows, but
+    // OLDER rows (any Run's) may exist past the window — the honest trigger
+    // for a completeness warning. Foreign rows are counted, never leaked.
+    const saturated = await listRunMessagePage("run_a", { limit: 3 });
+    assert.deepEqual(saturated.messages.map((row) => row.id), ["msg_a1", "msg_a2"]);
+    assert.deepEqual(saturated.window, { limit: 3, observed: 3, saturated: true });
+
+    // The same window with room to spare proves nothing is being truncated.
+    const page = await listRunMessagePage("run_a", { limit: 4 });
+    assert.deepEqual(page.window, { limit: 4, observed: 3, saturated: false });
+
+    const calls = readLog().filter((call) => call.argv[1] === "inbox");
+    assert.ok(calls.every((call) => call.argv.includes("--limit")), "the window is always explicitly bounded");
+    assert.ok(calls.some((call) => call.argv.includes("3")), "the requested limit reaches the CLI");
+  });
+
+  it("uses the full configured window by default and still filters exactly by Run", async () => {
+    useRuntime({ workspace: root });
+    writeScript({ inboxMessages: [message("msg_a", "run_a"), message("msg_b", "run_b")] });
+
+    const page = await listRunMessagePage("run_a");
+    assert.equal(page.messages.length, 1);
+    assert.deepEqual(page.window, {
+      limit: ORCHESTRATION_INBOX_LIMIT,
+      observed: 2,
+      saturated: false,
+    });
   });
 
   it("reads an empty Run even when it has no coordinator mailbox", async () => {

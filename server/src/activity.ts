@@ -6,7 +6,7 @@ import type {
   CoordinatorCheckReceipt,
   CoordinatorStatus,
 } from "./coordinator";
-import type { OrcaMessage, OrcaTask, OrcaWorkerRow, WorkerObservation } from "./orca";
+import type { OrcaInboxWindow, OrcaMessage, OrcaTask, OrcaWorkerRow, WorkerObservation } from "./orca";
 import { presentWorkerLiveness } from "./orca";
 
 export const ACTIVITY_FILE = ".orca-dag.activity.jsonl";
@@ -47,6 +47,20 @@ export interface ActivityEvent {
   detail: string | null;
   createdAt: string;
   groupedCount: number;
+  /**
+   * Phase 3 conversation metadata, carried verbatim from the Orca row. A
+   * null threadId means "Orca gave no thread evidence" — reply relationships
+   * are never reconstructed without one.
+   */
+  threadId: string | null;
+  /** Orca's own priority string (`normal`, `high`, `urgent`, …); null = absent. */
+  priority: string | null;
+  /**
+   * Tri-state durable read evidence from the global inbox row. `true` only on
+   * a positive read marker, `false` only on an explicit unread marker, and
+   * `null` when the marker is absent — absence is UNKNOWN, never unread.
+   */
+  read: boolean | null;
   actionable: null | {
     kind: "reply" | "release" | "retain" | "retry";
     targetId: string;
@@ -68,6 +82,13 @@ export interface ActivitySnapshot {
   checks: CoordinatorCheckReceipt[];
   pendingCount: number;
   truncated: boolean;
+  /**
+   * Phase 3: the global-inbox window this Run's message rows were observed
+   * in, with `saturated` flagging that older history may be missing. Null
+   * when the history read failed — completeness is then UNKNOWN, never
+   * claimed either way.
+   */
+  inboxWindow: OrcaInboxWindow | null;
   generatedAt: number;
 }
 
@@ -191,6 +212,22 @@ function normalizeMessage(
   const payloadTaskId = typeof payload.taskId === "string" ? payload.taskId : null;
   const payloadDispatchId = typeof payload.dispatchId === "string" ? payload.dispatchId : null;
   const resolvedDispatchId = payloadDispatchId ?? addressedDispatchId;
+  // Phase 3 conversation metadata. Threaded replies carry `thread_id` =
+  // the id of the message being answered; anything else (empty string,
+  // wrong type) is treated as "no thread evidence" so the UI can never
+  // fabricate a reply relationship. `read` is deliberately tri-state: only
+  // the CLI's explicit 0/1 (or boolean) marker may claim read/unread, and
+  // an absent marker stays null (unknown) instead of degrading to unread.
+  const threadId =
+    typeof message.thread_id === "string" && message.thread_id.trim() ? message.thread_id : null;
+  const priority =
+    typeof message.priority === "string" && message.priority.trim() ? message.priority.trim() : null;
+  const read =
+    message.read === 1 || message.read === true
+      ? true
+      : message.read === 0 || message.read === false
+        ? false
+        : null;
   // Heartbeats and older status senders do not always repeat the Task id in
   // every payload. A fleet row may still prove the sender terminal's exact
   // Dispatch/Task identity; use that evidence instead of labelling it by the
@@ -219,6 +256,9 @@ function normalizeMessage(
     runId: message.run_id,
     taskId,
     dispatchId,
+    threadId,
+    priority,
+    read,
     direction: outbound ? ("coordinator_to_agent" as const) : ("agent_to_coordinator" as const),
     actor: outbound
       ? ({ role: "coordinator", label: "Coordinator", harness: null, model: null } as const)
@@ -381,6 +421,9 @@ function debtEvent(runId: string, debt: CleanupDebtItem, createdAt: string): Act
     runId,
     taskId: null,
     dispatchId: debt.dispatchId,
+    threadId: null,
+    priority: null,
+    read: null,
     direction: "system",
     actor: { role: "system", label: "Orca", harness: null, model: null },
     kind: "cleanup_debt",
@@ -453,6 +496,21 @@ function removeJournalMessageDuplicates(
       );
     });
   });
+}
+
+/**
+ * Journal rows written before Phase 3 lack the conversation-metadata fields.
+ * Re-add them as explicit unknowns so every event leaving this module honors
+ * the ActivityEvent contract (and `read: undefined` can never be mistaken
+ * for a negative by tri-state consumers).
+ */
+function hydrateEvent(row: ActivityEvent): ActivityEvent {
+  return {
+    ...row,
+    threadId: typeof row.threadId === "string" && row.threadId.trim() ? row.threadId : null,
+    priority: typeof row.priority === "string" && row.priority.trim() ? row.priority : null,
+    read: typeof row.read === "boolean" ? row.read : null,
+  };
 }
 
 /** Orca's global inbox exposes a positive durable read bit, but no check log. */
@@ -619,6 +677,11 @@ export function buildActivitySnapshot(input: {
    * a synthesized negative.
    */
   observations?: Map<string, WorkerObservation>;
+  /**
+   * Phase 3: the global-inbox window evidence reported by the history read.
+   * Null/absent means the read failed — completeness stays unknown.
+   */
+  inboxWindow?: OrcaInboxWindow | null;
   now?: number;
 }): ActivitySnapshot {
   const { runId } = input;
@@ -739,7 +802,16 @@ export function buildActivitySnapshot(input: {
     checkMap.set(receipt.deliveryId!, receipt);
   }
   const checks = [...checkMap.values()].sort((a, b) => a.checkedAt - b.checkedAt);
-  return { runId, events, presence, checks, pendingCount: pendingIds.size, truncated, generatedAt: now };
+  return {
+    runId,
+    events,
+    presence,
+    checks,
+    pendingCount: pendingIds.size,
+    truncated,
+    inboxWindow: input.inboxWindow ?? null,
+    generatedAt: now,
+  };
 }
 
 export function createViewerActivity(input: {
@@ -750,6 +822,13 @@ export function createViewerActivity(input: {
   detail?: string | null;
   taskId?: string | null;
   dispatchId?: string | null;
+  /**
+   * Phase 3: the message id this journal row answers. For reply rows this is
+   * the exact id the viewer replied to — the same id Orca serializes into the
+   * durable reply's `thread_id` — so the optimistic row renders its reply
+   * context until the authoritative inbox row supersedes it.
+   */
+  threadId?: string | null;
   severity?: ActivityEvent["severity"];
   actionable?: ActivityEvent["actionable"];
   argv?: string[];
@@ -760,6 +839,11 @@ export function createViewerActivity(input: {
     runId: input.runId,
     taskId: input.taskId ?? null,
     dispatchId: input.dispatchId ?? null,
+    // Journal rows carry no durable read marker or Orca priority — both stay
+    // unknown rather than being defaulted to a value the viewer never saw.
+    threadId: input.threadId ?? null,
+    priority: null,
+    read: null,
     direction: "coordinator_to_agent",
     actor: { role: "coordinator", label: "Coordinator", harness: null, model: null },
     kind: input.kind,
@@ -847,7 +931,7 @@ export class ActivityJournal {
           }
           continue;
         }
-        events.push(record as ActivityEvent);
+        events.push(hydrateEvent(record as ActivityEvent));
       } catch {
         // A torn final append must not make the whole activity history unreadable.
       }
