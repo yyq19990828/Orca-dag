@@ -10,3 +10,4 @@ server/src/generated/
 server/.sessions/
 .orca-dag.config.json
 .orca-dag.activity.jsonl
+.orca-dag.requests.jsonl

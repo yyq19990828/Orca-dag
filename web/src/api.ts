@@ -7,6 +7,8 @@ import type {
   OrcaRun,
   OrcaWorktreeView,
   PlacementSpec,
+  RequestDetailResponse,
+  RequestLedgerRowView,
   RunHealthView,
   RunStatus,
   StopResultEntry,
@@ -14,6 +16,7 @@ import type {
   WorkerDetailView,
   WorkerOutputView,
   WorkerRowView,
+  WorkerTerminalReceiptView,
   RuntimeCapabilitiesResponse,
 } from "./types";
 
@@ -248,8 +251,12 @@ export async function sendTaskMessage(taskId: string, body: string, runId: strin
 }
 
 /** Explicitly release a settled worker terminal (resolves cleanup debt). */
-export async function releaseWorker(dispatchId: string): Promise<void> {
-  await post(`/api/workers/${encodeURIComponent(dispatchId)}/release`, {});
+export async function releaseWorker(dispatchId: string): Promise<WorkerTerminalReceiptView> {
+  const { receipt } = await post<{ receipt: WorkerTerminalReceiptView }>(
+    `/api/workers/${encodeURIComponent(dispatchId)}/release`,
+    {},
+  );
+  return receipt;
 }
 
 /**
@@ -274,8 +281,12 @@ export async function fetchWorkerOutput(
 }
 
 /** Explicit debug retention — keep a settled worker's terminal live. */
-export async function retainWorker(dispatchId: string): Promise<void> {
-  await post(`/api/workers/${encodeURIComponent(dispatchId)}/retain`, {});
+export async function retainWorker(dispatchId: string): Promise<WorkerTerminalReceiptView> {
+  const { receipt } = await post<{ receipt: WorkerTerminalReceiptView }>(
+    `/api/workers/${encodeURIComponent(dispatchId)}/retain`,
+    {},
+  );
+  return receipt;
 }
 
 /**
@@ -318,6 +329,32 @@ export async function saveConfig(patch: Partial<ViewerConfig>): Promise<void> {
 export async function fetchModels(harness: string): Promise<string[]> {
   const { models } = await get<{ models: string[] }>(`/api/models/${encodeURIComponent(harness)}`);
   return models ?? [];
+}
+
+// --- Phase 5: mutation-request audit (read-only) ------------------------------
+//
+// The durable ledger of viewer-originated mutation requests, plus a live
+// `request-show` inspection. Both are strictly read-only — nothing here can
+// replay a mutation, and an `absent` receipt never proves one did not happen.
+
+/**
+ * Bounded, Run-scoped audit list from the workspace ledger. Rows whose
+ * operation supplied no Run scope are included everywhere, labeled unscoped.
+ */
+export async function fetchRequests(runId: string): Promise<{ requests: RequestLedgerRowView[]; otherRunCount: number }> {
+  return get<{ requests: RequestLedgerRowView[]; otherRunCount: number }>(
+    `/api/requests?run=${encodeURIComponent(runId)}`,
+  );
+}
+
+/**
+ * One request's ledger row plus a fresh Orca receipt (completed / pending /
+ * absent / unknown), with Orca's own interpretation verbatim.
+ */
+export async function fetchRequestDetail(runId: string, requestId: string): Promise<RequestDetailResponse> {
+  return get<RequestDetailResponse>(
+    `/api/requests/${encodeURIComponent(requestId)}?run=${encodeURIComponent(runId)}`,
+  );
 }
 
 // --- Phase 6: saved-environment discovery ------------------------------------

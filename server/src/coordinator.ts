@@ -37,6 +37,7 @@ import {
   type WorkerStartReceipt,
   type WorkerTerminalReceipt,
 } from "./orca";
+import type { MutationRequestMeta } from "./requestLedger";
 import type { PlacementSpec } from "./config";
 
 /**
@@ -142,6 +143,13 @@ interface Attempt {
   nextAction: { kind: string; argv: string[] } | null;
   /** Durable id carried across release_pending retries so Orca replays, not repeats. */
   releaseRequestId: string | null;
+  /**
+   * Bounded summary of the last terminal receipt's release-archive facts
+   * (Phase 5), e.g. that a transcript archive exists. Evidence only — archive
+   * presence is never treated as worker settlement; the fleet row stays
+   * authoritative. Null when no receipt carried archive facts.
+   */
+  terminalArchive: string | null;
   /** Dispatch this attempt explicitly retries (set by the user's retry action). */
   retriedFrom: string | null;
   // --- Phase 5: launch preferences + reuse lineage ---
@@ -271,6 +279,16 @@ export interface StartOpts {
    * persists only deliveries, errors/recoveries, and agent-state changes.
    */
   onCheck?: (receipt: CoordinatorCheckReceipt) => Promise<void>;
+  /**
+   * Durable mutation-request ledger sink (Phase 5: recovery and output audit).
+   * Called BEFORE a `--retry-request`-carrying mutation is spawned (so even a
+   * crash or lost response leaves the id inspectable via `request-show`) and
+   * again once an outcome is observed (Dispatch/Task linkage + bounded note).
+   * Metadata only — never receipts or transcript bodies. Best-effort exactly
+   * like onActivity/onCheck: a ledger failure must never turn a live or
+   * ambiguous mutation into a different lifecycle decision.
+   */
+  onRequestRecord?: (meta: MutationRequestMeta) => Promise<void>;
 }
 
 export interface CoordinatorActivityNotice {
@@ -487,6 +505,8 @@ export function coordinatorStatus() {
       settledAt: a.settledAt,
       terminalDecision: a.terminalDecision,
       terminalDetail: a.terminalDetail,
+      /** Bounded release-archive facts from the last terminal receipt (Phase 5). */
+      terminalArchive: a.terminalArchive,
       adopted: a.adopted,
       retriedFrom: a.retriedFrom,
       startRequestId: a.startRequestId,
@@ -702,6 +722,7 @@ async function recoverState(opts: StartOpts): Promise<void> {
     startReceipts: [],
     nextAction: null,
     releaseRequestId: null,
+    terminalArchive: null,
     retriedFrom: null,
     requested: { agent: harness, model: null, effort: null, worktree: null, terminal: null, on: null },
     effective: null,
@@ -834,10 +855,50 @@ export async function stopCoordinator(): Promise<StopReport> {
   const coordinator = state.coordinatorHandle;
   const results: StopResultEntry[] = [];
 
+  // Phase 5: every worker-stop runs under a durable, ledger-recorded request
+  // id — recorded BEFORE the call so an interrupted stop stays inspectable,
+  // and closed with the observed state after. `runIdAtStop` is captured up
+  // front: the state machine starts tearing itself down below.
+  const runIdAtStop = state.runId;
+  const stopWithAudit = async (taskId: string, dispatchId: string) => {
+    const requestId = newRequestId();
+    await noteRequest({
+      requestId,
+      operation: "worker-stop",
+      runId: runIdAtStop,
+      taskId,
+      dispatchId,
+    });
+    try {
+      const receipt = await stopWorkerReceipt(dispatchId, { retryRequestId: requestId });
+      await noteRequest({
+        requestId,
+        operation: "worker-stop",
+        runId: runIdAtStop,
+        taskId,
+        dispatchId,
+        settledLocally: true,
+        note: `viewer-observed stop state: ${receipt.state}`,
+      });
+      return receipt;
+    } catch (err) {
+      await noteRequest({
+        requestId,
+        operation: "worker-stop",
+        runId: runIdAtStop,
+        taskId,
+        dispatchId,
+        settledLocally: false,
+        note: `stop failed: ${String((err as Error)?.message ?? err)}`,
+      }).catch(() => {});
+      throw err;
+    }
+  };
+
   for (const a of attempts) {
     if (a.dispatchId && a.mode === "supervised") {
       try {
-        const receipt = await stopWorkerReceipt(a.dispatchId);
+        const receipt = await stopWithAudit(a.taskId, a.dispatchId);
         results.push({
           target: a.dispatchId,
           kind: "supervised",
@@ -858,7 +919,7 @@ export async function stopCoordinator(): Promise<StopReport> {
       // but this does NOT touch its terminal process — the terminal below is
       // this viewer's own creation and is the only thing we close.
       try {
-        const receipt = await stopWorkerReceipt(a.dispatchId);
+        const receipt = await stopWithAudit(a.taskId, a.dispatchId);
         results.push({
           target: a.dispatchId,
           kind: "tracking_dispatch",
@@ -1024,6 +1085,41 @@ async function emitCoordinatorCheck(receipt: CoordinatorCheckReceipt): Promise<v
   } catch {
     // Check history is explanatory UI state, never orchestration authority.
     // A journal failure must not stop inbox processing or worker settlement.
+  }
+}
+
+/**
+ * Best-effort durable record of one viewer-originated mutation request
+ * (Phase 5). Called before the CLI call (mint) and after an outcome is
+ * observed (linkage + bounded note). Same neutrality rules as the activity
+ * journal: the ledger explains, it never decides — a write failure must not
+ * reclassify an in-flight mutation.
+ */
+async function noteRequest(meta: MutationRequestMeta): Promise<void> {
+  const sink = state.opts?.onRequestRecord;
+  if (!sink) return;
+  try {
+    await sink(meta);
+  } catch {
+    // Audit metadata is never lifecycle authority; dropping a note is the
+    // honest failure mode (the request id itself stays with Orca).
+  }
+}
+
+/**
+ * Bounded, presentational summary of a terminal receipt's `archive` facts
+ * (Phase 5). Archive presence is evidence that output was preserved — it is
+ * NOT worker settlement, and the fleet's terminal state stays authoritative.
+ * Serialized and sliced so an unexpectedly chatty runtime cannot push an
+ * unbounded receipt body through the projection.
+ */
+function archiveSummary(archive: Record<string, unknown> | null | undefined): string | null {
+  if (!archive || typeof archive !== "object") return null;
+  try {
+    const json = JSON.stringify(archive);
+    return json.length > 400 ? `${json.slice(0, 397)}...` : json;
+  } catch {
+    return null;
   }
 }
 
@@ -1386,6 +1482,7 @@ function reserveAttempt(task: OrcaTask, harness: string): Attempt {
     startReceipts: [],
     nextAction: null,
     releaseRequestId: null,
+    terminalArchive: null,
     retriedFrom: null,
     requested: { agent: harness, model: null, effort: null, worktree: null, terminal: null, on: null },
     effective: null,
@@ -1783,16 +1880,45 @@ async function performRelease(attempt: Attempt): Promise<WorkerTerminalReceipt> 
       requestId: attempt.releaseRequestId,
     };
   }
+  // Phase 5: mint + persist the durable id BEFORE the CLI call, so even a
+  // lost release response (or a crash mid-call) leaves the id inspectable
+  // via `request-show` from the ledger. The id is then RETAINED across
+  // release_pending retries: replaying the SAME request is idempotent;
+  // minting a new one each tick would pile up mutations.
+  if (!attempt.releaseRequestId) attempt.releaseRequestId = newRequestId();
+  await noteRequest({
+    requestId: attempt.releaseRequestId,
+    operation: "worker-release",
+    runId: state.runId,
+    taskId: attempt.taskId,
+    dispatchId: attempt.dispatchId,
+  });
   const receipt = await releaseWorker(attempt.dispatchId, {
-    retryRequestId: attempt.releaseRequestId ?? undefined,
+    retryRequestId: attempt.releaseRequestId,
   });
   // Keep the id for release_pending retries: replaying the SAME request is
   // idempotent; minting a new one each tick would pile up mutations.
   attempt.releaseRequestId = receipt.requestId ?? attempt.releaseRequestId;
+  await noteRequest({
+    requestId: attempt.releaseRequestId,
+    operation: "worker-release",
+    runId: state.runId,
+    taskId: attempt.taskId,
+    dispatchId: attempt.dispatchId,
+    settledLocally: receipt.state !== "release_unknown",
+    note: `viewer-observed terminal state: ${receipt.state}`,
+  });
   return receipt;
 }
 
-function applyReleaseReceipt(attempt: Attempt, receipt: { state: string; reason: string | null }): void {
+function applyReleaseReceipt(
+  attempt: Attempt,
+  receipt: { state: string; reason: string | null; archive?: Record<string, unknown> | null },
+): void {
+  // Archive facts ride along as bounded evidence (Phase 5) — presence is
+  // never upgraded into "the worker is settled"; the state switch below and
+  // the fleet row stay the only authority for that.
+  attempt.terminalArchive = archiveSummary(receipt.archive) ?? attempt.terminalArchive;
   switch (receipt.state) {
     case "released":
     case "already_released":
@@ -1963,6 +2089,17 @@ async function startOne(
   const startRequestId = newRequestId();
   attempt.startRequestId = startRequestId;
   attempt.retriedFrom = retryOf;
+  // Phase 5: persist the request id BEFORE the CLI call — after a response
+  // loss or a viewer restart this ledger row is the only local pointer to
+  // the exact id `request-show` needs. Dispatch/Task linkage is appended
+  // once an outcome is observed below.
+  await noteRequest({
+    requestId: startRequestId,
+    operation: "worker-start",
+    runId,
+    taskId: task.id,
+    dispatchId: null,
+  });
   // Phase 6: resolve placement BEFORE touching Orca. A task with a saved
   // environment starts on that connected server (`--on`, worker-start only);
   // its exact placement is an existing workspace selector or a new-top-level
@@ -2125,6 +2262,17 @@ async function startOne(
       };
     }
     attempt.startRequestId = null; // outcome known — the id is no longer pending
+    await noteRequest({
+      requestId: startRequestId,
+      operation: "worker-start",
+      runId,
+      taskId: task.id,
+      dispatchId: attempt.dispatchId,
+      settledLocally: true,
+      note: attempt.dispatchId
+        ? `landed as dispatch ${attempt.dispatchId}`
+        : "start outcome recorded without a dispatch id",
+    });
     const taskSpec = typeof task.spec === "string" ? task.spec : "";
     await emitCoordinatorActivity({
       kind: "dispatch_started",
@@ -2157,6 +2305,23 @@ async function startOne(
     attempt.settledAt = Date.now();
     attempt.terminalDecision = "pending"; // ownership decided from the receipt
     attempt.terminalDetail = startErr.message ?? String(err);
+    // Phase 5: close the ledger row with what the viewer actually observed.
+    // A `response_lost` stage means the outcome stayed UNRESOLVED — the row
+    // is exactly the audit trail for reconstructing it via request-show.
+    const responseLost = startErr.receipt?.failedStage === "response_lost";
+    await noteRequest({
+      requestId: startRequestId,
+      operation: "worker-start",
+      runId,
+      taskId: task.id,
+      dispatchId: attempt.dispatchId ?? startErr.receipt?.dispatchId ?? null,
+      settledLocally: !responseLost,
+      note: responseLost
+        ? "response lost — outcome unresolved; inspect with request-show"
+        : `failed before ready${
+            startErr.receipt?.failedStage ? ` at ${startErr.receipt.failedStage}` : ""
+          } — receipt retained`,
+    });
     if (attempt.handle) {
       // A legacy-lane start can fail after creating its terminal. The pane is
       // provably ours — close it; a refusal becomes cleanup debt, not silence.
@@ -2301,6 +2466,7 @@ export async function retryWorker(idOrTask: string): Promise<{
   attempt.output = null;
   attempt.nextAction = null;
   attempt.releaseRequestId = null;
+  attempt.terminalArchive = null;
   attempt.dispatchId = null;
   // Phase 5: a retry is a FRESH start — the old launch echo, reuse lineage,
   // and fleet projection of the dead attempt do not carry over. `requested`

@@ -6,6 +6,7 @@ import { ChatPanel } from "./components/ChatPanel";
 import { GatePanel } from "./components/GatePanel";
 import { NodePanel } from "./components/NodePanel";
 import { RecoveryPanel } from "./components/RecoveryPanel";
+import { RequestAuditPanel } from "./components/RequestAuditPanel";
 import { SchedulerPanel } from "./components/SchedulerPanel";
 import { WorkerPanel } from "./components/WorkerPanel";
 import { RunPicker } from "./components/RunPicker";
@@ -763,6 +764,7 @@ export default function App() {
                           disabled={execOff}
                           disabledReason={readiness?.reason}
                         />
+                        <RequestAuditPanel runId={runId} />
                         <CapabilityPanel />
                     </details>
                   </div>

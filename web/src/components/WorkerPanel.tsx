@@ -11,6 +11,7 @@ import type {
   WorkerDetailView,
   WorkerOutputView,
   WorkerRowView,
+  WorkerTerminalReceiptView,
 } from "../types";
 
 /**
@@ -73,6 +74,16 @@ export function WorkerPanel({
   const [detailLoading, setDetailLoading] = useState(false);
   const [output, setOutput] = useState<WorkerOutputView | null>(null);
   const [outputErr, setOutputErr] = useState<string | null>(null);
+  // Phase 5: in-loaded-rows search — deliberately client-side only. It can
+  // NEVER fetch more transcript than the user already paged in.
+  const [outputFilter, setOutputFilter] = useState("");
+  // Phase 5: the receipt of the last manual release/retain on this panel,
+  // including Orca's archive facts (evidence — not settlement).
+  const [decision, setDecision] = useState<{
+    dispatchId: string;
+    kind: "release" | "retain";
+    receipt: WorkerTerminalReceiptView;
+  } | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [terminalFilter, setTerminalFilter] = useState<string>("all");
@@ -126,6 +137,8 @@ export function WorkerPanel({
       setDetail(null);
       setOutput(null);
       setOutputErr(null);
+      setOutputFilter("");
+      setDecision(null);
       setSource("auto");
       try {
         setDetail(await fetchWorkerDetail(runId, dispatchId));
@@ -146,11 +159,34 @@ export function WorkerPanel({
     if (!open && row.dispatchId) void loadDetail(row.dispatchId);
   }
 
+  /** Bounded client-side summary of a receipt's archive facts (≤400 chars). */
+  function archiveSummary(archive: Record<string, unknown> | null): string | null {
+    if (!archive || typeof archive !== "object") return null;
+    try {
+      const json = JSON.stringify(archive);
+      return json.length > 400 ? `${json.slice(0, 397)}...` : json;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Export ONLY the rows already read — a local Blob, no server round-trip. */
+  function downloadLoaded(output: WorkerOutputView) {
+    const blob = new Blob([output.lines.join("\n")], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `worker-output-${output.dispatchId}-${output.source}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   async function decide(dispatchId: string, kind: "release" | "retain") {
     setBusyId(dispatchId);
     setErr(null);
     try {
-      await (kind === "release" ? releaseWorker(dispatchId) : retainWorker(dispatchId));
+      const receipt = await (kind === "release" ? releaseWorker(dispatchId) : retainWorker(dispatchId));
+      setDecision({ dispatchId, kind, receipt });
     } catch (e) {
       setErr(String((e as Error).message ?? e));
     } finally {
@@ -319,6 +355,14 @@ export function WorkerPanel({
                     <code>{row.terminalState}</code>
                     {attempt ? ` · viewer: ${attempt.terminalDecision}` : " · viewer: n/a (not coordinated here)"}
                   </div>
+                  {attempt?.terminalArchive && (
+                    <div className="inbox__body">
+                      Release archive: <code>{attempt.terminalArchive}</code>
+                      <span className="inbox__meta">
+                        {" "}— archive evidence is not settlement; Orca's terminal state above stays authoritative
+                      </span>
+                    </div>
+                  )}
                   {projection?.attention && projection.attention.categories.length > 0 && (
                     <div className="inbox__body">
                       Attention: {projection.attention.categories.join(", ")}
@@ -411,31 +455,96 @@ export function WorkerPanel({
                     </>
                   )}
 
-                  {/* --- bounded output (worker-read) --- */}
+                  {/* --- bounded output (worker-read), explicitly sourced --- */}
                   {output?.dispatchId === row.dispatchId && output.lines.length > 0 && (
-                    <pre className="workers__output">
-                      {output.lines.join("\n")}
-                      {!output.contentComplete && "\n…"}
-                      {output.clipped ? "\n[clipped by the runtime]" : ""}
-                    </pre>
+                    <>
+                      {(() => {
+                        // Search runs ONLY over rows already loaded on this
+                        // page stack — it can never fetch or render an
+                        // unbounded transcript.
+                        const q = outputFilter.trim().toLowerCase();
+                        const visible = q
+                          ? output.lines.filter((line) => line.toLowerCase().includes(q))
+                          : output.lines;
+                        return (
+                          <>
+                            <div className="workers__outputmeta" data-testid="output-meta">
+                              <span className="workers__srcbadge" data-source={output.source}>
+                                {output.source}
+                              </span>
+                              {output.clipped && (
+                                <span className="workers__flag" data-flag="clipped">
+                                  clipped by runtime
+                                </span>
+                              )}
+                              <span className="workers__flag" data-flag={output.contentComplete ? "complete" : "more"}>
+                                {output.contentComplete ? "complete" : "more available"}
+                              </span>
+                              {output.sourceChanged && (
+                                <span className="workers__flag" data-flag="changed">
+                                  source changed
+                                </span>
+                              )}
+                            </div>
+                            <input
+                              className="workers__search"
+                              type="search"
+                              value={outputFilter}
+                              onChange={(e) => setOutputFilter(e.target.value)}
+                              placeholder="Filter loaded rows… (never fetches more)"
+                              aria-label="Filter loaded output rows"
+                            />
+                            <pre className="workers__output" data-testid="output-pre">
+                              {visible.length > 0 ? visible.join("\n") : "(no loaded rows match)"}
+                              {!q && !output.contentComplete && "\n…"}
+                              {!q && output.clipped ? "\n[clipped by the runtime]" : ""}
+                            </pre>
+                            <div className="inbox__meta">
+                              {q
+                                ? `${visible.length} of ${output.lines.length} loaded rows match — search covers loaded rows only`
+                                : `${output.lines.length} loaded row${output.lines.length === 1 ? "" : "s"}`}
+                              {" · "}
+                              <button
+                                type="button"
+                                className="workers__download"
+                                onClick={() => downloadLoaded(output)}
+                                title="Save the rows already read to a local file — nothing more is fetched"
+                              >
+                                Download loaded rows
+                              </button>
+                            </div>
+                          </>
+                        );
+                      })()}
+                    </>
                   )}
-                  {output?.dispatchId === row.dispatchId && (
-                    <div className="inbox__meta">
-                      output source: <b>{output.source}</b>
-                      {output.clipped ? " · clipped" : ""}
-                      {!output.contentComplete ? " · more available" : " · complete"}
+                  {output?.dispatchId === row.dispatchId && output.warnings.map((w, i) => (
+                    <div key={i} className="inbox__body workers__warn">
+                      ⚠ {w}
+                    </div>
+                  ))}
+                  {outputErr && <div className="exec__err inbox__err">⚠️ {outputErr}</div>}
+
+                  {decision && decision.dispatchId === row.dispatchId && (
+                    <div className="inbox__body workers__decision" data-testid="decision-receipt">
+                      Terminal decision receipt: <b>{decision.receipt.state}</b>
+                      {decision.receipt.requestId && (
+                        <>
+                          {" "}· request <code>{decision.receipt.requestId.slice(0, 8)}…</code>
+                        </>
+                      )}
+                      {" · archive: "}
+                      {decision.receipt.archive ? (
+                        <code>{archiveSummary(decision.receipt.archive)}</code>
+                      ) : (
+                        "none reported"
+                      )}
+                      <div className="inbox__meta">
+                        Archive presence is evidence, not settlement — the fleet state above stays
+                        authoritative. The request id is recorded in the audit ledger.
+                      </div>
                     </div>
                   )}
-                  {output?.dispatchId === row.dispatchId && output.sourceChanged && (
-                    <div className="inbox__body workers__warn">Output source changed — read restarted from the start.</div>
-                  )}
-                  {output?.dispatchId === row.dispatchId &&
-                    output.warnings.map((w, i) => (
-                      <div key={i} className="inbox__body workers__warn">
-                        ⚠ {w}
-                      </div>
-                    ))}
-                  {outputErr && <div className="exec__err inbox__err">⚠️ {outputErr}</div>}
 
                   <div className="gate__actions">
                     {output?.dispatchId !== row.dispatchId && (

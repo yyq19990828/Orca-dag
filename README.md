@@ -180,7 +180,8 @@ An end-to-end pass, starting from nothing installed:
 - **▶ Run with Orca / ⏹ Stop** + **Max parallel**: start/stop the viewer's built-in self-driven coordinator; worker count follows the DAG's parallelism (whatever is ready runs together, capped by "Max parallel") — **no manual worker management**. Settled workers have their output archived, then their terminal is released by default; it is handed to an immediate compatible follow-up (same harness, no model change) via `worker-start --terminal` when one is ready, and kept alive instead with the explicit **Retain for debugging** control. While running it shows "N workers".
 - **Approval gates**: gate decisions live under Activity's expandable Operational details instead of overlapping the canvas.
 - **Node details (read-only spec)**: click a node to see its spec / status / result. The spec starts as a smaller one-line preview with an accessible Expand control. Structured worker results are parsed into an outcome, concise report, modified-file list, and optional report path; the complete payload stays available under collapsed technical details. To change the Task or its deps, have the agent redraw the DAG.
-- **Workers panel**: Activity's Operational details contains the live fleet view per attempt — liveness (`live / unverifiable / exited`, with Orca's own reason), attention flags, agent-wait stage, execution host, terminal accounting, requested vs effective model/effort, Orca's literal next action, and bounded output reading.
+- **Workers panel**: Activity's Operational details contains the live fleet view per attempt — liveness (`live / unverifiable / exited`, with Orca's own reason), attention flags, agent-wait stage, execution host, terminal accounting, requested vs effective model/effort, Orca's literal next action, and bounded output reading with explicit **source badges** (`auto / terminal / transcript`, clipped/complete flags), a **search that filters only the rows already loaded** (it never fetches more transcript), a local **Download loaded rows** export, and release-**archive facts** kept visibly separate from the authoritative fleet state (archive presence is evidence, not settlement).
+- **Mutation-request audit**: every viewer-originated mutation (worker-start / release / retain / stop) runs under a durable `--retry-request` id that is persisted — bounded, metadata-only — in the workspace's `.orca-dag.requests.jsonl` ledger *before* the CLI call, so the id stays inspectable even after a lost response or a viewer restart. Operational details gains a read-only **audit panel**: one row per recorded request (operation, Task/Dispatch linkage, scope), and per-row **Inspect** runs a fresh `request-show` probe rendering Orca's own state and interpretation verbatim — `completed` (green), `pending` (amber), `absent` (gray, explicitly labeled "absence is NOT proof the mutation did not happen"), and `unknown` when the probe itself fails. The audit surface never replays a mutation.
 - **Hand-drawn crayon style**: 🖍️ SVG feTurbulence wobbled strokes on a cream sketchbook canvas.
 
 ## Security model
@@ -220,6 +221,8 @@ All `POST`/`PUT` routes require the `X-Orca-Dag-Token` header (see the security 
 | `POST` | `/api/gates/:id/resolve` | `{ resolution, runId }`: resolve an approval gate |
 | `GET` | `/api/workers?run=<id>` | Complete, cursor-paged, remote-inclusive worker history for the Run (liveness, terminal state, projection); also the durable launch-lock evidence |
 | `GET` | `/api/workers/:dispatchId/output` | Bounded output page (`?source=auto\|terminal\|transcript&cursor=&limit=`, limit clamped 1–200) |
+| `GET` | `/api/requests?run=<id>` | Bounded audit list of this workspace's recorded mutation requests, Run-scoped (unscoped rows included, labeled; rows of other Runs counted, not listed) |
+| `GET` | `/api/requests/:requestId?run=<id>` | One ledger row plus a fresh, read-only `request-show` probe: `{ state: completed\|pending\|absent\|unknown, interpretation, outcome }` — never replays a mutation |
 | `POST` | `/api/workers/:id/release` / `/retain` | Explicit post-settlement terminal release / retain-for-debugging |
 | `POST` | `/api/workers/:id/retry` | Re-place one positively failed attempt (same harness/model/effort/placement) |
 | `POST` | `/api/reset` | `{ confirmAllRuns: true }`: `orca orchestration reset --tasks` — clears tasks in **all** Runs |
@@ -240,8 +243,9 @@ Mutation routes that drive execution (`POST /api/runs`, `POST /api/run`, gate re
 skill/SKILL.md            thin project workflow: PRD → design → task DAG → viewer; delegates command syntax to the runtime-matched guide (skills get orchestration)
 server/src/
   index.ts                process entry: subcommands (--help / uninstall), CLI+workspace resolution, skill install, loopback listener
-  app.ts                  the Express app (createApp): readiness / dag / session / runs / run / run-stop / run-status / activity / inbox / messages / gates / workers / environments / reset / models / config + SPA serving
+  app.ts                  the Express app (createApp): readiness / dag / session / runs / run / run-stop / run-status / activity / inbox / messages / gates / workers / requests / environments / reset / models / config + SPA serving
   activity.ts             Run-scoped readable event parser + bounded viewer Activity journal
+  requestLedger.ts        bounded, atomic ledger of viewer-originated mutation-request ids (.orca-dag.requests.jsonl) — metadata only, state always re-read live via request-show
   security.ts             loopback policy: per-process mutation token, request validation, custom-command gate
   coordinator.ts          self-driven coordinator loop: polls the DAG, fires ready tasks via worker-start (local or --on environment), owns settlement + terminal reuse/retain/release, reconciles with worker-list --include-remote
   orca.ts                 orca CLI wrapper: one resolved executable/argv + workspace, readiness/version gate, task-list→DAG, worker-start/reuse/legacy/opencode workers, environment discovery + peer capabilities + placement gates, worker-read, gates, terminals, models
@@ -260,7 +264,8 @@ web/src/
   components/GatePanel.tsx    approval gates inside Operational details
   components/RunPicker.tsx    Run selector + "New Run"
   components/DoodleSelect.tsx hand-drawn select (portal dropdown, search, keyboard nav)
-  components/WorkerPanel.tsx  fleet view: liveness/attention/launch prefs/output, retain & release controls
+  components/WorkerPanel.tsx  fleet view: liveness/attention/launch prefs/sourced output (search + download), archive facts, retain & release controls
+  components/RequestAuditPanel.tsx read-only mutation-request audit: ledger rows + request-show receipts (completed/pending/absent/unknown)
   harness.ts                reactive config store: per-node launch preferences, lead stage per Run, default, max parallel, layout (persisted via /api/config)
   layout.ts                 layout algorithms: dagre layered (LR/TB) + force-directed (Fruchterman–Reingold)
   types.ts / api.ts

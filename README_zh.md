@@ -179,7 +179,8 @@ npm run release 0.2.0  # 打 tag 并推送；CI 负责发 npm + 把各平台二�
 - **▶ Run with Orca / ⏹ Stop** + **Max parallel**：启动/停止 viewer 内置的自驱动 coordinator；worker 数由 DAG 并行度决定（能并行就并行，受 "Max parallel" 上限约束）—— **不用手动加 worker**。落定的 worker 先归档输出，终端默认释放；如果有立即可兼容的后续任务（同 harness、模型不变），终端通过 `worker-start --terminal` 直接交给它；也可以用 **Retain for debugging** 显式保留。执行中显示 "N workers"。
 - **审批门**：审批操作放在 Activity 可展开的 Operational details 中，不再与其他卡片叠在画布上。
 - **节点详情（只读 spec）**：点节点看 spec / 状态 / 结果。spec 默认是更小的一行预览，并提供可访问的 Expand 控件；结构化 worker 结果会解析为结果状态、简洁报告、修改文件列表和可选报告路径，完整 payload 收进默认折叠的技术详情；改 Task 或依赖仍需让 agent 重绘 DAG。
-- **Workers 面板**：Activity 的 Operational details 内按尝试展示 fleet 视图，包括存活状态、attention、执行主机、终端记账、请求值与实际生效值、Orca 字面 nextAction 与有界输出。
+- **Workers 面板**：Activity 的 Operational details 内按尝试展示 fleet 视图，包括存活状态、attention、执行主机、终端记账、请求值与实际生效值、Orca 字面 nextAction，以及带**来源徽标**（`auto / terminal / transcript`、截断/完整标记）的有界输出、只过滤**已加载行**的**搜索**（绝不会抓取更多转录）、本地**下载已加载行**导出，以及与 fleet 权威状态 visibly 区分的释放**归档事实**（归档存在只是证据，不等于结算）。
+- **变更请求审计**：查看器发起的每个变更（worker-start / release / retain / stop）都携带持久的 `--retry-request` id，并在调用 CLI **之前**写入工作区 `.orca-dag.requests.jsonl` 账本（有界、仅元数据），即使响应丢失或查看器重启之后 id 仍可检视。Operational details 新增只读**审计面板**：每个已记录请求一行（操作、Task/Dispatch 关联、作用域），行内 **Inspect** 会发起一次全新的 `request-show` 探测，并逐字渲染 Orca 自身的状态与解释——`completed`（绿）、`pending`（琥珀）、`absent`（灰，明确标注"absent 绝不证明变更没有发生"）、探测失败则显示 `unknown`。审计面绝不重放变更。
 - **手绘蜡笔风**：🖍️ SVG feTurbulence 波动描边 + 米色速写本画布。
 
 ## 安全模型
@@ -219,6 +220,8 @@ viewer 是直通 Orca 的控制面 —— 启动 Run 会 fence 掉原本的 coor
 | `POST` | `/api/gates/:id/resolve` | `{ resolution, runId }`：解决审批门 |
 | `GET` | `/api/workers?run=<id>` | 该 Run 完整、游标分页且包含远程记录的 worker 历史（存活状态、终端状态、projection），也是启动参数锁定的持久证据 |
 | `GET` | `/api/workers/:dispatchId/output` | 有界输出分页（`?source=auto\|terminal\|transcript&cursor=&limit=`，limit 钳制 1–200） |
+| `GET` | `/api/requests?run=<id>` | 本工作区已记录变更请求的有界审计列表，按 Run 划界（未记录作用域的行保留并标注；其他 Run 的行只计数不列出） |
+| `GET` | `/api/requests/:requestId?run=<id>` | 单条账本行加一次全新的只读 `request-show` 探测：`{ state: completed\|pending\|absent\|unknown, interpretation, outcome }` —— 绝不重放变更 |
 | `POST` | `/api/workers/:id/release` / `/retain` | 落定后显式释放终端 / 保留调试 |
 | `POST` | `/api/workers/:id/retry` | 重摆一个明确失败的尝试（同 harness/模型/effort/放置） |
 | `POST` | `/api/reset` | `{ confirmAllRuns: true }`：`orca orchestration reset --tasks` —— 清空**所有** Run 的任务 |
@@ -239,8 +242,9 @@ viewer 是直通 Orca 的控制面 —— 启动 Run 会 fence 掉原本的 coor
 skill/SKILL.md            薄项目工作流：PRD → 设计 → 任务 DAG → viewer；命令语法交给与运行时匹配的编排指南（skills get orchestration）
 server/src/
   index.ts               进程入口：子命令（--help / uninstall）、CLI+工作区解析、装 skill、回环监听
-  app.ts                 Express 应用（createApp）：readiness / dag / session / runs / run / run-stop / run-status / activity / inbox / messages / gates / workers / environments / reset / models / config + 托管 SPA
+  app.ts                 Express 应用（createApp）：readiness / dag / session / runs / run / run-stop / run-status / activity / inbox / messages / gates / workers / requests / environments / reset / models / config + 托管 SPA
   activity.ts            Run 作用域的可读事件解析器 + 有界 viewer Activity 日志
+  requestLedger.ts       查看器发起的变更请求 id 的有界、原子账本（.orca-dag.requests.jsonl）——仅元数据，状态永远通过 request-show 实时读取
   security.ts            回环安全策略：每进程 mutation token、请求校验、自定义命令开关
   coordinator.ts          自驱动 coordinator 循环：轮询 DAG，用 worker-start（本机或 --on 环境）派发 ready 任务，负责落定与终端复用/保留/释放，用 worker-list --include-remote 对账
   orca.ts                 orca CLI 封装：唯一解析的可执行/argv + 工作区、就绪/版本门、task-list→DAG、worker-start/复用/legacy/opencode worker、环境发现 + 对端能力 + 放置门、worker-read、门、终端、模型
@@ -259,7 +263,8 @@ web/src/
   components/GatePanel.tsx    Operational details 内的审批门
   components/RunPicker.tsx    Run 选择器 + 新建 Run
   components/DoodleSelect.tsx 手绘风下拉框（portal 弹层、搜索、键盘导航）
-  components/WorkerPanel.tsx  fleet 视图：存活/attention/启动偏好/输出，保留与释放控件
+  components/WorkerPanel.tsx  fleet 视图：存活/attention/启动偏好/带来源徽标的输出（搜索 + 下载）、归档事实、保留与释放控件
+  components/RequestAuditPanel.tsx 只读变更请求审计：账本行 + request-show 回执（completed/pending/absent/unknown）
   harness.ts                响应式配置 store：每节点启动偏好、每 Run 主阶段、默认 harness、最多并行、布局（/api/config 持久化）
   layout.ts                 布局算法：dagre 分层（LR/TB）+ 力导向（Fruchterman–Reingold）
   types.ts / api.ts

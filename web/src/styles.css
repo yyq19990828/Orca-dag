@@ -4572,3 +4572,214 @@ body {
   color: var(--sky-ink);
   font-size: 10px;
 }
+
+/* --- Phase 5: recovery and output audit ----------------------------------- */
+
+/* Output header badges: the source that answered (auto/terminal/transcript)
+   plus bounded facts (clipped / complete / source-changed). The badge never
+   claims more than the read receipt did. */
+.workers__outputmeta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.workers__srcbadge {
+  flex: none;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 2px solid currentColor;
+  color: var(--sky-ink, #3e7ba6);
+}
+
+.workers__srcbadge[data-source="transcript"] {
+  color: var(--lilac-ink, #6f5aa4);
+}
+
+.workers__srcbadge[data-source="terminal"] {
+  color: var(--flame, #f0975e);
+}
+
+.workers__flag {
+  font-size: 10px;
+  color: var(--ink-soft, #8b8798);
+  border: 1px dashed var(--line-strong, #d3ccb8);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+
+/* Search within ALREADY-LOADED output rows. Utility styling like
+   .workers__source — it filters, it never fetches. */
+.workers__search {
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink, #4a4754);
+  background: #faf8f0;
+  border: 2px solid #e6e1d2;
+  border-radius: 8px;
+  padding: 2px 8px;
+  width: 100%;
+}
+
+.workers__download {
+  font: inherit;
+  font-size: 11px;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--sky-ink, #3e7ba6);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.workers__download:hover {
+  color: var(--ink, #4a4754);
+}
+
+/* The receipt of a manual release/retain, with archive facts kept visibly
+   separate from the authoritative fleet state. */
+.workers__decision {
+  border-left: 3px solid var(--line-strong, #d3ccb8);
+  padding-left: 8px;
+}
+
+/* Mutation-request audit rows (read-only). */
+.audit__caption {
+  margin: 2px 0 6px;
+}
+
+.audit__row + .audit__row {
+  border-top: 2px dashed var(--paper-edge, #d8d3c4);
+  margin-top: 6px;
+  padding-top: 6px;
+}
+
+.audit__toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 2px 0;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+
+.audit__toggle:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.audit__op {
+  flex: none;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 2px solid currentColor;
+  color: var(--sky-ink, #3e7ba6);
+}
+
+.audit__op[data-op="worker-release"],
+.audit__op[data-op="worker-retain"] {
+  color: var(--flame, #f0975e);
+}
+
+.audit__op[data-op="worker-stop"] {
+  color: var(--coral, #ea6b5e);
+}
+
+/* The four readable receipt buckets. `absent` is deliberately the calmest:
+   it must read as "unknown", never as an error or a clearance. */
+.audit__state {
+  flex: none;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 2px solid currentColor;
+}
+
+.audit__state[data-state="completed"] {
+  color: #3e9a55;
+}
+
+.audit__state[data-state="pending"] {
+  color: var(--mustard, #b37f16);
+}
+
+.audit__state[data-state="absent"] {
+  color: #8a857a;
+}
+
+.audit__state[data-state="unknown"] {
+  color: var(--coral, #ea6b5e);
+}
+
+.audit__state[data-state="other"] {
+  color: var(--ink-soft, #8b8798);
+  border-style: dashed;
+}
+
+.audit__hint {
+  margin-left: auto;
+  flex: none;
+  font-size: 11px;
+  color: var(--ink-soft, #8b8798);
+}
+
+.audit__note {
+  font-size: 12px;
+  color: var(--ink-soft, #8b8798);
+}
+
+.audit__detail {
+  margin-top: 4px;
+  display: grid;
+  gap: 4px;
+}
+
+.audit__receipt {
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: #faf8f0;
+  border: 2px solid #e6e1d2;
+}
+
+.audit__receipt--completed {
+  border-color: #bfe3c8;
+}
+
+.audit__receipt--pending {
+  border-color: #ecd9a8;
+}
+
+.audit__receipt--absent {
+  border-style: dashed;
+}
+
+.audit__receipt--unknown {
+  border-color: #f3c1bb;
+}
+
+.audit__outcome {
+  font-size: 12px;
+  color: var(--ink-soft, #8b8798);
+}
+
+.audit__outcome summary {
+  cursor: pointer;
+  user-select: none;
+}

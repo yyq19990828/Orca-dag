@@ -35,8 +35,10 @@ import {
   runOrca,
   sendCoordinatorMessage,
   showRun,
+  showRequest,
   showWorkerDetail,
   tasksToDag,
+  newRequestId,
   type OrcaReadiness,
   type WorkerObservation,
 } from "./orca";
@@ -73,6 +75,7 @@ import {
   createViewerActivity,
   type ActivitySnapshot,
 } from "./activity";
+import { RequestLedger } from "./requestLedger";
 
 /**
  * The Express app, extracted from index.ts so it can be constructed and tested
@@ -232,6 +235,11 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
   const viewerCreatedRunIds = new Set<string>();
   const activityJournal = new ActivityJournal(workspaceDir);
   const activityCache = new Map<string, { at: number; value: Promise<ActivitySnapshot> }>();
+  // Durable, bounded metadata for viewer-originated mutation requests
+  // (Phase 5). Ids and scope only — the recorded state of a mutation is
+  // ALWAYS re-read live from Orca (`request-show`); this ledger never
+  // becomes a second lifecycle authority.
+  const requestLedger = new RequestLedger(workspaceDir);
 
   /**
    * One bounded, strictly Run-scoped activity projection. Message history is
@@ -325,6 +333,61 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
     const r = await readiness();
     if (!r.executionEnabled) {
       throw new ValidationError(r.reason ?? "Orca execution is unavailable.", "execution_disabled");
+    }
+  };
+
+  /**
+   * Run a one-off terminal mutation (release/retain) under a durable,
+   * ledger-recorded request id (Phase 5). Run/Task scope is recorded ONLY
+   * when this viewer's own coordinator projection positively proves it;
+   * anything else stays unscoped ("scope unknown") rather than being
+   * mis-attributed to whatever Run happens to be open. The mint record
+   * lands BEFORE the CLI call, so even a lost response leaves the id
+   * inspectable via `request-show`.
+   */
+  const terminalMutationWithLedger = async (
+    operation: "worker-release" | "worker-retain",
+    dispatchId: string,
+    run: (requestId: string) => Promise<{ state: string }>,
+  ): Promise<{ state: string }> => {
+    const live = coordinatorStatus();
+    const attempt =
+      live.running && live.runId
+        ? live.attempts.find((a) => a.dispatchId === dispatchId)
+        : undefined;
+    const runId = attempt ? live.runId : null;
+    const taskId = attempt?.taskId ?? null;
+    const requestId = newRequestId();
+    await requestLedger
+      .record({ requestId, operation, runId, taskId, dispatchId })
+      .catch(() => {});
+    try {
+      const receipt = await run(requestId);
+      await requestLedger
+        .record({
+          requestId,
+          operation,
+          runId,
+          taskId,
+          dispatchId,
+          settledLocally: receipt.state !== "release_unknown",
+          note: `viewer-observed terminal state: ${receipt.state}`,
+        })
+        .catch(() => {});
+      return receipt;
+    } catch (err) {
+      await requestLedger
+        .record({
+          requestId,
+          operation,
+          runId,
+          taskId,
+          dispatchId,
+          settledLocally: false,
+          note: `mutation failed: ${String((err as Error)?.message ?? err)}`,
+        })
+        .catch(() => {});
+      throw err;
     }
   };
 
@@ -602,6 +665,11 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
           await activityJournal.appendCheck(runId, receipt);
           activityCache.delete(runId);
         },
+        // Phase 5: the coordinator's mutation requests (worker-start/release/
+        // retain/stop) land in the durable ledger — best-effort, metadata
+        // only, so every `--retry-request` id stays inspectable via
+        // `request-show` even after a response loss or viewer restart.
+        onRequestRecord: (meta) => requestLedger.record(meta),
       });
       await recordActivity(
         createViewerActivity({
@@ -843,6 +911,100 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       const limitRaw = req.query.limit === undefined ? NaN : Number(req.query.limit);
       const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, Math.round(limitRaw))) : 40;
       res.json({ output: await readWorkerOutput(dispatchId, { source: source ?? undefined, cursor: cursor ?? undefined, limit }) });
+    }),
+  );
+
+  // --- Phase 5: mutation-request audit (read-only) --------------------------
+  //
+  // The durable ledger of viewer-originated mutation requests, plus a live
+  // `request-show` inspection endpoint. Both are strictly read-only: nothing
+  // here replays, retries, or settles anything. `request-show` only asks
+  // Orca what ALREADY happened, and its `absent` answer never proves a
+  // mutation did not happen — the UI says so in plain text.
+
+  /**
+   * Recovery/audit list for one Run: bounded ledger rows recorded by this
+   * workspace's viewer, filtered to the requested Run. Rows whose recorded
+   * operation supplied no Run scope stay inspectable under every Run —
+   * labeled unscoped — because an unscoped lost-response id is exactly what
+   * an operator needs to find, never silently dropped. Newest first, capped
+   * server-side (RequestLedger.list).
+   */
+  app.get(
+    "/api/requests",
+    route(async (req, res) => {
+      const runId = validateId(req.query.run, "run");
+      if (!runId) {
+        res.status(400).json({ error: "run query parameter required", code: "run_required" });
+        return;
+      }
+      const all = await requestLedger.list();
+      const requests = all.filter((row) => row.runId === runId || row.runId === null);
+      res.json({
+        runId,
+        requests,
+        /** Rows that positively name ANOTHER Run — excluded, but counted. */
+        otherRunCount: all.filter((row) => row.runId !== null && row.runId !== runId).length,
+        generatedAt: Date.now(),
+      });
+    }),
+  );
+
+  /**
+   * Live inspection of ONE recorded mutation request: the durable ledger row
+   * plus a fresh, read-only `request-show` probe. Orca's own state and
+   * interpretation ride through verbatim (`completed` / `pending` / `absent`
+   * / whatever new state a newer runtime introduces); a failed probe
+   * degrades to state "unknown" — never to a guess. This surface NEVER
+   * replays a mutation: the only CLI verb reachable from here is
+   * `request-show`, and no method on this route accepts an action.
+   */
+  app.get(
+    "/api/requests/:requestId",
+    route(async (req, res) => {
+      const requestId = validateId(req.params.requestId, "request id");
+      const runId = validateId(req.query.run, "run");
+      if (!requestId || !runId) {
+        res.status(400).json({ error: "run query parameter required", code: "run_required" });
+        return;
+      }
+      const request = (await requestLedger.list()).find((row) => row.requestId === requestId);
+      if (!request) {
+        res.status(404).json({ error: "no such recorded request", code: "request_not_found" });
+        return;
+      }
+      // Scope guard, mirroring worker detail: a row that positively names
+      // another Run 404s instead of leaking across the Run boundary.
+      // (Unscoped rows — the ledger's "scope unknown" — remain inspectable.)
+      if (request.runId !== null && request.runId !== runId) {
+        res.status(404).json({
+          error: "request belongs to a different Run",
+          code: "request_run_mismatch",
+        });
+        return;
+      }
+      const receipt = await showRequest(requestId);
+      res.json({
+        request,
+        receipt: receipt
+          ? {
+              state: receipt.state,
+              interpretation: receipt.interpretation,
+              outcome: receipt.outcome,
+              probe: "orca",
+              probedAt: new Date().toISOString(),
+            }
+          : {
+              // The probe itself failed (transport trouble, missing CLI).
+              // The mutation's outcome stays UNRESOLVED — reporting it as
+              // anything else would be inventing a lifecycle fact.
+              state: "unknown",
+              interpretation: null,
+              outcome: null,
+              probe: "failed",
+              probedAt: new Date().toISOString(),
+            },
+      });
     }),
   );
 
@@ -1110,7 +1272,9 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         return;
       }
       await requireExecutionEnabled();
-      const receipt = await releaseWorker(dispatchId);
+      const receipt = await terminalMutationWithLedger("worker-release", dispatchId, (requestId) =>
+        releaseWorker(dispatchId, { retryRequestId: requestId }),
+      );
       // Fold the receipt into the coordinator projection — a KNOWN terminal
       // state resolves the attempt + its debt; unknown/pending keeps them.
       noteManualRelease(dispatchId, receipt.state);
@@ -1144,7 +1308,9 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         return;
       }
       await requireExecutionEnabled();
-      const receipt = await retainWorker(dispatchId);
+      const receipt = await terminalMutationWithLedger("worker-retain", dispatchId, (requestId) =>
+        retainWorker(dispatchId, { retryRequestId: requestId }),
+      );
       noteManualRelease(dispatchId, receipt.state);
       const live = coordinatorStatus();
       if (live.runId) {

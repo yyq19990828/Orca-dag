@@ -1940,3 +1940,140 @@ describe("Phase 6: environment discovery API", () => {
     assert.equal(bad.status, 400);
   });
 });
+
+// --- Phase 5: durable mutation-request audit trail ---------------------------
+//
+// The coordinator's request ledger sink is metadata only — ids, scope, and a
+// bounded viewer note. What Phase 5 adds to the recovery story: the SAME
+// durable `--retry-request` id that makes a lost response idempotently
+// recoverable ALSO survives in the ledger, so `request-show` stays reachable
+// after the in-memory attempt projection is gone (response loss, viewer
+// restart). These tests capture the sink's output verbatim.
+
+describe("Phase 5: durable mutation-request audit trail", () => {
+  /** Start the loop with a capturing ledger sink (still fully best-effort). */
+  async function startWithAuditCapture(runId: string, extra: Partial<StartOpts> = {}) {
+    const records: import("./requestLedger").MutationRequestMeta[] = [];
+    await startCoordinator(
+      baseOpts(runId, {
+        ...extra,
+        onRequestRecord: async (meta) => {
+          records.push({ ...meta });
+        },
+      }),
+    );
+    return records;
+  }
+
+  it("records a worker-start request BEFORE the CLI call and links the Dispatch after recovery", async () => {
+    const runId = "run_audit_lost";
+    await mutateState((state) => {
+      state.tasks = { task_aaa: { id: "task_aaa", run_id: runId, status: "pending", deps: "[]" } };
+      state.runs = { [runId]: { id: runId, objective: "test", legacy: 0 } };
+      // The start LANDS and the response is lost — recovered via
+      // request-show + same-id replay, exactly as in Phase 4.
+      state.workerStartAmbiguous = "lost";
+    });
+    const records = await startWithAuditCapture(runId);
+    await waitFor(() => (findAttempt("task_aaa")?.dispatchId ?? null), "recovered dispatch");
+    const a = attempt("task_aaa");
+
+    const startRecords = records.filter((r) => r.operation === "worker-start");
+    assert.ok(startRecords.length >= 2, "mint record + resolution record");
+    const mint = startRecords[0];
+    assert.equal(mint.dispatchId, null, "the mint record precedes any Dispatch knowledge");
+    assert.equal(mint.runId, runId, "the run scope rides from the operation itself");
+    assert.equal(mint.taskId, "task_aaa");
+    // The minted id is EXACTLY the durable id both CLI calls ran under —
+    // this is what keeps request-show reachable after a restart.
+    const argvIds = calls("worker-start").map(
+      (c) => c.argv[c.argv.indexOf("--retry-request") + 1],
+    );
+    assert.equal(argvIds[0], mint.requestId);
+    assert.deepEqual(argvIds, [mint.requestId, mint.requestId], "same id on original + replay");
+    const resolved = startRecords[startRecords.length - 1];
+    assert.equal(resolved.requestId, mint.requestId);
+    assert.equal(resolved.dispatchId, a.dispatchId, "the Dispatch is linked once known");
+    assert.equal(resolved.settledLocally, true, "the replay resolved the outcome");
+    assert.match(resolved.note ?? "", /landed as dispatch/);
+    await stopCoordinator();
+  });
+
+  it("leaves an unresolved lost start inspectable: settledLocally false, request-show pointer in the note", async () => {
+    const runId = "run_audit_noreceipt";
+    await singleTaskState(runId);
+    await mutateState((state) => {
+      state.workerStartAmbiguous = "lost_noreceipt";
+    });
+    const records = await startWithAuditCapture(runId);
+    await waitFor(() => (findAttempt("task_aaa")?.settledVia === "start_failed" ? true : null), "failed start recorded");
+    const startRecords = records.filter((r) => r.operation === "worker-start");
+    const resolved = startRecords[startRecords.length - 1];
+    assert.equal(resolved.settledLocally, false, "the outcome is NOT known — never recorded as if it were");
+    assert.match(resolved.note ?? "", /response lost/);
+    assert.match(resolved.note ?? "", /request-show/);
+    assert.ok(calls("request-show").length >= 1, "Orca was asked before anything else");
+    await stopCoordinator();
+  });
+
+  it("records worker-release at settlement with Dispatch/Task linkage and the observed state", async () => {
+    const runId = "run_audit_release";
+    await singleTaskState(runId);
+    const records = await startWithAuditCapture(runId);
+    await waitFor(() => (findAttempt("task_aaa")?.dispatchId ?? null), "dispatch");
+    await settleViaWorkerDone("task_aaa", "succeeded", "msg_audit1");
+    await waitFor(() => (findAttempt("task_aaa")?.terminalDecision === "released" ? true : null), "release");
+    const releaseRecords = records.filter((r) => r.operation === "worker-release");
+    assert.ok(releaseRecords.length >= 2, "mint + resolution records");
+    const mint = releaseRecords[0];
+    assert.equal(mint.dispatchId, attempt("task_aaa").dispatchId, "release knows its Dispatch");
+    assert.equal(mint.taskId, "task_aaa");
+    const releaseArgv = calls("worker-release")[0].argv;
+    const argvId = releaseArgv[releaseArgv.indexOf("--retry-request") + 1];
+    assert.equal(argvId, mint.requestId, "the recorded id is the id the CLI ran under");
+    const resolved = releaseRecords[releaseRecords.length - 1];
+    assert.equal(resolved.settledLocally, true);
+    assert.match(resolved.note ?? "", /released/);
+    await stopCoordinator();
+  });
+
+  it("records worker-stop requests when the coordinator is stopped with live workers", async () => {
+    const runId = "run_audit_stop";
+    await singleTaskState(runId);
+    const records = await startWithAuditCapture(runId);
+    await waitFor(() => (findAttempt("task_aaa")?.dispatchId ?? null), "dispatch");
+    await stopCoordinator();
+    const stopRecords = records.filter((r) => r.operation === "worker-stop");
+    assert.ok(stopRecords.length >= 2, "mint + resolution records");
+    assert.equal(stopRecords[0].taskId, "task_aaa");
+    assert.equal(stopRecords[0].dispatchId, "ctx_s1");
+    assert.equal(stopRecords[0].runId, runId);
+    const resolved = stopRecords[stopRecords.length - 1];
+    assert.equal(resolved.settledLocally, true);
+    assert.match(resolved.note ?? "", /stop state:/);
+    const stopArgv = calls("worker-stop")[0].argv;
+    const argvId = stopArgv[stopArgv.indexOf("--retry-request") + 1];
+    assert.equal(argvId, stopRecords[0].requestId, "the recorded id is the id the CLI ran under");
+  });
+
+  it("captures release-archive facts on the attempt without claiming settlement", async () => {
+    const runId = "run_audit_archive";
+    await singleTaskState(runId);
+    await mutateState((state) => {
+      state.archives = { ctx_s1: ["ARCHIVED OUTPUT LINE"] };
+    });
+    await startCoordinator(baseOpts(runId));
+    await waitFor(() => (findAttempt("task_aaa")?.dispatchId ?? null), "dispatch");
+    await settleViaWorkerDone("task_aaa", "succeeded", "msg_audit2");
+    await waitFor(() => (findAttempt("task_aaa")?.terminalDecision === "released" ? true : null), "release");
+    // The release receipt the fake answers carries archive facts; the attempt
+    // projects them as a bounded summary alongside — never instead of — the
+    // authoritative terminal state.
+    const a = attempt("task_aaa");
+    assert.equal(a.terminalDecision, "released", "the fleet answer stays the authority");
+    const archive = (a as unknown as { terminalArchive: string | null }).terminalArchive;
+    assert.ok(archive, "archive facts from the release receipt are projected");
+    assert.match(archive!, /ARCHIVED OUTPUT LINE/, "the summary carries the receipt's archive");
+    await stopCoordinator();
+  });
+});

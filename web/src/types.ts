@@ -364,6 +364,12 @@ export interface RunAttempt {
     | "release_unknown"
     | "close_failed";
   terminalDetail: string | null;
+  /**
+   * Bounded release-archive facts from the last terminal receipt (Phase 5).
+   * Evidence that output was preserved — archive presence is NOT settlement;
+   * the fleet's terminal state stays authoritative. Null = none reported.
+   */
+  terminalArchive: string | null;
   /** Tail of archived output, captured before release. */
   output: {
     source: string;
@@ -424,6 +430,59 @@ export interface RecoverySummaryView {
   unverifiable: string[];
   /** Already-decided rows (released/retained) left exactly as Orca holds them. */
   leftDecided: number;
+}
+
+// --- Phase 5: mutation-request audit (read-only) -----------------------------
+
+/**
+ * Receipt of one terminal-ownership mutation (worker-release / worker-retain).
+ * `archive` carries Orca's release-archive facts verbatim — evidence that
+ * output was preserved, never proof of settlement. `requestId` is the durable
+ * `--retry-request` id the mutation ran under (also recorded in the viewer's
+ * audit ledger).
+ */
+export interface WorkerTerminalReceiptView {
+  dispatchId: string;
+  state: string;
+  reason: string | null;
+  processAction: string | null;
+  warning: string | null;
+  archive: Record<string, unknown> | null;
+  requestId: string | null;
+}
+
+/** One durable, bounded row of the viewer's mutation-request ledger. */
+export interface RequestLedgerRowView {
+  requestId: string;
+  operation: string;
+  /** Null = the recorded operation supplied no Run scope — "unknown", not guessed. */
+  runId: string | null;
+  taskId: string | null;
+  dispatchId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** Bounded viewer-observed note; never a receipt or transcript body. */
+  note: string | null;
+  /** Viewer observed a definitive outcome during the call — a hint, never authority. */
+  settledLocally: boolean | null;
+}
+
+/**
+ * The live `request-show` receipt for one request id, verbatim from Orca.
+ * `state` is Orca's own string (completed | pending | absent | …); a failed
+ * probe degrades to `unknown` with `probe: "failed"` — never to a guess.
+ */
+export interface RequestReceiptView {
+  state: string;
+  interpretation: string | null;
+  outcome: unknown;
+  probe: "orca" | "failed";
+  probedAt: string;
+}
+
+export interface RequestDetailResponse {
+  request: RequestLedgerRowView;
+  receipt: RequestReceiptView;
 }
 
 /** A worker question/escalation waiting on a human reply. */

@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { AGENT_SKILL_DIRS, SKILL_NAME } from "./skill";
 import { COORDINATOR_TITLE, closeTerminal, listTerminals, parseCoordinatorTitle } from "./orca";
 import { ACTIVITY_FILE } from "./activity";
+import { REQUESTS_FILE } from "./requestLedger";
 
 export interface UninstallOptions {
   /** Print what would happen, change nothing. */
@@ -124,6 +125,7 @@ export async function runUninstall(opts: UninstallOptions): Promise<void> {
   const persisted = [
     { path: join(opts.workspace, ".orca-dag.config.json"), label: "harness/model/layout choices" },
     { path: join(opts.workspace, ACTIVITY_FILE), label: "viewer activity history" },
+    { path: join(opts.workspace, REQUESTS_FILE), label: "mutation-request audit ledger" },
   ];
   for (const item of persisted) {
     if (!existsSync(item.path)) continue;
