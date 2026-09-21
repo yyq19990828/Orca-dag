@@ -27,12 +27,14 @@ import {
   FLEET_CAPABILITY_GAP_REASONS,
   parseWorkerDonePayload,
   parsePeerCapabilities,
+  previewRunAudiences,
   readWorkerOutput,
   releaseWorker,
   replyToMessage,
   resolveGate,
   retainWorker,
   runOrca,
+  sendCoordinatorGroupMessage,
   sendCoordinatorMessage,
   showRun,
   showRequest,
@@ -53,12 +55,16 @@ import {
   stopCoordinator,
 } from "./coordinator";
 import {
+  assertDiscoveredWorktreeAudience,
   requireToken,
   validateBooleanTaskMap,
   validateConcurrency,
   validateEffort,
   validateEnvironmentSelector,
   validateEnvironmentTaskMap,
+  validateGroupAudience,
+  validateGroupMessagePriority,
+  validateGroupMessageType,
   validateHarness,
   validateId,
   validateModel,
@@ -1254,6 +1260,140 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         }),
       );
       res.json({ ok: true, dispatchId: task.dispatch_id });
+    }),
+  );
+
+  /**
+   * Audience discovery for the Run-control group composer (Phase 6, read-only).
+   *
+   * Returns every supported group audience with an ESTIMATE of who it would
+   * reach, derived from the same Run-scoped worker facts the rest of the
+   * viewer renders. `previewRunAudiences` marks every option `exact: false`
+   * because Orca exposes no group-membership read — the UI must present these
+   * counts as estimates, never as a proven recipient list. Worktree audiences
+   * appear only for exact `worktree list` identities, so the composer can
+   * never offer — and the send route can never accept — an invented workspace.
+   *
+   * Read failures degrade to an explicit error field instead of an empty
+   * "no audiences" answer: absence of evidence is not evidence of absence.
+   */
+  app.get(
+    "/api/audiences",
+    route(async (req, res) => {
+      const runId = validateId(req.query.run, "run");
+      if (!runId) {
+        res.status(400).json({ error: "run query parameter required", code: "run_required" });
+        return;
+      }
+      const live = coordinatorStatus();
+      const coordinatorActive = live.running && live.runId === runId && Boolean(live.coordinatorHandle);
+      const [workersResult, worktreesResult] = await Promise.allSettled([
+        listWorkers(runId, { includeRemote: true }),
+        listWorktrees(),
+      ]);
+      const workers = workersResult.status === "fulfilled" ? workersResult.value : null;
+      const worktrees = worktreesResult.status === "fulfilled" ? worktreesResult.value : null;
+      res.json({
+        runId,
+        coordinatorActive,
+        audiences:
+          workers && worktrees
+            ? previewRunAudiences({ workers, worktrees })
+            : [],
+        workersError:
+          workersResult.status === "rejected"
+            ? String((workersResult.reason as Error)?.message ?? workersResult.reason).slice(0, 300)
+            : null,
+        worktreesError:
+          worktreesResult.status === "rejected"
+            ? String((worktreesResult.reason as Error)?.message ?? worktreesResult.reason).slice(0, 300)
+            : null,
+      });
+    }),
+  );
+
+  /**
+   * Send one deliberate Run-level GROUP message from the live coordinator
+   * (Phase 6). The one-to-one guidance route above anchors authority to a
+   * single active Dispatch; this route anchors it to Run coordination itself:
+   * only THIS viewer's live coordinator terminal for the selected Run may
+   * send, and never via a borrowed throwaway terminal (that would fence a
+   * real coordinator just by opening an old Run's Run-control thread).
+   *
+   * Safety ordering inside the handler:
+   *   1. token (middleware) → 2. shape validation (audience grammar, body,
+   *   subject, type, priority) → 3. FRESH `worktree list` discovery + exact
+   *   membership for `@worktree:` audiences → 4. execution gate → 5. live
+   *   coordinator check → 6. send. A client can therefore never choose an
+   *   arbitrary recipient, a lifecycle type, or an undiscovered workspace —
+   *   and never reach the CLI at all unless every gate passed.
+   */
+  app.post(
+    "/api/messages/group",
+    requireToken(policy),
+    route(async (req, res) => {
+      const runId = validateId(req.body?.runId, "runId");
+      const body = validateText(req.body?.body, "body", 20000);
+      const subject = validateText(req.body?.subject, "subject", 200) ?? "Coordinator broadcast";
+      const type = validateGroupMessageType(req.body?.type);
+      const priority = validateGroupMessagePriority(req.body?.priority);
+      const audience = validateGroupAudience(req.body?.audience);
+      if (!runId || !body) {
+        res.status(400).json({ error: "body and runId required" });
+        return;
+      }
+      // Worktree audiences must name a workspace Orca itself discovered, in
+      // this send's own discovery read — a stale or client-supplied list is
+      // exactly the free-text hole this route exists to close. Other address
+      // shapes return from the gate before any CLI call is spent. Discovery
+      // failure fails CLOSED: an unverifiable workspace is never a recipient.
+      await assertDiscoveredWorktreeAudience(audience, async () => {
+        try {
+          return new Set((await listWorktrees()).map((worktree) => worktree.id));
+        } catch (err) {
+          throw new ValidationError(
+            "Worktree audiences cannot be verified right now (worktree discovery failed: " +
+              `${String((err as Error)?.message ?? err).slice(0, 200)}).`,
+            "unknown_audience",
+          );
+        }
+      });
+      await requireExecutionEnabled();
+      const live = coordinatorStatus();
+      if (!live.running || live.runId !== runId || !live.coordinatorHandle) {
+        throw new OrcaCliError(
+          "This viewer is not the live coordinator for the selected Run; it cannot send group messages.",
+          "not_running",
+        );
+      }
+      const receipt = await sendCoordinatorGroupMessage({
+        runId,
+        audience,
+        subject,
+        body,
+        type,
+        priority,
+        from: live.coordinatorHandle,
+      });
+      // Journal the accepted enqueue receipt: the optimistic row renders the
+      // send immediately (with audience + requested priority as provenance)
+      // and `removeJournalMessageDuplicates` supersedes it once the durable
+      // Orca row lands in the global inbox window.
+      await recordActivity(
+        createViewerActivity({
+          runId,
+          kind: type === "question" ? "question" : "status",
+          title: type === "question" ? `Coordinator asked ${audience}` : `Coordinator messaged ${audience}`,
+          summary: body,
+          detail: subject === "Coordinator broadcast" ? null : `Subject: ${subject}`,
+          audience,
+          priority,
+          // The enqueue receipt itself is the durable evidence this row
+          // journals; the UI never re-interprets it as a read receipt.
+          payload: receipt,
+        }),
+      );
+      res.json({ ok: true, audience, type, priority, receipt });
     }),
   );
 

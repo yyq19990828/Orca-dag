@@ -40,16 +40,20 @@ import {
   parseEnvironmentRow,
   parsePeerCapabilities,
   parseWorkerStartReceipt,
+  previewRunAudiences,
   presentWorkerLiveness,
   readWorkerOutput,
   resolveOrcaCommand,
   resolveWorktreeSelector,
   resolveWorkspace,
   runOrca,
+  sendCoordinatorGroupMessage,
   sendCoordinatorMessage,
   showEnvironment,
   showWorkerDetail,
   startSupervisedWorker,
+  type OrcaWorktreeRow,
+  type OrcaWorkerRow,
 } from "./orca";
 import { closeCoordinatorTerminals } from "./uninstall";
 import { createApp, listenLoopback } from "./app";
@@ -1681,6 +1685,181 @@ describe("coordinator follow-up messaging", () => {
       "ctx_a",
       "--json",
     ]);
+  });
+});
+
+describe("coordinator group messaging (Phase 6)", () => {
+  it("sends an allowlisted group address with Run scope, no attempt identity, one argv per value", async () => {
+    useRuntime({ workspace: root });
+    writeScript({});
+
+    await sendCoordinatorGroupMessage({
+      runId: "run_a",
+      audience: "@all",
+      subject: "Sprint check-in",
+      body: "Please post a one-line status; do not start new work.",
+      type: "status",
+      priority: null,
+      from: "term_coordinator",
+    });
+
+    const call = readLog().find((entry) => entry.argv[1] === "send");
+    assert.ok(call, "send call missing");
+    assert.deepEqual(call.argv, [
+      "orchestration",
+      "send",
+      "--to",
+      "@all",
+      "--run",
+      "run_a",
+      "--from",
+      "term_coordinator",
+      "--subject",
+      "Sprint check-in",
+      "--body",
+      "Please post a one-line status; do not start new work.",
+      "--type",
+      "status",
+      "--json",
+    ]);
+    // A group message has no single attempt: threading a task/dispatch id in
+    // would misattribute Run-level guidance to one Task.
+    assert.ok(!call.argv.includes("--task-id"));
+    assert.ok(!call.argv.includes("--dispatch-id"));
+  });
+
+  it("threads the optional priority through as its own argv value", async () => {
+    useRuntime({ workspace: root });
+    writeScript({});
+
+    await sendCoordinatorGroupMessage({
+      runId: "run_a",
+      audience: "@worktree:wt_exact::/repo/x",
+      subject: "Question",
+      body: "Which stage is blocked?",
+      type: "question",
+      priority: "urgent",
+      from: "term_coordinator",
+    });
+
+    const call = readLog().find((entry) => entry.argv[1] === "send")!;
+    const priorityAt = call.argv.indexOf("--priority");
+    assert.ok(priorityAt >= 0, "priority flag missing");
+    assert.deepEqual(call.argv.slice(priorityAt, priorityAt + 2), ["--priority", "urgent"]);
+    // The exact discovered address is passed as ONE argv element (shell:false).
+    assert.ok(call.argv.includes("@worktree:wt_exact::/repo/x"));
+  });
+});
+
+describe("audience preview (Phase 6)", () => {
+  const worker = (over: Record<string, unknown>): OrcaWorkerRow =>
+    ({
+      dispatchId: "ctx_a",
+      taskId: "task_a",
+      runId: "run_a",
+      workerState: "supervised",
+      dispatchStatus: "dispatched",
+      agentTerminalHandle: null,
+      terminalState: "active",
+      projection: null,
+      ...over,
+    }) as OrcaWorkerRow;
+
+  it("estimates recipients from dispatched rows and labels every option an estimate", () => {
+    const options = previewRunAudiences({
+      workers: [
+        worker({
+          dispatchId: "ctx_1",
+          taskId: "task_1",
+          projection: {
+            launch: { agent: "codex", model: null, effort: null, worktree: null, terminal: null, on: null },
+            provider: null,
+            stage: { worker: "supervised", dispatch: "dispatched", detail: null, activity: "working" },
+            attention: null,
+          },
+        }),
+        worker({
+          dispatchId: "ctx_2",
+          taskId: "task_2",
+          projection: {
+            launch: { agent: "claude", model: null, effort: null, worktree: null, terminal: null, on: null },
+            provider: null,
+            stage: { worker: "supervised", dispatch: "dispatched", detail: null, activity: "idle" },
+            attention: null,
+          },
+        }),
+        // A settled row is not a recipient: group mail reaches live Dispatches.
+        worker({ dispatchId: "ctx_3", taskId: "task_3", dispatchStatus: "completed" }),
+      ],
+      worktrees: [],
+    });
+
+    const all = options.find((o) => o.address === "@all")!;
+    assert.ok(all, "@all must always be offered");
+    assert.deepEqual(
+      all.estimatedRecipients.map((r) => r.taskId),
+      ["task_1", "task_2"],
+    );
+    assert.equal(all.exact, false, "every estimate must stay labeled an estimate");
+    assert.ok(options.every((o) => o.exact === false));
+    const idle = options.find((o) => o.address === "@idle")!;
+    assert.deepEqual(idle.estimatedRecipients.map((r) => r.taskId), ["task_2"]);
+  });
+
+  it("offers harness groups only for active matches and worktree groups only from discovered ids", () => {
+    const options = previewRunAudiences({
+      workers: [
+        worker({
+          dispatchId: "ctx_1",
+          taskId: "task_1",
+          projection: {
+            provider: { id: "opencode", model: null },
+            workspace: "wt_exact::/repo/x",
+            launch: null,
+            stage: { worker: "supervised", dispatch: "dispatched", detail: null, activity: "working" },
+            attention: { categories: ["input"], requiresAction: true },
+          },
+        }),
+      ],
+      worktrees: [
+        {
+          id: "wt_exact::/repo/x",
+          repoId: null,
+          path: "/repo/x",
+          displayName: "Feature work",
+          branch: null,
+          hostId: null,
+          parentWorktreeId: null,
+          isMainWorktree: null,
+        },
+        {
+          // Discovered but with no active worker: still offered (Orca would
+          // include workspace coordinators), just with an empty estimate.
+          id: "wt_other::/repo/y",
+          repoId: null,
+          path: "/repo/y",
+          displayName: null,
+          branch: null,
+          hostId: null,
+          parentWorktreeId: null,
+          isMainWorktree: null,
+        },
+      ],
+    });
+
+    // @opencode matches via provider.id; @claude has no active worker and is
+    // NOT offered — the picker never lists a provably empty harness group.
+    assert.ok(options.some((o) => o.address === "@opencode"));
+    assert.ok(!options.some((o) => o.address === "@claude"));
+    const worktree = options.find((o) => o.address === "@worktree:wt_exact::/repo/x")!;
+    assert.ok(worktree, "discovered worktree audiences are offered by exact id");
+    assert.equal(worktree.kind, "worktree");
+    assert.deepEqual(worktree.estimatedRecipients.map((r) => r.taskId), ["task_1"]);
+    assert.ok(
+      options.some((o) => o.address === "@worktree:wt_other::/repo/y"),
+      "discovered identities are offered even before workers appear",
+    );
+    assert.ok(!options.some((o) => o.address.includes("invented")));
   });
 });
 

@@ -394,3 +394,117 @@ describe("Phase 6: environment/placement validation", () => {
     assert.equal(good.status, 200);
   });
 });
+
+// --- Phase 6: safe group messaging boundaries --------------------------------
+//
+// A dedicated app instance with an injected (passing) readiness probe: group
+// sends must fail on audience/type/priority validation BEFORE any Orca call,
+// and on coordinator authority (409 not_running) once validation passes.
+// This environment has no `orca` executable, so any attempt to reach the CLI
+// would surface as a 500 — which is itself the assertion that the gates
+// fired in the right order.
+
+describe("Phase 6: safe group messaging boundaries", () => {
+  let groupBase: string;
+  let groupServer: Server;
+  let groupWorkspace: string;
+
+  before(async () => {
+    groupWorkspace = await mkdtemp(join(tmpdir(), "orca-dag-group-test-"));
+    const { app } = createApp({
+      workspaceDir: groupWorkspace,
+      worktree: "active",
+      policy,
+      embeddedAssets: null,
+      readiness: async () => ({
+        cli: "fake-orca",
+        workspace: groupWorkspace,
+        worktree: "active",
+        version: "1.4.206",
+        executionEnabled: true,
+        reason: null,
+      }),
+    });
+    groupServer = await listenLoopback(app, 0);
+    const addr = groupServer.address();
+    assert.ok(addr && typeof addr === "object");
+    groupBase = `http://127.0.0.1:${addr.port}`;
+  });
+
+  after(async () => {
+    groupServer.closeAllConnections();
+    await new Promise<void>((resolve) => groupServer.close(() => resolve()));
+    await rm(groupWorkspace, { recursive: true, force: true });
+  });
+
+  async function callGroup(
+    body: unknown,
+    token: string | null = policy.token,
+  ): Promise<{ status: number; json: Record<string, unknown> }> {
+    const res = await fetch(`${groupBase}/api/messages/group`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token !== null ? { "X-Orca-Dag-Token": token } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+    const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    return { status: res.status, json };
+  }
+
+  it("protects group sends with the same mutation token", async () => {
+    const { status, json } = await callGroup({ runId: "run_a", audience: "@all", body: "hello" }, null);
+    assert.equal(status, 403);
+    assert.equal(json.code, "invalid_token");
+  });
+
+  it("rejects arbitrary and cross-Run recipient shapes with invalid_audience", async () => {
+    for (const audience of ["dispatch:ctx_a", "run:run_b", "term_worker", "@kernel", "all", ""]) {
+      const { status, json } = await callGroup({ runId: "run_a", audience, body: "hello" });
+      assert.equal(status, 400, `expected 400 for audience ${JSON.stringify(audience)}`);
+      assert.equal(json.code, "invalid_audience");
+    }
+  });
+
+  it("rejects a well-formed but undiscovered worktree audience with unknown_audience", async () => {
+    // No `orca` CLI exists here, so discovery cannot return ANY identity —
+    // the send must be refused as unknown, never passed through.
+    const { status, json } = await callGroup({
+      runId: "run_a",
+      audience: "@worktree:not-discovered::/repo/x",
+      body: "hello",
+    });
+    assert.equal(status, 400);
+    assert.equal(json.code, "unknown_audience");
+  });
+
+  it("forbids lifecycle group signals before touching Orca", async () => {
+    for (const type of ["worker_done", "heartbeat"]) {
+      const { status, json } = await callGroup({ runId: "run_a", audience: "@all", body: "hello", type });
+      assert.equal(status, 400, `expected 400 for type ${type}`);
+      assert.equal(json.code, "forbidden_group_type");
+    }
+    const other = await callGroup({ runId: "run_a", audience: "@all", body: "hello", type: "escalation" });
+    assert.equal(other.status, 400);
+    assert.equal(other.json.code, "invalid_message_type");
+  });
+
+  it("rejects unsupported priorities and a missing body", async () => {
+    const badPriority = await callGroup({ runId: "run_a", audience: "@all", body: "hello", priority: "asap" });
+    assert.equal(badPriority.status, 400);
+    assert.equal(badPriority.json.code, "invalid_priority");
+
+    const noBody = await callGroup({ runId: "run_a", audience: "@all", body: "" });
+    assert.equal(noBody.status, 400);
+    const noRun = await callGroup({ audience: "@all", body: "hello" });
+    assert.equal(noRun.status, 400);
+  });
+
+  it("answers a valid request with 409 not_running when this viewer is not the Run's live coordinator", async () => {
+    const { status, json } = await callGroup({ runId: "run_a", audience: "@all", body: "hello" });
+    assert.equal(status, 409);
+    assert.equal(json.code, "not_running");
+    assert.match(String(json.error), /live coordinator/);
+  });
+});

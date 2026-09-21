@@ -1,8 +1,10 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { replyToMessage, sendTaskMessage } from "../api";
-import type {
+import { fetchAudiencePreview, replyToMessage, sendGroupMessage, sendTaskMessage } from "../api";
+import { useDecisionDialog } from "./DecisionDialog";
+import { DoodleSelect, type DoodleOption } from "./DoodleSelect";import type {
   ActivityEvent,
   ActivitySnapshot,
+  AudiencePreviewResponse,
   CoordinatorCheckAgentSummary,
   CoordinatorCheckReceipt,
   DagNode,
@@ -65,13 +67,31 @@ function messageBody(event: ActivityEvent): string {
 /** Only Orca's own high/urgent priorities may render the urgent flag. */
 const URGENT_PRIORITIES = new Set(["high", "urgent"]);
 
+function priorityLabel(event: ActivityEvent): string {
+  const normalized = event.priority?.trim().toLowerCase();
+  if (normalized === "urgent") return "Urgent";
+  if (normalized === "low") return "Low priority";
+  if (normalized === "normal") return "Normal priority";
+  return "High priority";
+}
+
+/** Orca priorities a group send may carry; "normal" renders no chip at all. */
+const GROUP_PRIORITIES = ["low", "normal", "high", "urgent"] as const;
+type GroupPriority = (typeof GROUP_PRIORITIES)[number];
+
 function isUrgent(event: ActivityEvent): boolean {
   return event.priority != null && URGENT_PRIORITIES.has(event.priority.trim().toLowerCase());
 }
 
-function priorityLabel(event: ActivityEvent): string {
+/**
+ * A group bubble shows its requested priority whenever it is anything other
+ * than the default "normal" — the priority is part of the send's metadata the
+ * plan requires the outgoing row to retain.
+ */
+function groupPriorityChip(event: ActivityEvent): string | null {
   const normalized = event.priority?.trim().toLowerCase();
-  return normalized === "urgent" ? "Urgent" : "High priority";
+  if (!normalized || normalized === "normal") return null;
+  return priorityLabel(event);
 }
 
 /**
@@ -386,6 +406,24 @@ export function ChatPanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // --- Phase 6: Run-control group composer -----------------------------------
+  //
+  // The audience list comes from the server's preview endpoint, which only
+  // ever offers allowlisted addresses (@all, @idle, active harness groups,
+  // exact discovered @worktree:<id>). The composer never lets a recipient
+  // string be typed — choosing is the only way to address a group.
+  const dialog = useDecisionDialog();
+  const [preview, setPreview] = useState<AudiencePreviewResponse | null>(null);
+  const [audience, setAudience] = useState("");
+  const [groupSubject, setGroupSubject] = useState("");
+  const [groupType, setGroupType] = useState<"status" | "question">("status");
+  const [groupPriority, setGroupPriority] = useState<GroupPriority>("normal");
+  const [groupDraft, setGroupDraft] = useState("");
+  const [groupBusy, setGroupBusy] = useState(false);
+  const [groupError, setGroupError] = useState<string | null>(null);
+  const [previewNonce, setPreviewNonce] = useState(0);
+  const [previewFailed, setPreviewFailed] = useState(false);
+
   useEffect(() => {
     setSelectedId(null);
     setDraft("");
@@ -399,6 +437,97 @@ export function ChatPanel({
   }, [conversations, selectedId]);
 
   const selected = conversations.find((conversation) => conversation.id === selectedId) ?? null;
+
+  // Refresh the audience preview when Run control opens, when coordination
+  // flips, and after every send (worker facts may have changed). Estimates
+  // are derived server-side from the same worker facts the rest of the
+  // viewer renders; a failed read leaves the composer without options rather
+  // than inventing any.
+  const isRunControl = selected?.taskId === null;
+  useEffect(() => {
+    if (!runId || !isRunControl || !coordinatorActive) {
+      setPreview(null);
+      setPreviewFailed(false);
+      return;
+    }
+    let cancelled = false;
+    fetchAudiencePreview(runId)
+      .then((next) => {
+        if (!cancelled) {
+          setPreview(next);
+          setPreviewFailed(false);
+        }
+      })
+      .catch(() => {
+        // A failed discovery read must look failed, not eternally loading —
+        // the composer stays empty rather than pretending audiences exist.
+        if (!cancelled) {
+          setPreview(null);
+          setPreviewFailed(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [runId, isRunControl, coordinatorActive, previewNonce]);
+
+  const audienceOptions: DoodleOption[] = useMemo(
+    () =>
+      (preview?.audiences ?? []).map((option) => ({
+        value: option.address,
+        label: option.label,
+        hint: `${option.estimatedRecipients.length} estimated recipient${option.estimatedRecipients.length === 1 ? "" : "s"}`,
+      })),
+    [preview],
+  );
+
+  // Keep the selection inside the offered set; default to the broadest group.
+  useEffect(() => {
+    if (audience && audienceOptions.some((option) => option.value === audience)) return;
+    setAudience(audienceOptions[0]?.value ?? "");
+  }, [audience, audienceOptions]);
+
+  const selectedAudience = preview?.audiences.find((option) => option.address === audience) ?? null;
+
+  async function sendGroup() {
+    const body = groupDraft.trim();
+    if (!body || !runId || disabled || groupBusy || !audience) return;
+    const estimated = selectedAudience?.estimatedRecipients.length ?? 0;
+    // In-app confirmation for every multi-recipient send. Group addresses are
+    // multi-recipient by construction; the copy states the enqueue-only
+    // guarantee and the estimate caveat verbatim.
+    const confirmed = await dialog.confirm({
+      title: "Send group message?",
+      message:
+        `This enqueues the message for an estimated ${estimated} recipient${estimated === 1 ? "" : "s"} (${audience}). ` +
+        "Orca durably enqueues group mail: the receipt proves enqueue only — it never proves that any worker has read or will act on it. " +
+        "The recipient count is an estimate from current Run workers, not a confirmed delivery list.",
+      confirmLabel: `Send to ${audience}`,
+      cancelLabel: "Cancel",
+    });
+    if (!confirmed) return;
+    setGroupBusy(true);
+    setGroupError(null);
+    try {
+      await sendGroupMessage({
+        runId,
+        audience,
+        subject: groupSubject.trim() || undefined,
+        body,
+        type: groupType,
+        priority: groupPriority === "normal" ? null : groupPriority,
+      });
+      setGroupDraft("");
+      setGroupSubject("");
+      setPreviewNonce((nonce) => nonce + 1);
+      onResolved();
+    } catch (err) {
+      setGroupError(String((err as Error).message ?? err));
+    } finally {
+      setGroupBusy(false);
+    }
+  }
+
   // Phase 3 history completeness: a saturated global window means rows older
   // than the window may be missing for EVERY Run — including one with only a
   // handful of messages. A failed history read leaves inboxWindow null and
@@ -704,6 +833,11 @@ export function ChatPanel({
                 const event = item.event;
                 const system = event.direction === "system" || event.actor.role === "system";
                 const outgoing = event.direction === "coordinator_to_agent";
+                // Phase 6: an audience turns the bubble into a distinct group
+                // send — different border treatment, an audience chip, the
+                // requested priority, and the enqueue-only provenance note.
+                const groupChip = event.audience ? groupPriorityChip(event) : null;
+                const priorityChip = isUrgent(event) ? priorityLabel(event) : groupChip;
                 return system ? (
                   <div key={event.id} className={`chat-message chat-message--system chat-message--${event.severity}`}>
                     <span>{event.title}</span>
@@ -713,7 +847,7 @@ export function ChatPanel({
                 ) : (
                   <article
                     key={event.id}
-                    className={`chat-message ${outgoing ? "chat-message--outgoing" : "chat-message--incoming"} chat-message--${event.kind} chat-message--${event.severity}${isUrgent(event) ? " chat-message--urgent" : ""}`}
+                    className={`chat-message ${outgoing ? "chat-message--outgoing" : "chat-message--incoming"} chat-message--${event.kind} chat-message--${event.severity}${isUrgent(event) ? " chat-message--urgent" : ""}${event.audience ? " chat-message--group" : ""}`}
                   >
                     <div className="chat-message__meta">
                       <strong>{eventActor(event)}</strong>
@@ -725,9 +859,17 @@ export function ChatPanel({
                           Viewer journal
                         </span>
                       )}
-                      {isUrgent(event) && (
+                      {event.audience && (
+                        <span
+                          className="chat-message__audience"
+                          title="Group audience — every live Dispatch Orca routes this group to in this Run"
+                        >
+                          To {event.audience}
+                        </span>
+                      )}
+                      {priorityChip && (
                         <span className="chat-message__priority" title={`Orca priority: ${event.priority}`}>
-                          {priorityLabel(event)}
+                          {priorityChip}
                         </span>
                       )}
                       {/* Tri-state read evidence: only an explicit unread
@@ -748,8 +890,16 @@ export function ChatPanel({
                         </div>
                       ) : null;
                     })()}
-                    <h3>{eventHeading(event)}</h3>
+                    <h3>{event.audience ? event.title : eventHeading(event)}</h3>
                     <p>{messageBody(event)}</p>
+                    {event.audience && (
+                      <small
+                        className="chat-message__enqueue"
+                        title="Orca durably enqueued this message for the group. A send receipt never proves that any worker read or acted on it."
+                      >
+                        Enqueued — delivery to each recipient is not proven
+                      </small>
+                    )}
                     {event.groupedCount > 1 && <small>{event.groupedCount} similar updates grouped</small>}
                     {event.actionable?.kind === "reply" && <span className="chat-message__waiting">Waiting for reply</span>}
                     {event.detail?.trim() && event.detail.trim() !== event.summary.trim() && (
@@ -787,6 +937,103 @@ export function ChatPanel({
 
             <footer className="chat__composer">
               {error && <div className="chat__error" role="status">⚠ {error}</div>}
+              {groupError && <div className="chat__error" role="status">⚠ {groupError}</div>}
+              {isRunControl && coordinatorActive && !disabled && (
+                <div className="chat__group-composer">
+                  <div className="chat__group-controls">
+                    <label className="chat__group-field">
+                      <span>Audience</span>
+                      <DoodleSelect
+                        value={audience}
+                        onChange={setAudience}
+                        options={audienceOptions}
+                        size="sm"
+                        placeholder={preview ? "Select audience" : "Audiences unavailable"}
+                        loading={!preview && !previewFailed}
+                        emptyText={previewFailed ? "Audience discovery failed" : "No discovered audiences"}
+                        title="Allowlisted Run groups and exact discovered worktree addresses only — recipients are never typed"
+                      />
+                    </label>
+                    <label className="chat__group-field">
+                      <span>Type</span>
+                      <DoodleSelect
+                        value={groupType}
+                        onChange={(value) => setGroupType(value === "question" ? "question" : "status")}
+                        options={[
+                          { value: "status", label: "Status note" },
+                          { value: "question", label: "Question" },
+                        ]}
+                        size="sm"
+                        title="Lifecycle signals (worker_done, heartbeat) can never be sent to a group"
+                      />
+                    </label>
+                    <label className="chat__group-field">
+                      <span>Priority</span>
+                      <DoodleSelect
+                        value={groupPriority}
+                        onChange={(value) =>
+                          setGroupPriority(
+                            (GROUP_PRIORITIES as readonly string[]).includes(value)
+                              ? (value as GroupPriority)
+                              : "normal",
+                          )
+                        }
+                        options={GROUP_PRIORITIES.map((priority) => ({
+                          value: priority,
+                          label: priority.charAt(0).toUpperCase() + priority.slice(1),
+                        }))}
+                        size="sm"
+                      />
+                    </label>
+                  </div>
+                  {selectedAudience && (
+                    <p className="chat__group-estimate">
+                      <strong>Estimated recipients ({selectedAudience.estimatedRecipients.length}):</strong>{" "}
+                      {selectedAudience.estimatedRecipients.length === 0
+                        ? "none observed yet — the estimate can miss workers Orca has not accounted for"
+                        : selectedAudience.estimatedRecipients
+                            .slice(0, 6)
+                            .map((candidate) => tasks.find((task) => task.id === candidate.taskId)?.label ?? candidate.taskId)
+                            .join(", ") + (selectedAudience.estimatedRecipients.length > 6 ? `, +${selectedAudience.estimatedRecipients.length - 6} more` : "")}
+                      {" — an estimate from current Run workers, not a confirmed delivery list."}
+                    </p>
+                  )}
+                  <input
+                    className="chat__group-subject"
+                    value={groupSubject}
+                    disabled={groupBusy}
+                    placeholder="Subject (optional)"
+                    aria-label="Group message subject"
+                    onChange={(event) => setGroupSubject(event.target.value)}
+                  />
+                  <div className="chat__compose-row">
+                    <textarea
+                      rows={2}
+                      value={groupDraft}
+                      disabled={groupBusy}
+                      placeholder={`Message ${audience || "the group"}…`}
+                      aria-label={`Send a Run-level group message to ${audience || "the selected audience"}`}
+                      onChange={(event) => setGroupDraft(event.target.value)}
+                      onKeyDown={(event) => {
+                        if ((event.metaKey || event.ctrlKey) && event.key === "Enter") void sendGroup();
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className="btn btn--ok"
+                      disabled={groupBusy || !groupDraft.trim() || !audience}
+                      title={`Send to ${audience || "an audience"} — asks for confirmation first (Ctrl or Command + Enter)`}
+                      onClick={() => void sendGroup()}
+                    >
+                      {groupBusy ? "Sending…" : audience ? `Send to ${audience}` : "Send"}
+                    </button>
+                  </div>
+                  <p className="chat__group-note">
+                    Group mail is durably enqueued by Orca for this Run's live Dispatches; the receipt proves enqueue
+                    only — never that a worker read it. Lifecycle signals (worker_done, heartbeat) cannot target groups.
+                  </p>
+                </div>
+              )}
               {replyTarget || activeDispatch ? (
                 <div className="chat__compose-row">
                   <textarea

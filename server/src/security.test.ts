@@ -1,9 +1,13 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  assertDiscoveredWorktreeAudience,
   createSecurityPolicy,
   tokensMatch,
   validateConcurrency,
+  validateGroupAudience,
+  validateGroupMessagePriority,
+  validateGroupMessageType,
   validateHarness,
   validateId,
   validateModel,
@@ -202,5 +206,107 @@ describe("validateConcurrency", () => {
     assertThrowsWith(() => validateConcurrency(17));
     assertThrowsWith(() => validateConcurrency(2.5));
     assertThrowsWith(() => validateConcurrency("abc"));
+  });
+});
+
+// --- Phase 6 (safe group messaging) ------------------------------------------
+//
+// The audience allowlist is the boundary that keeps group mail deliberate:
+// recipients are chosen from Orca's supported group grammar only, and a
+// worktree audience additionally has to name a workspace Orca itself
+// discovered. Everything a client could invent — handles, run:/dispatch:
+// targets, lifecycle pseudo-groups — must fail here, before any Orca call.
+
+describe("validateGroupAudience (Phase 6)", () => {
+  it("accepts the Run-wide groups exactly", () => {
+    assert.equal(validateGroupAudience("@all"), "@all");
+    assert.equal(validateGroupAudience(" @idle "), "@idle");
+  });
+
+  it("accepts known harness groups and nothing harness-shaped beyond the allowlist", () => {
+    for (const harness of ["claude", "codex", "opencode", "gemini", "grok", "cursor", "droid", "kimi"]) {
+      assert.equal(validateGroupAudience(`@${harness}`), `@${harness}`);
+    }
+    // Not a harness, not a Run group: an invented group can never pass.
+    assertThrowsWith(() => validateGroupAudience("@kernel"), "invalid_audience");
+    assertThrowsWith(() => validateGroupAudience("@worker_done"), "invalid_audience");
+    assertThrowsWith(() => validateGroupAudience("@heartbeat"), "invalid_audience");
+  });
+
+  it("accepts well-formed @worktree:<id> grammar (membership is a separate gate)", () => {
+    assert.equal(
+      validateGroupAudience("@worktree:901352a2-e6c4-4140-9c44-24d49beaea72::/home/me/project"),
+      "@worktree:901352a2-e6c4-4140-9c44-24d49beaea72::/home/me/project",
+    );
+    assertThrowsWith(() => validateGroupAudience("@worktree:"), "invalid_audience");
+  });
+
+  it("rejects arbitrary, cross-Run and lifecycle recipient shapes outright", () => {
+    assertThrowsWith(() => validateGroupAudience("dispatch:ctx_0d995a2e8e19"), "invalid_audience");
+    assertThrowsWith(() => validateGroupAudience("run:run_25f6"), "invalid_audience");
+    assertThrowsWith(() => validateGroupAudience("term_d08b78b5"), "invalid_audience");
+    assertThrowsWith(() => validateGroupAudience("workers@example.com"), "invalid_audience");
+    assertThrowsWith(() => validateGroupAudience("all"), "invalid_audience");
+    assertThrowsWith(() => validateGroupAudience(""), "invalid_audience");
+    assertThrowsWith(() => validateGroupAudience(undefined), "invalid_audience");
+    assertThrowsWith(() => validateGroupAudience(`@${"x".repeat(300)}`), "invalid_audience");
+  });
+});
+
+describe("assertDiscoveredWorktreeAudience (Phase 6)", () => {
+  const discovered = async () => new Set(["wt-id-1", "901352a2::/repo"]);
+
+  it("accepts an exact discovered worktree identity", async () => {
+    await assertDiscoveredWorktreeAudience("@worktree:wt-id-1", discovered);
+    await assertDiscoveredWorktreeAudience("@worktree:901352a2::/repo", discovered);
+  });
+
+  it("refuses a well-formed but undiscovered workspace with unknown_audience", async () => {
+    await assert.rejects(
+      () => assertDiscoveredWorktreeAudience("@worktree:not-discovered", discovered),
+      (err: unknown) => err instanceof ValidationError && err.code === "unknown_audience",
+    );
+  });
+
+  it("returns before discovery for every non-worktree shape", async () => {
+    let called = false;
+    await assertDiscoveredWorktreeAudience("@all", async () => {
+      called = true;
+      return new Set<string>();
+    });
+    await assertDiscoveredWorktreeAudience("@codex", async () => {
+      called = true;
+      return new Set<string>();
+    });
+    assert.equal(called, false, "non-worktree audiences must not spend a discovery read");
+  });
+});
+
+describe("group message type + priority (Phase 6)", () => {
+  it("allows only status and question, defaulting to status", () => {
+    assert.equal(validateGroupMessageType(undefined), "status");
+    assert.equal(validateGroupMessageType(null), "status");
+    assert.equal(validateGroupMessageType("Status"), "status");
+    assert.equal(validateGroupMessageType("question"), "question");
+    // An explicit empty value is a malformed request, not a default.
+    assertThrowsWith(() => validateGroupMessageType(""), "invalid_message_type");
+  });
+
+  it("forbids lifecycle group signals with a dedicated code", () => {
+    assertThrowsWith(() => validateGroupMessageType("worker_done"), "forbidden_group_type");
+    assertThrowsWith(() => validateGroupMessageType("heartbeat"), "forbidden_group_type");
+    assertThrowsWith(() => validateGroupMessageType("escalation"), "invalid_message_type");
+    assertThrowsWith(() => validateGroupMessageType("dispatch"), "invalid_message_type");
+  });
+
+  it("restricts priority to Orca's levels and defaults to none", () => {
+    assert.equal(validateGroupMessagePriority(undefined), null);
+    assert.equal(validateGroupMessagePriority(""), null);
+    assert.equal(validateGroupMessagePriority("HIGH"), "high");
+    assert.equal(validateGroupMessagePriority("urgent"), "urgent");
+    assert.equal(validateGroupMessagePriority("low"), "low");
+    assert.equal(validateGroupMessagePriority("normal"), "normal");
+    assertThrowsWith(() => validateGroupMessagePriority("asap"), "invalid_priority");
+    assertThrowsWith(() => validateGroupMessagePriority("normal; rm -rf /"), "invalid_priority");
   });
 });

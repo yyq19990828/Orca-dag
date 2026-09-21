@@ -56,6 +56,13 @@ export interface ActivityEvent {
   /** Orca's own priority string (`normal`, `high`, `urgent`, …); null = absent. */
   priority: string | null;
   /**
+   * Phase 6: the group address an outgoing coordinator message was addressed
+   * to (`@all`, `@worktree:<id>`, …), verbatim from the Orca row's
+   * `to_handle`. Null on every one-to-one row — presence is what makes the
+   * UI render a bubble as a distinct group send with audience provenance.
+   */
+  audience: string | null;
+  /**
    * Tri-state durable read evidence from the global inbox row. `true` only on
    * a positive read marker, `false` only on an explicit unread marker, and
    * `null` when the marker is absent — absence is UNKNOWN, never unread.
@@ -203,7 +210,12 @@ function normalizeMessage(
   const terminalHandle = typeof message.from_handle === "string" ? message.from_handle : "unknown";
   const toHandle = typeof message.to_handle === "string" ? message.to_handle : "";
   const addressedDispatchId = toHandle.startsWith("dispatch:") ? toHandle.slice("dispatch:".length) || null : null;
-  const outbound = addressedDispatchId !== null;
+  // Phase 6: a group-addressed row (`@all`, `@idle`, `@<harness>`,
+  // `@worktree:<id>`) is by construction an OUTGOING coordinator message —
+  // only group senders sit on the coordinator side of a Run — and the exact
+  // address is the audience provenance the UI renders on the bubble.
+  const audience = toHandle.startsWith("@") ? toHandle : null;
+  const outbound = addressedDispatchId !== null || audience !== null;
   const createdAt =
     typeof message.created_at === "string" && !Number.isNaN(Date.parse(message.created_at))
       ? message.created_at
@@ -258,6 +270,7 @@ function normalizeMessage(
     dispatchId,
     threadId,
     priority,
+    audience,
     read,
     direction: outbound ? ("coordinator_to_agent" as const) : ("agent_to_coordinator" as const),
     actor: outbound
@@ -295,13 +308,15 @@ function normalizeMessage(
   // status message whose subject is prefixed with "Re:"; ordinary `send`
   // guidance is also status but keeps its own subject. Render both as outgoing
   // chat bubbles while preserving the real Orca message id as provenance.
+  // Group rows (audience set) keep the address in the title so a Run-wide
+  // send reads as one deliberate broadcast, not a private nudge.
   if (outbound) {
     if (messageType === "question") {
       return {
         ...base,
         kind: "question",
         severity: "warning",
-        title: "Coordinator asks",
+        title: audience ? `Coordinator asked ${audience}` : "Coordinator asks",
         summary: body || subject || "The coordinator asked the worker a question.",
         detail: null,
         actionable: null,
@@ -315,11 +330,13 @@ function normalizeMessage(
         severity: "info",
         title: reply
           ? "Coordinator replied to a worker"
-          : subject.trim().toLowerCase() === "coordinator guidance"
-            ? "Coordinator sent guidance"
-            : meaningfulSubject(subject)
-              ? subject
-              : "Coordinator sent guidance",
+          : audience
+            ? `Coordinator messaged ${audience}`
+            : subject.trim().toLowerCase() === "coordinator guidance"
+              ? "Coordinator sent guidance"
+              : meaningfulSubject(subject)
+                ? subject
+                : "Coordinator sent guidance",
         summary: body || subject || "No additional detail was provided.",
         detail: null,
         actionable: null,
@@ -423,6 +440,7 @@ function debtEvent(runId: string, debt: CleanupDebtItem, createdAt: string): Act
     dispatchId: debt.dispatchId,
     threadId: null,
     priority: null,
+    audience: null,
     read: null,
     direction: "system",
     actor: { role: "system", label: "Orca", harness: null, model: null },
@@ -477,20 +495,34 @@ function removeJournalMessageDuplicates(
     if (
       candidate.technical.provenance !== "viewer_journal" ||
       candidate.direction !== "coordinator_to_agent" ||
-      (candidate.kind !== "reply" && candidate.kind !== "status") ||
-      candidate.taskId === null ||
-      candidate.dispatchId === null
+      (candidate.kind !== "reply" && candidate.kind !== "status" && candidate.kind !== "question")
     ) {
       return true;
     }
     const candidateAt = Date.parse(candidate.createdAt);
+    if (!Number.isFinite(candidateAt)) return true;
+    // Group sends (Phase 6) carry no Task/Dispatch identity — their stable
+    // identity is the exact audience address, which the authoritative row
+    // echoes back in `to_handle`. Match on audience when present and fall
+    // back to the attempt-identity match for one-to-one sends.
+    if (candidate.audience !== null) {
+      return !durableOutgoing.some((durable) => {
+        const durableAt = Date.parse(durable.createdAt);
+        return (
+          durable.audience === candidate.audience &&
+          durable.summary.trim() === candidate.summary.trim() &&
+          Number.isFinite(durableAt) &&
+          Math.abs(durableAt - candidateAt) <= 15_000
+        );
+      });
+    }
+    if (candidate.taskId === null || candidate.dispatchId === null) return true;
     return !durableOutgoing.some((durable) => {
       const durableAt = Date.parse(durable.createdAt);
       return (
         durable.taskId === candidate.taskId &&
         durable.dispatchId === candidate.dispatchId &&
         durable.summary.trim() === candidate.summary.trim() &&
-        Number.isFinite(candidateAt) &&
         Number.isFinite(durableAt) &&
         Math.abs(durableAt - candidateAt) <= 15_000
       );
@@ -509,6 +541,9 @@ function hydrateEvent(row: ActivityEvent): ActivityEvent {
     ...row,
     threadId: typeof row.threadId === "string" && row.threadId.trim() ? row.threadId : null,
     priority: typeof row.priority === "string" && row.priority.trim() ? row.priority : null,
+    // Journal rows written before Phase 6 lack the field; normalize to an
+    // explicit "not a group message" rather than leaking undefined.
+    audience: typeof row.audience === "string" && row.audience.trim() ? row.audience : null,
     read: typeof row.read === "boolean" ? row.read : null,
   };
 }
@@ -832,6 +867,20 @@ export function createViewerActivity(input: {
   severity?: ActivityEvent["severity"];
   actionable?: ActivityEvent["actionable"];
   argv?: string[];
+  /**
+   * Phase 6 (group sends): the allowlisted audience the message was addressed
+   * to and the priority the viewer requested. The journal is the only place
+   * this provenance exists before the authoritative Orca row lands, so a
+   * group send's optimistic row carries it verbatim.
+   */
+  audience?: string | null;
+  priority?: string | null;
+  /**
+   * Phase 6 (group sends): the accepted enqueue receipt, stored verbatim so
+   * the optimistic row carries the same evidence the CLI returned (message
+   * id et al.) until the authoritative Orca row supersedes it.
+   */
+  payload?: unknown;
 }): ActivityEvent {
   const createdAt = new Date().toISOString();
   return {
@@ -839,10 +888,13 @@ export function createViewerActivity(input: {
     runId: input.runId,
     taskId: input.taskId ?? null,
     dispatchId: input.dispatchId ?? null,
-    // Journal rows carry no durable read marker or Orca priority — both stay
-    // unknown rather than being defaulted to a value the viewer never saw.
+    // One-to-one journal rows carry no durable read marker or Orca priority —
+    // both stay unknown rather than being defaulted to a value the viewer
+    // never saw. A group send records the priority it REQUESTED (input above);
+    // the authoritative Orca row later carries whatever Orca actually stored.
     threadId: input.threadId ?? null,
-    priority: null,
+    audience: input.audience ?? null,
+    priority: input.priority ?? null,
     read: null,
     direction: "coordinator_to_agent",
     actor: { role: "coordinator", label: "Coordinator", harness: null, model: null },
@@ -854,7 +906,7 @@ export function createViewerActivity(input: {
     createdAt,
     groupedCount: 1,
     actionable: input.actionable ?? null,
-    technical: { argv: input.argv, provenance: "viewer_journal" },
+    technical: { argv: input.argv, payload: input.payload, provenance: "viewer_journal" },
   };
 }
 

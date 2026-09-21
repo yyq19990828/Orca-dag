@@ -439,3 +439,122 @@ export function validateEnvironmentTaskMap(
     validateEnvironmentSelector(v, field),
   );
 }
+
+// --- Phase 6 (safe group messaging): audience, type and priority ------------
+//
+// Group mail is the one surface where the request would choose its own
+// recipients, so the client-facing audience string is an allowlist, not a
+// pattern: Orca's group grammar (`@all`, `@idle`, `@<harness>`,
+// `@worktree:<id>`) is accepted only in those exact shapes, and a worktree
+// audience must additionally name a workspace this viewer DISCOVERED from
+// Orca itself. A client-supplied `run:<id>` / `dispatch:<id>` / bare handle
+// is refused outright — recipient selection never crosses this boundary.
+
+/** The Run-wide groups every Run supports (Orca-scoped to the sender's Run). */
+export const RUN_GROUP_AUDIENCES: ReadonlySet<string> = new Set(["@all", "@idle"]);
+
+/** `@worktree:<id>` — the id part must be a discovered Orca worktree identity. */
+export const WORKTREE_AUDIENCE_PREFIX = "@worktree:";
+
+/**
+ * One group audience from a request body — GRAMMAR only. Orca's group grammar
+ * (`@all`, `@idle`, `@<known harness>`, `@worktree:<id>`) is accepted in those
+ * exact shapes; everything else — arbitrary addresses, `run:`/`dispatch:`
+ * cross-Run targets, bare handles, pseudo-groups like `@worker_done` — is
+ * rejected here before the route spends any Orca call. Worktree membership
+ * (the id must be one Orca itself discovered) is a second gate:
+ * `assertDiscoveredWorktreeAudience`.
+ */
+export function validateGroupAudience(raw: unknown): string {
+  const v = String(raw ?? "").trim();
+  if (!v) throw new ValidationError("audience must not be empty", "invalid_audience");
+  if (v.length > 200) {
+    throw new ValidationError("audience is too long (max 200 characters)", "invalid_audience");
+  }
+  if (!v.startsWith("@")) {
+    throw new ValidationError(
+      `audience must be an Orca group address starting with "@" (got ${JSON.stringify(v.slice(0, 64))})`,
+      "invalid_audience",
+    );
+  }
+  if (RUN_GROUP_AUDIENCES.has(v)) return v;
+  if (v.startsWith(WORKTREE_AUDIENCE_PREFIX)) {
+    const id = v.slice(WORKTREE_AUDIENCE_PREFIX.length);
+    if (!id) {
+      throw new ValidationError(
+        "worktree audience must name a discovered worktree id (@worktree:<id>)",
+        "invalid_audience",
+      );
+    }
+    return v;
+  }
+  if (KNOWN_HARNESSES.has(v.slice(1))) return v;
+  throw new ValidationError(
+    `audience ${JSON.stringify(v.slice(0, 64))} is not a supported group ` +
+      `(@all, @idle, a known harness group, or @worktree:<discovered id>)`,
+    "invalid_audience",
+  );
+}
+
+/**
+ * The exactness gate for `@worktree:<id>` audiences: the id must be one of
+ * the identities a FRESH Orca discovery returned (the callback re-reads
+ * `worktree list` per send — the route never trusts a client-echoed list).
+ * Discovery is awaited ONLY for worktree addresses — the other shapes return
+ * before the route spends a CLI call. A well-formed but undiscovered
+ * workspace is refused with `unknown_audience` so free-text workspace names
+ * can never become recipients.
+ */
+export async function assertDiscoveredWorktreeAudience(
+  audience: string,
+  discoverWorktreeIds: () => Promise<ReadonlySet<string>>,
+): Promise<void> {
+  if (!audience.startsWith(WORKTREE_AUDIENCE_PREFIX)) return;
+  const id = audience.slice(WORKTREE_AUDIENCE_PREFIX.length);
+  if (!(await discoverWorktreeIds()).has(id)) {
+    throw new ValidationError(
+      `worktree audience ${JSON.stringify(audience.slice(0, 80))} is not one of this Run's discovered ` +
+        "worktree identities; pick an audience from the composer's discovered list",
+      "unknown_audience",
+    );
+  }
+}
+
+/**
+ * Message types a GROUP send may carry. Orca itself refuses lifecycle group
+ * traffic (`worker_done` and heartbeat are exact-Dispatch signals), and the
+ * viewer refuses earlier and louder: a worker_done sent to a group would be
+ * either a lifecycle forgery or a silent no-op, and both are worse than a
+ * clear 400. Task-attempt guidance stays on the one-to-one route.
+ */
+export const GROUP_MESSAGE_TYPES: ReadonlySet<string> = new Set(["status", "question"]);
+
+const LIFECYCLE_GROUP_TYPES: ReadonlySet<string> = new Set(["worker_done", "heartbeat"]);
+
+export function validateGroupMessageType(raw: unknown): string {
+  const v = String(raw ?? "status").trim().toLowerCase();
+  if (GROUP_MESSAGE_TYPES.has(v)) return v;
+  if (LIFECYCLE_GROUP_TYPES.has(v)) {
+    throw new ValidationError(
+      `"${v}" is a per-Dispatch lifecycle signal and can never be sent to a group`,
+      "forbidden_group_type",
+    );
+  }
+  throw new ValidationError(
+    `group message type "${v.slice(0, 32)}" is not supported (status or question only)`,
+    "invalid_message_type",
+  );
+}
+
+/** Priorities the composer may attach to a group send (Orca's own levels). */
+const GROUP_PRIORITIES: ReadonlySet<string> = new Set(["low", "normal", "high", "urgent"]);
+
+export function validateGroupMessagePriority(raw: unknown): string | null {
+  if (raw === undefined || raw === null || raw === "") return null;
+  const v = String(raw).trim().toLowerCase();
+  if (GROUP_PRIORITIES.has(v)) return v;
+  throw new ValidationError(
+    `priority "${String(raw).slice(0, 32)}" is not supported (low, normal, high or urgent)`,
+    "invalid_priority",
+  );
+}

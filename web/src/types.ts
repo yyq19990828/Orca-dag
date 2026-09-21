@@ -551,6 +551,14 @@ export interface ActivityEvent {
    */
   threadId: string | null;
   priority: string | null;
+  /**
+   * Phase 6: the group address an outgoing coordinator message was addressed
+   * to (`@all`, `@worktree:<id>`, …), verbatim from Orca's `to_handle` (or
+   * the viewer journal's optimistic row). Null on every one-to-one row —
+   * presence is what renders a bubble as a distinct group send with
+   * audience provenance.
+   */
+  audience: string | null;
   read: boolean | null;
   actionable: null | {
     kind: "reply" | "release" | "retain" | "retry";
@@ -827,6 +835,38 @@ export interface OrcaReadiness {
   version: string | null;
   executionEnabled: boolean;
   reason: string | null;
+}
+
+// --- Phase 6 (operations epic): safe group messaging -------------------------
+
+/** One estimated recipient behind a group audience (current Run worker facts). */
+export interface AudienceCandidate {
+  taskId: string;
+  dispatchId: string | null;
+  label: string | null;
+  harness: string | null;
+}
+
+/** One supported group audience with the Run's own estimate of its reach. */
+export interface AudienceOptionView {
+  /** The exact group address — the only string the composer ever sends back. */
+  address: string;
+  kind: "run" | "harness" | "worktree";
+  label: string;
+  estimatedRecipients: AudienceCandidate[];
+  /** Always false today: Orca exposes no group-membership read. */
+  exact: boolean;
+}
+
+/** GET /api/audiences — audience preview for the Run-control group composer. */
+export interface AudiencePreviewResponse {
+  runId: string;
+  /** True only when THIS viewer is the selected Run's live coordinator. */
+  coordinatorActive: boolean;
+  audiences: AudienceOptionView[];
+  /** Read failures are reported, never collapsed into "no audiences". */
+  workersError: string | null;
+  worktreesError: string | null;
 }
 
 // --- Phase 1 (operations epic): capability negotiation + Run health ----------

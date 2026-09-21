@@ -5,6 +5,9 @@ import { realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+// The audience allowlist is a security-boundary concept, so the adapter
+// consumes it from security.ts (which never imports this module — no cycle).
+import { KNOWN_HARNESSES, WORKTREE_AUDIENCE_PREFIX } from "./security";
 
 const pExecFile = promisify(execFile);
 
@@ -1470,6 +1473,177 @@ export async function sendCoordinatorMessage(opts: {
   ];
   if (opts.threadId) args.push("--thread-id", opts.threadId);
   return runOrca<Record<string, unknown>>(args);
+}
+
+/**
+ * Send one deliberate GROUP message from the live coordinator.
+ *
+ * Recipient safety is structural: `audience` arrives already allowlisted by
+ * `validateGroupAudience` (Run groups, harness groups, or an exact discovered
+ * `@worktree:<id>`), and this adapter is the only place a `--to` group value
+ * is ever composed — never from raw client text. Orca scopes group mail to
+ * the sender's own Run (the `--run` flag repeats that scope for the receipt),
+ * and per the 1.4.206 contract a successful receipt proves the message was
+ * durably ENQUEUED for the group — never that any worker read or acted on it.
+ * `--task-id`/`--dispatch-id` are deliberately absent: a group message has no
+ * single attempt, and threading one in would misattribute Run-level guidance
+ * to one Task.
+ */
+export async function sendCoordinatorGroupMessage(opts: {
+  runId: string;
+  /** Allowlisted group address (`@all`, `@idle`, `@<harness>`, `@worktree:<id>`). */
+  audience: string;
+  subject: string;
+  body: string;
+  /** `status` | `question` — lifecycle types never reach this adapter. */
+  type: string;
+  priority?: string | null;
+  from: string;
+}): Promise<Record<string, unknown>> {
+  const args = [
+    "orchestration",
+    "send",
+    "--to",
+    opts.audience,
+    "--run",
+    opts.runId,
+    "--from",
+    opts.from,
+    "--subject",
+    opts.subject,
+    "--body",
+    opts.body,
+    "--type",
+    opts.type,
+  ];
+  if (opts.priority) args.push("--priority", opts.priority);
+  return runOrca<Record<string, unknown>>(args);
+}
+
+/** One estimated recipient behind a group audience, from current Run facts. */
+export interface AudienceRecipientEstimate {
+  taskId: string;
+  dispatchId: string | null;
+  label: string | null;
+  harness: string | null;
+}
+
+/** One offered audience with the Run's own estimate of who it would reach. */
+export interface AudienceOption {
+  /** The exact group address (the only string the client may ever send back). */
+  address: string;
+  kind: "run" | "harness" | "worktree";
+  label: string;
+  estimatedRecipients: AudienceRecipientEstimate[];
+  /**
+   * Always false today: Orca exposes no read API for group membership, so
+   * every count is derived from worker-list facts and MUST render as an
+   * estimate. If a future runtime proves exact recipients, flip this per
+   * audience — never default it to true.
+   */
+  exact: false;
+}
+
+/** The worker facts an audience estimate is built from (already Run-scoped). */
+function recipientOf(worker: OrcaWorkerRow): AudienceRecipientEstimate {
+  return {
+    taskId: worker.taskId,
+    dispatchId: worker.dispatchId,
+    label:
+      worker.projection?.launch?.worktree?.trim() ||
+      worker.projection?.workspace?.trim() ||
+      worker.projection?.provider?.id?.trim() ||
+      null,
+    harness: worker.projection?.launch?.agent ?? worker.projection?.provider?.id ?? null,
+  };
+}
+
+/**
+ * Estimate who each supported group audience would reach, from the current
+ * Run's worker facts. Orca documents that group addresses reach "the live
+ * Dispatches of your own Run" (and that `@worktree:<id>` additionally includes
+ * workspace coordinators), but exposes no membership read — so these counts
+ * are honest estimates, labeled `exact: false`, and the harness/worktree
+ * breakdown uses only what the fleet rows themselves report.
+ */
+export function previewRunAudiences(input: {
+  workers: OrcaWorkerRow[];
+  worktrees: OrcaWorktreeRow[];
+}): AudienceOption[] {
+  // Group mail reaches live Dispatches: a settled or fenced row is not a
+  // recipient, no matter how recently it dispatched.
+  const active = input.workers.filter((worker) => worker.dispatchStatus === "dispatched");
+  const all = active.map(recipientOf);
+
+  // "@idle" targets workers parked waiting rather than working. Fleet rows
+  // only hint at this (stage activity/attention), so the subset is an even
+  // softer estimate — never a claimed exact idle list.
+  const idleSignal = (worker: OrcaWorkerRow): boolean => {
+    const activity = `${worker.projection?.stage?.activity ?? ""} ${worker.projection?.stage?.detail ?? ""}`.toLowerCase();
+    const waiting = worker.projection?.attention?.categories?.includes("input") ?? false;
+    return waiting || /\bidle\b|\bwaiting\b/.test(activity);
+  };
+  const idle = active.filter(idleSignal).map(recipientOf);
+
+  const byHarness = (harness: string): AudienceRecipientEstimate[] =>
+    active
+      .filter(
+        (worker) =>
+          (worker.projection?.launch?.agent ?? worker.projection?.provider?.id ?? null) === harness,
+      )
+      .map(recipientOf);
+
+  const byWorktree = (id: string): AudienceRecipientEstimate[] =>
+    active
+      .filter(
+        (worker) =>
+          worker.projection?.workspace === id || worker.projection?.launch?.worktree === id,
+      )
+      .map(recipientOf);
+
+  const options: AudienceOption[] = [
+    {
+      address: "@all",
+      kind: "run",
+      label: "All active workers",
+      estimatedRecipients: all,
+      exact: false,
+    },
+    {
+      address: "@idle",
+      kind: "run",
+      label: "Idle workers",
+      estimatedRecipients: idle,
+      exact: false,
+    },
+  ];
+  // Harness groups are offered from the same allowlist the server validates
+  // against — but only those with at least one active worker, so the picker
+  // never offers a group that provably reaches nobody in THIS Run.
+  for (const harness of KNOWN_HARNESSES) {
+    const recipients = byHarness(harness);
+    if (recipients.length === 0) continue;
+    options.push({
+      address: `@${harness}`,
+      kind: "harness",
+      label: `${harness} workers`,
+      estimatedRecipients: recipients,
+      exact: false,
+    });
+  }
+  // Worktree audiences come ONLY from exact discovered identities. The id is
+  // the opaque worktree identity Orca itself reported — never a path or a
+  // display name reassembled by the client.
+  for (const worktree of input.worktrees) {
+    options.push({
+      address: `${WORKTREE_AUDIENCE_PREFIX}${worktree.id}`,
+      kind: "worktree",
+      label: worktree.displayName || worktree.id,
+      estimatedRecipients: byWorktree(worktree.id),
+      exact: false,
+    });
+  }
+  return options;
 }
 
 /** Terminal accounting state of one worker, from `worker-list`. */

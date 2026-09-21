@@ -1,5 +1,6 @@
 import type {
   ActivitySnapshot,
+  AudiencePreviewResponse,
   DagResponse,
   OrcaEnvironmentView,
   OrcaReadiness,
@@ -248,6 +249,35 @@ export async function replyToMessage(id: string, body: string, runId: string): P
 /** Send durable coordinator guidance to the Task's current active Dispatch. */
 export async function sendTaskMessage(taskId: string, body: string, runId: string): Promise<void> {
   await post(`/api/tasks/${encodeURIComponent(taskId)}/messages`, { body, runId });
+}
+
+// --- Phase 6: safe group messaging --------------------------------------------
+//
+// The composer only ever echoes an address the server's audience preview
+// offered (`@all`, `@idle`, a harness group, or an exact discovered
+// `@worktree:<id>`); subject/type/priority are optional metadata the server
+// validates against its own allowlists.
+
+/** Audience preview for the Run-control composer (read-only). */
+export async function fetchAudiencePreview(runId: string): Promise<AudiencePreviewResponse> {
+  return get<AudiencePreviewResponse>(`/api/audiences?run=${encodeURIComponent(runId)}`);
+}
+
+/**
+ * Send one Run-level group message from the live coordinator. The server
+ * re-checks the audience allowlist, worktree discovery, lifecycle-type
+ * forbidden list, and live-coordinator authority; a success receipt means
+ * Orca durably ENQUEUED the message — never that any worker read it.
+ */
+export async function sendGroupMessage(payload: {
+  runId: string;
+  audience: string;
+  subject?: string;
+  body: string;
+  type?: "status" | "question";
+  priority?: "low" | "normal" | "high" | "urgent" | null;
+}): Promise<void> {
+  await post("/api/messages/group", payload);
 }
 
 /** Explicitly release a settled worker terminal (resolves cleanup debt). */

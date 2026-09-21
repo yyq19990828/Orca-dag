@@ -2846,6 +2846,95 @@ body {
   font-size: 15px;
 }
 
+/* Phase 6: Run-control group composer. A sticker-row of doodle selects
+   (audience / type / priority), the audience estimate, and the enqueue-only
+   note — all in the same crayon vocabulary as the rest of the panel. */
+.chat__group-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 9px 10px 11px;
+  background: rgba(255, 252, 240, 0.6);
+  border: 1.5px dashed var(--line-strong);
+  border-radius: 12px 9px 13px 8px;
+}
+.chat__group-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.chat__group-field {
+  display: flex;
+  min-width: 150px;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+  color: var(--ink-soft);
+  font-size: 12.75px;
+}
+.chat__group-field > span {
+  padding-left: 2px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.chat__group-estimate {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+.chat__group-estimate strong {
+  color: var(--sky-ink);
+  font-family: var(--font-display);
+}
+.chat__group-subject {
+  width: 100%;
+  padding: 6px 9px;
+  color: var(--ink);
+  background: #fff;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 9px 7px 10px 6px;
+  font: inherit;
+  font-size: 15px;
+}
+.chat__group-note {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12.75px;
+  line-height: 1.45;
+}
+
+/* Phase 6: outgoing group bubbles. A double-ruled crayon border separates a
+   deliberate Run-wide broadcast from ordinary one-to-one guidance, and the
+   enqueue note under the body carries the only guarantee a send receipt
+   ever had. */
+.chat-message--group {
+  border-color: rgba(62, 123, 166, 0.55);
+  border-style: double;
+  border-width: 3.5px;
+  background: rgba(214, 233, 245, 0.5);
+}
+.chat-message__audience {
+  padding: 1px 5px;
+  border-radius: 5px 4px 6px 3px;
+  color: var(--sky-ink);
+  background: rgba(123, 183, 224, 0.24);
+  border: 1px solid rgba(62, 123, 166, 0.45);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1.25;
+}
+.chat-message__enqueue {
+  display: block;
+  margin-top: 5px;
+  color: var(--sky-ink);
+  font-size: 12.75px;
+  font-style: italic;
+}
+
 @media (max-width: 900px) {
   .communication-center {
     position: absolute;
