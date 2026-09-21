@@ -94,7 +94,14 @@ function eventActor(event: ActivityEvent): string {
 
 function stageState(task: DagNode, presence: StagePresence | null, waiting: boolean): string {
   if (waiting) return "Waiting for reply";
-  if (task.status === "dispatched" && presence?.liveness === "unverifiable") return "Connection unknown";
+  if (task.status === "dispatched" && presence?.liveness === "unverifiable") {
+    // Phase 2: for the documented fleet capability gaps, an exact worker-show
+    // observation proving the terminal live replaces the misleading generic
+    // label with the qualified working state — the fleet verdict itself stays
+    // unverifiable (both evidence layers remain visible in Worker Operations).
+    if (presence.qualifiedWorking) return "Agent working · terminal live · supervised liveness unavailable";
+    return "Connection unknown";
+  }
   if (task.status === "dispatched") return "Running";
   return {
     pending: "Pending",

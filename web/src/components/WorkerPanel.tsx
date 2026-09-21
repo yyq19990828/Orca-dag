@@ -1,38 +1,84 @@
 import { useCallback, useEffect, useState } from "react";
-import { fetchEnvironments, fetchRunStatus, fetchWorkerOutput, releaseWorker, retainWorker } from "../api";
-import type { RunAttempt, RunStatus, WorkerOutputView } from "../types";
+import {
+  fetchEnvironments,
+  fetchWorkerDetail,
+  fetchWorkerOutput,
+  releaseWorker,
+  retainWorker,
+} from "../api";
+import type {
+  RunStatus,
+  WorkerDetailView,
+  WorkerOutputView,
+  WorkerRowView,
+} from "../types";
 
 /**
- * Worker observability (Phase 5): per-attempt fleet liveness (+ the runtime's
- * own reason), attention categories, agent-wait stage, terminal accounting,
- * requested vs effective launch preferences, Orca's literal prescribed next
- * action, and bounded output reading with cursor paging. Also hosts the
- * explicit retain-for-debugging / release controls for settled workers.
+ * Durable worker operations (Phase 2): the panel renders the Run-scoped,
+ * fully paginated `worker-list` inventory passed down from App, so historical
+ * and active workers stay visible even when this viewer is not coordinating
+ * the Run. Expanding a row fetches `worker-show` evidence on demand — exact
+ * observation, agent-wait, requested/effective launch preferences, the
+ * runtime's prescribed next action — while `worker-read` output stays a
+ * bounded, explicitly sourced surface with cursor paging and source-change
+ * warnings.
  *
- * Everything here is evidence-backed: effective preferences come only from
- * runtime echoes (unechoed → "unknown", never assumed applied), liveness
- * renders only live/unverifiable/exited, and a `source_changed` answer
- * restarts the read with a visible warning instead of silently jumping.
+ * Everything here is evidence-backed: fleet liveness is the authoritative
+ * verdict and is never upgraded from PTY facts. The one exception is the
+ * runtime-documented capability gaps (`missing_status` /
+ * `capability_unsupported`) where the server merges a positively exact
+ * observation into a QUALIFIED working label that keeps both evidence layers
+ * visible. Release/retain controls appear only when a lifecycle decision is
+ * positively proven — by Orca's own `release_pending` accounting or the
+ * viewer coordinator's settled-undecided attempt — never inferred.
  */
+
+/** Terminal states the fleet can report; unknown states render verbatim. */
+const TERMINAL_STATES = [
+  "active",
+  "release_pending",
+  "retained",
+  "reclaimable",
+  "release_unknown",
+  "released",
+] as const;
+
+/** Viewer-local post-settlement decisions that mean "nothing owed anymore". */
+const DECIDED = new Set(["released", "retained", "closed", "reused", "not_needed"]);
+
+/** The exact label the plan prescribes for a qualified capability-gap row. */
+const QUALIFIED_LABEL = "Agent working · terminal live · supervised liveness unavailable";
+
 export function WorkerPanel({
   runId,
+  rows,
+  rowsError,
+  status,
   disabled = false,
   disabledReason,
-  pollMs = 2000,
 }: {
   runId: string;
+  /** Durable, Run-scoped fleet rows (fully paginated server-side). */
+  rows: WorkerRowView[];
+  /** Last fleet-read error — kept visible while stale rows remain on screen. */
+  rowsError: string | null;
+  /** Process-local coordinator state (requested launch prefs, decisions). */
+  status: RunStatus | null;
   disabled?: boolean;
   disabledReason?: string | null;
-  pollMs?: number;
 }) {
-  const [status, setStatus] = useState<RunStatus | null>(null);
-  const [openTask, setOpenTask] = useState<string | null>(null);
+  const [openDispatch, setOpenDispatch] = useState<string | null>(null);
+  const [detail, setDetail] = useState<WorkerDetailView | null>(null);
+  const [detailErr, setDetailErr] = useState<string | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [output, setOutput] = useState<WorkerOutputView | null>(null);
   const [outputErr, setOutputErr] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  // Phase 6: structured-read source picker + the environment capability list
-  // it is gated on (cached in api.ts; one fetch, not one per poll tick).
+  const [terminalFilter, setTerminalFilter] = useState<string>("all");
+  const [attentionFilter, setAttentionFilter] = useState<string>("all");
+  // Structured-read source picker + the environment capability list it is
+  // gated on (cached in api.ts; one fetch, not one per render).
   const [source, setSource] = useState<string>("auto");
   const [envs, setEnvs] = useState<Awaited<ReturnType<typeof fetchEnvironments>>>([]);
   useEffect(() => {
@@ -45,30 +91,16 @@ export function WorkerPanel({
     };
   }, []);
 
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const s = await fetchRunStatus();
-        if (alive) setStatus(s);
-      } catch {
-        /* transient — keep the last known state */
-      }
-    };
-    void load();
-    const t = window.setInterval(load, pollMs);
-    return () => {
-      alive = false;
-      window.clearInterval(t);
-    };
-  }, [pollMs]);
+  // The status endpoint describes the one process-local coordinator, so its
+  // attempts (requested launch prefs, viewer decisions) merge only under the
+  // same selected Run. Rows render regardless — that is the point of Phase 2.
+  const attempts = status?.runId === runId ? status.attempts : [];
 
   const loadOutput = useCallback(
-    async (a: RunAttempt, cursor?: string, src?: string) => {
-      if (!a.dispatchId) return;
+    async (dispatchId: string, cursor?: string, src?: string) => {
       setOutputErr(null);
       try {
-        const page = await fetchWorkerOutput(a.dispatchId, {
+        const page = await fetchWorkerOutput(dispatchId, {
           cursor,
           limit: 40,
           source: src && src !== "auto" ? src : undefined,
@@ -87,12 +119,38 @@ export function WorkerPanel({
     [],
   );
 
-  async function decide(a: RunAttempt, kind: "release" | "retain") {
-    if (!a.dispatchId) return;
-    setBusyId(a.dispatchId);
+  const loadDetail = useCallback(
+    async (dispatchId: string) => {
+      setDetailLoading(true);
+      setDetailErr(null);
+      setDetail(null);
+      setOutput(null);
+      setOutputErr(null);
+      setSource("auto");
+      try {
+        setDetail(await fetchWorkerDetail(runId, dispatchId));
+      } catch (e) {
+        setDetailErr(String((e as Error).message ?? e));
+      } finally {
+        setDetailLoading(false);
+      }
+    },
+    [runId],
+  );
+
+  function toggle(row: WorkerRowView) {
+    const open = openDispatch === row.dispatchId;
+    setOpenDispatch(open ? null : row.dispatchId);
+    setDetail(null);
+    setDetailErr(null);
+    if (!open && row.dispatchId) void loadDetail(row.dispatchId);
+  }
+
+  async function decide(dispatchId: string, kind: "release" | "retain") {
+    setBusyId(dispatchId);
     setErr(null);
     try {
-      await (kind === "release" ? releaseWorker(a.dispatchId) : retainWorker(a.dispatchId));
+      await (kind === "release" ? releaseWorker(dispatchId) : retainWorker(dispatchId));
     } catch (e) {
       setErr(String((e as Error).message ?? e));
     } finally {
@@ -100,165 +158,331 @@ export function WorkerPanel({
     }
   }
 
-  // The status endpoint describes the one process-local coordinator, so its
-  // attempts are displayable only under the same selected Run.
-  const attempts = status?.runId === runId ? status.attempts : [];
-  if (!runId || attempts.length === 0) return null;
+  // --- filters: terminal/accounting state + attention categories ------------
+  const attentionCategories = new Set<string>();
+  for (const row of rows) {
+    for (const category of row.projection?.attention?.categories ?? []) {
+      attentionCategories.add(category);
+    }
+  }
+  const filtered = rows.filter((row) => {
+    if (terminalFilter !== "all" && row.terminalState !== terminalFilter) return false;
+    if (attentionFilter === "needs_action") {
+      if (!row.projection?.attention?.requiresAction) return false;
+    } else if (attentionFilter !== "all") {
+      if (!(row.projection?.attention?.categories ?? []).includes(attentionFilter)) return false;
+    }
+    return true;
+  });
+
+  if (!runId || (rows.length === 0 && !rowsError)) return null;
 
   return (
     <div className="gates inbox workers" data-testid="worker-panel">
       <div className="gate inbox__item">
-        <div className="gate__badge">Workers · fleet view</div>
-        {attempts.map((a) => {
-          const open = openTask === a.taskId;
-          const settledDecided = ["released", "retained", "closed", "reused", "not_needed"].includes(
-            a.terminalDecision,
+        <div className="gate__badge">Workers · durable fleet view</div>
+        {rows.length > 0 && (
+          <div className="workers__filters">
+            <select
+              className="workers__source"
+              value={terminalFilter}
+              onChange={(e) => setTerminalFilter(e.target.value)}
+              aria-label="Filter by terminal state"
+            >
+              <option value="all">state: all</option>
+              {TERMINAL_STATES.map((state) => (
+                <option key={state} value={state}>
+                  state: {state}
+                </option>
+              ))}
+            </select>
+            <select
+              className="workers__source"
+              value={attentionFilter}
+              onChange={(e) => setAttentionFilter(e.target.value)}
+              aria-label="Filter by attention"
+            >
+              <option value="all">attention: all</option>
+              <option value="needs_action">attention: needs action</option>
+              {[...attentionCategories].map((category) => (
+                <option key={category} value={category}>
+                  attention: {category}
+                </option>
+              ))}
+            </select>
+            <span className="inbox__meta">
+              {filtered.length} of {rows.length} worker{rows.length === 1 ? "" : "s"}
+            </span>
+          </div>
+        )}
+        {filtered.map((row) => {
+          const open = openDispatch === row.dispatchId;
+          const projection = row.projection;
+          const liveness = projection?.liveness ?? null;
+          const verdict = liveness?.verdict === "live" || liveness?.verdict === "exited" ? liveness.verdict : "unverifiable";
+          const attempt = attempts.find(
+            (candidate) =>
+              (row.dispatchId && candidate.dispatchId === row.dispatchId) ||
+              candidate.taskId === row.taskId,
           );
-          const modelMismatch =
-            a.effective?.model != null && a.requested.model != null && a.effective.model !== a.requested.model;
-          const effortMismatch =
-            a.effective?.effort != null && a.requested.effort != null && a.effective.effort !== a.requested.effort;
-          // Phase 6: the execution host that owns this worker's process and
-          // transcript. Null = never reported — shown as unknown, never as a
-          // synthesized "local".
+          const host = projection?.host ?? null;
           const hostLabel =
-            a.host == null
+            host == null
               ? "unknown"
-              : a.host.kind === "local"
+              : host.kind === "local"
                 ? "local (this server)"
-                : `environment ${a.host.id}`;
-          const hostEnv = a.host ? envs.find((e) => e.id === a.host!.id) : undefined;
-          // Structured transcript reads are a peer capability: offered for
-          // local workers always, for remote workers only when their
-          // environment advertises it. Unknown host → auto only (never guess).
+                : `environment ${host.id}`;
+          const provider =
+            projection?.provider?.model ??
+            projection?.provider?.id ??
+            projection?.launch?.model ??
+            projection?.launch?.agent ??
+            null;
+          // Structured transcript reads are a peer capability (Phase 6):
+          // offered for local workers always, for remote workers only when
+          // their environment advertises it. Unknown host → auto only.
+          const hostEnv = host ? envs.find((e) => e.id === host.id) : undefined;
           const canTranscript =
-            a.host?.kind === "local" ||
-            (a.host?.kind != null && a.host.kind !== "local" && (hostEnv?.peer.transcriptRead ?? false));
+            host?.kind === "local" ||
+            (host?.kind != null && host.kind !== "local" && (hostEnv?.peer.transcriptRead ?? false));
+          // Lifecycle decisions appear only on positive proof: Orca's own
+          // accounting says a decision is owed (release_pending), or this
+          // viewer's coordinator settled the attempt without a decision yet.
+          const decisionOwed =
+            row.terminalState === "release_pending" ||
+            (attempt?.settled === true && !DECIDED.has(attempt.terminalDecision));
           return (
-            <div key={`${a.taskId}-${a.dispatchId ?? "pending"}`} className="workers__row">
-              <button
-                className="workers__toggle"
-                onClick={() => {
-                  const next = open ? null : a.taskId;
-                  setOpenTask(next);
-                  setOutput(null);
-                  setOutputErr(null);
-                  setSource("auto"); // per-attempt read state resets on switch
-                  if (next) void loadOutput(a);
-                }}
-              >
-                <span className="workers__liveness" data-verdict={a.liveness ?? "unverifiable"}>
-                  {a.liveness ?? "unverifiable"}
+            <div key={row.dispatchId || row.taskId} className="workers__row">
+              <button className="workers__toggle" onClick={() => toggle(row)}>
+                <span
+                  className="workers__liveness"
+                  data-verdict={verdict}
+                  title={liveness?.reason ? `${verdict} (${liveness.reason})` : verdict}
+                >
+                  {verdict}
                 </span>
-                <code className="workers__task">{a.taskId}</code>
+                <code className="workers__task">{row.taskId}</code>
                 <span className="inbox__meta">
-                  {a.harness}
-                  {a.reuseOf ? " · reused terminal" : ""}
-                  {a.settled ? ` · ${a.terminalDecision}` : " · running"}
+                  <code className="workers__dispatch">{row.dispatchId || "no dispatch"}</code>
+                  {projection?.outcome ? ` · ${projection.outcome}` : ""}
+                  {row.workerState === "unsupervised" ? " · unsupervised" : ""}
+                  {` · ${hostLabel}`}
+                  {provider ? ` · ${provider}` : ""}
+                  {` · ${row.terminalState}`}
+                  {(projection?.attention?.categories ?? []).length > 0
+                    ? ` · ⚑ ${(projection?.attention?.categories ?? []).join(", ")}`
+                    : ""}
                 </span>
               </button>
 
               {open && (
                 <div className="workers__detail">
+                  {/* --- Liveness: both evidence layers, never merged away --- */}
+                  {detail?.liveness.qualifiedWorking ? (
+                    <div className="inbox__body workers__qualified" data-testid="qualified-working">
+                      <b>{QUALIFIED_LABEL}</b>
+                      <span className="inbox__meta">
+                        {" "}— fleet: unverifiable ({detail.liveness.fleetReason}); exact observation:{" "}
+                        {detail.liveness.observationStatus ?? "unknown"}. Both layers shown; the fleet
+                        verdict is not overridden.
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="inbox__body">
+                      Liveness: <b>{verdict}</b>
+                      {liveness?.reason ? ` — ${liveness.reason}` : ""}
+                      {detail?.liveness.observationStatus
+                        ? ` · observed: ${detail.liveness.observationStatus}${
+                            detail.observation?.exactWorker === false ? " (not exact-worker — not merged)" : ""
+                          }`
+                        : ""}
+                    </div>
+                  )}
                   <div className="inbox__body">
-                    Liveness: <b>{a.liveness ?? "unverifiable"}</b>
-                    {a.livenessReason ? ` — ${a.livenessReason}` : ""}
-                    {a.stage && a.stage.activity !== "unknown" ? ` · agent: ${a.stage.activity}` : ""}
-                  </div>
-                  <div className="inbox__body">
-                    Execution host: <b>{hostLabel}</b>
-                    {a.requested.on ? ` · placed via --on ${a.requested.on}` : ""}
-                    {a.host?.kind != null && a.host.kind !== "local" && a.liveness === "unverifiable"
+                    Host: <b>{hostLabel}</b>
+                    {projection?.launch?.on ? ` · placed via --on ${projection.launch.on}` : ""}
+                    {host?.kind != null && host.kind !== "local" && verdict === "unverifiable"
                       ? " · contact lost is NOT exit — the Dispatch is preserved"
                       : ""}
                   </div>
-                  {a.attention && a.attention.categories.length > 0 && (
+                  <div className="inbox__body">
+                    Provider/model:{" "}
+                    <b>
+                      {provider ??
+                        (attempt
+                          ? `${attempt.requested.agent}${attempt.requested.model ? ` · ${attempt.requested.model}` : ""} (requested)`
+                          : "unknown")}
+                    </b>
+                  </div>
+                  <div className="inbox__body">
+                    Terminal: <code>{row.agentTerminalHandle ?? "unknown"}</code> · Orca:{" "}
+                    <code>{row.terminalState}</code>
+                    {attempt ? ` · viewer: ${attempt.terminalDecision}` : " · viewer: n/a (not coordinated here)"}
+                  </div>
+                  {projection?.attention && projection.attention.categories.length > 0 && (
                     <div className="inbox__body">
-                      Attention: {a.attention.categories.join(", ")}
-                      {a.attention.requiresAction ? " · needs action" : ""}
+                      Attention: {projection.attention.categories.join(", ")}
+                      {projection.attention.requiresAction ? " · needs action" : ""}
                     </div>
                   )}
-                  <div className="inbox__body">
-                    Terminal: <code>{a.agentTerminalHandle ?? "unknown"}</code> · Orca:{" "}
-                    <code>{a.fleetTerminalState ?? "unknown"}</code> · viewer: {a.terminalDecision}
-                  </div>
-                  <div className="inbox__body">
-                    Launch — agent {a.requested.agent ?? "?"}
-                    {a.requested.model ? ` · model ${a.requested.model}` : ""}
-                    {a.requested.effort ? ` · effort ${a.requested.effort}` : ""}
-                    {" → effective "}
-                    {a.effective
-                      ? [
-                          a.effective.agent ?? "unknown agent",
-                          a.effective.model ?? "unknown model",
-                          ...(a.effective.effort ? [`effort ${a.effective.effort}`] : []),
-                        ].join(", ")
-                      : "unknown (no receipt echo)"}
-                    {(modelMismatch || effortMismatch) && (
-                      <b className="workers__mismatch"> · requested ≠ effective</b>
-                    )}
-                  </div>
-                  {a.nextAction && a.nextAction.argv.length > 0 && (
-                    <div className="inbox__body">
-                      Orca prescribes: <code>{a.nextAction.argv.join(" ")}</code>
-                    </div>
+                  {projection?.stage && projection.stage.activity !== "unknown" && (
+                    <div className="inbox__body">Agent stage: {projection.stage.activity}</div>
                   )}
 
-                  {output?.dispatchId === a.dispatchId && output.lines.length > 0 && (
+                  {/* --- worker-show evidence (fetched on expand) --- */}
+                  {detailLoading && <div className="inbox__body">Loading worker evidence…</div>}
+                  {detailErr && <div className="exec__err inbox__err">⚠️ {detailErr}</div>}
+                  {detail && (
+                    <>
+                      {detail.observation && (
+                        <div className="inbox__body">
+                          Observation: <b>{detail.observation.status ?? "unknown"}</b>
+                          {detail.observation.exactWorker === true
+                            ? " · exact worker"
+                            : detail.observation.exactWorker === false
+                              ? " · not provably this worker"
+                              : ""}
+                          {detail.observation.agentWait === undefined
+                            ? " · agent-wait: unknown (this host never looked)"
+                            : detail.observation.agentWait === null
+                              ? " · agent-wait: none detected"
+                              : ` · agent-wait: waiting on a human prompt${
+                                  detail.observation.agentWait.kind ? ` (${detail.observation.agentWait.kind})` : ""
+                                }${detail.observation.agentWait.detail ? ` — ${detail.observation.agentWait.detail}` : ""}`}
+                        </div>
+                      )}
+                      {detail.worker && (detail.worker.state || detail.worker.stage) && (
+                        <div className="inbox__body">
+                          Worker record: {detail.worker.state ?? "unknown"}
+                          {detail.worker.stage ? ` · stage ${detail.worker.stage}` : ""}
+                          {detail.dispatch?.status ? ` · dispatch ${detail.dispatch.status}` : ""}
+                          {detail.dispatch?.failureCount ? ` · failures ${detail.dispatch.failureCount}` : ""}
+                        </div>
+                      )}
+                      {/* Requested vs effective launch preferences: requested
+                          only exists when this viewer started the attempt;
+                          effective comes only from the runtime echo. */}
+                      {(attempt || detail.fleet?.projection?.launch) && (
+                        <div className="inbox__body">
+                          Launch —{" "}
+                          {attempt
+                            ? `requested ${attempt.requested.agent ?? "?"}${
+                                attempt.requested.model ? ` · ${attempt.requested.model}` : ""
+                              }${attempt.requested.effort ? ` · effort ${attempt.requested.effort}` : ""}`
+                            : "requested unknown (not started here)"}
+                          {" → effective "}
+                          {detail.fleet?.projection?.launch
+                            ? [
+                                detail.fleet.projection.launch.agent ?? "unknown agent",
+                                detail.fleet.projection.launch.model ?? "unknown model",
+                                ...(detail.fleet.projection.launch.effort
+                                  ? [`effort ${detail.fleet.projection.launch.effort}`]
+                                  : []),
+                              ].join(", ")
+                            : detail.fleet?.projection?.provider
+                              ? [detail.fleet.projection.provider.id, detail.fleet.projection.provider.model]
+                                  .filter(Boolean)
+                                  .join(" · ") || "unknown"
+                              : "unknown (no receipt echo)"}
+                        </div>
+                      )}
+                      {detail.fleet?.projection?.nextAction && detail.fleet.projection.nextAction.argv.length > 0 && (
+                        <div className="inbox__body">
+                          Orca prescribes: <code>{detail.fleet.projection.nextAction.argv.join(" ")}</code>
+                        </div>
+                      )}
+                      {/* Raw receipts live ONLY in this collapsed diagnostic section. */}
+                      <details className="workers__raw">
+                        <summary>Diagnostic receipt</summary>
+                        <pre className="workers__rawpre">
+                          {JSON.stringify(
+                            {
+                              dispatch: detail.dispatch,
+                              worker: detail.worker,
+                              terminal: detail.terminal,
+                              observation: detail.observation,
+                              fleet: detail.fleet?.projection ?? null,
+                            },
+                            null,
+                            2,
+                          )}
+                        </pre>
+                      </details>
+                    </>
+                  )}
+
+                  {/* --- bounded output (worker-read) --- */}
+                  {output?.dispatchId === row.dispatchId && output.lines.length > 0 && (
                     <pre className="workers__output">
                       {output.lines.join("\n")}
                       {!output.contentComplete && "\n…"}
+                      {output.clipped ? "\n[clipped by the runtime]" : ""}
                     </pre>
                   )}
-                  {output?.dispatchId === a.dispatchId && output.sourceChanged && (
+                  {output?.dispatchId === row.dispatchId && (
+                    <div className="inbox__meta">
+                      output source: <b>{output.source}</b>
+                      {output.clipped ? " · clipped" : ""}
+                      {!output.contentComplete ? " · more available" : " · complete"}
+                    </div>
+                  )}
+                  {output?.dispatchId === row.dispatchId && output.sourceChanged && (
                     <div className="inbox__body workers__warn">Output source changed — read restarted from the start.</div>
                   )}
-                  {output?.dispatchId === a.dispatchId &&
+                  {output?.dispatchId === row.dispatchId &&
                     output.warnings.map((w, i) => (
                       <div key={i} className="inbox__body workers__warn">
                         ⚠ {w}
                       </div>
                     ))}
                   {outputErr && <div className="exec__err inbox__err">⚠️ {outputErr}</div>}
+
                   <div className="gate__actions">
-                    {/* Structured reads: `transcript` appears only where the
-                        execution host's peer advertises it (auto always works
-                        — the runtime picks whatever source it can). */}
-                    {canTranscript && (
+                    {output?.dispatchId !== row.dispatchId && (
+                      <button
+                        className="btn btn--gate"
+                        onClick={() => row.dispatchId && void loadOutput(row.dispatchId, undefined, "auto")}
+                      >
+                        Read output
+                      </button>
+                    )}
+                    {output?.dispatchId === row.dispatchId && output.cursor && (
+                      <button
+                        className="btn btn--gate"
+                        onClick={() =>
+                          row.dispatchId && void loadOutput(row.dispatchId, output.cursor ?? undefined, source)
+                        }
+                      >
+                        Load more
+                      </button>
+                    )}
+                    {output?.dispatchId === row.dispatchId && (
                       <select
                         className="workers__source"
                         value={source}
                         onChange={(e) => {
                           setSource(e.target.value);
-                          if (a.dispatchId) void loadOutput(a, undefined, e.target.value);
+                          if (row.dispatchId) void loadOutput(row.dispatchId, undefined, e.target.value);
                         }}
                       >
                         <option value="auto">source: auto</option>
-                        <option value="transcript">source: transcript</option>
+                        {canTranscript && <option value="transcript">source: transcript</option>}
                       </select>
                     )}
-                    {output && output.cursor && (
-                      <button
-                        className="btn btn--gate"
-                        onClick={() => a.dispatchId && void loadOutput(a, output.cursor ?? undefined, source)}
-                      >
-                        Load more
-                      </button>
-                    )}
-                    {a.settled && a.dispatchId && !settledDecided && (
+                    {decisionOwed && row.dispatchId && (
                       <>
                         <button
                           className="btn btn--gate btn--ok"
-                          disabled={disabled || busyId === a.dispatchId}
-                          onClick={() => void decide(a, "release")}
+                          disabled={disabled || busyId === row.dispatchId}
+                          onClick={() => void decide(row.dispatchId, "release")}
                           title="worker-release — the default post-settlement decision"
                         >
                           Release
                         </button>
                         <button
                           className="btn btn--gate"
-                          disabled={disabled || busyId === a.dispatchId}
-                          onClick={() => void decide(a, "retain")}
+                          disabled={disabled || busyId === row.dispatchId}
+                          onClick={() => void decide(row.dispatchId, "retain")}
                           title="worker-retain — keep this terminal alive for inspection"
                         >
                           Retain for debugging
@@ -271,7 +495,12 @@ export function WorkerPanel({
             </div>
           );
         })}
-        {err && <div className="exec__err inbox__err">⚠️ {err}</div>}
+        {rows.length > 0 && filtered.length === 0 && (
+          <div className="inbox__body">No workers match the current filters.</div>
+        )}
+        {(rowsError || err) && (
+          <div className="exec__err inbox__err">⚠️ {rowsError ?? ""}{rowsError && err ? " · " : ""}{err ?? ""}</div>
+        )}
         {disabled && disabledReason && <div className="exec__hint">🔒 {disabledReason}</div>}
       </div>
     </div>

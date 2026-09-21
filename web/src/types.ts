@@ -125,6 +125,133 @@ export interface WorkerOutputView {
 }
 
 /**
+ * One durable `worker-list` row (GET /api/workers). This is the Run-scoped,
+ * fully paginated fleet inventory: it renders historical and active workers
+ * even when this viewer is not coordinating the Run. Optional fields mirror
+ * the runtime's tolerant receipt — absent means unknown, never a negative.
+ */
+export interface WorkerRowView {
+  dispatchId: string;
+  taskId: string;
+  runId: string;
+  /** "supervised" for worker-start attempts, "unsupervised" for tracking dispatches. */
+  workerState: string;
+  dispatchStatus: string;
+  agentTerminalHandle: string | null;
+  /** active | reclaimable | retained | release_pending | release_unknown | released */
+  terminalState: string;
+  resource?: { state: string; reason: string | null } | null;
+  projection: {
+    id?: string | null;
+    role?: string | null;
+    parent?: string | null;
+    workspace?: string | null;
+    outcome: string | null;
+    liveness: { verdict: string; reason: string | null } | null;
+    evidence?: {
+      durable?: boolean | null;
+      liveStatus?: string | null;
+      lastObservedAt?: string | null;
+    } | null;
+    resource?: { state: string; reason: string | null } | null;
+    stage: { worker: string; dispatch: string; detail: string | null; activity: string } | null;
+    nextAction: { kind: string; argv: string[] } | null;
+    attention: { categories: string[]; requiresAction: boolean } | null;
+    host?: { kind: string; id: string } | null;
+    launch?: {
+      agent?: string | null;
+      model?: string | null;
+      effort?: string | null;
+      worktree?: string | null;
+      terminal?: string | null;
+      on?: string | null;
+    } | null;
+    provider?: { id?: string | null; model?: string | null } | null;
+  } | null;
+}
+
+/** Agent-wait evidence (worker-show observation.agentWait), parsed server-side. */
+export interface WorkerAgentWaitView {
+  /** How the wait was proven: hook | prompt-text | title | … (verbatim). */
+  kind: string | null;
+  detail: string | null;
+  /** Verbatim receipt fields — diagnostics section only. */
+  raw: Record<string, unknown>;
+}
+
+/** The exact execution-host observation layer (worker-show.observation). */
+export interface WorkerObservationView {
+  status: string | null;
+  /** Positively true only when the receipt provably observed THIS dispatch. */
+  exactWorker: boolean | null;
+  /**
+   * Tri-state: object → parked on a human prompt; null → Orca looked and found
+   * no wait; undefined (absent key) → this host never looked — unknown, and
+   * never "not waiting".
+   */
+  agentWait?: WorkerAgentWaitView | null;
+}
+
+/** PTY terminal facts — the observation layer, never fleet liveness. */
+export interface WorkerTerminalFactsView {
+  handle: string | null;
+  title: string | null;
+  connected: boolean | null;
+  orphaned: boolean | null;
+  worktreePath: string | null;
+  branch: string | null;
+  executionHostId: string | null;
+  agentIdentity: string | null;
+  lastOutputAt: number | null;
+  preview: string | null;
+}
+
+/**
+ * Presentation merge of fleet liveness with exact observation evidence. The
+ * verdict is ALWAYS the fleet's normalized verdict — a live PTY never promotes
+ * it. `qualifiedWorking` is true only for the documented capability-gap
+ * reasons (missing_status / capability_unsupported) with a positively exact,
+ * positively live worker-show observation.
+ */
+export interface WorkerLivenessPresentationView {
+  verdict: "live" | "unverifiable" | "exited";
+  fleetReason: string | null;
+  qualifiedWorking: boolean;
+  qualifiedReason: string | null;
+  observationStatus: string | null;
+}
+
+/** GET /api/workers/:dispatchId — durable row + worker-show evidence. */
+export interface WorkerDetailView {
+  dispatchId: string;
+  runId: string | null;
+  taskId: string | null;
+  fleet: WorkerRowView | null;
+  dispatch: {
+    status: string | null;
+    failureCount: number | null;
+    lastFailure: string | null;
+    terminationReason: string | null;
+    dispatchedAt: string | null;
+    completedAt: string | null;
+    lastHeartbeatAt: string | null;
+    retryOfDispatchId: string | null;
+    depth: number | null;
+  } | null;
+  worker: {
+    state: string | null;
+    stage: string | null;
+    setupState: string | null;
+    lastError: string | null;
+    createdAt: string | null;
+    updatedAt: string | null;
+  } | null;
+  terminal: WorkerTerminalFactsView | null;
+  observation: WorkerObservationView | null;
+  liveness: WorkerLivenessPresentationView;
+}
+
+/**
  * The durable identity fields the launch-lock UI needs from one worker-list
  * row. The server may return richer fleet accounting, but existence of a
  * Task-linked row alone proves that its launch plan has already been used.
@@ -371,6 +498,15 @@ export interface StagePresence {
   taskId: string;
   dispatchId: string;
   liveness: "live" | "unverifiable" | "exited";
+  /** Fleet's own reason for an unverifiable verdict (e.g. missing_status). */
+  livenessReason?: string | null;
+  /**
+   * Qualified working state (Phase 2): the fleet could not decide for a
+   * documented capability-gap reason while an exact worker-show observation
+   * positively proves the terminal live. Presentation-only — the verdict
+   * above stays unverifiable; both evidence layers stay visible.
+   */
+  qualifiedWorking?: boolean;
   activity: string | null;
   detail: string | null;
   outcome: string | null;
@@ -521,6 +657,8 @@ export interface OrcaEnvironmentView {
   version: string | null;
   /** Parsed gates the UI disables controls on. */
   peer: PeerCapabilitiesView;
+  /** Canonical capability matrix for the same advertisement (epic O1). */
+  runtimeCapabilities: RuntimeCapabilityProjection;
 }
 
 /** One exact workspace on an environment (GET /api/environments/:id/worktrees). */
@@ -558,4 +696,89 @@ export interface OrcaReadiness {
   version: string | null;
   executionEnabled: boolean;
   reason: string | null;
+}
+
+// --- Phase 1 (operations epic): capability negotiation + Run health ----------
+
+/**
+ * One row of the canonical capability matrix (Orca 1.4.206 ids). `supported`
+ * is true ONLY on a positively advertised canonical id or documented legacy
+ * alias — unknown and absent names stay off, never guessed into support.
+ */
+export interface RuntimeCapabilityView {
+  /** Canonical id, verbatim (e.g. `orchestration.federation-fleet-snapshot.v1`). */
+  id: string;
+  label: string;
+  /** Where the advertisement is expected: the local CLI or a peer runtime. */
+  scope: string;
+  state: "supported" | "alias" | "absent";
+  supported: boolean;
+  /** The verbatim advertised name that matched (null = nothing did). */
+  matchedName: string | null;
+  explanation: string;
+}
+
+/** Projection of one advertised-capability set against the canonical table. */
+export interface RuntimeCapabilityProjection {
+  capabilities: RuntimeCapabilityView[];
+  /** Advertised names this viewer does not understand, verbatim. */
+  unknownAdvertised: string[];
+}
+
+/** GET /api/capabilities — the local runtime's read-only capability view. */
+export interface RuntimeCapabilitiesResponse extends RuntimeCapabilityProjection {
+  runtime: {
+    cli: string;
+    version: string | null;
+    executionEnabled: boolean;
+    reason: string | null;
+  };
+  /** null = this source exposes no capability list (unknown, not "none"). */
+  advertised: string[] | null;
+  advertisedSource: string;
+}
+
+/** The five Run ownership states the health projection distinguishes. */
+export type RunOwnershipState =
+  | "viewer_coordinator"
+  | "viewer_coordinator_other_run"
+  | "external_coordinator"
+  | "unbound"
+  | "unverifiable";
+
+/** One evidence-backed health warning (readable message, stable code). */
+export interface RunHealthWarning {
+  code:
+    | "messages_without_tasks"
+    | "dispatched_task_without_worker"
+    | "reclaimable_workers"
+    | "pending_gates"
+    | "evidence_incomplete"
+    | "foreign_workspace";
+  severity: "info" | "warning";
+  message: string;
+}
+
+/**
+ * Ownership + health of ONE Run (GET /api/run-health). Counts are `null`
+ * when their read failed — unknown, never zero. Orca's Run record is the
+ * only ownership evidence; this viewer never calls a coordinator "stale"
+ * from a missing local terminal row.
+ */
+export interface RunHealthView {
+  runId: string;
+  ownership: RunOwnershipState;
+  ownershipDetail: string;
+  coordinatorHandle: string | null;
+  consumerGeneration: number | null;
+  viewerCoordinator: { running: boolean; runId: string | null; coordinatorHandle: string | null };
+  counts: {
+    tasks: number | null;
+    messages: number | null;
+    workers: number | null;
+    gates: number | null;
+    pendingGates: number | null;
+  };
+  evidenceComplete: boolean;
+  warnings: RunHealthWarning[];
 }

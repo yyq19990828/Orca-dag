@@ -8,6 +8,8 @@ import { NodePanel } from "./components/NodePanel";
 import { RecoveryPanel } from "./components/RecoveryPanel";
 import { WorkerPanel } from "./components/WorkerPanel";
 import { RunPicker } from "./components/RunPicker";
+import { RunHealthBadge } from "./components/RunHealthBadge";
+import { CapabilityPanel } from "./components/CapabilityPanel";
 import { useDecisionDialog } from "./components/DecisionDialog";
 import { fetchDag, fetchRunStatus, fetchWorkers, resetTasks } from "./api";
 import { initConfig, setLayout, setLeadTask, setRunId, useConfig, useReadiness } from "./harness";
@@ -19,6 +21,7 @@ import {
   type LayoutKind,
   type RunStatus,
   type TaskStatus,
+  type WorkerRowView,
 } from "./types";
 
 const EMPTY: DagResponse = { runId: "", nodes: [], edges: [], gates: [], generatedAt: 0 };
@@ -215,6 +218,10 @@ export default function App() {
   const [startingRunId, setStartingRunId] = useState<string | null>(null);
   const [workerHistoryLoading, setWorkerHistoryLoading] = useState(false);
   const [workerHistoryError, setWorkerHistoryError] = useState<string | null>(null);
+  // Durable fleet rows for the selected Run (Phase 2). Kept monotonic within
+  // this page session: a transient fleet-read failure keeps the last good
+  // rows on screen next to the error instead of blanking the operations view.
+  const [workerRows, setWorkerRows] = useState<WorkerRowView[]>([]);
   const selectedRunRef = useRef(runId);
   selectedRunRef.current = runId;
   const dagRequestSeq = useRef(0);
@@ -364,8 +371,10 @@ export default function App() {
         startedByRun.current.set(requestedRun, known);
         if (changed) setStartedRevision((n) => n + 1);
         setWorkerHistoryError(null);
+        setWorkerRows(workersResult.value);
       } else {
         setWorkerHistoryError(String((workersResult.reason as Error)?.message ?? workersResult.reason));
+        // keep the last good rows visible alongside the error
       }
     }
 
@@ -380,6 +389,7 @@ export default function App() {
   useEffect(() => {
     setWorkerHistoryLoading(Boolean(runId));
     setWorkerHistoryError(null);
+    setWorkerRows([]); // a Run switch must not show the previous Run's workers
     refreshExecutionState();
     executionTimer.current = window.setInterval(refreshExecutionState, POLL_MS);
     return () => {
@@ -517,6 +527,7 @@ export default function App() {
         <span className="topbar__tape" aria-hidden="true" />
         <div className="topbar__right">
           <RunPicker runId={runId} onPick={pickRun} autoPick={hydrated} />
+          <RunHealthBadge runId={runId} />
           <div
             className={`conn ${connError ? "conn--bad" : execOff ? "conn--warn" : "conn--ok"}`}
             title={
@@ -696,7 +707,15 @@ export default function App() {
                           disabled={execOff}
                           disabledReason={readiness?.reason}
                         />
-                        <WorkerPanel runId={runId} disabled={execOff} disabledReason={readiness?.reason} />
+                        <WorkerPanel
+                          runId={runId}
+                          rows={workerRows}
+                          rowsError={workerHistoryError}
+                          status={runStatus}
+                          disabled={execOff}
+                          disabledReason={readiness?.reason}
+                        />
+                        <CapabilityPanel />
                     </details>
                   </div>
                   <div hidden={communicationTab !== "chat"} className="communication-center__chat">

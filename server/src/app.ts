@@ -21,6 +21,8 @@ import {
   listWorkers,
   listWorktrees,
   normalizeLiveness,
+  describeRuntimeCapabilities,
+  FLEET_CAPABILITY_GAP_REASONS,
   parseWorkerDonePayload,
   parsePeerCapabilities,
   readWorkerOutput,
@@ -30,9 +32,13 @@ import {
   retainWorker,
   runOrca,
   sendCoordinatorMessage,
+  showRun,
+  showWorkerDetail,
   tasksToDag,
   type OrcaReadiness,
+  type WorkerObservation,
 } from "./orca";
+import { buildRunHealth, type RunHealthView } from "./runHealth";
 import { loadConfig, saveConfig } from "./config";
 import {
   answerInboxItem,
@@ -243,6 +249,31 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         loadConfig(workspaceDir),
         activityJournal.listHistory(runId),
       ]);
+      // Phase 2: Chat's presence strip must not render a false disconnect for
+      // the documented fleet capability gaps. Rows the fleet could not decide
+      // for (`missing_status` / `capability_unsupported`) get ONE exact
+      // `worker-show` observation each — a small bounded sweep, because a
+      // healthy runtime reports none of these rows — and the positive exact-
+      // worker evidence rides into the snapshot as qualified presentation.
+      // The fleet verdict itself is never replaced (see presentWorkerLiveness).
+      const gapRows = workers
+        .filter(
+          (worker) =>
+            worker.projection?.liveness?.verdict === "unverifiable" &&
+            worker.projection.liveness.reason != null &&
+            FLEET_CAPABILITY_GAP_REASONS.has(worker.projection.liveness.reason),
+        )
+        .slice(0, 6);
+      const observations = new Map<string, WorkerObservation>();
+      if (gapRows.length > 0) {
+        const probes = await Promise.allSettled(
+          gapRows.map(async (worker) => [worker.dispatchId, await showWorkerDetail(worker.dispatchId)] as const),
+        );
+        for (const probe of probes) {
+          if (probe.status !== "fulfilled" || !probe.value[1]?.observation) continue;
+          observations.set(probe.value[0], probe.value[1].observation);
+        }
+      }
       return buildActivitySnapshot({
         runId,
         tasks,
@@ -252,6 +283,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         status,
         journal: history.events,
         persistedChecks: history.checks,
+        observations,
       });
     })();
     activityCache.set(runId, { at: Date.now(), value });
@@ -402,6 +434,9 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       const environments = (await listEnvironments()).map((env) => ({
         ...env,
         peer: parsePeerCapabilities(env.capabilities),
+        // Canonical projection of the same advertisement (epic O1): the UI's
+        // readable matrix, while `peer` keeps gating the remote controls.
+        runtimeCapabilities: describeRuntimeCapabilities(env.capabilities),
       }));
       res.json({ environments });
     }),
@@ -585,6 +620,115 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
   });
 
   /**
+   * Read-only runtime capability projection (operations epic O1).
+   *
+   * The local CLI exposes no capability advertisement this viewer can read
+   * (there is no `--version`-style surface listing capability ids), so the
+   * local projection honestly reports `advertised: null` — every canonical
+   * capability reads "absent", nothing is inferred from the version number.
+   * The canonical machinery is exercised for real on peer environments, see
+   * /api/environments below, whose rows DO carry advertised capability lists.
+   * Token-free and read-only like the other discovery reads; safe on
+   * view-only runtimes (no execution gate — this endpoint mutates nothing).
+   */
+  app.get(
+    "/api/capabilities",
+    route(async (_req, res) => {
+      const r = await readiness();
+      res.json({
+        runtime: {
+          cli: r.cli,
+          version: r.version,
+          executionEnabled: r.executionEnabled,
+          reason: r.reason,
+        },
+        /** null = this source exposes no capability list (unknown, never "none needed"). */
+        advertised: null,
+        advertisedSource: "local-runtime",
+        ...describeRuntimeCapabilities(null),
+      });
+    }),
+  );
+
+  /**
+   * Ownership + health of ONE Run (operations epic O2). Read-only, strictly
+   * `?run=`-scoped like the other Run reads, and available on view-only
+   * runtimes (everything here is a read; no execution gate).
+   *
+   * Authority comes from `run-show` (the durable binding) plus this process's
+   * coordinator facts; counts come from the same Run-scoped reads the rest of
+   * the UI uses. A failed read leaves its count `null` and raises a warning —
+   * never a silent zero. Results share a short cache because each projection
+   * fans out to five CLI reads and the UI polls this alongside the DAG.
+   */
+  const runHealthCache = new Map<string, { at: number; value: Promise<RunHealthView> }>();
+  const RUN_HEALTH_CACHE_MS = 1_500;
+  const loadRunHealth = (runId: string): Promise<RunHealthView> => {
+    const cached = runHealthCache.get(runId);
+    if (cached && Date.now() - cached.at < RUN_HEALTH_CACHE_MS) return cached.value;
+    const value = (async (): Promise<RunHealthView> => {
+      const viewer = coordinatorStatus();
+      const [runRes, taskRes, gateRes, messageRes, workerRes] = await Promise.allSettled([
+        showRun(runId),
+        listTasks(runId),
+        listGates(runId),
+        listRunMessages(runId),
+        listWorkers(runId, { includeRemote: true }),
+      ]);
+      const valueOf = <T,>(r: PromiseSettledResult<T>): { value: T | null; error: string | null } =>
+        r.status === "fulfilled"
+          ? { value: r.value, error: null }
+          : { value: null, error: String((r.reason as Error)?.message ?? r.reason).slice(0, 300) };
+      const run = valueOf(runRes);
+      const tasks = valueOf(taskRes);
+      const gates = valueOf(gateRes);
+      const messages = valueOf(messageRes);
+      const workers = valueOf(workerRes);
+      return buildRunHealth({
+        runId,
+        // showRun resolves null both for "Orca doesn't know this id" and for a
+        // failed read — either way ownership is unverifiable, which is the
+        // state the projection renders.
+        run: run.value,
+        viewer: {
+          running: viewer.running,
+          runId: viewer.runId,
+          coordinatorHandle: viewer.coordinatorHandle,
+        },
+        evidence: {
+          tasks: tasks.value,
+          taskError: tasks.error,
+          gates: gates.value,
+          gateError: gates.error,
+          messages: messages.value,
+          messageError: messages.error,
+          workers: workers.value,
+          workerError: workers.error,
+        },
+        workspaceDir,
+      });
+    })();
+    runHealthCache.set(runId, { at: Date.now(), value });
+    value.catch(() => {
+      if (runHealthCache.get(runId)?.value === value) runHealthCache.delete(runId);
+    });
+    return value;
+  };
+
+  app.get(
+    "/api/run-health",
+    route(async (req, res) => {
+      const runId = validateId(req.query.run, "run");
+      if (!runId) {
+        res.status(400).json({ error: "run query parameter required", code: "run_required" });
+        return;
+      }
+      res.json({ health: await loadRunHealth(runId) });
+    }),
+  );
+
+
+  /**
    * Complete worker accounting for one Run: normalized worker-list rows across
    * every cursor page, including connected-server observations. This endpoint
    * is also the UI's durable "has this Task ever started?" source, so omitting
@@ -600,6 +744,47 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         return;
       }
       res.json({ workers: await listWorkers(runId, { includeRemote: true }) });
+    }),
+  );
+
+  /**
+   * Run-scoped detail for ONE worker (Phase 2): the durable accounting row
+   * plus `worker-show` evidence — Dispatch/Worker records, PTY terminal facts,
+   * and the exact-worker observation with agent-wait evidence. Read-only,
+   * token-free, and deliberately independent of the coordinator loop so a
+   * historical worker stays inspectable after a viewer restart or when this
+   * viewer is not coordinating the Run.
+   *
+   * `worker-show` itself has no `--run` flag, so Run scoping is enforced by
+   * comparing the receipt's durable runId with the requested Run: a worker
+   * from another Run 404s rather than leaking across the scope boundary.
+   */
+  app.get(
+    "/api/workers/:dispatchId",
+    route(async (req, res) => {
+      const dispatchId = validateId(req.params.dispatchId, "dispatch id");
+      if (!dispatchId) {
+        res.status(400).json({ error: "dispatch id required" });
+        return;
+      }
+      const runId = validateId(req.query.run, "run");
+      if (!runId) {
+        res.status(400).json({ error: "run query parameter required", code: "run_required" });
+        return;
+      }
+      const detail = await showWorkerDetail(dispatchId);
+      if (!detail) {
+        res.status(404).json({ error: "no such worker dispatch", code: "worker_not_found" });
+        return;
+      }
+      if (detail.runId !== runId) {
+        res.status(404).json({
+          error: "worker belongs to a different Run",
+          code: "worker_run_mismatch",
+        });
+        return;
+      }
+      res.json({ detail });
     }),
   );
 

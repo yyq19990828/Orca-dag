@@ -6,7 +6,8 @@ import type {
   CoordinatorCheckReceipt,
   CoordinatorStatus,
 } from "./coordinator";
-import type { OrcaMessage, OrcaTask, OrcaWorkerRow } from "./orca";
+import type { OrcaMessage, OrcaTask, OrcaWorkerRow, WorkerObservation } from "./orca";
+import { presentWorkerLiveness } from "./orca";
 
 export const ACTIVITY_FILE = ".orca-dag.activity.jsonl";
 const JOURNAL_MAX_BYTES = 5 * 1024 * 1024;
@@ -93,6 +94,18 @@ export interface StagePresence {
   taskId: string;
   dispatchId: string;
   liveness: "live" | "unverifiable" | "exited";
+  /**
+   * The fleet's own reason for an `unverifiable` verdict, verbatim (Phase 2,
+   * e.g. `missing_status`). Null/absent = the fleet gave no reason.
+   */
+  livenessReason?: string | null;
+  /**
+   * Qualified working state (Phase 2): true only when the fleet could not
+   * decide for a documented capability-gap reason AND an exact `worker-show`
+   * observation positively proves this worker's terminal live. The verdict
+   * above stays `unverifiable` — this flag is presentation-only evidence.
+   */
+  qualifiedWorking?: boolean;
   activity: string | null;
   detail: string | null;
   outcome: string | null;
@@ -600,6 +613,12 @@ export function buildActivitySnapshot(input: {
   status?: CoordinatorStatus | null;
   journal?: ActivityEvent[];
   persistedChecks?: CoordinatorCheckReceipt[];
+  /**
+   * Phase 2: exact `worker-show` observations for capability-gap rows, keyed
+   * by dispatch id. A missing entry means "no observation was taken" — never
+   * a synthesized negative.
+   */
+  observations?: Map<string, WorkerObservation>;
   now?: number;
 }): ActivitySnapshot {
   const { runId } = input;
@@ -641,10 +660,21 @@ export function buildActivitySnapshot(input: {
     // mistaking the user's requested launch values for runtime-applied ones.
     const stage = projection?.stage ?? attempt?.stage ?? null;
     const verdict = projection?.liveness?.verdict ?? attempt?.liveness ?? null;
+    const livenessReason = projection?.liveness?.reason ?? null;
+    // Phase 2: merge the exact observation ONLY through the shared
+    // presentation rule — the fleet verdict is never upgraded, and the
+    // qualified flag exists solely for the UI's qualified working label.
+    const liveness = presentWorkerLiveness({
+      fleetVerdict: verdict,
+      fleetReason: livenessReason,
+      observation: dispatchId ? input.observations?.get(dispatchId) : null,
+    });
     return {
       taskId,
       dispatchId,
-      liveness: verdict === "live" || verdict === "exited" ? verdict : "unverifiable",
+      liveness: liveness.verdict,
+      livenessReason,
+      qualifiedWorking: liveness.qualifiedWorking,
       activity: stage?.activity ?? null,
       detail: stage?.detail ?? null,
       outcome: projection?.outcome ?? attempt?.outcome ?? null,

@@ -7,14 +7,17 @@ import type { Server } from "node:http";
 import {
   assertValidWorkerStart,
   buildWorkerStartArgv,
+  CANONICAL_RUNTIME_CAPABILITIES,
   COORDINATOR_TITLE,
   MIN_EXECUTION_VERSION,
   MIN_VIEW_VERSION,
   OrcaCliError,
+  canonicalCapabilitySupported,
   checkReadiness,
   compareVersions,
   coordinatorTitle,
   coordinatorTitlePrefix,
+  describeRuntimeCapabilities,
   ensureCoordinatorTerminal,
   evaluateReadiness,
   formatCommand,
@@ -35,6 +38,7 @@ import {
   parseEnvironmentRow,
   parsePeerCapabilities,
   parseWorkerStartReceipt,
+  presentWorkerLiveness,
   readWorkerOutput,
   resolveOrcaCommand,
   resolveWorktreeSelector,
@@ -42,6 +46,7 @@ import {
   runOrca,
   sendCoordinatorMessage,
   showEnvironment,
+  showWorkerDetail,
   startSupervisedWorker,
 } from "./orca";
 import { closeCoordinatorTerminals } from "./uninstall";
@@ -98,6 +103,8 @@ function writeScript(
     };
     /** Phase 5: worker-start receipt body (argv itself is asserted from the log). */
     workerStart?: Record<string, unknown>;
+    /** Phase 2: dispatch-keyed `worker-show` result payloads served verbatim. */
+    workerShow?: Record<string, Record<string, unknown>>;
     /** Phase 6: discovery + fleet rows served verbatim by the fake. */
     environments?: unknown[];
     repos?: unknown[];
@@ -184,6 +191,19 @@ if (args[0] === "orchestration" && args[1] === "worker-list") {
   };
 }
 if (args[0] === "orchestration" && args[1] === "worker-start") out.result = conf.workerStart ?? {};
+// Phase 2: dispatch-keyed worker-show receipts. Each entry is the "result"
+// payload served verbatim; an unlisted dispatch answers dispatch_not_found so
+// detail-null behavior is testable without a second fixture.
+if (args[0] === "orchestration" && args[1] === "worker-show") {
+  const id = args[args.indexOf("--dispatch") + 1];
+  const receipt = conf.workerShow && conf.workerShow[id];
+  if (receipt) {
+    out.result = receipt;
+  } else {
+    out.ok = false;
+    out.error = { code: "dispatch_not_found", message: "Worker Dispatch " + id + " was not found." };
+  }
+}
 if (args[0] === "orchestration" && args[1] === "worker-read") {
   const wr = conf.workerRead;
   // Scripted source_changed: refuse the FIRST cursor read so
@@ -1092,6 +1112,120 @@ describe("parsePeerCapabilities", () => {
   });
 });
 
+describe("describeRuntimeCapabilities (canonical Orca 1.4.206 ids)", () => {
+  it("exposes exactly the seven canonical identifiers from the epic", () => {
+    assert.deepEqual(
+      CANONICAL_RUNTIME_CAPABILITIES.map((c) => c.canonicalId),
+      [
+        "orchestration.worker-launch-preferences.v1",
+        "orchestration.federation-structured-read.v1",
+        "orchestration.federation-fleet-snapshot.v1",
+        "orchestration.federation-control-mail.v1",
+        "orchestration.federation-lifecycle-settlement.v1",
+        "orchestration.federation-release-archive.v1",
+        "orchestration.worker-stop-verdict.v1",
+      ],
+    );
+  });
+
+  it("marks every canonical capability supported when advertised verbatim", () => {
+    const ids = CANONICAL_RUNTIME_CAPABILITIES.map((c) => c.canonicalId);
+    const { capabilities, unknownAdvertised } = describeRuntimeCapabilities(ids);
+    for (const view of capabilities) {
+      assert.equal(view.supported, true, view.id);
+      assert.equal(view.state, "supported", view.id);
+      assert.equal(view.matchedName, view.id);
+    }
+    assert.deepEqual(unknownAdvertised, []);
+  });
+
+  it("matches documented legacy aliases and labels them as such", () => {
+    const { capabilities } = describeRuntimeCapabilities([
+      "transcript.read",
+      "fleet.snapshot",
+      "launch.model.effort",
+    ]);
+    const byId = new Map(capabilities.map((v) => [v.id, v]));
+    assert.equal(byId.get("orchestration.federation-structured-read.v1")?.supported, true);
+    assert.equal(byId.get("orchestration.federation-structured-read.v1")?.state, "alias");
+    assert.equal(byId.get("orchestration.federation-structured-read.v1")?.matchedName, "transcript.read");
+    assert.equal(byId.get("orchestration.federation-fleet-snapshot.v1")?.state, "alias");
+    assert.equal(byId.get("orchestration.worker-launch-preferences.v1")?.state, "alias");
+    // capabilities with no alias table stay off under an unrelated advertisement
+    assert.equal(byId.get("orchestration.worker-stop-verdict.v1")?.supported, false);
+    assert.equal(byId.get("orchestration.worker-stop-verdict.v1")?.state, "absent");
+  });
+
+  it("folds case and separators in canonical ids and aliases", () => {
+    assert.equal(
+      canonicalCapabilitySupported(
+        // version-suffix near-misses must not match: folding is case/separator
+        // only, never "close enough" on the name itself
+        ["orchestration.worker-stop-verdict.v2", "orchestration.worker-stop-verdict"],
+        "orchestration.worker-stop-verdict.v1",
+      ),
+      false,
+      "a wrong name must never match",
+    );
+    assert.equal(
+      canonicalCapabilitySupported(
+        ["Orchestration.Worker_Stop-Verdict.V1"],
+        "orchestration.worker-stop-verdict.v1",
+      ),
+      true,
+    );
+    assert.equal(
+      canonicalCapabilitySupported(
+        ["ORCHESTRATION.FEDERATION_FLEET-SNAPSHOT.V1"],
+        "orchestration.federation-fleet-snapshot.v1",
+      ),
+      true,
+    );
+  });
+
+  it("gates everything off when nothing is advertised (null) or an empty set arrives", () => {
+    for (const advertised of [null, []]) {
+      const { capabilities, unknownAdvertised } = describeRuntimeCapabilities(advertised);
+      assert.equal(capabilities.length, CANONICAL_RUNTIME_CAPABILITIES.length);
+      for (const view of capabilities) {
+        assert.equal(view.supported, false, `${view.id} must stay off for ${JSON.stringify(advertised)}`);
+        assert.equal(view.state, "absent");
+        assert.equal(view.matchedName, null);
+      }
+      assert.deepEqual(unknownAdvertised, []);
+    }
+  });
+
+  it("keeps unknown capabilities unsupported and reports them verbatim", () => {
+    const { capabilities, unknownAdvertised } = describeRuntimeCapabilities([
+      "time.travel",
+      "hyper.render",
+      "orchestration.federation-structured-read.v1",
+    ]);
+    for (const view of capabilities) {
+      assert.equal(
+        view.supported,
+        view.id === "orchestration.federation-structured-read.v1",
+        `${view.id} must not be enabled by an unfamiliar vocabulary`,
+      );
+    }
+    assert.deepEqual(unknownAdvertised, ["time.travel", "hyper.render"]);
+  });
+
+  it("derives the remote peer gates from the same canonical table (no drift)", () => {
+    // canonical advertisement alone must unlock the exact remote gates
+    const caps = parsePeerCapabilities([
+      "orchestration.worker-launch-preferences.v1",
+      "orchestration.federation-structured-read.v1",
+      "orchestration.federation-fleet-snapshot.v1",
+    ]);
+    assert.deepEqual([caps.modelEffort, caps.transcriptRead, caps.fleetSnapshot], [true, true, true]);
+    // and a capability with no remote gate never flips one on
+    const only = parsePeerCapabilities(["orchestration.worker-stop-verdict.v1"]);
+    assert.deepEqual([only.modelEffort, only.transcriptRead, only.fleetSnapshot], [false, false, false]);
+  });
+});
+
 describe("assertValidWorkerStart placement gates (Phase 6)", () => {
   const base = { taskId: "task_p", agent: "claude", runId: "run_p", from: "term_c" };
 
@@ -1814,5 +1948,505 @@ describe("listWorkers --include-remote (Phase 6, fake CLI)", () => {
     assert.equal(calls.length, 2);
     assert.ok(calls.every((call) => call.argv.includes("--include-remote")));
     assert.ok(calls.every((call) => call.argv.includes("run_api")), "every page stays scoped to the Run");
+  });
+});
+
+// --- Phase 2: durable worker operations --------------------------------------
+
+/**
+ * A `worker-show` result payload shaped like the verified 1.4.206 receipt:
+ * durable projection row + dispatch/worker records + PTY terminal facts +
+ * the exact-worker observation. Tests override the layers they care about.
+ */
+function workerShowReceipt(overrides: {
+  dispatchId?: string;
+  runId?: string;
+  taskId?: string;
+  liveness?: { verdict: string; reason: string | null } | null;
+  dispatchStatus?: string;
+  observation?: Record<string, unknown> | null;
+  omitObservation?: boolean;
+  terminal?: Record<string, unknown> | null;
+  workerState?: string | null;
+  workerStage?: string | null;
+} = {}): Record<string, unknown> {
+  const dispatchId = overrides.dispatchId ?? "ctx_show";
+  const runId = overrides.runId ?? "run_show";
+  const taskId = overrides.taskId ?? "task_show";
+  return {
+    dispatch: {
+      id: dispatchId,
+      runId,
+      taskId,
+      task_id: taskId,
+      status: overrides.dispatchStatus ?? "dispatched",
+      failureCount: 0,
+      lastFailure: null,
+      terminationReason: null,
+      dispatchedAt: "2026-09-21 10:25:47",
+      completedAt: null,
+      lastHeartbeatAt: "2026-09-21T10:26:04Z",
+      retryOfDispatchId: null,
+      depth: 1,
+    },
+    worker: {
+      dispatchId,
+      state: overrides.workerState ?? "supervised",
+      stage: overrides.workerStage ?? "running",
+      setupState: "complete",
+      agentTerminalHandle: "term_agent",
+      lastError: null,
+    },
+    projection: {
+      id: dispatchId,
+      dispatchId,
+      taskId,
+      runId,
+      role: "worker",
+      host: { kind: "local", id: "local" },
+      stage: { worker: "supervised", dispatch: "dispatched", detail: null, activity: "working" },
+      outcome: "in_progress",
+      liveness:
+        overrides.liveness === undefined
+          ? { verdict: "live", reason: null }
+          : overrides.liveness,
+      nextAction: { kind: "none", argv: [] },
+      attention: { categories: [], requiresAction: false },
+    },
+    terminal: {
+      handle: "term_agent",
+      title: "opencode",
+      connected: true,
+      orphaned: false,
+      worktreePath: "/ws",
+      branch: "refs/heads/main",
+      executionHostId: "local",
+      agentIdentity: "opencode",
+      lastOutputAt: 1789986567208,
+      preview: "…",
+      agentWait: null,
+      ...(overrides.terminal ?? {}),
+    },
+    ...(overrides.omitObservation
+      ? {}
+      : { observation: overrides.observation ?? { status: "live", exactWorker: true, agentWait: null } }),
+  };
+}
+
+describe("presentWorkerLiveness (Phase 2)", () => {
+  it("keeps the fleet verdict authoritative — even against a live observation", () => {
+    for (const verdict of ["live", "exited"]) {
+      const p = presentWorkerLiveness({
+        fleetVerdict: verdict,
+        fleetReason: null,
+        observation: { status: "live", exactWorker: true },
+      });
+      assert.equal(p.verdict, verdict);
+      assert.equal(p.qualifiedWorking, false);
+      assert.equal(p.qualifiedReason, null);
+    }
+  });
+
+  it("qualifies a missing_status gap when the exact observation proves live", () => {
+    const p = presentWorkerLiveness({
+      fleetVerdict: "unverifiable",
+      fleetReason: "missing_status",
+      observation: { status: "live", exactWorker: true },
+    });
+    assert.equal(p.verdict, "unverifiable", "the fleet verdict itself is never promoted");
+    assert.equal(p.qualifiedWorking, true);
+    assert.equal(p.qualifiedReason, "missing_status");
+    assert.equal(p.observationStatus, "live");
+  });
+
+  it("qualifies a capability_unsupported gap the same way", () => {
+    const p = presentWorkerLiveness({
+      fleetVerdict: "unverifiable",
+      fleetReason: "capability_unsupported",
+      observation: { status: "live", exactWorker: true },
+    });
+    assert.equal(p.qualifiedWorking, true);
+    assert.equal(p.qualifiedReason, "capability_unsupported");
+  });
+
+  it("refuses to qualify without a positively exact observation", () => {
+    for (const exactWorker of [false, null, undefined]) {
+      const p = presentWorkerLiveness({
+        fleetVerdict: "unverifiable",
+        fleetReason: "missing_status",
+        observation: { status: "live", exactWorker },
+      });
+      assert.equal(p.qualifiedWorking, false, `exactWorker=${String(exactWorker)} must not qualify`);
+    }
+  });
+
+  it("refuses to qualify unless the observation itself says live", () => {
+    for (const status of ["closed", "unreadable", null, undefined]) {
+      const p = presentWorkerLiveness({
+        fleetVerdict: "unverifiable",
+        fleetReason: "missing_status",
+        observation: { status, exactWorker: true },
+      });
+      assert.equal(p.qualifiedWorking, false, `observation.status=${String(status)} must not qualify`);
+    }
+  });
+
+  it("refuses to qualify for reasons outside the documented capability gaps", () => {
+    const p = presentWorkerLiveness({
+      fleetVerdict: "unverifiable",
+      fleetReason: "unsupervised_settled",
+      observation: { status: "live", exactWorker: true },
+    });
+    assert.equal(p.qualifiedWorking, false);
+  });
+
+  it("stays unverifiable (never exited) when nothing was observed", () => {
+    const p = presentWorkerLiveness({ fleetVerdict: null, fleetReason: null, observation: null });
+    assert.equal(p.verdict, "unverifiable");
+    assert.equal(p.qualifiedWorking, false);
+    assert.equal(p.observationStatus, null);
+  });
+});
+
+describe("showWorkerDetail (Phase 2, fake CLI)", () => {
+  it("parses the receipt into the detail view and flags the qualified merge", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      workerShow: {
+        ctx_show: workerShowReceipt({
+          liveness: { verdict: "unverifiable", reason: "missing_status" },
+          observation: { status: "live", exactWorker: true, agentWait: null },
+        }),
+      },
+    });
+    const detail = await showWorkerDetail("ctx_show");
+    assert.ok(detail);
+    assert.equal(detail.dispatchId, "ctx_show");
+    assert.equal(detail.runId, "run_show");
+    assert.equal(detail.taskId, "task_show");
+    assert.equal(detail.fleet?.taskId, "task_show");
+    assert.equal(detail.dispatch?.status, "dispatched");
+    assert.equal(detail.worker?.stage, "running");
+    assert.equal(detail.terminal?.connected, true);
+    assert.equal(detail.terminal?.agentIdentity, "opencode");
+    assert.equal(detail.observation?.status, "live");
+    assert.equal(detail.observation?.exactWorker, true);
+    assert.equal(detail.liveness.verdict, "unverifiable");
+    assert.equal(detail.liveness.qualifiedWorking, true);
+    const call = readLog().find((c) => c.argv[1] === "worker-show")!;
+    assert.deepEqual(call.argv.slice(0, 4), ["orchestration", "worker-show", "--dispatch", "ctx_show"]);
+  });
+
+  it("keeps agent-wait tri-state: present object, explicit null, absent = unknown", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      workerShow: {
+        // present: parked on a human prompt, with the evidence that proved it
+        ctx_wait: workerShowReceipt({
+          dispatchId: "ctx_wait",
+          observation: { status: "live", exactWorker: true, agentWait: { kind: "hook", detail: "permission prompt", extra: 1 } },
+        }),
+        // explicit null: Orca looked and found no wait (healthy)
+        ctx_nowait: workerShowReceipt({
+          dispatchId: "ctx_nowait",
+          observation: { status: "live", exactWorker: true, agentWait: null },
+        }),
+        // absent: this host never looked — must stay undefined (unknown)
+        ctx_neverlooked: workerShowReceipt({
+          dispatchId: "ctx_neverlooked",
+          observation: { status: "live", exactWorker: true },
+        }),
+      },
+    });
+    const waited = await showWorkerDetail("ctx_wait");
+    assert.equal(waited?.observation?.agentWait?.kind, "hook");
+    assert.equal(waited.observation?.agentWait?.detail, "permission prompt");
+    assert.deepEqual(waited.observation?.agentWait?.raw, { kind: "hook", detail: "permission prompt", extra: 1 });
+
+    const noWait = await showWorkerDetail("ctx_nowait");
+    assert.equal(noWait?.observation?.hasOwnProperty("agentWait"), true);
+    assert.equal(noWait?.observation?.agentWait, null);
+
+    const neverLooked = await showWorkerDetail("ctx_neverlooked");
+    assert.equal(neverLooked?.observation?.hasOwnProperty("agentWait"), false);
+    assert.equal(neverLooked?.observation?.agentWait, undefined);
+  });
+
+  it("returns null when the runtime reports the dispatch unknown", async () => {
+    useRuntime({ workspace: root });
+    writeScript({ workerShow: {} });
+    assert.equal(await showWorkerDetail("ctx_missing"), null);
+  });
+
+  it("rethrows infrastructure failures instead of calling the worker unknown", async () => {
+    useRuntime({ workspace: root, env: { ORCA_CLI_COMMAND: join(root, "no-such-orca") } });
+    await assert.rejects(showWorkerDetail("ctx_x"), (err: unknown) => {
+      assert.ok(err instanceof OrcaCliError);
+      assert.equal(err.code, "cli_not_found");
+      return true;
+    });
+  });
+
+  it("tolerates a receipt with no observation or projection layers", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      workerShow: {
+        ctx_thin: {
+          dispatch: { id: "ctx_thin", runId: "run_thin", status: "dispatched" },
+        },
+      },
+    });
+    const detail = await showWorkerDetail("ctx_thin");
+    assert.ok(detail);
+    assert.equal(detail.observation, null);
+    assert.equal(detail.fleet, null);
+    assert.equal(detail.terminal, null);
+    assert.equal(detail.runId, "run_thin");
+    assert.equal(detail.liveness.verdict, "unverifiable");
+    assert.equal(detail.liveness.qualifiedWorking, false);
+  });
+});
+
+describe("Phase 2: worker detail + durable history over HTTP", () => {
+  /** Boot a throwaway viewer against the current fake-CLI script. */
+  async function bootViewer(): Promise<{ server: Server; base: string }> {
+    const policy = createSecurityPolicy({});
+    const { app } = createApp({
+      workspaceDir: root,
+      worktree: `path:${root}`,
+      policy,
+      embeddedAssets: null,
+    });
+    const server = await listenLoopback(app, 0);
+    const addr = server.address();
+    assert.ok(addr && typeof addr === "object");
+    return { server, base: `http://127.0.0.1:${addr.port}` };
+  }
+
+  async function get(base: string, path: string): Promise<{ status: number; json: Record<string, unknown> }> {
+    const res = await fetch(base + path);
+    return { status: res.status, json: (await res.json().catch(() => ({}))) as Record<string, unknown> };
+  }
+
+  it("requires the Run scope before touching Orca", async () => {
+    useRuntime({ workspace: root });
+    writeScript({});
+    const { server, base } = await bootViewer();
+    try {
+      const missing = await get(base, "/api/workers/ctx_show");
+      assert.equal(missing.status, 400);
+      assert.equal(missing.json.code, "run_required");
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("serves worker-show evidence, scoped to the requested Run", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      workerShow: {
+        ctx_gap: workerShowReceipt({
+          dispatchId: "ctx_gap",
+          runId: "run_hist",
+          workerState: "unsupervised",
+          workerStage: "context_only",
+          liveness: { verdict: "unverifiable", reason: "missing_status" },
+          observation: { status: "live", exactWorker: true, agentWait: null },
+        }),
+      },
+    });
+    const { server, base } = await bootViewer();
+    try {
+      const ok = await get(base, "/api/workers/ctx_gap?run=run_hist");
+      assert.equal(ok.status, 200);
+      const detail = ok.json.detail as Record<string, any>;
+      assert.equal(detail.dispatchId, "ctx_gap");
+      assert.equal(detail.runId, "run_hist");
+      assert.equal(detail.observation.status, "live");
+      assert.equal(detail.liveness.qualifiedWorking, true);
+      assert.equal(detail.liveness.fleetReason, "missing_status");
+
+      // A worker from another Run must not leak across the scope boundary.
+      const other = await get(base, "/api/workers/ctx_gap?run=run_other");
+      assert.equal(other.status, 404);
+      assert.equal(other.json.code, "worker_run_mismatch");
+
+      const unknown = await get(base, "/api/workers/ctx_nothere?run=run_hist");
+      assert.equal(unknown.status, 404);
+      assert.equal(unknown.json.code, "worker_not_found");
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("keeps worker history with the coordinator stopped and across a viewer restart", async () => {
+    // The viewer's coordinator loop is NEVER started in this test: the fleet
+    // rows exist only in Orca's durable accounting, which is exactly what the
+    // endpoint must serve. A second viewer process (a "restart") then reads
+    // the same history through a brand-new app instance.
+    useRuntime({ workspace: root });
+    writeScript({
+      workerPages: {
+        __first__: {
+          workers: [
+            {
+              dispatchId: "ctx_old",
+              taskId: "task_old",
+              runId: "run_durable",
+              workerState: "unsupervised",
+              dispatchStatus: "completed",
+              agentTerminalHandle: "term_gone",
+              terminalState: "released",
+              projection: {
+                outcome: "succeeded",
+                liveness: { verdict: "unverifiable", reason: "unsupervised_settled" },
+                stage: null,
+                nextAction: { kind: "none", argv: [] },
+                attention: null,
+              },
+            },
+          ],
+          page: { hasMore: false, nextCursor: null },
+        },
+      },
+    });
+
+    const first = await bootViewer();
+    let history: Array<Record<string, unknown>> = [];
+    try {
+      const res = await get(first.base, "/api/workers?run=run_durable");
+      assert.equal(res.status, 200);
+      history = res.json.workers as Array<Record<string, unknown>>;
+      assert.equal(history.length, 1);
+      const status = await get(first.base, "/api/run-status");
+      assert.equal(status.json.running, false, "no viewer coordinator was ever started");
+    } finally {
+      first.server.closeAllConnections();
+      await new Promise<void>((resolve) => first.server.close(() => resolve()));
+    }
+
+    const second = await bootViewer();
+    try {
+      const res = await get(second.base, "/api/workers?run=run_durable");
+      assert.equal(res.status, 200);
+      const after = res.json.workers as Array<Record<string, unknown>>;
+      assert.deepEqual(
+        after.map((row) => [row.dispatchId, row.taskId, row.terminalState]),
+        history.map((row) => [row.dispatchId, row.taskId, row.terminalState]),
+        "history survives a viewer process restart untouched",
+      );
+    } finally {
+      second.server.closeAllConnections();
+      await new Promise<void>((resolve) => second.server.close(() => resolve()));
+    }
+  });
+
+  it("carries qualified working evidence into Chat presence for capability-gap rows", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      tasksByRun: { run_gap: [] },
+      inboxMessages: [],
+      workerPages: {
+        __first__: {
+          workers: [
+            {
+              // The documented acceptance case: an unsupervised, context-only
+              // OpenCode dispatch the fleet cannot verify…
+              dispatchId: "ctx_gap",
+              taskId: "task_gap",
+              runId: "run_gap",
+              workerState: "unsupervised",
+              dispatchStatus: "dispatched",
+              agentTerminalHandle: "term_agent",
+              terminalState: "retained",
+              projection: {
+                outcome: "in_progress",
+                liveness: { verdict: "unverifiable", reason: "missing_status" },
+                stage: { worker: "unsupervised", dispatch: "dispatched", detail: null, activity: "unknown" },
+                nextAction: { kind: "none", argv: [] },
+                attention: { categories: ["unverifiable"], requiresAction: true },
+              },
+            },
+            {
+              // …a control row whose gap is NOT a documented capability gap…
+              dispatchId: "ctx_settled",
+              taskId: "task_settled",
+              runId: "run_gap",
+              workerState: "unsupervised",
+              dispatchStatus: "completed",
+              agentTerminalHandle: null,
+              terminalState: "released",
+              projection: {
+                outcome: "succeeded",
+                liveness: { verdict: "unverifiable", reason: "unsupervised_settled" },
+                stage: null,
+                nextAction: { kind: "none", argv: [] },
+                attention: null,
+              },
+            },
+            {
+              // …and a gap row whose observation is NOT provably exact.
+              dispatchId: "ctx_shared",
+              taskId: "task_shared",
+              runId: "run_gap",
+              workerState: "unsupervised",
+              dispatchStatus: "dispatched",
+              agentTerminalHandle: null,
+              terminalState: "active",
+              projection: {
+                outcome: "in_progress",
+                liveness: { verdict: "unverifiable", reason: "missing_status" },
+                stage: null,
+                nextAction: { kind: "none", argv: [] },
+                attention: null,
+              },
+            },
+          ],
+          page: { hasMore: false, nextCursor: null },
+        },
+      },
+      workerShow: {
+        ctx_gap: workerShowReceipt({
+          dispatchId: "ctx_gap",
+          runId: "run_gap",
+          taskId: "task_gap",
+          workerState: "unsupervised",
+          workerStage: "context_only",
+          liveness: { verdict: "unverifiable", reason: "missing_status" },
+          observation: { status: "live", exactWorker: true, agentWait: null },
+        }),
+        // exactWorker false: a live pane, but not provably THIS worker
+        ctx_shared: workerShowReceipt({
+          dispatchId: "ctx_shared",
+          runId: "run_gap",
+          taskId: "task_shared",
+          workerState: "unsupervised",
+          liveness: { verdict: "unverifiable", reason: "missing_status" },
+          observation: { status: "live", exactWorker: false, agentWait: null },
+        }),
+      },
+    });
+    const { server, base } = await bootViewer();
+    try {
+      const res = await get(base, "/api/activity?run=run_gap");
+      assert.equal(res.status, 200);
+      const presence = res.json.presence as Array<Record<string, any>>;
+      const gap = presence.find((p) => p.dispatchId === "ctx_gap");
+      assert.ok(gap, "capability-gap row present");
+      assert.equal(gap.liveness, "unverifiable", "fleet verdict stays unverifiable");
+      assert.equal(gap.livenessReason, "missing_status");
+      assert.equal(gap.qualifiedWorking, true, "exact live observation qualifies the presentation");
+
+      const settled = presence.find((p) => p.dispatchId === "ctx_settled");
+      assert.equal(settled?.qualifiedWorking, false, "non-capability-gap reasons never qualify");
+
+      const shared = presence.find((p) => p.dispatchId === "ctx_shared");
+      assert.equal(shared?.qualifiedWorking, false, "an inexact observation never qualifies");
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });

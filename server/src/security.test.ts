@@ -109,7 +109,7 @@ describe("validateHarness", () => {
 
 describe("validateModel", () => {
   it("enforces the provider/model grammar for opencode (same as enumeration)", () => {
-    assert.equal(validateModel("zai/glm-5.3-flash", "opencode"), "zai/glm-5.3-flash");
+    assert.equal(validateModel("zai-coding-plan/glm-5.3-flash", "opencode"), "zai-coding-plan/glm-5.3-flash");
     assert.equal(validateModel("openai/gpt-4o.mini_2", "opencode"), "openai/gpt-4o.mini_2");
     assertThrowsWith(() => validateModel("glm-5.3-flash", "opencode"), "invalid_model");
     assertThrowsWith(() => validateModel("zai/glm v2", "opencode"), "invalid_model");
@@ -117,6 +117,41 @@ describe("validateModel", () => {
     // interpolated into a shell line on the legacy path — metacharacters stay out
     assertThrowsWith(() => validateModel("zai/$(calc)", "opencode"), "invalid_model");
   });
+
+  it("accepts the bounded #variant suffix for opencode, including zai-coding-plan/glm-5.3-flash#high", () => {
+    assert.equal(validateModel("zai-coding-plan/glm-5.3-flash#high", "opencode"), "zai-coding-plan/glm-5.3-flash#high");
+    assert.equal(validateModel("zai-coding-plan/glm-5.3-flash", "opencode"), "zai-coding-plan/glm-5.3-flash");
+    assert.equal(validateModel("openai/gpt-5.1-codex#fast", "opencode"), "openai/gpt-5.1-codex#fast");
+    assert.equal(validateModel("a/b#v1.2_x-y", "opencode"), "a/b#v1.2_x-y");
+  });
+
+  it("rejects malformed or shell-shaped #variant suffixes (epic A4)", () => {
+    // spaces anywhere break the single-argument contract
+    assertThrowsWith(() => validateModel("zai-coding-plan/glm-5.3-flash#hi gh", "opencode"), "invalid_model");
+    assertThrowsWith(() => validateModel("zai-coding-plan/glm-5.3-flash #high", "opencode"), "invalid_model");
+    // shell metacharacters — the value is quoted into a shell line on the legacy path
+    assertThrowsWith(() => validateModel('zai-coding-plan/glm-5.3-flash#hi"gh', "opencode"), "invalid_model");
+    assertThrowsWith(() => validateModel("zai-coding-plan/glm-5.3-flash#hi'gh", "opencode"), "invalid_model");
+    assertThrowsWith(() => validateModel("zai-coding-plan/glm-5.3-flash#$(calc)", "opencode"), "invalid_model");
+    assertThrowsWith(() => validateModel("zai-coding-plan/glm-5.3-flash#hi;gh", "opencode"), "invalid_model");
+    assertThrowsWith(() => validateModel("zai-coding-plan/glm-5.3-flash#hi|gh", "opencode"), "invalid_model");
+    assertThrowsWith(() => validateModel("zai-coding-plan/glm-5.3-flash#hi&gh", "opencode"), "invalid_model");
+    assertThrowsWith(() => validateModel("zai-coding-plan/glm-5.3-flash#`id`", "opencode"), "invalid_model");
+    assertThrowsWith(() => validateModel("zai-coding-plan/glm-5.3-flash#hi\\gh", "opencode"), "invalid_model");
+    // exactly one # — never a second segment or extra path separators
+    assertThrowsWith(() => validateModel("zai-coding-plan/glm-5.3-flash#high#low", "opencode"), "invalid_model");
+    assertThrowsWith(() => validateModel("zai-coding-plan/glm-5.3-flash#high/x", "opencode"), "invalid_model");
+    assertThrowsWith(() => validateModel("zai-coding-plan/glm-5.3-flash#", "opencode"), "invalid_model");
+    assertThrowsWith(() => validateModel("zai#high", "opencode"), "invalid_model");
+    // bounded length: a 65-char variant is rejected
+    assertThrowsWith(() => validateModel(`zai-coding-plan/glm-5.3-flash#${"x".repeat(65)}`, "opencode"), "invalid_model");
+  });
+
+  it("keeps the #variant suffix opencode-only (plain harness grammar unchanged)", () => {
+    assertThrowsWith(() => validateModel("zai-coding-plan/glm-5.3-flash#high", "claude"), "invalid_model");
+    assert.equal(validateModel("gpt-5.1-codex-max", "codex"), "gpt-5.1-codex-max");
+  });
+
   it("accepts plain free-text model names for the other harnesses only charset-bounded", () => {
     assert.equal(validateModel("opus", "claude"), "opus");
     assert.equal(validateModel("o3", "codex"), "o3");

@@ -120,8 +120,19 @@ export const KNOWN_HARNESSES: ReadonlySet<string> = new Set([
 
 const KNOWN_HARNESS_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
 
-/** The same `provider/model` grammar `listModels()` in orca.ts enumerates. */
-export const OPENCODE_MODEL_PATTERN = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+/**
+ * The same `provider/model` grammar `listModels()` in orca.ts enumerates,
+ * extended with ONE optional bounded `#variant` suffix (Orca 1.4.206 epic A4:
+ * the variant is part of the OpenCode model identity, e.g.
+ * `zai-coding-plan/glm-5.3-flash#high`). The suffix is deliberately narrow:
+ *  - exactly one `#`, never two (`zai/glm#high#low` is rejected);
+ *  - the variant charset is the same safe token class as the rest —
+ *    letters/digits/._- — so no spaces, quotes, `$`, backticks, shell
+ *    operators or additional path separators can ride in with it;
+ *  - the whole value still ends up as ONE argv element, quoted as a single
+ *    argument on the legacy shell path (see `startOpencodeWorker`).
+ */
+export const OPENCODE_MODEL_PATTERN = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(?:#[A-Za-z0-9._-]{1,64})?$/;
 /** claude/codex/cursor take free-text model names via `worker-start --model`. */
 const PLAIN_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._+/-]{0,127}$/;
 
@@ -183,7 +194,8 @@ export function validateHarness(raw: unknown, policy: SecurityPolicy): string {
 /**
  * One model override. opencode models are interpolated into a shell line on
  * the legacy worker path, so they must match the enumerated `provider/model`
- * grammar exactly; other harnesses take plain model names through
+ * grammar exactly — with an optional bounded `#variant` suffix (e.g.
+ * `zai-coding-plan/glm-5.3-flash#high`). Other harnesses take plain model names through
  * `worker-start --model` argv — still charset-bound for defense in depth.
  */
 export function validateModel(raw: unknown, harness: string): string {
@@ -192,7 +204,8 @@ export function validateModel(raw: unknown, harness: string): string {
   if (harness === "opencode") {
     if (!OPENCODE_MODEL_PATTERN.test(v)) {
       throw new ValidationError(
-        `opencode model "${v.slice(0, 64)}" must be a provider/model pair (e.g. zai/glm-5.3-flash)`,
+        `opencode model "${v.slice(0, 64)}" must be a provider/model pair with an optional single ` +
+          `#variant suffix (e.g. zai-coding-plan/glm-5.3-flash or zai-coding-plan/glm-5.3-flash#high)`,
         "invalid_model",
       );
     }

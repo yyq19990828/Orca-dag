@@ -7,11 +7,14 @@ import type {
   OrcaRun,
   OrcaWorktreeView,
   PlacementSpec,
+  RunHealthView,
   RunStatus,
   StopResultEntry,
   ViewerConfig,
-  WorkerAccountingView,
+  WorkerDetailView,
   WorkerOutputView,
+  WorkerRowView,
+  RuntimeCapabilitiesResponse,
 } from "./types";
 
 /** An /api error that carries Orca's machine-readable error code. */
@@ -146,14 +149,29 @@ export async function fetchActivity(runId: string): Promise<ActivitySnapshot> {
 }
 
 /**
- * Durable worker accounting for one Run. Every returned Task id is evidence
- * that the Task has started at least once, regardless of liveness or outcome.
+ * Durable worker accounting for one Run — the fully paginated, remote-inclusive
+ * `worker-list` inventory. Every returned Task id is evidence that the Task
+ * has started at least once, regardless of liveness or outcome, and the rows
+ * render historical workers even when this viewer is not coordinating.
  */
-export async function fetchWorkers(runId: string): Promise<WorkerAccountingView[]> {
-  const { workers } = await get<{ workers: WorkerAccountingView[] }>(
+export async function fetchWorkers(runId: string): Promise<WorkerRowView[]> {
+  const { workers } = await get<{ workers: WorkerRowView[] }>(
     `/api/workers?run=${encodeURIComponent(runId)}`,
   );
   return workers ?? [];
+}
+
+/**
+ * Run-scoped detail for ONE worker (Phase 2): the durable row plus
+ * `worker-show` evidence — observation, agent-wait, terminal facts, launch
+ * and provider identity, and the qualified liveness presentation. Works
+ * whether or not this viewer coordinates the Run.
+ */
+export async function fetchWorkerDetail(runId: string, dispatchId: string): Promise<WorkerDetailView> {
+  const { detail } = await get<{ detail: WorkerDetailView }>(
+    `/api/workers/${encodeURIComponent(dispatchId)}?run=${encodeURIComponent(runId)}`,
+  );
+  return detail;
 }
 
 /**
@@ -163,6 +181,28 @@ export async function fetchWorkers(runId: string): Promise<WorkerAccountingView[
  */
 export async function fetchReadiness(): Promise<OrcaReadiness> {
   return get<OrcaReadiness>("/api/readiness");
+}
+
+/**
+ * Read-only canonical capability projection for the connected runtime. The
+ * local CLI exposes no capability advertisement yet, so `advertised` is null
+ * and every canonical capability renders "not advertised" — an honest matrix,
+ * never an inferred one. Fetched once per page load like readiness.
+ */
+export async function fetchCapabilities(): Promise<RuntimeCapabilitiesResponse> {
+  return get<RuntimeCapabilitiesResponse>("/api/capabilities");
+}
+
+/**
+ * Ownership + health of ONE Run: who is bound (from Orca's Run record, not a
+ * local terminal guess), the task/message/worker/gate counts, and evidence-
+ * backed warnings. Counts are null when their read failed — unknown, not zero.
+ */
+export async function fetchRunHealth(runId: string): Promise<RunHealthView> {
+  const { health } = await get<{ health: RunHealthView }>(
+    `/api/run-health?run=${encodeURIComponent(runId)}`,
+  );
+  return health;
 }
 
 /**

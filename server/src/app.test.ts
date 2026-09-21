@@ -188,6 +188,22 @@ describe("strict request validation", () => {
     assert.equal(malformed.json.code, "invalid_input");
   });
 
+  it("validates worker-detail scope and ids before invoking Orca (Phase 2)", async () => {
+    // missing run → run_required; malformed dispatch/run → invalid_input.
+    // All three refuse at the boundary, before any Orca command can run.
+    const noRun = await call("GET", "/api/workers/ctx_valid");
+    assert.equal(noRun.status, 400);
+    assert.equal(noRun.json.code, "run_required");
+
+    const badDispatch = await call("GET", "/api/workers/bad%20id?run=run_a");
+    assert.equal(badDispatch.status, 400);
+    assert.equal(badDispatch.json.code, "invalid_input");
+
+    const badRun = await call("GET", "/api/workers/ctx_valid?run=../escape");
+    assert.equal(badRun.status, 400);
+    assert.equal(badRun.json.code, "invalid_input");
+  });
+
   it("requires explicit Run scope for Inbox and Activity reads", async () => {
     for (const path of ["/api/inbox", "/api/activity", "/api/activity/stream"]) {
       const missing = await call("GET", path);

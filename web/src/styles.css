@@ -3864,6 +3864,68 @@ body {
   padding: 2px 6px;
 }
 
+/* --- Phase 2: durable worker operations ---------------------------------- */
+
+/* Filter strip above the durable fleet rows: two native utility selects plus
+   a "n of m" counter. */
+.workers__filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 4px 0 6px;
+}
+
+/* The qualified working state never restyles the collapsed chip: the row
+   always shows the honest fleet verdict, and the qualified label appears in
+   the expanded detail (and Chat's stage state) where both evidence layers
+   fit. */
+
+.workers__qualified {
+  color: #3e9a55;
+}
+
+.workers__qualified .inbox__meta {
+  color: inherit;
+  opacity: 0.85;
+}
+
+/* Dispatch ids are long; let them shrink and ellipsize inside the row. */
+.workers__dispatch {
+  font-size: 11px;
+  max-width: 16ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+/* Raw receipts: collapsed by default, diagnostics only (never the main
+   evidence surface). */
+.workers__raw {
+  font-size: 12px;
+  color: #6b6557;
+}
+
+.workers__raw summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.workers__rawpre {
+  max-height: 240px;
+  overflow: auto;
+  background: #faf8f0;
+  border: 2px dashed #e6e1d2;
+  border-radius: 8px;
+  padding: 8px;
+  margin: 4px 0 0;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* Phase 6: the new-top-level placement editor stacks a repo picker and a
    name input under the placement picker. */
 .node-panel__custom-block {
@@ -3880,4 +3942,202 @@ body {
   align-items: center;
   gap: 8px;
   cursor: pointer;
+}
+
+/* ---------- Run ownership / health (operations epic Phase 1) ----------
+   A compact chip beside the Run selector plus a peek panel. Tones follow
+   the .conn indicator: meadow = viewer-owned, butter = external/mismatch,
+   coral = unverifiable, plain paper = unbound. */
+.runhealth {
+  position: relative;
+}
+.runhealth__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-display);
+  font-size: 12.5px;
+  padding: 5px 12px;
+  border-radius: 12px 14px 11px 13px;
+  border: 2px solid var(--line-strong);
+  background: var(--paper);
+  color: var(--ink-soft);
+  cursor: pointer;
+  transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+  white-space: nowrap;
+}
+.runhealth__chip--ok {
+  color: #3e9a55;
+  border-color: #bfe4c7;
+  background: #eef8f0;
+}
+.runhealth__chip--warn {
+  color: #b37f16;
+  border-color: #eedeb4;
+  background: #fdf4e1;
+}
+.runhealth__chip--bad {
+  color: var(--coral);
+  border-color: #f6c7c1;
+  background: var(--blush-wash);
+}
+.runhealth__flag {
+  font-family: var(--font-body);
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 9px;
+  background: var(--coral);
+  color: #fff;
+}
+.runhealth__info-dot {
+  font-size: 10.5px;
+  line-height: 1;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+}
+.runhealth__panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 60;
+  width: 340px;
+  padding: 12px 14px;
+  border: 2px solid var(--line-strong);
+  border-radius: 14px 12px 15px 11px;
+  background: var(--paper);
+  box-shadow: var(--shadow-sticker);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-align: left;
+}
+.runhealth__row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.runhealth__key {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-faint);
+  min-width: 74px;
+}
+.runhealth__val {
+  font-size: 12.5px;
+  color: var(--ink);
+}
+.runhealth__detail {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+}
+.runhealth__warnings {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.runhealth__warning {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ink);
+}
+.runhealth__warning--warning {
+  color: #b37f16;
+}
+.runhealth__warning--info {
+  color: var(--sky-ink);
+}
+.runhealth__clean {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+/* ---------- Capability matrix (operations epic Phase 1) ----------
+   Read-only list inside the Operational details drawer: one row per
+   canonical capability, state chip colored like the health tones. */
+.cap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 2px dashed var(--line);
+}
+.cap__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 14px;
+  color: var(--ink);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.cap__runtime {
+  font-family: var(--font-body);
+  font-size: 11.5px;
+  color: var(--ink-faint);
+}
+.cap__note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.cap__error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--coral);
+}
+.cap__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cap__item {
+  display: grid;
+  grid-template-columns: minmax(120px, auto) auto 1fr;
+  gap: 8px;
+  align-items: baseline;
+}
+.cap__label {
+  font-size: 12.5px;
+  color: var(--ink);
+}
+.cap__state {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 9px 11px 10px 12px;
+  border: 1.5px solid var(--line-strong);
+  white-space: nowrap;
+}
+.cap__state--on {
+  color: #3e9a55;
+  border-color: #bfe4c7;
+  background: #eef8f0;
+}
+.cap__state--alias {
+  color: #b37f16;
+  border-color: #eedeb4;
+  background: #fdf4e1;
+}
+.cap__state--off {
+  color: var(--ink-faint);
+  background: var(--paper-2);
+}
+.cap__explain {
+  font-size: 11.5px;
+  color: var(--ink-faint);
 }

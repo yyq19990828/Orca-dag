@@ -1372,9 +1372,29 @@ export interface OrcaWorkerRow {
   dispatchStatus: string;
   agentTerminalHandle: string | null;
   terminalState: TerminalState | string;
+  /** Terminal resource the row still holds (Phase 2); absent = unknown. */
+  resource?: { state: string; reason: string | null } | null;
   projection: {
+    id?: string | null;
+    /** "worker" | "lead" | ... — presentation hint, absent on older runtimes. */
+    role?: string | null;
+    parent?: string | null;
+    workspace?: string | null;
     outcome: string | null;
     liveness: { verdict: string; reason: string | null } | null;
+    /**
+     * How the fleet itself grounds this row (1.4.206). `liveStatus:
+     * "unavailable"` on a durable row is exactly the capability-gap evidence
+     * the Phase 2 presentation merge is allowed to react to — verbatim, never
+     * interpreted.
+     */
+    evidence?: {
+      durable?: boolean | null;
+      liveStatus?: string | null;
+      lastObservedAt?: string | null;
+    } | null;
+    /** Fleet-recorded resource accounting for this row (absent = unknown). */
+    resource?: { state: string; reason: string | null } | null;
     /**
      * Agent-wait evidence (Phase 5): what stage the worker/dispatch is in,
      * what the agent is doing. Optional per row — absent means "unknown",
@@ -1425,6 +1445,304 @@ export type LivenessVerdict = "live" | "unverifiable" | "exited";
 
 export function normalizeLiveness(verdict: string | null | undefined): LivenessVerdict {
   return verdict === "live" || verdict === "exited" ? verdict : "unverifiable";
+}
+
+// --- Phase 2: durable worker operations (worker-show detail) -----------------
+//
+// `worker-show --dispatch` is the exact-worker inspection surface: one
+// Dispatch's durable accounting row, its Dispatch/Worker records, the PTY
+// terminal facts, and an `observation` object with agent-wait evidence.
+// Verified against the 1.4.206 CLI (receipt keys: dispatch, worker,
+// projection, terminal, observation, terminalResource). Everything below
+// parses tolerantly — an older runtime simply reports fewer layers, and every
+// absent layer renders as "unknown", never as a synthesized negative.
+
+/**
+ * The runtime-documented fleet capability gaps that allow merging a
+ * `worker-show` observation into the presentation. These are the only reasons
+ * under which a positive PTY observation may QUALIFY the display — never the
+ * fleet verdict itself (hard plan constraint: no promotion of PTY liveness
+ * into supervised fleet liveness).
+ */
+export const FLEET_CAPABILITY_GAP_REASONS: ReadonlySet<string> = new Set([
+  "missing_status",
+  "capability_unsupported",
+]);
+
+/** The `worker-show` observation layer (exact execution-host evidence). */
+export interface WorkerObservation {
+  /** The observation verdict for this worker's terminal, verbatim. */
+  status: string | null;
+  /**
+   * True when the receipt provably observed THIS dispatch's terminal (not a
+   * shared or reused pane). Absent/null = NOT proven exact, and only a proven
+   * exact observation may ever qualify the presentation.
+   */
+  exactWorker: boolean | null;
+  /**
+   * Agent-wait evidence, tri-state per the CLI contract:
+   *  - object → the worker is parked on a prompt only a human can answer;
+   *  - null   → Orca looked and found no wait (healthy);
+   *  - absent (key missing) → this host never looked — UNKNOWN, and never
+   *    "not waiting" (a waiting worker is healthy, not failed).
+   */
+  agentWait?: WorkerAgentWait | null;
+}
+
+/** Human-readable agent-wait evidence, parsed tolerantly from the receipt. */
+export interface WorkerAgentWait {
+  /** Provenance kind the runtime reported (hook | prompt-text | title | …). */
+  kind: string | null;
+  /** The human-readable explanation, when the receipt carries one. */
+  detail: string | null;
+  /** Everything else the receipt carried, verbatim (diagnostics section). */
+  raw: Record<string, unknown>;
+}
+
+/** PTY-level terminal facts from `worker-show` (distinct from fleet liveness). */
+export interface WorkerTerminalFacts {
+  handle: string | null;
+  title: string | null;
+  connected: boolean | null;
+  orphaned: boolean | null;
+  worktreePath: string | null;
+  branch: string | null;
+  executionHostId: string | null;
+  /** The runtime-observed agent identity (e.g. "opencode"), verbatim. */
+  agentIdentity: string | null;
+  lastOutputAt: number | null;
+  /** Bounded PTY tail from the receipt — a hint, never a transcript source. */
+  preview: string | null;
+}
+
+/**
+ * Presentation-only merge of fleet liveness with the exact observation.
+ *
+ * Invariants (plan §Scope):
+ *  - `verdict` is ALWAYS the normalized fleet verdict — never upgraded to
+ *    "live" from PTY evidence;
+ *  - `qualifiedWorking` is true only when (a) the fleet's own reason for not
+ *    deciding is one of the documented capability gaps, (b) the observation
+ *    positively says "live", and (c) `exactWorker` is positively true — an
+ *    absent exactWorker flag means the observation cannot be pinned to this
+ *    dispatch and must not qualify;
+ *  - both evidence layers stay visible: the UI renders the qualified label
+ *    alongside the fleet reason, so nothing is silently replaced.
+ */
+export interface WorkerLivenessPresentation {
+  verdict: LivenessVerdict;
+  fleetReason: string | null;
+  qualifiedWorking: boolean;
+  qualifiedReason: string | null;
+  observationStatus: string | null;
+}
+
+export function presentWorkerLiveness(input: {
+  fleetVerdict?: string | null;
+  fleetReason?: string | null;
+  observation?: { status?: unknown; exactWorker?: unknown } | null;
+}): WorkerLivenessPresentation {
+  const verdict = normalizeLiveness(input.fleetVerdict);
+  const fleetReason = typeof input.fleetReason === "string" ? input.fleetReason : null;
+  const observationStatus =
+    typeof input.observation?.status === "string" ? input.observation.status : null;
+  const base: WorkerLivenessPresentation = {
+    verdict,
+    fleetReason,
+    qualifiedWorking: false,
+    qualifiedReason: null,
+    observationStatus,
+  };
+  if (!fleetReason || !FLEET_CAPABILITY_GAP_REASONS.has(fleetReason)) return base;
+  if (observationStatus !== "live") return base;
+  // exactWorker must be POSITIVELY true; absent/false both fail closed.
+  if (input.observation?.exactWorker !== true) return base;
+  return { ...base, qualifiedWorking: true, qualifiedReason: fleetReason };
+}
+
+/** One `orchestration worker-show` receipt, normalized for the detail view. */
+export interface WorkerDetailView {
+  dispatchId: string;
+  runId: string | null;
+  taskId: string | null;
+  /** Durable accounting row — the same shape `worker-list` emits for this Dispatch. */
+  fleet: OrcaWorkerRow | null;
+  /** Dispatch record facts (attempt bookkeeping). */
+  dispatch: {
+    status: string | null;
+    failureCount: number | null;
+    lastFailure: string | null;
+    terminationReason: string | null;
+    dispatchedAt: string | null;
+    completedAt: string | null;
+    lastHeartbeatAt: string | null;
+    retryOfDispatchId: string | null;
+    depth: number | null;
+  } | null;
+  /** Supervised-worker record facts. */
+  worker: {
+    state: string | null;
+    stage: string | null;
+    setupState: string | null;
+    lastError: string | null;
+    createdAt: string | null;
+    updatedAt: string | null;
+  } | null;
+  /** PTY terminal facts — the observation layer, never fleet liveness. */
+  terminal: WorkerTerminalFacts | null;
+  /** Exact-worker observation incl. agent-wait evidence (tri-state agentWait). */
+  observation: WorkerObservation | null;
+  /** The Phase 2 presentation merge (fleet verdict + qualified observation). */
+  liveness: WorkerLivenessPresentation;
+}
+
+function asRecordOrNull(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function numberOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function booleanOrNull(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+/** Parse `observation.agentWait` tolerantly; preserves the tri-state contract. */
+function parseAgentWait(raw: unknown): WorkerAgentWait | null | undefined {
+  if (raw === undefined) return undefined; // host never looked — unknown
+  if (raw === null) return null; // looked, no wait found — healthy
+  const record = asRecordOrNull(raw);
+  if (!record) return null; // malformed → treat as "no wait evidence", never invented
+  return {
+    kind:
+      stringOrNull(record.kind) ??
+      stringOrNull(record.evidence) ??
+      stringOrNull(record.source) ??
+      stringOrNull(record.via),
+    detail:
+      stringOrNull(record.detail) ??
+      stringOrNull(record.message) ??
+      stringOrNull(record.promptText) ??
+      stringOrNull(record.reason) ??
+      stringOrNull(record.title),
+    raw: record,
+  };
+}
+
+/**
+ * Inspect ONE worker in depth (`orchestration worker-show --dispatch`) and
+ * normalize the receipt into the Phase 2 detail view. Returns null only when
+ * the runtime reports the Dispatch unknown — an infrastructure failure keeps
+ * its OrcaCliError so the UI can distinguish "no such worker" from "Orca is
+ * unreachable". Read-only: safe to call for history, and safe whether or not
+ * this viewer coordinates the Run.
+ */
+export async function showWorkerDetail(dispatchId: string): Promise<WorkerDetailView | null> {
+  let result: Record<string, unknown>;
+  try {
+    result = await runOrca<Record<string, unknown>>([
+      "orchestration",
+      "worker-show",
+      "--dispatch",
+      dispatchId,
+    ]);
+  } catch (err) {
+    const e = err as OrcaCliError;
+    // A runtime refusal naming THIS dispatch unknown means "no such worker" —
+    // an honest null. Codes are matched exactly so infrastructure failures
+    // (cli_not_found, timeouts, garbled output) keep surfacing as errors the
+    // UI can distinguish from "worker does not exist".
+    if (e instanceof OrcaCliError) {
+      if (e.code === "dispatch_not_found" || e.code === "worker_not_found") return null;
+      if (e.code === null && /not found/i.test(e.message)) return null;
+    }
+    throw e;
+  }
+  const dispatch = asRecordOrNull(result.dispatch) ?? {};
+  const worker = asRecordOrNull(result.worker) ?? {};
+  const terminal = asRecordOrNull(result.terminal);
+  const observationRaw = asRecordOrNull(result.observation);
+  const fleet = asRecordOrNull(result.projection);
+  const observation: WorkerObservation | null = observationRaw
+    ? {
+        status: stringOrNull(observationRaw.status),
+        exactWorker: booleanOrNull(observationRaw.exactWorker),
+        // Preserve the tri-state ON the object: an absent key must stay absent
+        // (undefined assigned explicitly would still own the property).
+        ...(observationRaw.agentWait === undefined
+          ? {}
+          : { agentWait: parseAgentWait(observationRaw.agentWait) }),
+      }
+    : null;
+  const normalizedFleet: OrcaWorkerRow | null = fleet
+    ? {
+        dispatchId: stringOrNull(fleet.dispatchId) ?? dispatchId,
+        taskId: stringOrNull(fleet.taskId) ?? stringOrNull(dispatch.task_id) ?? "",
+        runId: stringOrNull(fleet.runId) ?? "",
+        workerState: stringOrNull(fleet.role) ?? stringOrNull(worker.state) ?? "unknown",
+        dispatchStatus: stringOrNull(dispatch.status) ?? "unknown",
+        agentTerminalHandle:
+          stringOrNull(fleet.agentTerminalHandle) ??
+          stringOrNull(worker.agentTerminalHandle) ??
+          stringOrNull(terminal?.handle) ??
+          null,
+        terminalState: stringOrNull(fleet.terminalState) ?? "unknown",
+        projection: fleet as unknown as OrcaWorkerRow["projection"],
+      }
+    : null;
+  const liveness = presentWorkerLiveness({
+    fleetVerdict: stringOrNull(asRecordOrNull(fleet?.liveness)?.verdict),
+    fleetReason: stringOrNull(asRecordOrNull(fleet?.liveness)?.reason),
+    observation,
+  });
+  return {
+    dispatchId,
+    runId: stringOrNull(fleet?.runId) ?? stringOrNull(dispatch.runId),
+    taskId: stringOrNull(fleet?.taskId) ?? stringOrNull(dispatch.task_id),
+    fleet: normalizedFleet,
+    dispatch: {
+      status: stringOrNull(dispatch.status),
+      failureCount: numberOrNull(dispatch.failureCount),
+      lastFailure: stringOrNull(dispatch.lastFailure),
+      terminationReason: stringOrNull(dispatch.terminationReason),
+      dispatchedAt: stringOrNull(dispatch.dispatchedAt),
+      completedAt: stringOrNull(dispatch.completedAt),
+      lastHeartbeatAt: stringOrNull(dispatch.lastHeartbeatAt),
+      retryOfDispatchId: stringOrNull(dispatch.retryOfDispatchId),
+      depth: numberOrNull(dispatch.depth),
+    },
+    worker: {
+      state: stringOrNull(worker.state),
+      stage: stringOrNull(worker.stage),
+      setupState: stringOrNull(worker.setupState),
+      lastError: stringOrNull(worker.lastError),
+      createdAt: stringOrNull(worker.createdAt),
+      updatedAt: stringOrNull(worker.updatedAt),
+    },
+    terminal: terminal
+      ? {
+          handle: stringOrNull(terminal.handle),
+          title: stringOrNull(terminal.title),
+          connected: booleanOrNull(terminal.connected),
+          orphaned: booleanOrNull(terminal.orphaned),
+          worktreePath: stringOrNull(terminal.worktreePath),
+          branch: stringOrNull(terminal.branch),
+          executionHostId: stringOrNull(terminal.executionHostId),
+          agentIdentity: stringOrNull(terminal.agentIdentity),
+          lastOutputAt: numberOrNull(terminal.lastOutputAt),
+          preview: stringOrNull(terminal.preview),
+        }
+      : null,
+    observation,
+    liveness,
+  };
 }
 
 export async function listWorkers(
@@ -2197,24 +2515,204 @@ export interface PeerCapabilities {
   raw: string[] | null;
 }
 
+// --- Canonical runtime capability negotiation (operations epic O1/A3) --------
+//
+// Orca 1.4.206 introduced canonical orchestration capability identifiers. The
+// viewer reasons about EXACTLY this table: a feature lights up only when the
+// runtime positively advertised its canonical id (or a documented older
+// alias), everything else — unknown names, missing capability fields, older
+// runtimes — stays gated off. There is deliberately no "probably supported"
+// state: an unfamiliar name never enables a feature.
+
+/** One capability this viewer understands, with its compatibility story. */
+export interface RuntimeCapabilitySpec {
+  /** The canonical Orca 1.4.206 identifier, verbatim. */
+  canonicalId: string;
+  /** Readable name for the UI matrix. */
+  label: string;
+  /** Where the advertisement is expected: the local CLI or a peer runtime. */
+  scope: "runtime" | "peer";
+  /** What supporting it lets the viewer do (rendered as the explanation). */
+  explanation: string;
+  /**
+   * Documented older spellings accepted as compatibility inputs. Kept to the
+   * short names this viewer matched before canonical ids existed; anything
+   * outside canonical + aliases stays unsupported.
+   */
+  aliases: string[];
+  /** Existing remote gates this capability feeds (see `parsePeerCapabilities`). */
+  gates?: Array<keyof Omit<PeerCapabilities, "raw">>;
+}
+
 /**
- * Capability name spellings accepted per gate. The canonical peer vocabulary
- * is not observable from a single-server install, so the matcher accepts the
- * documented operation names and their obvious variants — case-insensitive,
- * `.`/`-`/`_` folded — and EVERYTHING ELSE STAYS GATED OFF. A peer that
- * advertises with a vocabulary we do not recognize degrades to the documented
- * older behavior (controls hidden), never to forwarded calls it may silently
- * drop.
+ * The canonical Orca 1.4.206 orchestration capability identifiers (epic A3),
+ * each with the older local spellings that remain accepted as aliases.
  */
-const CAPABILITY_LOOKUPS: Record<keyof Omit<PeerCapabilities, "raw">, string[]> = {
-  modelEffort: ["model.effort", "model", "launch.model.effort", "launch.model", "launch"],
-  transcriptRead: ["worker.read.transcript", "transcript.read", "transcript", "structured.read", "worker.read"],
-  fleetSnapshot: ["fleet.snapshot", "fleet", "worker.list.remote", "include.remote"],
-};
+export const CANONICAL_RUNTIME_CAPABILITIES: readonly RuntimeCapabilitySpec[] = [
+  {
+    canonicalId: "orchestration.worker-launch-preferences.v1",
+    label: "Worker launch preferences",
+    scope: "peer",
+    explanation: "Forwards per-worker --model/--effort launch preferences through a remote worker-start.",
+    aliases: ["model.effort", "model", "launch.model.effort", "launch.model", "launch"],
+    gates: ["modelEffort"],
+  },
+  {
+    canonicalId: "orchestration.federation-structured-read.v1",
+    label: "Structured worker reads",
+    scope: "peer",
+    explanation: "Serves structured transcript reads (`worker-read --source transcript`) from a connected runtime.",
+    aliases: ["worker.read.transcript", "transcript.read", "transcript", "structured.read", "worker.read"],
+    gates: ["transcriptRead"],
+  },
+  {
+    canonicalId: "orchestration.federation-fleet-snapshot.v1",
+    label: "Fleet snapshot",
+    scope: "peer",
+    explanation: "Includes remote workers in `worker-list --include-remote` fleet accounting.",
+    aliases: ["fleet.snapshot", "fleet", "worker.list.remote", "include.remote"],
+    gates: ["fleetSnapshot"],
+  },
+  {
+    canonicalId: "orchestration.federation-control-mail.v1",
+    label: "Federation control mail",
+    scope: "peer",
+    explanation: "Routes coordinator control mail (guidance, questions) to workers on a connected runtime.",
+    aliases: [],
+  },
+  {
+    canonicalId: "orchestration.federation-lifecycle-settlement.v1",
+    label: "Lifecycle settlement",
+    scope: "peer",
+    explanation: "Settles worker_done / task completion through the connected runtime's lifecycle contract.",
+    aliases: [],
+  },
+  {
+    canonicalId: "orchestration.federation-release-archive.v1",
+    label: "Release archive",
+    scope: "peer",
+    explanation: "Archives worker terminal ownership decisions (release/retain) on the connected runtime.",
+    aliases: [],
+  },
+  {
+    canonicalId: "orchestration.worker-stop-verdict.v1",
+    label: "Worker stop verdict",
+    scope: "runtime",
+    explanation: "worker-stop receipts carry an explicit per-worker verdict instead of an ambiguous exit.",
+    aliases: [],
+  },
+] as const;
 
 function normalizeCapabilityName(name: string): string {
   return name.toLowerCase().replace(/[._-]+/g, ".");
 }
+
+/**
+ * Project an advertised-capability set against the canonical table.
+ *
+ * Returns one row per canonical capability — `state: "supported"` when the
+ * canonical id was advertised verbatim (up to case/separator folding),
+ * `"alias"` when only an older spelling matched (still `supported: true`),
+ * and `"absent"` otherwise. Names that matched NOTHING come back in
+ * `unknownAdvertised`, verbatim, so the UI can show what a newer runtime
+ * advertises that this viewer does not understand — without treating any of
+ * it as support. `advertised: null` (no capability field at all) gates every
+ * row off: absence is never evidence of support.
+ */
+export interface RuntimeCapabilityProjection {
+  capabilities: RuntimeCapabilityView[];
+  /** Advertised names that matched no canonical id and no alias, verbatim. */
+  unknownAdvertised: string[];
+}
+
+export interface RuntimeCapabilityView {
+  /** Canonical id, verbatim from the table. */
+  id: string;
+  label: string;
+  scope: string;
+  state: "supported" | "alias" | "absent";
+  /** True ONLY on a positively advertised canonical id or documented alias. */
+  supported: boolean;
+  /** The verbatim advertised name that matched (null = nothing did). */
+  matchedName: string | null;
+  explanation: string;
+}
+
+export function describeRuntimeCapabilities(advertised: string[] | null): RuntimeCapabilityProjection {
+  const have = new Map<string, string>();
+  for (const name of advertised ?? []) {
+    have.set(normalizeCapabilityName(name), name);
+  }
+  const known = new Set<string>();
+  const capabilities = CANONICAL_RUNTIME_CAPABILITIES.map((spec) => {
+    const canonicalKey = normalizeCapabilityName(spec.canonicalId);
+    known.add(canonicalKey);
+    for (const alias of spec.aliases) known.add(normalizeCapabilityName(alias));
+    if (have.has(canonicalKey)) {
+      return {
+        id: spec.canonicalId,
+        label: spec.label,
+        scope: spec.scope,
+        state: "supported" as const,
+        supported: true,
+        matchedName: have.get(canonicalKey) ?? spec.canonicalId,
+        explanation: spec.explanation,
+      };
+    }
+    const aliasHit = spec.aliases.find((alias) => have.has(normalizeCapabilityName(alias)));
+    if (aliasHit) {
+      return {
+        id: spec.canonicalId,
+        label: spec.label,
+        scope: spec.scope,
+        state: "alias" as const,
+        supported: true,
+        matchedName: have.get(normalizeCapabilityName(aliasHit)) ?? aliasHit,
+        explanation: spec.explanation,
+      };
+    }
+    return {
+      id: spec.canonicalId,
+      label: spec.label,
+      scope: spec.scope,
+      state: "absent" as const,
+      supported: false,
+      matchedName: null,
+      explanation: spec.explanation,
+    };
+  });
+  const unknownAdvertised = (advertised ?? []).filter((name) => !known.has(normalizeCapabilityName(name)));
+  return { capabilities, unknownAdvertised };
+}
+
+/** Positive-only gate: does the advertised set prove this canonical capability? */
+export function canonicalCapabilitySupported(advertised: string[] | null, canonicalId: string): boolean {
+  return describeRuntimeCapabilities(advertised).capabilities.some(
+    (view) => view.id === canonicalId && view.supported,
+  );
+}
+
+/**
+ * Capability name spellings accepted per remote gate, derived from the
+ * canonical table above so the two can never drift: a gate accepts its
+ * capability's canonical id plus its documented aliases. EVERYTHING ELSE
+ * STAYS GATED OFF — a peer advertising a vocabulary we do not recognize
+ * degrades to the documented older behavior (controls hidden), never to
+ * forwarded calls it may silently drop.
+ */
+const CAPABILITY_LOOKUPS: Record<keyof Omit<PeerCapabilities, "raw">, string[]> = (() => {
+  const lookups: Record<keyof Omit<PeerCapabilities, "raw">, string[]> = {
+    modelEffort: [],
+    transcriptRead: [],
+    fleetSnapshot: [],
+  };
+  for (const spec of CANONICAL_RUNTIME_CAPABILITIES) {
+    for (const gate of spec.gates ?? []) {
+      lookups[gate].push(spec.canonicalId, ...spec.aliases);
+    }
+  }
+  return lookups;
+})();
 
 export function parsePeerCapabilities(advertised: string[] | null): PeerCapabilities {
   const have = new Set((advertised ?? []).map(normalizeCapabilityName));
@@ -2788,7 +3286,10 @@ export async function listModels(harness: string): Promise<string[]> {
     return stdout
       .split("\n")
       .map((l) => l.trim())
-      .filter((l) => /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(l));
+      // Same grammar the HTTP boundary validates (security.ts): provider/model
+      // plus the optional bounded `#variant` suffix, so an enumerated variant
+      // id like `zai-coding-plan/glm-5.3-flash#high` survives the round-trip into the picker.
+      .filter((l) => /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(?:#[A-Za-z0-9._-]{1,64})?$/.test(l));
   } catch {
     return [];
   }
@@ -2872,9 +3373,12 @@ async function startOpencodeWorker(opts: {
   // for byte intact.
   const preambleFile = join(tmpdir(), `orca-preamble-${opts.taskId}.txt`);
   await writeFile(preambleFile, shown.preamble);
-  // `opencode run -m <provider/model>` selects the model; the preamble is passed
-  // as ONE shell arg read from a file. Quoting the model keeps any odd provider
-  // ids safe. `--auto` is the mandatory autonomous flag (see the docstring).
+  // `opencode run -m <provider/model[#variant]>` selects the model; the
+  // preamble is passed as ONE shell arg read from a file. Quoting the model
+  // keeps any odd provider ids safe — and the upstream validator
+  // (validateModel) has already bounded it to provider/model plus an optional
+  // #variant suffix, so no quote, space or shell operator can be inside.
+  // `--auto` is the mandatory autonomous flag (see the docstring).
   const modelArg = opts.model ? ` -m "${opts.model}"` : "";
   const cmd = `opencode run --auto${modelArg} "$(cat ${preambleFile})"`;
   await runOrca(["terminal", "send", "--terminal", handle, "--text", cmd, "--enter"]);
