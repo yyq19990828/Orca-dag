@@ -4,6 +4,7 @@ import {
   BackgroundVariant,
   Controls,
   getBezierPath,
+  getSmoothStepPath,
   Handle,
   Position,
   ReactFlow,
@@ -452,7 +453,40 @@ function PencilEdge(props: EdgeProps) {
   );
 }
 
-const edgeTypes = { pencil: PencilEdge };
+const edgeTypes = { pencil: PencilEdge, hierarchy: HierarchyEdge };
+
+/**
+ * Parent → child OWNERSHIP edge (Phase 4) — a deliberately different visual
+ * grammar from the dependency pencils above:
+ *
+ *   dependency  = hand-wobbling bezier, boiling pencil line, animated draw
+ *   ownership   = calm rounded bracket (smooth step), fine dotted graphite,
+ *                 a small open ring resting on the child, no animation
+ *
+ * The stillness is the point: nothing about a parent relation moves work
+ * forward, so nothing on it may look like flow. These edges are never fed to
+ * the layout algorithms (see the layout effect below) and can be hidden from
+ * the toolbar toggle when they hurt readability.
+ */
+function HierarchyEdge(props: EdgeProps) {
+  const [path] = getSmoothStepPath({
+    sourceX: props.sourceX,
+    sourceY: props.sourceY,
+    sourcePosition: props.sourcePosition,
+    targetX: props.targetX,
+    targetY: props.targetY,
+    targetPosition: props.targetPosition,
+    borderRadius: 14,
+  });
+  return (
+    <g className="hierarchy-edge" aria-label="Parent-child ownership link (not a dependency)">
+      <path className="hierarchy-edge__link" d={path} fill="none" />
+      {/* the open ring marks the CHILD end: who something belongs to, drawn
+          like a little hoop resting on the owned stage */}
+      <circle className="hierarchy-edge__ring" cx={props.targetX} cy={props.targetY} r={4} />
+    </g>
+  );
+}
 
 const CONFETTI_COLORS = ["#7bb7e0", "#f2a0a6", "#7fc98c", "#f0b94e", "#ea6b5e", "#b79fe0"];
 
@@ -501,6 +535,7 @@ function Flow({
   layout,
   reorgNonce,
   fitNonce,
+  showHierarchy,
 }: {
   dag: DagResponse;
   leadTaskId: string | null;
@@ -509,6 +544,7 @@ function Flow({
   layout: LayoutKind;
   reorgNonce: number;
   fitNonce: number;
+  showHierarchy: boolean;
 }) {
   const rf = useReactFlow();
   const config = useConfig();
@@ -585,6 +621,27 @@ function Flow({
     });
     const laid = applyLayout(layout, rawNodes, rawEdges);
 
+    // Ownership links (Phase 4) are rendered as edges but are NEVER layout
+    // input: `applyLayout` above ranked only the dependency arrows, so a
+    // parent whose child is ready does not drag it into an earlier rank, and
+    // every layout algorithm (LR/TB/force) behaves exactly as before. Merged
+    // BELOW the dependency edges (array order = paint order) so ownership
+    // reads as the subordinate structure it is. The toolbar toggle removes
+    // them outright — they are presentation-only, so hiding them loses no
+    // scheduling meaning. An owner's Task can also be missing from this Run
+    // (dangling parent_id): the server already emits no link for it.
+    const hierarchyEdges: Edge[] = showHierarchy
+      ? (dag.hierarchy ?? []).map((l) => ({
+          id: l.id,
+          source: l.parent,
+          target: l.child,
+          type: "hierarchy",
+          className: "edge--hierarchy",
+          selectable: false,
+          deletable: false,
+        }))
+      : [];
+
     setNodes((cur) => {
       const currentById = new Map(cur.map((n) => [n.id, n]));
       return laid.nodes.map((n) => {
@@ -607,8 +664,8 @@ function Flow({
         };
       });
     });
-    setEdges(laid.edges);
-  }, [dag, leadTaskId, selectedId, layout, reorgNonce, config, setNodes, setEdges]);
+    setEdges([...hierarchyEdges, ...laid.edges]);
+  }, [dag, leadTaskId, selectedId, layout, reorgNonce, showHierarchy, config, setNodes, setEdges]);
 
   // Auto-fit when the node count changes, so live status polls don't yank the
   // viewport while the user is inspecting (or dragging).
@@ -700,6 +757,7 @@ export function DagView(props: {
   layout: LayoutKind;
   reorgNonce: number;
   fitNonce: number;
+  showHierarchy: boolean;
 }) {
   return (
     <ReactFlowProvider>

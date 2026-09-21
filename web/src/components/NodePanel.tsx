@@ -25,6 +25,7 @@ import {
   MODEL_PICKER,
   STATUS_META,
   type DagNode,
+  type DagNodeReadiness,
   type OrcaEnvironmentView,
   type OrcaRepoView,
   type OrcaWorktreeView,
@@ -127,6 +128,12 @@ interface NodePanelProps {
   node: DagNode;
   runId: string;
   isLead: boolean;
+  /** Resolved parent Task label, when the node's parent_id is in this Run. */
+  parentLabel: string | null;
+  /** Labels of Tasks in this Run whose parent_id is this node. */
+  childLabels: string[];
+  /** Server-projected readiness explanation for this node (Phase 4). */
+  readiness: DagNodeReadiness | null;
   onLeadChange: (taskId: string | null) => void;
   /** Evidence accumulated from worker-list for this Run during this page session. */
   permanentlyLocked: boolean;
@@ -148,6 +155,9 @@ export function NodePanel({
   node,
   runId,
   isLead,
+  parentLabel,
+  childLabels,
+  readiness,
   onLeadChange,
   permanentlyLocked,
   temporarilyLocked,
@@ -303,6 +313,39 @@ export function NodePanel({
       <div className="node-panel__id">
         <code>{node.id}</code>
       </div>
+
+      {/* Phase 4: scheduler state + ownership, derived from Run-scoped
+          task/gate/coordinator facts the server projected onto /api/dag.
+          A parent relation is ownership, never a dependency — the copy says
+          so explicitly so nobody reads order into it. */}
+      {(parentLabel || childLabels.length > 0 || (readiness && readiness.reasons.length > 0)) && (
+        <div className="node-panel__field node-panel__scheduler">
+          {parentLabel && (
+            <p className="node-panel__relation">
+              <span aria-hidden="true">┄</span> Sub-stage of <strong>{parentLabel}</strong>
+              <span className="node-panel__hint"> ownership only — not a dependency</span>
+            </p>
+          )}
+          {childLabels.length > 0 && (
+            <p className="node-panel__relation">
+              <span aria-hidden="true">┄</span> Parent of {childLabels.length}{" "}
+              {childLabels.length === 1 ? "sub-stage" : "sub-stages"}: {childLabels.join(", ")}
+            </p>
+          )}
+          {readiness && readiness.reasons.length > 0 && (
+            <ul className="node-panel__readiness" aria-label="Why this stage is not running yet">
+              {readiness.reasons.map((reason, i) => (
+                <li key={readiness.codes[i] ?? i} data-code={readiness.codes[i] ?? "unknown"}>
+                  {reason}
+                </li>
+              ))}
+            </ul>
+          )}
+          {readiness && readiness.runnable && readiness.reasons.length === 0 && (
+            <p className="node-panel__relation node-panel__relation--ready">Ready — dispatchable now.</p>
+          )}
+        </div>
+      )}
 
       <div className="node-panel__lead" aria-live="polite">
         {isLead ? (

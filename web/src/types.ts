@@ -27,12 +27,51 @@ export interface DagNode {
   dispatchId: string | null;
   /** Terminal running the current attempt. Only set while dispatched. */
   assigneeHandle: string | null;
+  /**
+   * Orca Task `parent_id`, verbatim (Phase 4). OWNERSHIP, not a dependency:
+   * never a reason to wait, never a layout constraint. May name a Task that is
+   * not in this Run (dangling) — only links whose both ends exist are rendered.
+   */
+  parentId: string | null;
 }
 
 export interface DagEdge {
   id: string;
   source: string;
   target: string;
+}
+
+/** One parent → child OWNERSHIP link. Separate from DagEdge on purpose. */
+export interface DagHierarchyLink {
+  id: string;
+  parent: string;
+  child: string;
+}
+
+/** Why one Task is or is not runnable right now (never an ordering among ready Tasks). */
+export type DagBlockCode =
+  | "unmet_dependencies"
+  | "pending_gate"
+  | "waiting_for_capacity"
+  | "in_flight"
+  | "already_finished"
+  | "unknown";
+
+export interface DagNodeReadiness {
+  /** True only for Orca-status-`ready` Tasks. */
+  runnable: boolean;
+  codes: DagBlockCode[];
+  /** One human sentence per code, evidence included. */
+  reasons: string[];
+  unmetDependencyIds: string[];
+  pendingGateIds: string[];
+}
+
+export interface ReadyWaveView {
+  /** Orca-`ready` task ids sorted by id; order implies NO scheduling precedence. */
+  taskIds: string[];
+  /** Free viewer-coordinator slots at compute time; null = coordinator not running this Run (unknown, not zero). */
+  freeSlots: number | null;
 }
 
 export interface Gate {
@@ -50,6 +89,12 @@ export interface DagResponse {
   nodes: DagNode[];
   edges: DagEdge[];
   gates: Gate[];
+  /** Parent/child ownership links (Phase 4); rendered separately from edges. */
+  hierarchy: DagHierarchyLink[];
+  /** The current ready wave + coordinator capacity evidence (Phase 4). */
+  readyWave: ReadyWaveView;
+  /** Per-node readiness explanation keyed by task id (Phase 4). */
+  readiness: Record<string, DagNodeReadiness>;
   generatedAt: number;
 }
 
@@ -590,6 +635,8 @@ export interface RunStatus {
   unownedDispatches: string[];
   /** What startup recovery found and did — present after every coordinator start. */
   recovery: RecoverySummaryView | null;
+  /** The configured worker-slot budget; null while no coordinator is running (unknown capacity). */
+  maxConcurrency: number | null;
 }
 
 /**

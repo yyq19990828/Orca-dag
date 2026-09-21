@@ -6,6 +6,7 @@ import { ChatPanel } from "./components/ChatPanel";
 import { GatePanel } from "./components/GatePanel";
 import { NodePanel } from "./components/NodePanel";
 import { RecoveryPanel } from "./components/RecoveryPanel";
+import { SchedulerPanel } from "./components/SchedulerPanel";
 import { WorkerPanel } from "./components/WorkerPanel";
 import { RunPicker } from "./components/RunPicker";
 import { RunHealthBadge } from "./components/RunHealthBadge";
@@ -24,7 +25,16 @@ import {
   type WorkerRowView,
 } from "./types";
 
-const EMPTY: DagResponse = { runId: "", nodes: [], edges: [], gates: [], generatedAt: 0 };
+const EMPTY: DagResponse = {
+  runId: "",
+  nodes: [],
+  edges: [],
+  gates: [],
+  hierarchy: [],
+  readyWave: { taskIds: [], freeSlots: null },
+  readiness: {},
+  generatedAt: 0,
+};
 const EMPTY_ACTIVITY: ActivitySnapshot = {
   runId: "",
   events: [],
@@ -181,6 +191,9 @@ export default function App() {
   const [communicationWidth, setCommunicationWidth] = useState<number | null>(null);
   const [communicationResizing, setCommunicationResizing] = useState(false);
   const [communicationTab, setCommunicationTab] = useState<"activity" | "chat">("activity");
+  // Parent/child ownership links (Phase 4) are hideable: on dense graphs they
+  // can reduce readability, and they carry no scheduling semantics to lose.
+  const [showHierarchy, setShowHierarchy] = useState(true);
   const [activityPending, setActivityPending] = useState(0);
   const [activitySnapshot, setActivitySnapshot] = useState<ActivitySnapshot>(EMPTY_ACTIVITY);
   const [connError, setConnError] = useState<string | null>(null);
@@ -438,6 +451,18 @@ export default function App() {
   }, {});
 
   const selected = visibleDag.nodes.find((n) => n.id === selectedId) ?? null;
+  // Phase 4: the selected node's ownership + readiness context. Parent/child
+  // labels resolve within THIS Run only; a dangling parent_id (parent not in
+  // the Run) shows its raw id so the fact is not silently hidden.
+  const selectedParentLabel = (() => {
+    const pid = selected?.parentId;
+    if (!pid) return null;
+    return visibleDag.nodes.find((n) => n.id === pid)?.label ?? pid;
+  })();
+  const selectedChildLabels = selected
+    ? visibleDag.nodes.filter((n) => n.parentId === selected.id).map((n) => n.label)
+    : [];
+  const selectedReadiness = selected ? visibleDag.readiness[selected.id] ?? null : null;
   const startedTaskIds = useMemo(
     () => new Set(runId ? startedByRun.current.get(runId) ?? [] : []),
     [runId, startedRevision],
@@ -587,6 +612,28 @@ export default function App() {
                     ) : null}
                   </span>
                 ))}
+              </div>
+              {/* Phase 4: the two relation grammars, named. The toggle hides
+                  parent links (they are presentation-only, so hiding them
+                  loses nothing the scheduler depends on). */}
+              <div className="legend legend--relations" role="group" aria-label="Relation legend">
+                <span className="legend__item legend__item--static" title="Dependency: work that must finish before the target stage may start">
+                  <span aria-hidden="true" className="legend__glyph legend__glyph--dep">⇢</span>
+                  dependency
+                </span>
+                <span className="legend__item legend__item--static" title="Ownership: parent/child structure — never a dependency, never an order">
+                  <span aria-hidden="true" className="legend__glyph legend__glyph--hier">┄</span>
+                  parent
+                </span>
+                <button
+                  type="button"
+                  className={`btn btn--ghost legend__toggle${showHierarchy ? "" : " legend__toggle--off"}`}
+                  aria-pressed={showHierarchy}
+                  title="Show or hide parent/child links on the graph (they are never dependencies)"
+                  onClick={() => setShowHierarchy((v) => !v)}
+                >
+                  {showHierarchy ? "Hide parent links" : "Show parent links"}
+                </button>
               </div>
             </div>
             <div className="dag-toolbar__right">
@@ -766,7 +813,21 @@ export default function App() {
                 layout={layout}
                 reorgNonce={reorgNonce}
                 fitNonce={canvasFitNonce}
+                showHierarchy={showHierarchy}
               />
+
+              {/* Compact scheduler surface (Phase 4): intentionally its own
+                  panel — separate from Activity/Chat, which answer "what
+                  happened", while this answers "what runs next and why is the
+                  rest waiting". */}
+              {runId && visibleDag.nodes.length > 0 && (
+                <SchedulerPanel
+                  dag={visibleDag}
+                  runStatus={runStatus}
+                  runId={runId}
+                  onSelectTask={(id) => selectStage(id)}
+                />
+              )}
 
               {!runId && (
                 <div className="empty-run">
@@ -785,6 +846,9 @@ export default function App() {
                   node={selected}
                   runId={runId}
                   isLead={selected.id === leadTaskId}
+                  parentLabel={selectedParentLabel}
+                  childLabels={selectedChildLabels}
+                  readiness={selectedReadiness}
                   onLeadChange={(taskId) => setLeadTask(runId, taskId)}
                   permanentlyLocked={startedTaskIds.has(selected.id)}
                   temporarilyLocked={selectedRunExecuting}

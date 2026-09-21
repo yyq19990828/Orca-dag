@@ -506,6 +506,12 @@ export function coordinatorStatus() {
         : null,
     })),
     busy: [...state.attempts.values()].filter((a) => !a.settled).length,
+    /**
+     * The configured worker-slot budget (Phase 4 scheduler surface). null while
+     * no coordinator is running: capacity is then UNKNOWN, never zero — the
+     * DAG readiness projection keys off exactly this distinction.
+     */
+    maxConcurrency: state.opts?.maxConcurrency ?? null,
     inbox: {
       pending: [...state.inbox],
       pendingDeliveryId: state.pendingDeliveryId,

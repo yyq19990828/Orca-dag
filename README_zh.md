@@ -165,6 +165,8 @@ npm run release 0.2.0  # 打 tag 并推送；CI 负责发 npm + 把各平台二�
 - **按 workspace 隔离的 Run 选择器**：Orca 的 Run 注册表是全局的，但 viewer 只显示任务创建者身份与当前 workspace 匹配的 Run（以及该 workspace 已保存/刚创建的空 Run）。紧凑选择器以稳定的 `run_*` 编号为主信息，objective 作为次级说明。**＋ Create Run** 会从当前 workspace 创建一个空 Run 并立即选中。
 - **实时可视化** DAG，节点状态 `pending / ready / dispatched / completed / failed / blocked` 映射颜色；每个节点角上标着它的 harness。
 - **布局算法切换**：顶栏 "Layout" 段控可切**横向/纵向分层**（dagre / Sugiyama）与**力导向**（Fruchterman–Reingold）；**↻ Re-layout** 一键重新自动布局（清除手动拖拽）。选择会持久化。
+- **层级与依赖分离**：Task 的 `parent_id` 会被保留，并以安静的点线括弧（子端带圆环）呈现——与铅笔依赖箭头刻意采用不同的视觉语法。父子关系绝不等于依赖：它不影响就绪判定，也不参与布局；顶栏开关（**Hide/Show parent links**）可在影响可读性时隐藏它。
+- **调度器 / 就绪队列面板**：画布上的紧凑卡片（与 Activity/Chat 分离）展示当前就绪波次（按 id 排序，不隐含任何调度顺序）、本查看器协调器的worker容量（未运行该 Run 时显示"unknown"，绝不猜测），以及每个等待阶段的证据化原因：未满足的依赖（指明上游 Task 及其状态）、待决策门（指明 gate）、无空闲 worker 槽位或未知状态。选中节点卡片会重复这些原因，并补充其父子关系。
 - **拖拽布局**：节点可自由拖动，位置在实时轮询刷新中保持不变（只有你没动过的节点跟随自动布局）。
 - **执行动画**：`dispatched`（执行中）节点用蜡笔斜纹从左上到右下一遍遍「涂鸦」；从执行中节点流出的连线先是游动的虚线草稿，再有铅笔笔触从本节点向下游一遍遍「描」成实线。
 - **显式主代理阶段**：每个 Run 可以手动标记一个代表主 agent 的语义阶段。该节点会叠加醒目的靛蓝双层外框与金色 `★ Lead` 徽标，同时保留原有状态颜色。这只是 viewer 元数据，不会改变 Orca 的 coordinator 权限。
@@ -203,7 +205,7 @@ viewer 是直通 Orca 的控制面 —— 启动 Run 会 fence 掉原本的 coor
 | --- | --- | --- |
 | `GET` | `/api/session` | 把本进程的 mutation token + 自定义命令开关交给同源客户端（`Cache-Control: no-store`） |
 | `GET` | `/api/readiness` | 解析出的 CLI、Orca 版本，以及是否允许执行（不允许时附上可操作的原因） |
-| `GET` | `/api/dag?run=<id>` | 该 Run 的 DAG：`{ runId, nodes, edges, gates, generatedAt }` |
+| `GET` | `/api/dag?run=<id>` | 该 Run 的 DAG：`{ runId, nodes, edges, hierarchy, gates, readyWave, readiness, generatedAt }` |
 | `GET` | `/api/runs` | 列出精确归属于当前 workspace 的 Run（依据任务创建者的 worktree 身份判定） |
 | `POST` | `/api/runs` | `{ objective }`：在当前 workspace 新建一个空 Run（走一次性 coordinator 终端） |
 | `GET` | `/api/terminals` | 列出 Orca 终端 |

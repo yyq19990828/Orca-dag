@@ -77,6 +77,7 @@ const status = (runId = "run_a"): CoordinatorStatus =>
     completedAt: null,
     attempts: [],
     busy: 1,
+    maxConcurrency: 2,
     inbox: {
       pending: [
         {

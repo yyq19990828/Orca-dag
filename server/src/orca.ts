@@ -400,12 +400,81 @@ export interface DagNode {
   /** Live attempt, present only while dispatched. */
   dispatchId: string | null;
   assigneeHandle: string | null;
+  /**
+   * Orca Task `parent_id`, preserved verbatim (Phase 4 of the operations epic).
+   * Ownership structure, NOT a dependency: a parent may still be running while
+   * its child is ready, and no scheduling order may be inferred from it. The
+   * renderable links live in `DagResponse.hierarchy`; a parent id whose Task
+   * is not in this Run stays here but produces no link.
+   */
+  parentId: string | null;
 }
 
 export interface DagEdge {
   id: string;
   source: string;
   target: string;
+}
+
+/**
+ * One parent → child ownership link (Phase 4). Deliberately a SEPARATE
+ * structure from `DagEdge`: `edges` are dependency arrows (scheduling
+ * semantics, layout input), hierarchy links are bookkeeping (visual grouping
+ * only, never fed to the layouter and never a reason to wait).
+ */
+export interface DagHierarchyLink {
+  id: string;
+  parent: string;
+  child: string;
+}
+
+/**
+ * Why one Task is or is not runnable right now (operations epic O5). Every
+ * reason is derived ONLY from Run-scoped task/gate/coordinator facts — never
+ * invented, and never an ordering among equally ready Tasks.
+ */
+export type DagBlockCode =
+  | "unmet_dependencies"
+  | "pending_gate"
+  | "waiting_for_capacity"
+  | "in_flight"
+  | "already_finished"
+  | "unknown";
+
+export interface DagNodeReadiness {
+  /** True only for Orca-status-`ready` Tasks (deps met, no open gate). */
+  runnable: boolean;
+  /** Machine-readable reason codes, deterministic order, empty when runnable-and-dispatchable. */
+  codes: DagBlockCode[];
+  /** One human sentence per code, same order — the evidence-backed explanation. */
+  reasons: string[];
+  /** Evidence: dep Task ids (this Run) whose Task is not `completed`. */
+  unmetDependencyIds: string[];
+  /** Evidence: ids of open gates bound to this Task. */
+  pendingGateIds: string[];
+}
+
+/** The current ready wave (operations epic O5). */
+export interface ReadyWaveView {
+  /**
+   * Task ids whose Orca status is `ready`, sorted by id. Array order carries
+   * NO scheduling precedence — equally ready Tasks are equally dispatchable.
+   */
+  taskIds: string[];
+  /**
+   * Free viewer-coordinator worker slots when this projection was computed;
+   * `null` when this viewer's coordinator is not running this Run (another
+   * coordinator, or none — capacity is then simply unknown, never zero).
+   */
+  freeSlots: number | null;
+}
+
+/** Viewer-coordinator occupancy fact, injected by the HTTP layer. */
+export interface SchedulerOccupancy {
+  /** Unsettled attempts the viewer coordinator currently holds. */
+  busy: number;
+  /** The Run's configured worker-slot budget. */
+  maxConcurrency: number;
 }
 
 export interface Gate {
@@ -3551,8 +3620,19 @@ function sleep(ms: number): Promise<void> {
 
 // --- DAG projection --------------------------------------------------------
 
-/** Transform a Run's task list into a nodes/edges DAG for the UI. */
-export function tasksToDag(tasks: OrcaTask[]): { nodes: DagNode[]; edges: DagEdge[] } {
+/**
+ * Transform a Run's task list into a nodes/edges DAG for the UI.
+ *
+ * Phase 4: the projection now ALSO carries the parent/child structure — as a
+ * separate `hierarchy` list, never folded into `edges`. A parent relation is
+ * ownership, not a dependency: it must not create a dependency arrow, must not
+ * gate readiness, and must not influence layout ranking.
+ */
+export function tasksToDag(tasks: OrcaTask[]): {
+  nodes: DagNode[];
+  edges: DagEdge[];
+  hierarchy: DagHierarchyLink[];
+} {
   const idSet = new Set(tasks.map((t) => t.id));
   const nodes: DagNode[] = tasks.map((t) => ({
     id: t.id,
@@ -3564,6 +3644,9 @@ export function tasksToDag(tasks: OrcaTask[]): { nodes: DagNode[]; edges: DagEdg
     completedAt: t.completed_at,
     dispatchId: t.dispatch_id ?? null,
     assigneeHandle: t.assignee_handle ?? null,
+    // Preserved verbatim even when dangling: it is Orca's fact about the Task,
+    // and the node detail can say "parent not in this Run" instead of hiding it.
+    parentId: t.parent_id ?? null,
   }));
 
   const edges: DagEdge[] = [];
@@ -3576,5 +3659,158 @@ export function tasksToDag(tasks: OrcaTask[]): { nodes: DagNode[]; edges: DagEdg
       }
     }
   }
-  return { nodes, edges };
+
+  // Hierarchy links: only between Tasks that both exist in THIS Run (a parent
+  // from another Run — or a stale id — cannot be drawn). The `__hier__` infix
+  // keeps link ids in a different namespace than dependency edge ids
+  // (`<dep>__<task>`), so the two can never collide or be confused.
+  const hierarchy: DagHierarchyLink[] = [];
+  for (const t of tasks) {
+    if (t.parent_id && idSet.has(t.parent_id)) {
+      hierarchy.push({ id: `${t.parent_id}__hier__${t.id}`, parent: t.parent_id, child: t.id });
+    }
+  }
+  return { nodes, edges, hierarchy };
+}
+
+/**
+ * True when a gate still blocks whatever it is bound to. Matches the GatePanel
+ * rule exactly (status pending/open, or no resolution recorded): the three
+ * shapes Orca's tolerant gate receipts take for "not decided yet".
+ */
+function gateIsOpen(g: Gate): boolean {
+  return g.status === "pending" || g.status === "open" || !g.resolution;
+}
+
+/**
+ * Explain scheduler readiness for one Run (operations epic O5 / plan Phase 4).
+ *
+ * Pure projection over Run-scoped facts: `task-list` rows, `gate-list` rows,
+ * and — optionally — this viewer coordinator's worker-slot occupancy. It never
+ * mutates anything, never invents order among equally ready Tasks (the wave is
+ * sorted by id purely for deterministic rendering), and treats capacity as
+ * unknown rather than zero when no viewer coordinator is running the Run.
+ *
+ * Block-reason precedence for a `pending` Task: unmet dependencies first, then
+ * an open gate — a Task can wait on both at once and both are reported. A
+ * `pending`/`blocked` Task with NOTHING visible against it is `unknown`: Orca
+ * itself flips those to `ready` (the coordinator nudges them), so a lingering
+ * non-ready row is a runtime fact we must not paper over.
+ */
+export function explainReadiness(
+  tasks: OrcaTask[],
+  gates: Gate[],
+  occupancy: SchedulerOccupancy | null,
+): { readyWave: ReadyWaveView; readiness: Record<string, DagNodeReadiness> } {
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const openGatesByTask = new Map<string, Gate[]>();
+  for (const g of gates) {
+    if (!g.taskId || !gateIsOpen(g) || !byId.has(g.taskId)) continue;
+    const list = openGatesByTask.get(g.taskId) ?? [];
+    list.push(g);
+    openGatesByTask.set(g.taskId, list);
+  }
+
+  const freeSlots =
+    occupancy && occupancy.maxConcurrency > 0
+      ? Math.max(0, occupancy.maxConcurrency - occupancy.busy)
+      : occupancy
+        ? 0
+        : null;
+
+  const statusWord = (id: string): string => byId.get(id)?.status ?? "missing";
+  const depSentence = (ids: string[]): string =>
+    ids.map((id) => `${id} (${statusWord(id)})`).join(", ");
+
+  const readyWave: ReadyWaveView = {
+    taskIds: tasks.filter((t) => t.status === "ready").map((t) => t.id).sort(),
+    freeSlots,
+  };
+
+  const readiness: Record<string, DagNodeReadiness> = {};
+  for (const t of tasks) {
+    const unmetDeps = parseDeps(t.deps).filter((dep) => {
+      const depTask = byId.get(dep);
+      // A dep outside this Run can never complete — count it as unmet rather
+      // than silently treating the Task as ready (same honesty rule as the
+      // coordinator, which only dispatches `ready` rows Orca itself computed).
+      return !depTask || depTask.status !== "completed";
+    });
+    const openGates = openGatesByTask.get(t.id) ?? [];
+    const codes: DagBlockCode[] = [];
+    const reasons: string[] = [];
+
+    switch (t.status) {
+      case "ready": {
+        // Runnable by definition. Capacity only explains WHY it has not been
+        // placed yet — it never makes the Task less ready.
+        if (freeSlots !== null && freeSlots <= 0) {
+          codes.push("waiting_for_capacity");
+          reasons.push(
+            `Ready now — every coordinator worker slot is busy (${occupancy?.busy ?? 0}/${occupancy?.maxConcurrency ?? 0} running); it is dispatched when a slot frees.`,
+          );
+        }
+        break;
+      }
+      case "dispatched": {
+        codes.push("in_flight");
+        reasons.push(
+          t.dispatch_id
+            ? `A worker is running this task (dispatch ${t.dispatch_id}).`
+            : "A worker is running this task right now.",
+        );
+        break;
+      }
+      case "completed":
+      case "failed": {
+        codes.push("already_finished");
+        reasons.push(`This task has already ${t.status === "completed" ? "completed" : "failed"} — nothing left to schedule.`);
+        break;
+      }
+      case "pending":
+      case "blocked": {
+        if (unmetDeps.length > 0) {
+          codes.push("unmet_dependencies");
+          reasons.push(
+            `Waiting on ${unmetDeps.length} unmet ${unmetDeps.length === 1 ? "dependency" : "dependencies"}: ${depSentence(unmetDeps)}.`,
+          );
+        }
+        if (openGates.length > 0) {
+          codes.push("pending_gate");
+          reasons.push(
+            `Waiting on a decision gate: ${openGates.map((g) => `“${g.question || g.id}” (${g.id})`).join("; ")}.`,
+          );
+        }
+        if (codes.length === 0) {
+          // Nothing we can see explains the non-ready status. That is exactly
+          // the state the viewer coordinator nudges to `ready` when it runs —
+          // surface it as unknown instead of inventing a blocker.
+          codes.push("unknown");
+          reasons.push(
+            t.status === "blocked"
+              ? "Orca reports blocked, but no open gate is bound to this task in this Run — state not explainable from the current task/gate facts."
+              : "No unmet dependency and no open gate is visible, but Orca still reports pending — the coordinator nudges such tasks to ready when it runs.",
+          );
+        }
+        break;
+      }
+      default: {
+        codes.push("unknown");
+        reasons.push(
+          `Orca reports an unrecognized task status (${String(t.status)}) — refresh, or check the connected runtime.`,
+        );
+        break;
+      }
+    }
+
+    readiness[t.id] = {
+      runnable: t.status === "ready",
+      codes,
+      reasons,
+      unmetDependencyIds: unmetDeps,
+      pendingGateIds: openGates.map((g) => g.id),
+    };
+  }
+
+  return { readyWave, readiness };
 }

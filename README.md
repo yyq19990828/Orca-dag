@@ -166,6 +166,8 @@ An end-to-end pass, starting from nothing installed:
 - **Workspace-scoped Run picker**: Orca's Run registry is global, but the viewer shows only Runs whose Task creator identity matches this workspace (plus the workspace's persisted/current empty Run). The compact selector leads with the stable `run_*` id and keeps the objective as secondary context. **＋ Create Run** creates an empty Run from this workspace and selects it immediately.
 - **Live DAG visualization** — node statuses `pending / ready / dispatched / completed / failed / blocked` map to colors; each node wears its harness on its corner.
 - **Switchable layout algorithms**: the "Layout" segment in the toolbar toggles **layered horizontal / vertical** (dagre / Sugiyama) and **force-directed** (Fruchterman–Reingold); **↻ Re-layout** reruns auto-layout (clearing manual drags). The choice persists.
+- **Hierarchy vs. dependencies**: a Task's `parent_id` is preserved and drawn as a calm dotted bracket with a ring on the child — a deliberately different grammar from the pencil dependency arrows. Ownership is never a dependency: it neither gates readiness nor influences layout, and a toolbar toggle (**Hide/Show parent links**) hides it when it hurts readability.
+- **Scheduler / ready-queue panel**: a compact canvas card — separate from Activity/Chat — shows the current ready wave (listed in id order; no scheduling precedence is implied), this viewer coordinator's worker capacity ("unknown" when it is not running the Run, never guessed), and one evidence-backed reason per waiting stage: unmet dependencies (naming the upstream Task and its status), a pending decision gate (naming the gate), no free worker slot, or unknown state. The selected node's card repeats the same reasons plus its parent/child relations.
 - **Drag to arrange**: nodes drag freely and hold their positions across live polling refreshes (only untouched nodes follow auto-layout).
 - **Execution animations**: `dispatched` (running) nodes get scribbled over and over with diagonal crayon strokes; edges flowing out of a running node start as a swimming dashed draft, then pencil strokes trace them solid toward the downstream node.
 - **Explicit lead stage**: mark one Task per Run as the semantic main-agent stage. It gets a prominent indigo double outline and gold `★ Lead` badge without replacing its status color. This is viewer metadata only — Orca coordinator authority remains separate.
@@ -204,7 +206,7 @@ All `POST`/`PUT` routes require the `X-Orca-Dag-Token` header (see the security 
 | --- | --- | --- |
 | `GET` | `/api/session` | Hand the same-origin client its per-process mutation token + the custom-command flag (`Cache-Control: no-store`) |
 | `GET` | `/api/readiness` | Resolved CLI, Orca version, and whether execution is enabled (with the actionable reason when not) |
-| `GET` | `/api/dag?run=<id>` | The Run's DAG: `{ runId, nodes, edges, gates, generatedAt }` |
+| `GET` | `/api/dag?run=<id>` | The Run's DAG: `{ runId, nodes, edges, hierarchy, gates, readyWave, readiness, generatedAt }` |
 | `GET` | `/api/runs` | List Runs scoped to this exact workspace (derived from Task creator-worktree identity) |
 | `POST` | `/api/runs` | `{ objective }`: create an empty Run in this workspace (via a throwaway coordinator terminal) |
 | `GET` | `/api/terminals` | List Orca terminals |

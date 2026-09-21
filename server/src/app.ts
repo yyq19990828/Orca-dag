@@ -9,6 +9,7 @@ import {
   closeTerminal,
   createRun,
   createTempCoordinatorTerminal,
+  explainReadiness,
   listEnvironments,
   listGates,
   listModels,
@@ -411,8 +412,28 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         return;
       }
       const [tasks, gates] = await Promise.all([listTasks(runId), listGates(runId)]);
-      const { nodes, edges } = tasksToDag(tasks);
-      res.json({ runId, nodes, edges, gates, generatedAt: Date.now() });
+      const { nodes, edges, hierarchy } = tasksToDag(tasks);
+      // Capacity evidence (Phase 4 scheduler surface): ONLY this viewer's
+      // coordinator occupancy on THIS Run counts. Any other state — not
+      // running, running a different Run — leaves capacity unknown (null),
+      // never zero: we must not claim "no free slots" from a coordinator
+      // that isn't ours.
+      const coord = coordinatorStatus();
+      const occupancy =
+        coord.running && coord.runId === runId && coord.maxConcurrency !== null
+          ? { busy: coord.busy, maxConcurrency: coord.maxConcurrency }
+          : null;
+      const { readyWave, readiness } = explainReadiness(tasks, gates, occupancy);
+      res.json({
+        runId,
+        nodes,
+        edges,
+        hierarchy,
+        gates,
+        readyWave,
+        readiness,
+        generatedAt: Date.now(),
+      });
     }),
   );
 
