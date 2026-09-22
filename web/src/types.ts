@@ -608,12 +608,27 @@ export interface CoordinatorCheckReceipt {
   deliveryId: string | null;
   messageCount: number;
   messageTypes: string[];
+  /**
+   * The individual rows this pass consumed, oldest first. Optional because
+   * receipts persisted before this field existed simply lack it — absence
+   * renders as "not recorded", never as a guess.
+   */
+  messages?: CoordinatorCheckMessageSummary[];
   replayed: boolean;
   timedOut: boolean;
   error: string | null;
   agents: CoordinatorCheckAgentSummary[];
   source?: "viewer_loop" | "external_inferred";
   evidence?: string | null;
+}
+
+/** Bounded digest of one message inside a checked Delivery (see receipt). */
+export interface CoordinatorCheckMessageSummary {
+  id: string;
+  type: string;
+  from: string;
+  subject: string;
+  createdAt: string;
 }
 
 export interface CoordinatorCheckAgentSummary {

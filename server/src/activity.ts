@@ -647,6 +647,15 @@ export function inferExternalCoordinatorChecks(
       deliveryId: `inferred:${boundaryId}`,
       messageCount: batch.length,
       messageTypes: types,
+      // Same bounded digest as a native receipt, so an inferred "N messages"
+      // row can be expanded into the rows behind it just like a live one.
+      messages: batch.slice(0, 20).map((message) => ({
+        id: message.id,
+        type: message.type,
+        from: message.from_handle,
+        subject: message.subject,
+        createdAt: message.created_at,
+      })),
       replayed: false,
       timedOut: false,
       error: null,
@@ -819,6 +828,7 @@ export function buildActivitySnapshot(input: {
     checkMap.set(key, {
       ...receipt,
       messageTypes: [...receipt.messageTypes],
+      messages: receipt.messages?.map((message) => ({ ...message })) ?? [],
       agents: receipt.agents.map((agent) => ({ ...agent, attention: [...agent.attention] })),
     });
   }

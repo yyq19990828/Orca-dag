@@ -309,6 +309,21 @@ export interface CoordinatorActivityNotice {
  * errors/recoveries, and agent-state changes); repetitive empty checks remain
  * memory-only so presence telemetry cannot grow into an endless transcript.
  */
+/**
+ * One row the checked Delivery carried. A receipt's `messageCount`/`messageTypes`
+ * only summarize the batch — without this list the UI cannot expand "5 messages"
+ * into the rows behind that number. Deliberately a bounded digest (id, type,
+ * sender, subject, time), never the full body: check history is explanatory
+ * UI state, and the conversation itself still renders from the activity feed.
+ */
+export interface CoordinatorCheckMessageSummary {
+  id: string;
+  type: string;
+  from: string;
+  subject: string;
+  createdAt: string;
+}
+
 export interface CoordinatorCheckReceipt {
   sequence: number;
   checkedAt: number;
@@ -316,6 +331,8 @@ export interface CoordinatorCheckReceipt {
   deliveryId: string | null;
   messageCount: number;
   messageTypes: string[];
+  /** The individual rows this pass consumed, oldest first, bounded. */
+  messages: CoordinatorCheckMessageSummary[];
   replayed: boolean;
   timedOut: boolean;
   error: string | null;
@@ -412,6 +429,8 @@ const PROCESSED_MESSAGES_MAX = 2000;
 const START_RECEIPTS_MAX = 5;
 /** About three minutes at the default cadence; enough context without noise. */
 const CHECK_RECEIPTS_MAX = 60;
+/** Per-receipt message digest bound — Deliveries are small; this is generous. */
+const CHECK_MESSAGES_MAX = 20;
 
 const state: State = {
   running: false,
@@ -1206,6 +1225,13 @@ function recordCheckReceipt(
     deliveryId: delivery?.deliveryId ?? null,
     messageCount: delivery?.messages.length ?? 0,
     messageTypes: [...new Set((delivery?.messages ?? []).map((message) => message.type))],
+    messages: (delivery?.messages ?? []).slice(0, CHECK_MESSAGES_MAX).map((message) => ({
+      id: message.id,
+      type: message.type,
+      from: message.from_handle,
+      subject: message.subject,
+      createdAt: message.created_at,
+    })),
     replayed: delivery?.replayed ?? false,
     timedOut: delivery?.timedOut ?? false,
     error,

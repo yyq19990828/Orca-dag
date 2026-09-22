@@ -106,6 +106,7 @@ const status = (runId = "run_a"): CoordinatorStatus =>
         deliveryId: null,
         messageCount: 0,
         messageTypes: [],
+        messages: [],
         replayed: false,
         timedOut: true,
         error: null,
@@ -439,6 +440,19 @@ describe("human-readable activity projection", () => {
     assert.deepEqual(snapshot.checks.at(-1)?.messageTypes, ["status", "worker_done"]);
     assert.match(snapshot.checks[0].evidence ?? "", /durable reply/i);
     assert.match(snapshot.checks.at(-1)?.evidence ?? "", /settled worker/i);
+    // The digest must be expandable: every receipt carries its rows, oldest
+    // first, so the UI can list the messages behind "N messages" instead of
+    // only the count.
+    for (const receipt of snapshot.checks) {
+      assert.equal(receipt.messages?.length, receipt.messageCount);
+    }
+    assert.deepEqual(
+      snapshot.checks.at(-1)?.messages.map((row) => [row.id, row.type, row.subject]),
+      [
+        ["s3", "status", "Round 3 acknowledged"],
+        ["done", "worker_done", "Complete"],
+      ],
+    );
   });
 
   it("does not fabricate external checks from unread messages and prefers nearby native receipts", () => {
