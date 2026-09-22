@@ -1888,16 +1888,12 @@ body {
 .communication-center__chat {
   height: 100%;
 }
+/* Operations is a full communication-center TAB now (promoted out of the
+   collapsed drawer it used to be under the Activity timeline): page-level
+   padding, and the gates layout overrides that let floating panels live
+   inline in this narrow rail. */
 .communication-center__operations {
-  margin: 0 14px 16px;
-  border-top: 2px dashed var(--line);
-}
-.communication-center__operations > summary {
-  padding: 12px 2px;
-  color: var(--ink-soft);
-  cursor: pointer;
-  font-family: var(--font-display);
-  font-size: 12px;
+  padding: 10px 14px 16px;
 }
 .communication-center__operations .gates {
   position: static;
@@ -2245,6 +2241,52 @@ body {
     rgba(231, 241, 247, 0.84);
   box-shadow: inset 3px 0 0 var(--sky-ink);
 }
+
+/* --- stage-state signalling (matches the runtime-summary pulse palette and
+   STATUS_META, so list / conversation / DAG canvas tell one story) ------- */
+.chat-thread[data-state="run-active"] { --thread-state: var(--meadow); }
+.chat-thread[data-state="running"]   { --thread-state: var(--butter); }
+.chat-thread[data-state="waiting"]   { --thread-state: var(--butter); }
+.chat-thread[data-state="ready"]     { --thread-state: var(--sky); }
+.chat-thread[data-state="completed"] { --thread-state: var(--meadow); }
+.chat-thread[data-state="failed"]    { --thread-state: var(--coral); }
+.chat-thread[data-state="blocked"]   { --thread-state: var(--lilac); }
+.chat-thread[data-state="unknown"]   { --thread-state: var(--ink-faint); }
+/* The state rides the row's left edge as a short crayon tick, inset top and
+   bottom so the full-height selection bar (active rows) stays visible
+   beneath it; rows without a state leave the spine transparent. */
+.chat-thread::before {
+  content: "";
+  position: absolute;
+  top: 9px;
+  bottom: 9px;
+  left: 0;
+  width: 3px;
+  border-radius: 0 2px 2px 0;
+  background: var(--thread-state, transparent);
+  pointer-events: none;
+}
+/* Live states breathe a dashed halo around the row — motion only where
+   work is actually live, echoing the DAG node auras. */
+.chat-thread[data-state="running"]::after,
+.chat-thread[data-state="waiting"]::after,
+.chat-thread[data-state="run-active"]::after {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  border: 1.5px dashed color-mix(in srgb, var(--thread-state, var(--butter)) 65%, transparent);
+  border-radius: 7px;
+  pointer-events: none;
+  animation: thread-live-breathe 2.2s ease-in-out infinite;
+}
+@keyframes thread-live-breathe {
+  0%, 100% { opacity: 0.2; }
+  50% { opacity: 0.85; }
+}
+.chat-thread__avatar--pair {
+  font-size: 11.5px;
+  letter-spacing: 0.02em;
+}
 .chat-thread__avatar {
   display: grid;
   width: 30px;
@@ -2268,6 +2310,63 @@ body {
   border-color: var(--line-strong);
   border-style: dashed;
   border-radius: 8px 6px 9px 5px;
+}
+/* two-letter initials need a smaller hand than a single glyph */
+.chat-thread__avatar--pair {
+  font-size: 11.5px;
+  letter-spacing: 0.02em;
+}
+/* --- stage status on the thread's edge -----------------------------------
+   The same state palette as the runtime-summary pulse and STATUS_META, so
+   list, conversation body and DAG canvas all tell one story: a crayon bar
+   rides the row's left edge, and only live stages (running / waiting /
+   active run control) get motion — their dashes march downward like a
+   pencil filling in a line. The bar paints over the active row's purple
+   inset bar: an actively-selected stage shows its state colour first, the
+   lilac wash still marks the selection. */
+.chat-thread[data-state="run-active"] { --thread-state: var(--meadow); }
+.chat-thread[data-state="running"],
+.chat-thread[data-state="waiting"] { --thread-state: var(--butter); }
+.chat-thread[data-state="ready"] { --thread-state: var(--sky); }
+.chat-thread[data-state="completed"] { --thread-state: var(--meadow); }
+.chat-thread[data-state="failed"] { --thread-state: var(--coral); }
+.chat-thread[data-state="blocked"] { --thread-state: var(--lilac); }
+.chat-thread[data-state="unknown"] { --thread-state: var(--ink-faint); }
+.chat-thread[data-state]::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 3px;
+  background: var(--thread-state);
+  opacity: 0.45;
+  pointer-events: none;
+}
+.chat-thread[data-state].chat-thread--active::before {
+  opacity: 0.95;
+}
+/* the march itself: a dashed fill scrolled one period per step (seamless) */
+.chat-thread[data-state="running"]::after,
+.chat-thread[data-state="waiting"]::after,
+.chat-thread[data-state="run-active"]::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 3px;
+  background: repeating-linear-gradient(
+    180deg,
+    var(--thread-state) 0 5px,
+    transparent 5px 9px
+  );
+  opacity: 0.95;
+  pointer-events: none;
+  animation: thread-edge-march 1.15s linear infinite;
+}
+@keyframes thread-edge-march {
+  to { background-position-y: 9px; }
 }
 .chat-thread__copy,
 .chat-thread__topline {
@@ -2709,6 +2808,67 @@ body {
   overflow-wrap: anywhere;
   color: var(--ink-soft);
 }
+/* The expandable row list behind an aggregated "N messages" digest —
+   same disclosure treatment as the outer Details toggle above. */
+.chat-checkpoint__messages {
+  margin: 0;
+  padding-top: 5px;
+  border-top: 1px dashed rgba(211, 204, 184, 0.7);
+}
+.chat-checkpoint__messages > summary {
+  display: inline-flex;
+  width: max-content;
+  align-items: center;
+  gap: 4px;
+  color: var(--sky-ink);
+  cursor: pointer;
+  font-size: 12px;
+  list-style: none;
+}
+.chat-checkpoint__messages > summary::-webkit-details-marker {
+  display: none;
+}
+.chat-checkpoint__messages > summary:hover,
+.chat-checkpoint__messages > summary:focus-visible {
+  color: var(--lilac-ink);
+}
+.chat-checkpoint__messages > summary:focus-visible {
+  outline: 1px dashed currentColor;
+  outline-offset: 2px;
+}
+.chat-checkpoint__messages[open] > summary .chat-checkpoint__chevron {
+  transform: rotate(90deg);
+}
+.chat-checkpoint__messages ul {
+  display: grid;
+  gap: 3px;
+  margin: 5px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.chat-checkpoint__messages li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: baseline;
+  padding-left: 7px;
+  border-left: 2px solid rgba(211, 204, 184, 0.82);
+}
+.chat-checkpoint__message-type {
+  color: var(--sky-ink);
+  white-space: nowrap;
+}
+.chat-checkpoint__message-subject {
+  overflow: hidden;
+  color: var(--ink-soft);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-checkpoint__messages li time {
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 .chat-checkpoint__evidence,
 .chat-checkpoint__agents {
   margin: 0;
@@ -2766,7 +2926,11 @@ body {
   display: grid;
   width: 100%;
   align-self: stretch;
-  grid-template-columns: 7px auto minmax(0, 1fr) auto;
+  /* minmax(0, auto) lets the label column SHRINK: a long status label
+     ("Agent working · terminal live · supervised liveness unavailable") used
+     to size the track to its nowrap content and blow the pill past the
+     panel edge. */
+  grid-template-columns: 7px minmax(0, auto) minmax(0, 1fr) auto;
   align-items: center;
   gap: 7px;
   margin-top: 2px;
@@ -2777,25 +2941,57 @@ body {
   border-radius: 8px 6px 9px 5px;
   font-size: 12.75px;
 }
+/* The pulse dot must agree with the status words beside it: a state-driven
+   colour (palette mirrors STATUS_META in web/src/types.ts, so the DAG canvas
+   and the chat never disagree), and only genuinely live states pulse — a
+   "Completed" row keeps a settled dot, never a heartbeat. */
 .chat-runtime-summary__pulse {
   width: 7px;
   height: 7px;
-  background: var(--line-strong);
+  background: var(--pulse-color, var(--line-strong));
   border-radius: 50%;
 }
-.chat-runtime-summary[data-active="true"] .chat-runtime-summary__pulse {
-  background: var(--meadow);
-  box-shadow: 0 0 0 0 rgba(127, 201, 140, 0.42);
+.chat-runtime-summary[data-state="run-active"],
+.chat-runtime-summary[data-state="completed"] {
+  --pulse-color: var(--meadow);
+}
+.chat-runtime-summary[data-state="run-active"] {
+  --pulse-halo: rgba(127, 201, 140, 0.42);
+}
+.chat-runtime-summary[data-state="running"],
+.chat-runtime-summary[data-state="waiting"] {
+  --pulse-color: var(--butter);
+  --pulse-halo: rgba(240, 185, 78, 0.45);
+}
+.chat-runtime-summary[data-state="ready"] {
+  --pulse-color: var(--sky);
+}
+.chat-runtime-summary[data-state="failed"] {
+  --pulse-color: var(--coral);
+}
+.chat-runtime-summary[data-state="blocked"] {
+  --pulse-color: var(--lilac);
+}
+.chat-runtime-summary[data-state="unknown"] {
+  --pulse-color: var(--ink-faint);
+}
+.chat-runtime-summary[data-state="run-active"] .chat-runtime-summary__pulse,
+.chat-runtime-summary[data-state="running"] .chat-runtime-summary__pulse,
+.chat-runtime-summary[data-state="waiting"] .chat-runtime-summary__pulse {
+  box-shadow: 0 0 0 0 var(--pulse-halo);
   animation: chat-check-pulse 1.8s ease-out infinite;
 }
 @keyframes chat-check-pulse {
-  0% { box-shadow: 0 0 0 0 rgba(127, 201, 140, 0.42); }
-  70%, 100% { box-shadow: 0 0 0 6px rgba(127, 201, 140, 0); }
+  0% { box-shadow: 0 0 0 0 var(--pulse-halo); }
+  70%, 100% { box-shadow: 0 0 0 6px transparent; }
 }
 .chat-runtime-summary strong {
+  overflow: hidden;
+  min-width: 0;
   color: var(--ink);
   font-family: var(--font-display);
   font-size: 13.5px;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 .chat-runtime-summary__detail {
@@ -3700,6 +3896,14 @@ body {
   }
   /* the ready ring is a real signal, so keep it — just stop it breathing */
   .task-node[data-status="ready"] .task-node__aura {
+    opacity: 0.5;
+  }
+  /* same deal for the live-thread halo: keep the dashed state edge, drop the
+     breathing */
+  .chat-thread[data-state="running"]::after,
+  .chat-thread[data-state="waiting"]::after,
+  .chat-thread[data-state="run-active"]::after {
+    animation: none;
     opacity: 0.5;
   }
 }

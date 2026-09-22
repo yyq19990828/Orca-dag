@@ -128,6 +128,45 @@ function stageState(task: DagNode, presence: StagePresence | null, waiting: bool
   }[task.status] ?? task.status;
 }
 
+/**
+ * Coarse bucket for the runtime-summary pulse: the dot's colour — and whether
+ * it pulses at all — must agree with the words beside it. A "Completed" row
+ * keeps a settled green dot; only genuinely live states (run control active,
+ * a running or replying stage) pulse. Values are styled in styles.css, where
+ * the palette mirrors STATUS_META so canvas and chat never disagree.
+ */
+function summaryStateKey(task: DagNode, presence: StagePresence | null, waiting: boolean): string {
+  if (waiting) return "waiting";
+  if (task.status === "dispatched") {
+    return presence?.liveness === "unverifiable" ? "unknown" : "running";
+  }
+  return task.status; // pending | ready | completed | failed | blocked
+}
+
+/** Connector words skipped when picking avatar initials ("Capability and Run
+    Health" is CR, not CA). */
+const AVATAR_STOP_WORDS = new Set([
+  "a", "an", "and", "for", "in", "of", "on", "or", "the", "to", "with",
+]);
+
+/**
+ * Stage initials for the thread avatar. The old constant "S" made every stage
+ * look identical in the list; two letters picked from the label's first two
+ * meaningful words keep each row recognizable at a glance ("Integration and
+ * Acceptance" → IA, "DAG Hierarchy and Ready Waves" → DH). Falls back to the
+ * first letter (or "S" for an empty label).
+ */
+function initialsOf(label: string): string {
+  const words = label
+    .split(/\s+/)
+    .map((word) => word.trim())
+    .filter((word) => word && !AVATAR_STOP_WORDS.has(word.toLowerCase()));
+  const picks = (words.length >= 2 ? words.slice(0, 2) : words.slice(0, 1)).map(
+    (word) => [...word][0]?.toUpperCase() ?? "",
+  );
+  return picks.join("") || "S";
+}
+
 function briefSummary(spec: string): string {
   const normalized = spec.replace(/\s+/g, " ").trim();
   if (!normalized) return "The coordinator assigned this stage without an additional brief.";
@@ -530,6 +569,15 @@ export function ChatPanel({
     coordinatorActive && selected?.task?.status === "dispatched" && selected.task.dispatchId
       ? selected.task.dispatchId
       : null;
+  // Shared by the runtime summary's data-state and its label; extracting keeps
+  // the pill's title attribute (full text on hover) from drifting from what's
+  // rendered.
+  const summaryState = selected?.task
+    ? summaryStateKey(selected.task, selected.presence, selected.pending.length > 0)
+    : coordinatorActive ? "run-active" : "run-stopped";
+  const summaryLabel = selected?.task
+    ? stageState(selected.task, selected.presence, selected.pending.length > 0)
+    : coordinatorActive ? "Run control active" : "Run control stopped";
   const hasRecordedAssignment = Boolean(
     selected?.events.some(
       (event) => event.kind === "dispatch_started" && event.direction === "coordinator_to_agent",
@@ -609,6 +657,35 @@ export function ChatPanel({
                         </div>
                       )}
                     </dl>
+                    {/* Expand the aggregated batch into its rows. The summary
+                        above ("5 messages: Heartbeat, Worker done") is the
+                        digest; this is the evidence behind it. Receipts
+                        persisted before the digest existed render no list at
+                        all — absence is unknown, never a guess. */}
+                    {(item.messages?.length ?? 0) > 0 && (
+                      <details className="chat-checkpoint__messages">
+                        <summary>
+                          <span>{item.messages!.length === 1 ? "1 message" : `${item.messages!.length} messages`}</span>
+                          <span className="chat-checkpoint__chevron" aria-hidden="true">›</span>
+                        </summary>
+                        <ul>
+                          {item.messages!.map((message) => {
+                            const iso = new Date(message.createdAt).toISOString();
+                            return (
+                              <li key={message.id}>
+                                <span className="chat-checkpoint__message-type">
+                                  {compactSignal(message.type) ?? message.type}
+                                </span>
+                                <span className="chat-checkpoint__message-subject" title={message.subject}>
+                                  {message.subject || "(no subject)"}
+                                </span>
+                                <time dateTime={iso}>{formatClock(iso)}</time>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      </details>
+                    )}
                     {item.evidence && (
                       <p className="chat-checkpoint__evidence">
                         <strong>Why this check appears</strong>
@@ -690,6 +767,16 @@ export function ChatPanel({
           {conversations.map((conversation, index) => {
             const latest = conversation.events.at(-1);
             const isSystem = conversation.id === COORDINATOR_THREAD;
+            // Same state bucket the runtime-summary pulse uses, so the list,
+            // the conversation body, and the DAG canvas all tell one story.
+            // Only the Run-control thread carries run-level state; a taskless
+            // agent thread (dangling Task) simply shows no state.
+            const threadState = isSystem
+              ? coordinatorActive ? "run-active" : "run-stopped"
+              : conversation.task
+                ? summaryStateKey(conversation.task, conversation.presence, conversation.pending.length > 0)
+                : null;
+            const initials = conversation.taskId && !conversation.isLead ? initialsOf(conversation.label) : null;
             return (
               <Fragment key={conversation.id}>
                 {index > 0 && conversations[index - 1]?.id === COORDINATOR_THREAD && (
@@ -698,6 +785,7 @@ export function ChatPanel({
                 <button
                   type="button"
                   className={`chat-thread${isSystem ? " chat-thread--system" : ""}${selected?.id === conversation.id ? " chat-thread--active" : ""}`}
+                  data-state={threadState}
                   aria-current={selected?.id === conversation.id ? "true" : undefined}
                   onClick={() => {
                     setSelectedId(conversation.id);
@@ -706,10 +794,10 @@ export function ChatPanel({
                   }}
                 >
                   <span
-                    className={`chat-thread__avatar${conversation.isLead ? " chat-thread__avatar--lead" : ""}${isSystem ? " chat-thread__avatar--system" : ""}`}
+                    className={`chat-thread__avatar${conversation.isLead ? " chat-thread__avatar--lead" : ""}${isSystem ? " chat-thread__avatar--system" : ""}${initials && initials.length > 1 ? " chat-thread__avatar--pair" : ""}`}
                     aria-hidden="true"
                   >
-                    {conversation.taskId ? (conversation.isLead ? "★" : "S") : "R"}
+                    {conversation.taskId ? (conversation.isLead ? "★" : initials!) : "R"}
                   </span>
                   <span className="chat-thread__copy">
                     <span className="chat-thread__topline">
@@ -843,7 +931,10 @@ export function ChatPanel({
                           marker renders "Unread" — an absent marker stays
                           unknown and renders nothing at all. */}
                       {event.read === false && (
-                        <span className="chat-message__read" title="Durable unread marker in the Orca inbox">
+                        <span
+                          className="chat-message__read"
+                          title="Orca's durable inbox marker says the recipient terminal has not consumed this message. It tracks the Orca inbox — not whether you have read it here."
+                        >
                           Unread
                         </span>
                       )}
@@ -881,15 +972,11 @@ export function ChatPanel({
 
               <section
                 className="chat-runtime-summary"
-                data-active={coordinatorActive ? "true" : "false"}
+                data-state={summaryState}
                 aria-label="Run status summary"
               >
                 <span className="chat-runtime-summary__pulse" aria-hidden="true" />
-                <strong>
-                  {selected.task
-                    ? stageState(selected.task, selected.presence, selected.pending.length > 0)
-                    : coordinatorActive ? "Run control active" : "Run control stopped"}
-                </strong>
+                <strong title={summaryLabel}>{summaryLabel}</strong>
                 <span className="chat-runtime-summary__detail">
                   {selected.task
                     ? presenceSummary

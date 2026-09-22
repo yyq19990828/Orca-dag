@@ -191,7 +191,7 @@ export default function App() {
   const [communicationOpen, setCommunicationOpen] = useState(false);
   const [communicationWidth, setCommunicationWidth] = useState<number | null>(null);
   const [communicationResizing, setCommunicationResizing] = useState(false);
-  const [communicationTab, setCommunicationTab] = useState<"activity" | "chat">("activity");
+  const [communicationTab, setCommunicationTab] = useState<"activity" | "chat" | "operations">("activity");
   // Parent/child ownership links (Phase 4) are hideable: on dense graphs they
   // can reduce readability, and they carry no scheduling semantics to lose.
   const [showHierarchy, setShowHierarchy] = useState(true);
@@ -712,6 +712,15 @@ export default function App() {
                     <button
                       type="button"
                       role="tab"
+                      aria-selected={communicationTab === "operations"}
+                      className={communicationTab === "operations" ? "active" : ""}
+                      onClick={() => setCommunicationTab("operations")}
+                    >
+                      Operations
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
                       aria-selected={communicationTab === "chat"}
                       className={communicationTab === "chat" ? "active" : ""}
                       onClick={() => setCommunicationTab("chat")}
@@ -741,32 +750,35 @@ export default function App() {
                         disabled={execOff}
                         disabledReason={readiness?.reason}
                       />
-                    <details className="communication-center__operations">
-                        <summary>Operational details</summary>
-                        <GatePanel
-                          gates={visibleDag.gates}
-                          runId={runId}
-                          onResolved={refresh}
-                          disabled={execOff}
-                          disabledReason={readiness?.reason}
-                        />
-                        <RecoveryPanel
-                          runId={runId}
-                          onRetried={refresh}
-                          disabled={execOff}
-                          disabledReason={readiness?.reason}
-                        />
-                        <WorkerPanel
-                          runId={runId}
-                          rows={workerRows}
-                          rowsError={workerHistoryError}
-                          status={runStatus}
-                          disabled={execOff}
-                          disabledReason={readiness?.reason}
-                        />
-                        <RequestAuditPanel runId={runId} />
-                        <CapabilityPanel />
-                    </details>
+                  </div>
+                  <div hidden={communicationTab !== "operations"} className="communication-center__operations">
+                    {/* Promoted from a collapsed drawer under the timeline to
+                        its own tab: gates, recovery, the durable fleet view,
+                        the mutation audit and capability facts are operational
+                        state, not an afterthought. */}
+                    <GatePanel
+                      gates={visibleDag.gates}
+                      runId={runId}
+                      onResolved={refresh}
+                      disabled={execOff}
+                      disabledReason={readiness?.reason}
+                    />
+                    <RecoveryPanel
+                      runId={runId}
+                      onRetried={refresh}
+                      disabled={execOff}
+                      disabledReason={readiness?.reason}
+                    />
+                    <WorkerPanel
+                      runId={runId}
+                      rows={workerRows}
+                      rowsError={workerHistoryError}
+                      status={runStatus}
+                      disabled={execOff}
+                      disabledReason={readiness?.reason}
+                    />
+                    <RequestAuditPanel runId={runId} />
+                    <CapabilityPanel />
                   </div>
                   <div hidden={communicationTab !== "chat"} className="communication-center__chat">
                     <ChatPanel
@@ -816,6 +828,8 @@ export default function App() {
                 reorgNonce={reorgNonce}
                 fitNonce={canvasFitNonce}
                 showHierarchy={showHierarchy}
+                workerRows={workerRows}
+                attempts={runStatus?.runId === runId ? runStatus.attempts : []}
               />
 
               {/* Compact scheduler surface (Phase 4): intentionally its own

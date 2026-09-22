@@ -21,7 +21,7 @@ import {
 import "@xyflow/react/dist/style.css";
 import { applyLayout } from "../layout";
 import { effectiveHarness, useConfig } from "../harness";
-import { STATUS_META, type DagResponse, type LayoutKind, type TaskStatus } from "../types";
+import { STATUS_META, type DagResponse, type LayoutKind, type RunAttempt, type TaskStatus, type WorkerRowView } from "../types";
 
 /** Deterministic PRNG so each node's scribble stays stable across polls. */
 function mulberry32(seed: number) {
@@ -160,6 +160,8 @@ type TaskNodeData = {  label: string;
   /** Viewer-only semantic ownership; never changes DAG or Orca authority. */
   lead: boolean;
   harness: string;
+  /** True when `harness` is what Orca durably recorded as launched, not the plan. */
+  harnessActual: boolean;
   dir: "LR" | "TB";
   /** paint order on first draw — staggers the entrance so the DAG "grows" */
   index: number;
@@ -280,7 +282,16 @@ function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
           <span className="dot" style={{ background: meta.color }} />
           {meta.label}
         </div>
-        <span className="task-node__harness" title="This node's harness">
+        <span
+          className="task-node__harness"
+          title={
+            data.harnessActual
+              ? "Harness recorded for this stage's actual launch"
+              : data.status === "pending" || data.status === "ready"
+                ? "Planned harness — nothing launched here yet"
+                : "No launch record found — showing the planned harness"
+          }
+        >
           {data.harness}
         </span>
       </div>
@@ -536,6 +547,8 @@ function Flow({
   reorgNonce,
   fitNonce,
   showHierarchy,
+  workerRows,
+  attempts,
 }: {
   dag: DagResponse;
   leadTaskId: string | null;
@@ -545,6 +558,12 @@ function Flow({
   reorgNonce: number;
   fitNonce: number;
   showHierarchy: boolean;
+  /** Durable fleet rows — the authority on what actually launched per Task. */
+  workerRows: WorkerRowView[];
+  /** Viewer-coordinator attempt records — the only launch evidence for
+   *  legacy/tracking starts (opencode, custom commands), whose fleet rows
+   *  carry no launch facts at all. Scoped to the selected Run by the caller. */
+  attempts: RunAttempt[];
 }) {
   const rf = useReactFlow();
   const config = useConfig();
@@ -577,6 +596,42 @@ function Flow({
     const dir: "LR" | "TB" = layout === "layered-tb" ? "TB" : "LR";
     const statusById = new Map(dag.nodes.map((n) => [n.id, n.status]));
 
+    // What a stage ACTUALLY launched with, from two evidence layers (never the
+    // viewer config, which is only the plan and drifts the moment a harness is
+    // re-picked after dispatch):
+    //   1. Orca's fleet row (`launch.agent`, provider id fallback). CAVEAT,
+    //      verified against Orca 1.4.205 (2026-09-22): worker-list's
+    //      projection.launch is null even for supervised worker-start
+    //      launches — the durable facts live only in worker-show under
+    //      worker.startOptions.launch.effective, and list rows do not include
+    //      startOptions. This layer only earns its keep on builds whose list
+    //      projection carries launch facts; enriching it here would cost one
+    //      worker-show CLI call per row per 2s poll, deliberately not done.
+    //   2. This viewer coordinator's own attempt records — the working source
+    //      for viewer-driven runs, supervised AND legacy/tracking (opencode,
+    //      custom commands). Launches made outside the viewer session (manual
+    //      CLI, a previous process) have no attempt record and fall back to
+    //      the plan behind a "no launch record found" tooltip.
+    // worker-list is newest-first, so the first fleet row per Task is the
+    // latest attempt; for attempts, keep the latest startedAt per Task.
+    const actualHarness = new Map<string, string>();
+    for (const row of workerRows) {
+      const agent = row.projection?.launch?.agent ?? row.projection?.provider?.id ?? null;
+      if (row.taskId && agent && !actualHarness.has(row.taskId)) actualHarness.set(row.taskId, agent);
+    }
+    // Second evidence layer: the viewer coordinator's own attempt records
+    // (see the caveat above for why the fleet layer alone cannot be trusted
+    // on 1.4.205). Keep the latest attempt per Task.
+    const latestAttemptByTask = new Map<string, RunAttempt>();
+    for (const attempt of attempts) {
+      const prev = latestAttemptByTask.get(attempt.taskId);
+      if (!prev || attempt.startedAt >= prev.startedAt) latestAttemptByTask.set(attempt.taskId, attempt);
+    }
+    for (const [taskId, attempt] of latestAttemptByTask) {
+      const agent = attempt.effective?.agent ?? attempt.harness;
+      if (agent && !actualHarness.has(taskId)) actualHarness.set(taskId, agent);
+    }
+
     if (seenDag.current !== dag) {
       const prev = prevStatus.current;
       popped.current = new Set(
@@ -595,7 +650,11 @@ function Flow({
         status: n.status,
         selected: n.id === selectedId,
         lead: n.id === leadTaskId,
-        harness: effectiveHarness(n.id),
+        // A launched stage shows what Orca/the coordinator recorded; stages
+        // with no launch evidence at all fall back to the planned (config)
+        // harness, and the tooltip says which is which.
+        harness: actualHarness.get(n.id) ?? effectiveHarness(n.id),
+        harnessActual: actualHarness.has(n.id),
         dir,
         index: i,
         // deterministic pseudo-random tilt from the paint order: stickers
@@ -665,7 +724,7 @@ function Flow({
       });
     });
     setEdges([...hierarchyEdges, ...laid.edges]);
-  }, [dag, leadTaskId, selectedId, layout, reorgNonce, showHierarchy, config, setNodes, setEdges]);
+  }, [dag, leadTaskId, selectedId, layout, reorgNonce, showHierarchy, workerRows, attempts, config, setNodes, setEdges]);
 
   // Auto-fit when the node count changes, so live status polls don't yank the
   // viewport while the user is inspecting (or dragging).
@@ -758,6 +817,12 @@ export function DagView(props: {
   reorgNonce: number;
   fitNonce: number;
   showHierarchy: boolean;
+  /** Durable fleet rows — the authority on what actually launched per Task. */
+  workerRows: WorkerRowView[];
+  /** Viewer-coordinator attempt records — the only launch evidence for
+   *  legacy/tracking starts (opencode, custom commands), whose fleet rows
+   *  carry no launch facts at all. Scoped to the selected Run by the caller. */
+  attempts: RunAttempt[];
 }) {
   return (
     <ReactFlowProvider>
