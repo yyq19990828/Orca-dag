@@ -77,6 +77,7 @@ Two artifacts ship from this repo, and **neither is an Orca plugin** — Orca's 
 - **`task-update` only changes `--status`/`--result`** — no edit to spec/title/deps, no delete-single-task. "Changing a task" = rebuild the DAG.
 - **Gates are Run-scoped, but the flag differs by direction**: `gate-list` (read) takes `--run <id>`; `gate-resolve` (mutation) takes NO `--run` — it resolves Run scope from the bound `--from <handle>` (plus a globally-unique `--id`). The viewer binds the coordinator terminal to the Run first via `run-use`, then resolves by `--from`.
 - **`HARNESS_LAUNCH` in `orca.ts` only has `claude --dangerously-skip-permissions` verified.** Other harnesses need their own autonomous flag added and verified, and only matter on the legacy path (custom commands or `agent_unconfigured` from `worker-start`).
+- **Unacked deliveries deadlock a mailbox** — every `check` replays the oldest unacknowledged Delivery until it is acked, and messages behind it stay invisible. A worker that answers mail but never acks goes permanently deaf while looking alive (observed live on 1.4.205, 2026-09-22: it armed its own inbox watcher, which the replaying old batch starved; unblocking required typing the ack recipe into its TUI). The coordinator loop in `coordinator.ts` processes and acks every delivery each pass, so it cannot hit this; hand-rolled worker loops must ack. Detail lives in `skill/SKILL.md` Boundaries.
 
 ## Conventions
 

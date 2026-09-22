@@ -65,6 +65,19 @@ npx orca-dag    # run in the current project directory; serves http://localhost:
 ```
 (If it's already running — likely, since that command also installed this skill — they just reselect the Run.) The user picks your Run in the top bar, chooses a harness (and optionally model/effort) per node, and clicks **"▶ Run with Orca"**: the viewer's coordinator uses Orca's supervised-worker primitives to execute the whole graph in dependency-parallel order and resolve approval gates as they pop.
 
+**Prefer firing execution from the backend.** When you are asked to start the run yourself, trigger the same call the button makes through the viewer's local HTTP API — do not hand-drive orchestration from your terminal:
+
+```bash
+TOKEN=$(curl -s localhost:8787/api/session | python3 -c "import json,sys;print(json.load(sys.stdin)['token'])")
+curl -s -X POST localhost:8787/api/run -H "X-Orca-Dag-Token: $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"runId":"<run_id>","defaultHarness":"claude","maxConcurrency":2}'
+```
+
+The viewer then binds **its own** terminal as the Run's coordinator and runs the whole loop autonomously — parallel waves, inbox consumption with per-pass acknowledgements, retries, gate surfacing, terminal release — and native check receipts stream into its Chat panel. Your terminal is fenced from mutations against that Run (`consumer_fenced`); reads stay open.
+
+Hand-driving workers from your terminal is the **fallback for one-off delegations only**: it re-implements the viewer's loop token by token, never acks unless you remember to (an unacked Delivery deadlocks the worker's mailbox — see Boundaries), and leaves no native records in the viewer.
+
 **Execution is the viewer's job, not yours.** Your responsibility ends at "the DAG is correct" — by default do **not** run `dispatch` / `worker-start` yourself unless the user explicitly asks you to drive from the command line.
 
 ⚠️ **You will get fenced — this is normal.** Starting execution binds the viewer's own terminal as the Run's coordinator, so your subsequent mutations against that Run fail with `consumer_fenced`. Reads (`task-list --run <id>` / `gate-list --run <id>`) are unaffected. To take the binding back, re-bind yourself as coordinator (`run-use`), following the runtime guide's authority rules.
@@ -73,6 +86,7 @@ npx orca-dag    # run in the current project directory; serves http://localhost:
 - Focus on **planning + graph building**. Execution belongs to the viewer's coordinator.
 - **Created tasks cannot be edited or deleted**: `task-update` only changes `--status` / `--result` — there is no interface to change spec/title/deps, and no command to delete a single task. You can still **add** new tasks or gates to a Run that hasn't finished (additions are creates), but to **change** an existing task or dependency, open a **new Run and redraw** the whole DAG; the old Run stays as history.
 - **Never `reset`.** `orchestration reset --tasks` has **no `--run` scope**: it wipes the entire local orchestration DB, deleting every Run's tasks at once. The only correct "redo" is a fresh Run.
+- **Unacked deliveries deadlock a mailbox (worker-side).** Orca's inbox is FIFO: the oldest unacknowledged Delivery replays on every check until it is acked, and messages behind it stay invisible. A worker that answers mail but never acks goes permanently deaf while looking alive — coordinator follow-ups, including the completion signal, never surface (observed live on 1.4.205: the worker even armed its own inbox watcher, which the replaying old batch starved forever). The viewer's coordinator cannot hit this — it processes and acknowledges every delivery on every pass. If you ever drive workers by hand: ack each delivery after processing it, and when a provably-live worker goes silent, suspect this deadlock (the receipt names the delivery id) before assuming anything worse.
 - The retired scheduler commands (`orchestration run` / `run-stop` / `coordinator-start` / `coordinator-stop`) are no-ops — don't use them.
 - Don't run destructive or off-task system commands.
 
