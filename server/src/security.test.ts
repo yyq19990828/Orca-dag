@@ -2,19 +2,29 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   assertDiscoveredWorktreeAudience,
+  assertEnvironmentPlacementCompatibility,
+  assertLanePlacementDisjoint,
+  assertLaneReferences,
   createSecurityPolicy,
   tokensMatch,
+  validateBaseBranch,
   validateConcurrency,
+  validateCreationOptions,
   validateGroupAudience,
   validateGroupMessagePriority,
   validateGroupMessageType,
   validateHarness,
   validateId,
+  validateLaneTaskMap,
   validateModel,
+  validatePlacementSpec,
+  validateSetupPolicy,
   validateTaskValueMap,
   validateText,
+  validateWorktreeLaneMap,
   ValidationError,
 } from "./security";
+import type { WorktreeLaneSpec } from "./config";
 
 const FLAG_OFF = createSecurityPolicy({});
 const FLAG_ON = createSecurityPolicy({ ORCA_DAG_ALLOW_CUSTOM_COMMANDS: "1" });
@@ -308,5 +318,266 @@ describe("group message type + priority (Phase 6)", () => {
     assert.equal(validateGroupMessagePriority("normal"), "normal");
     assertThrowsWith(() => validateGroupMessagePriority("asap"), "invalid_priority");
     assertThrowsWith(() => validateGroupMessagePriority("normal; rm -rf /"), "invalid_priority");
+  });
+});
+
+// --- Placement foundation: the full local matrix -----------------------------
+//
+// Local tasks may select any of the four placement kinds; creation metadata
+// rides only on the two new-worktree kinds. Everything malformed, conflicting,
+// remote-invalid, or shell-shaped must fail HERE — before any Orca mutation —
+// with a machine-readable code.
+
+describe("validatePlacementSpec: local four-kind matrix (placement foundation)", () => {
+  it("accepts current and exact-existing with no creation fields", () => {
+    assert.deepEqual(validatePlacementSpec({ kind: "current" }, "p"), { kind: "current" });
+    assert.deepEqual(validatePlacementSpec({ kind: "existing", selector: " path:/srv/ws " }, "p"), {
+      kind: "existing",
+      selector: "path:/srv/ws",
+    });
+  });
+
+  it("accepts new-child with bounded creation metadata", () => {
+    assert.deepEqual(
+      validatePlacementSpec(
+        { kind: "new-child", name: "kid-wt", setup: "inherit", baseBranch: "feature/x", displayName: "Kid", comment: "lane" },
+        "p",
+      ),
+      {
+        kind: "new-child",
+        name: "kid-wt",
+        setup: "inherit",
+        baseBranch: "feature/x",
+        displayName: "Kid",
+        comment: "lane",
+      },
+    );
+  });
+
+  it("accepts new-top-level with an exact repo selector and optional name", () => {
+    assert.deepEqual(
+      validatePlacementSpec({ kind: "new-top-level", repo: "id:repoA", name: "wt", setup: "skip" }, "p"),
+      { kind: "new-top-level", repo: "id:repoA", name: "wt", setup: "skip" },
+    );
+    // Name is optional locally — the server derives a deterministic one.
+    assert.deepEqual(validatePlacementSpec({ kind: "new-top-level", repo: "id:repoA" }, "p"), {
+      kind: "new-top-level",
+      repo: "id:repoA",
+      setup: "run",
+    });
+  });
+
+  it("normalizes an absent setup policy to Orca's default run", () => {
+    const spec = validatePlacementSpec({ kind: "new-child", name: "kid" }, "p");
+    assert.equal((spec as { setup: string }).setup, "run");
+    assert.equal(validateCreationOptions({ name: "kid" }, "p").setup, "run");
+  });
+
+  it("rejects creation fields on current and existing placements (conflicting)", () => {
+    for (const kind of [{ kind: "current" }, { kind: "existing", selector: "path:/srv/ws" }]) {
+      for (const field of ["repo", "name", "baseBranch", "displayName", "comment", "setup"]) {
+        assertThrowsWith(
+          () => validatePlacementSpec({ ...kind, [field]: "x" }, "p"),
+          "invalid_placement",
+        );
+      }
+    }
+  });
+
+  it("rejects repo on new-child (a child anchors on the current workspace's repo)", () => {
+    assertThrowsWith(
+      () => validatePlacementSpec({ kind: "new-child", repo: "id:repoA" }, "p"),
+      "invalid_placement",
+    );
+  });
+
+  it("rejects shell-shaped or unbounded creation metadata", () => {
+    assertThrowsWith(() => validatePlacementSpec({ kind: "new-child", name: "bad name" }, "p"), "invalid_placement");
+    assertThrowsWith(() => validatePlacementSpec({ kind: "new-child", name: "-rf" }, "p"), "invalid_placement");
+    assertThrowsWith(
+      () => validatePlacementSpec({ kind: "new-child", baseBranch: "../escape" }, "p"),
+      "invalid_base_branch",
+    );
+    assertThrowsWith(
+      () => validatePlacementSpec({ kind: "new-child", baseBranch: "a b" }, "p"),
+      "invalid_base_branch",
+    );
+    assertThrowsWith(
+      () => validatePlacementSpec({ kind: "new-child", baseBranch: "feature/x; rm -rf /" }, "p"),
+      "invalid_base_branch",
+    );
+    assertThrowsWith(() => validatePlacementSpec({ kind: "new-child", setup: "yolo" }, "p"), "invalid_setup");
+    assertThrowsWith(
+      () => validatePlacementSpec({ kind: "new-child", comment: "x".repeat(501) }, "p"),
+      undefined,
+    );
+    assertThrowsWith(
+      () => validatePlacementSpec({ kind: "new-top-level", repo: "id:repoA", displayName: "bad\u0000null" }, "p"),
+      undefined,
+    );
+  });
+
+  it("rejects unknown kinds and structurally invalid specs", () => {
+    assertThrowsWith(() => validatePlacementSpec({ kind: "new-sibling" }, "p"), "invalid_placement");
+    assertThrowsWith(() => validatePlacementSpec({ kind: "existing" }, "p"), "invalid_selector");
+    assertThrowsWith(() => validatePlacementSpec({ kind: "new-top-level", name: "wt" }, "p"), "invalid_selector");
+    assertThrowsWith(() => validatePlacementSpec("path:/srv/ws", "p"), "invalid_placement");
+  });
+});
+
+describe("validatePlacementSpec: the remote matrix is preserved (foundation)", () => {
+  const remote = { remote: true } as const;
+
+  it("still refuses remote current and new-child", () => {
+    assertThrowsWith(() => validatePlacementSpec({ kind: "current" }, "p", remote), "invalid_placement");
+    assertThrowsWith(
+      () => validatePlacementSpec({ kind: "new-child", name: "kid" }, "p", remote),
+      "invalid_placement",
+    );
+  });
+
+  it("still accepts remote exact-existing and name-complete new-top-level", () => {
+    assert.deepEqual(
+      validatePlacementSpec({ kind: "existing", selector: "id:repoA::/srv/ws" }, "p", remote),
+      { kind: "existing", selector: "id:repoA::/srv/ws" },
+    );
+    assert.deepEqual(
+      validatePlacementSpec(
+        { kind: "new-top-level", repo: "id:repoA", name: "wt", setup: "skip" },
+        "p",
+        remote,
+      ),
+      { kind: "new-top-level", repo: "id:repoA", name: "wt", setup: "skip" },
+    );
+  });
+
+  it("requires an explicit name for remote new-top-level (the host cannot derive one)", () => {
+    assertThrowsWith(
+      () => validatePlacementSpec({ kind: "new-top-level", repo: "id:repoA" }, "p", remote),
+      "invalid_placement",
+    );
+  });
+});
+
+describe("placement creation field validators (foundation)", () => {
+  it("validateSetupPolicy accepts exactly run/skip/inherit", () => {
+    assert.equal(validateSetupPolicy("run"), "run");
+    assert.equal(validateSetupPolicy(" skip "), "skip");
+    assert.equal(validateSetupPolicy("inherit"), "inherit");
+    assertThrowsWith(() => validateSetupPolicy("always"), "invalid_setup");
+    assertThrowsWith(() => validateSetupPolicy(""), "invalid_setup");
+  });
+
+  it("validateBaseBranch accepts ref-shaped tokens and refuses traversal and flags", () => {
+    assert.equal(validateBaseBranch("main"), "main");
+    assert.equal(validateBaseBranch(" feature/x "), "feature/x");
+    assert.equal(validateBaseBranch("release/v1.2.3"), "release/v1.2.3");
+    assertThrowsWith(() => validateBaseBranch("../escape"), "invalid_base_branch");
+    assertThrowsWith(() => validateBaseBranch("a..b"), "invalid_base_branch");
+    assertThrowsWith(() => validateBaseBranch("-rf"), "invalid_base_branch");
+    assertThrowsWith(() => validateBaseBranch("feature/"), "invalid_base_branch");
+    assertThrowsWith(() => validateBaseBranch("main."), "invalid_base_branch");
+    assertThrowsWith(() => validateBaseBranch("a b"), "invalid_base_branch");
+    assertThrowsWith(() => validateBaseBranch(""), "invalid_base_branch");
+  });
+
+  it("validateCreationOptions keeps absent fields absent and validates present ones", () => {
+    assert.deepEqual(validateCreationOptions({}, "p"), { setup: "run" });
+    assert.deepEqual(validateCreationOptions({ name: undefined, setup: null }, "p"), { setup: "run" });
+    assert.deepEqual(validateCreationOptions({ name: "wt", setup: "skip" }, "p"), {
+      name: "wt",
+      setup: "skip",
+    });
+    assertThrowsWith(() => validateCreationOptions({ name: "wt extra" }, "p"));
+  });
+});
+
+describe("worktree lane request maps (foundation)", () => {
+  it("validateWorktreeLaneMap accepts non-current seeds and drops nothing silently", () => {
+    assert.deepEqual(
+      validateWorktreeLaneMap(
+        {
+          lane_1: { placement: { kind: "new-child", name: "kid", setup: "run" } },
+          lane_2: { placement: { kind: "existing", selector: "path:/srv/ws" } },
+        },
+        "lanes",
+      ),
+      {
+        lane_1: { placement: { kind: "new-child", name: "kid", setup: "run" } },
+        lane_2: { placement: { kind: "existing", selector: "path:/srv/ws" } },
+      },
+    );
+  });
+
+  it("refuses a lane seeded by current and malformed lane shapes", () => {
+    assertThrowsWith(
+      () => validateWorktreeLaneMap({ lane_1: { placement: { kind: "current" } } }, "lanes"),
+      "invalid_placement",
+    );
+    assertThrowsWith(() => validateWorktreeLaneMap({ lane_1: { nope: true } }, "lanes"));
+    assertThrowsWith(() => validateWorktreeLaneMap({ "bad lane": { placement: { kind: "new-child" } } }, "lanes"));
+    assertThrowsWith(() => validateWorktreeLaneMap(["lane"], "lanes"));
+  });
+
+  it("validateLaneTaskMap validates both sides as ids", () => {
+    assert.deepEqual(validateLaneTaskMap({ task_1: "lane_1" }, "laneByTask"), { task_1: "lane_1" });
+    assertThrowsWith(() => validateLaneTaskMap({ task_1: "bad lane" }, "laneByTask"));
+    assertThrowsWith(() => validateLaneTaskMap({ "bad task": "lane_1" }, "laneByTask"));
+  });
+
+  it("assertLaneReferences refuses a membership without a declared lane", () => {
+    const lanes = {
+      lane_1: { placement: { kind: "new-child", setup: "run" } },
+    } satisfies Record<string, WorktreeLaneSpec>;
+    assert.doesNotThrow(() => assertLaneReferences({ task_1: "lane_1" }, lanes));
+    assert.throws(() => assertLaneReferences({ task_1: "lane_missing" }, lanes), ValidationError);
+    assert.doesNotThrow(() => assertLaneReferences(null, null), "nothing to check");
+  });
+
+  it("assertLanePlacementDisjoint refuses a task placed directly AND by a lane", () => {
+    assert.doesNotThrow(() =>
+      assertLanePlacementDisjoint({ task_a: { kind: "current" } }, { task_b: "lane_1" }),
+    );
+    assert.throws(
+      () => assertLanePlacementDisjoint({ task_a: { kind: "current" } }, { task_a: "lane_1" }),
+      (err: unknown) => err instanceof ValidationError && err.code === "conflicting_placement",
+    );
+  });
+
+  it("assertEnvironmentPlacementCompatibility enforces the remote matrix per task", () => {
+    // Remote task on exact-existing: fine.
+    assert.doesNotThrow(() =>
+      assertEnvironmentPlacementCompatibility(
+        { task_r: "env_remote" },
+        { task_r: { kind: "existing", selector: "id:repoA::/srv/ws" } },
+      ),
+    );
+    // Remote task on current/new-child: refused.
+    assert.throws(
+      () =>
+        assertEnvironmentPlacementCompatibility({ task_r: "env_remote" }, { task_r: { kind: "current" } }),
+      ValidationError,
+    );
+    assert.throws(
+      () =>
+        assertEnvironmentPlacementCompatibility(
+          { task_r: "env_remote" },
+          { task_r: { kind: "new-child", name: "kid", setup: "run" } },
+        ),
+      ValidationError,
+    );
+    // Remote nameless new-top-level: refused.
+    assert.throws(
+      () =>
+        assertEnvironmentPlacementCompatibility(
+          { task_r: "env_remote" },
+          { task_r: { kind: "new-top-level", repo: "id:repoA", setup: "run" } },
+        ),
+      ValidationError,
+    );
+    // Local tasks are untouched by the remote matrix.
+    assert.doesNotThrow(() =>
+      assertEnvironmentPlacementCompatibility(null, { task_l: { kind: "new-child", setup: "run" } }),
+    );
   });
 });

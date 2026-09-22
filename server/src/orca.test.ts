@@ -1,20 +1,32 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "node:http";
 import {
+  abandonWorkerReceipt,
   assertValidWorkerStart,
   buildWorkerStartArgv,
   CANONICAL_RUNTIME_CAPABILITIES,
   COORDINATOR_TITLE,
+  computerSupports,
+  deriveWorktreeName,
+  fetchComputerCapabilities,
+  focusTerminal,
+  isArchiveHookFailure,
+  listRuns,
   MIN_EXECUTION_VERSION,
   MIN_VIEW_VERSION,
+  openWorkspaceChangedFiles,
+  openWorkspaceFile,
+  openWorkspaceFileDiff,
   OrcaCliError,
   canonicalCapabilitySupported,
   checkReadiness,
   compareVersions,
+  coordinatorTerminalCommand,
   coordinatorTitle,
   coordinatorTitlePrefix,
   describeRuntimeCapabilities,
@@ -36,6 +48,7 @@ import {
   normalizeLiveness,
   parseAdvertisedCapabilities,
   parseCliCommand,
+  parseComputerCapabilities,
   parseCoordinatorTitle,
   parseEnvironmentRow,
   parsePeerCapabilities,
@@ -43,6 +56,8 @@ import {
   previewRunAudiences,
   presentWorkerLiveness,
   readWorkerOutput,
+  removeWorktree,
+  RESPONSE_LOST,
   resolveOrcaCommand,
   resolveWorktreeSelector,
   resolveWorkspace,
@@ -50,10 +65,18 @@ import {
   sendCoordinatorGroupMessage,
   sendCoordinatorMessage,
   showEnvironment,
+  showRepo,
+  showRun,
   showWorkerDetail,
+  showWorktree,
   startSupervisedWorker,
+  withDerivedCreationDefaults,
+  type ComputerUseCapabilities,
+  type OrcaRepoRow,
   type OrcaWorktreeRow,
   type OrcaWorkerRow,
+  type WorkerStartRequest,
+  type WorkspaceChangedMode,
 } from "./orca";
 import { closeCoordinatorTerminals } from "./uninstall";
 import { createApp, listenLoopback } from "./app";
@@ -127,6 +150,20 @@ function writeScript(
       string,
       { workers?: unknown[]; page?: { hasMore?: boolean; nextCursor?: string | null } }
     >;
+    /** Cursor-keyed run-list receipts (top-level nextCursor); `__first__` = no cursor. */
+    runPages?: Record<string, { runs?: unknown[]; nextCursor?: string | null }>;
+    /** run-show raw-output fault injection (response-loss evidence tests). */
+    runShow?: { rawError?: string; exitCode?: number };
+    /** worker-abandon receipt body, or a raw-output fault for lost-response tests. */
+    workerAbandon?: { rawError?: string; exitCode?: number; result?: Record<string, unknown> };
+    /** terminal switch result served verbatim. */
+    terminalSwitch?: Record<string, unknown>;
+    /** file open/diff/open-changed result served verbatim. */
+    fileResult?: Record<string, unknown>;
+    /** worktree rm success result or typed failure (archive-hook semantics). */
+    worktreeRm?: { fail?: boolean; error?: Record<string, unknown>; result?: Record<string, unknown> };
+    /** computer capabilities receipt, or a raw-output fault for lost-response tests. */
+    computerCapabilities?: { rawError?: string; exitCode?: number; result?: Record<string, unknown> };
   },
 ): void {
   writeFileSync(scriptPath, JSON.stringify(conf));
@@ -170,12 +207,62 @@ if (args[0] === "environment" && args[1] === "show") {
   }
 }
 if (args[0] === "repo" && args[1] === "list") out.result = { repos: conf.repos ?? [] };
+// Placement-foundation revalidation surface: exact-selector show, with the
+// real runtime's not-found codes (selector_not_found / repo_not_found).
+if (args[0] === "worktree" && args[1] === "show") {
+  const sel = args[args.indexOf("--worktree") + 1];
+  const row = (conf.worktrees ?? []).find((w) => w && (w.id === sel || w.path === sel));
+  if (!row) {
+    out.ok = false;
+    out.error = { code: "selector_not_found", message: "No Orca workspace matched the worktree selector " + sel };
+  } else {
+    out.result = { worktree: row };
+  }
+}
+if (args[0] === "repo" && args[1] === "show") {
+  const sel = args[args.indexOf("--repo") + 1];
+  // Real repo ids are bare; the id:<id> selector form prefixes them — match both.
+  const bare = sel.startsWith("id:") ? sel.slice(3) : sel;
+  const row = (conf.repos ?? []).find((r) => r && (r.id === sel || r.id === bare || r.path === sel));
+  if (!row) {
+    out.ok = false;
+    out.error = { code: "repo_not_found", message: "repo_not_found" };
+  } else {
+    out.result = { repo: row };
+  }
+}
 if (args[0] === "worktree" && args[1] === "list") out.result = { worktrees: conf.worktrees ?? [] };
 if (args[0] === "project" && args[1] === "list") out.result = { projects: conf.projects ?? [] };
-if (args[0] === "orchestration" && args[1] === "run-list") out.result = { runs: conf.runs ?? [] };
+if (args[0] === "orchestration" && args[1] === "run-list") {
+  const cursorAt = args.indexOf("--cursor");
+  const cursor = cursorAt >= 0 ? args[cursorAt + 1] : "__first__";
+  const page = conf.runPages && conf.runPages[cursor];
+  // Live receipt shape (1.4.206): top-level nextCursor, null on the last page.
+  out.result = page ?? { runs: conf.runs ?? [], nextCursor: null };
+}
 if (args[0] === "orchestration" && args[1] === "run-show") {
+  const rs = conf.runShow;
+  if (rs && rs.rawError) {
+    process.stdout.write(rs.rawError);
+    process.exit(rs.exitCode ?? 1);
+  }
   const id = args[args.indexOf("--id") + 1];
-  out.result = { run: conf.runsById?.[id] };
+  const run = conf.runsById && conf.runsById[id];
+  if (run) {
+    out.result = { run };
+  } else {
+    // The real runtime's definite-absence answer for an unknown exact id.
+    out.ok = false;
+    out.error = { code: "run_not_found", message: "Run " + id + " was not found." };
+  }
+}
+if (args[0] === "orchestration" && args[1] === "worker-abandon") {
+  const ab = conf.workerAbandon;
+  if (ab && ab.rawError) {
+    process.stdout.write(ab.rawError);
+    process.exit(ab.exitCode ?? 1);
+  }
+  out.result = (ab && ab.result) ?? {};
 }
 if (args[0] === "orchestration" && args[1] === "inbox") {
   const limitAt = args.indexOf("--limit");
@@ -229,6 +316,28 @@ if (args[0] === "orchestration" && args[1] === "worker-read") {
     }
   }
   out.result = (wr && wr.result) ?? {};
+}
+if (args[0] === "terminal" && args[1] === "switch") out.result = conf.terminalSwitch ?? { switched: true };
+if (args[0] === "file") out.result = conf.fileResult ?? {};
+if (args[0] === "worktree" && args[1] === "rm") {
+  const wr = conf.worktreeRm;
+  if (wr && wr.fail) {
+    // Mirror the real runtime: a blocking archive hook answers ok:false WITH
+    // the typed code AND exits non-zero.
+    out.ok = false;
+    out.error = wr.error ?? { code: "worktree_archive_hook_failed", message: "archive hook failed" };
+    process.stdout.write(JSON.stringify(out));
+    process.exit(1);
+  }
+  out.result = (wr && wr.result) ?? {};
+}
+if (args[0] === "computer" && args[1] === "capabilities") {
+  const cc = conf.computerCapabilities;
+  if (cc && cc.rawError) {
+    process.stdout.write(cc.rawError);
+    process.exit(cc.exitCode ?? 1);
+  }
+  out.result = (cc && cc.result) ?? {};
 }
 process.stdout.write(JSON.stringify(out));
 `;
@@ -606,12 +715,29 @@ describe("CLI spawning through the resolved spec (fake orca)", () => {
     assert.equal(create.argv[wt + 1], `path:${b}`);
     const ti = create.argv.indexOf("--title");
     assert.match(create.argv[ti + 1], /^orca-dag coordinator · [0-9a-f]{8} · [0-9a-f]{8}$/);
-    // The terminal parks with its title (OSC-0 + sleep) instead of running an
-    // interactive shell that would immediately overwrite the title.
+    // The terminal parks with its title (OSC-0 set before exec — nothing can
+    // overwrite it afterward) and then execs a watcher on THIS viewer
+    // process's pid: when the backend dies the pane dies with it, instead of
+    // the old `sleep infinity` that leaked the pane past a crash.
     const ci = create.argv.indexOf("--command");
     const cmd = create.argv[ci + 1];
-    assert.match(cmd, /printf .*sleep infinity$/);
+    assert.match(
+      cmd,
+      /printf .*&& exec sh -c 'while kill -0 \d+ 2>\/dev\/null; do sleep 2; done'$/,
+    );
+    assert.ok(cmd.includes(String(process.pid)), "the watcher watches THIS backend process");
     assert.ok(cmd.includes(create.argv[ti + 1]), "the parked title matches the terminal title");
+  });
+
+  it("parks the coordinator pane on a watcher tied to the exact backend pid it is given", () => {
+    // Explicit pid: the pane's lifetime IS that process's lifetime.
+    const cmd = coordinatorTerminalCommand("orca-dag coordinator · abcd1234 · deadbeef", 4242);
+    assert.match(cmd, /^printf '\\033\]0;%s\\007' 'orca-dag coordinator · abcd1234 · deadbeef' && exec /);
+    assert.match(cmd, /exec sh -c 'while kill -0 4242 2>\/dev\/null; do sleep 2; done'$/);
+    // Default: THIS orca-dag backend process.
+    assert.ok(coordinatorTerminalCommand("t").includes(`kill -0 ${process.pid} `));
+    // No form of the command ever parks unbounded again.
+    assert.ok(!cmd.includes("sleep infinity"));
   });
 
   it("reuses its own instance's terminal without creating a second one", async () => {
@@ -1004,6 +1130,9 @@ describe("parseWorkerStartReceipt effective launch preferences", () => {
       worktree: "current",
       terminal: null,
       on: null,
+      name: null,
+      baseBranch: null,
+      displayName: null,
     });
   });
 
@@ -1016,7 +1145,25 @@ describe("parseWorkerStartReceipt effective launch preferences", () => {
       worktree: null,
       terminal: null,
       on: null,
+      name: null,
+      baseBranch: null,
+      displayName: null,
     });
+  });
+
+  it("echoes creation metadata (name/baseBranch/displayName) when the runtime reports it", () => {
+    const receipt = parseWorkerStartReceipt(
+      {
+        dispatchId: "ctx_e4",
+        status: "ready",
+        worktree: "new-child",
+        launch: { name: "task_a-1a2b3c4d", baseBranch: "feature/x", displayName: "Kid lane" },
+      },
+      true,
+    );
+    assert.equal(receipt.effective.name, "task_a-1a2b3c4d");
+    assert.equal(receipt.effective.baseBranch, "feature/x");
+    assert.equal(receipt.effective.displayName, "Kid lane");
   });
 
   it("picks up the execution server the receipt echoes (Phase 6 --on)", () => {
@@ -2671,5 +2818,761 @@ describe("Phase 2: worker detail + durable history over HTTP", () => {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  });
+});
+
+// --- Placement foundation: full local matrix, creation flags, revalidation --
+//
+// Adapter-level acceptance for the approved placement foundation: the exact
+// worker-start argv for all four LOCAL modes, proof that creation flags never
+// leak onto current/existing starts, deterministic name derivation, refusals
+// BEFORE any Orca mutation, and exact-selector worktree/repo revalidation.
+
+describe("placement foundation: local creation gates (assertValidWorkerStart)", () => {
+  const base = { taskId: "task_f", agent: "claude", runId: "run_f", from: "term_c" };
+
+  function rejectsWith(opts: Parameters<typeof assertValidWorkerStart>[0], re: RegExp): void {
+    assert.throws(() => assertValidWorkerStart(opts), (err: OrcaCliError) => {
+      assert.equal(err.code, "invalid_argument");
+      assert.match(err.message, re);
+      return true;
+    });
+  }
+
+  it("refuses the whole creation-flag family on current and existing starts", () => {
+    for (const worktree of ["current", "id:repoA::/srv/ws", "path:/srv/ws"] as const) {
+      for (const field of ["repo", "name", "baseBranch", "displayName", "comment", "setup"] as const) {
+        rejectsWith({ ...base, worktree, [field]: "x" }, /creation flags/);
+      }
+    }
+  });
+
+  it("refuses --repo on new-child (a child anchors on the current workspace's repo)", () => {
+    rejectsWith({ ...base, worktree: "new-child", name: "kid", repo: "id:repoA" }, /--repo/);
+  });
+
+  it("refuses malformed creation metadata before any spawn", () => {
+    rejectsWith({ ...base, worktree: "new-child", name: "bad name" }, /--name/);
+    rejectsWith({ ...base, worktree: "new-top-level", repo: "id:repoA", name: "wt", setup: "yolo" }, /--setup/);
+    rejectsWith(
+      { ...base, worktree: "new-child", name: "kid", baseBranch: "../escape" },
+      /--base-branch/,
+    );
+    rejectsWith(
+      { ...base, worktree: "new-child", name: "kid", comment: "x".repeat(501) },
+      /--comment/,
+    );
+    rejectsWith(
+      { ...base, worktree: "new-child", name: "kid", displayName: "bad\u0000null" },
+      /--display-name/,
+    );
+  });
+
+  it("still requires an explicit name for remote new-top-level (no derivation there)", () => {
+    rejectsWith({ ...base, on: "env_r", worktree: "new-top-level", repo: "id:repoA" }, /--name/);
+  });
+});
+
+describe("placement foundation: deriveWorktreeName / withDerivedCreationDefaults", () => {
+  it("derives a deterministic, bounded, grammar-safe name from Run + Task ids", () => {
+    const a = deriveWorktreeName("run_abc123", "task_def456");
+    const b = deriveWorktreeName("run_abc123", "task_def456");
+    assert.equal(a, b, "same Run + Task → same name (replays reuse identical argv)");
+    assert.notEqual(a, deriveWorktreeName("run_abc123", "task_other"), "different scope → different name");
+    assert.match(a, /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, "always satisfies the --name grammar");
+    // The suffix is the first 8 hex chars of sha256("run\u0000scope") — the
+    // exact documented recipe, pinned here so it can never silently drift.
+    const digest = createHash("sha256").update("run_abc123\u0000task_def456").digest("hex").slice(0, 8);
+    assert.equal(a, `task_def456-${digest}`);
+    // Path-flavored scope ids collapse to the bounded token form.
+    const messy = deriveWorktreeName("run_x", "task/weird id");
+    assert.match(messy, /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/);
+    assert.equal(deriveWorktreeName("run_x", "///").slice(0, 2), "wt", "empty base falls back to wt");
+  });
+
+  it("withDerivedCreationDefaults fills only local nameless creating starts", () => {
+    const seed = { taskId: "task_a", agent: "claude", runId: "run_a", from: "term_c" };
+    // current/existing: untouched, no name invented.
+    assert.deepEqual(withDerivedCreationDefaults({ ...seed }), seed);
+    assert.deepEqual(withDerivedCreationDefaults({ ...seed, worktree: "path:/srv/ws" }), {
+      ...seed,
+      worktree: "path:/srv/ws",
+    });
+    // Local creating start without a name: derived.
+    const derived: WorkerStartRequest = withDerivedCreationDefaults({
+      ...seed,
+      worktree: "new-child",
+    });
+    assert.equal(derived.name, deriveWorktreeName("run_a", "task_a"));
+    // Explicit name wins.
+    assert.deepEqual(withDerivedCreationDefaults({ ...seed, worktree: "new-child", name: "mine" }), {
+      ...seed,
+      worktree: "new-child",
+      name: "mine",
+    });
+    // Remote creating starts keep the explicit-name contract.
+    assert.deepEqual(withDerivedCreationDefaults({ ...seed, on: "env_r", worktree: "new-top-level", repo: "id:repoA" }), {
+      ...seed,
+      on: "env_r",
+      worktree: "new-top-level",
+      repo: "id:repoA",
+    });
+  });
+});
+
+describe("buildWorkerStartArgv wire contract (placement foundation: local modes)", () => {
+  const base = { taskId: "task_a", agent: "claude", runId: "run_a", from: "term_c" };
+  const CREATION_FLAGS = ["--repo", "--name", "--base-branch", "--display-name", "--comment", "--setup"];
+
+  function assertNoCreationFlags(argv: string[], note: string): void {
+    for (const flag of CREATION_FLAGS) {
+      assert.ok(!argv.includes(flag), `${note}: ${flag} must never appear`);
+    }
+  }
+
+  it("local current stays byte-identical to the pre-foundation shape (no creation flags)", () => {
+    const argv = buildWorkerStartArgv({ ...base }, "req_c1");
+    assert.deepEqual(argv, [
+      "orchestration",
+      "worker-start",
+      "--task",
+      "task_a",
+      "--agent",
+      "claude",
+      "--worktree",
+      "current",
+      "--run",
+      "run_a",
+      "--from",
+      "term_c",
+      "--retry-request",
+      "req_c1",
+    ]);
+    assertNoCreationFlags(argv, "current");
+  });
+
+  it("local exact-existing carries the full selector verbatim and no creation flags", () => {
+    const argv = buildWorkerStartArgv({ ...base, worktree: "id:repoA::/srv/ws" }, "req_c2");
+    assert.ok(argv.includes("--worktree") && argv.includes("id:repoA::/srv/ws"));
+    assertNoCreationFlags(argv, "existing");
+  });
+
+  it("local new-child carries --name + every creation flag and never --repo", () => {
+    const argv = buildWorkerStartArgv(
+      {
+        ...base,
+        worktree: "new-child",
+        name: "kid-wt",
+        baseBranch: "feature/x",
+        displayName: "Kid lane",
+        comment: "stacked",
+        setup: "inherit",
+      },
+      "req_c3",
+    );
+    assert.ok(argv.includes("--worktree") && argv.includes("new-child"));
+    // Everything after --name is exactly the creation block, in order.
+    assert.deepEqual(argv.slice(argv.indexOf("--name")), [
+      "--name",
+      "kid-wt",
+      "--base-branch",
+      "feature/x",
+      "--display-name",
+      "Kid lane",
+      "--comment",
+      "stacked",
+      "--setup",
+      "inherit",
+    ]);
+    assert.ok(!argv.includes("--repo"), "new-child must never carry --repo");
+  });
+
+  it("local new-top-level carries --repo + --name + creation flags", () => {
+    const argv = buildWorkerStartArgv(
+      {
+        ...base,
+        worktree: "new-top-level",
+        repo: "id:repoA",
+        name: "top-wt",
+        baseBranch: "main",
+        setup: "skip",
+      },
+      "req_c4",
+    );
+    assert.ok(argv.includes("--worktree") && argv.includes("new-top-level"));
+    assert.deepEqual(
+      argv.slice(argv.indexOf("--repo")),
+      ["--repo", "id:repoA", "--name", "top-wt", "--base-branch", "main", "--setup", "skip"],
+    );
+  });
+
+  it("absent creation fields emit absent flags (no empty --setup/--comment padding)", () => {
+    const argv = buildWorkerStartArgv({ ...base, worktree: "new-child", name: "kid" }, "req_c5");
+    assert.ok(argv.includes("--name") && argv.includes("kid"));
+    assertNoCreationFlags(
+      argv.filter((a) => a !== "--name" && a !== "kid"),
+      "nameless creation fields",
+    );
+  });
+});
+
+describe("placement foundation: supervised starts through the fake CLI", () => {
+  it("derives the worktree name for a local nameless new-child start and preserves the receipt", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      workerStart: {
+        dispatchId: "ctx_f1",
+        status: "ready",
+        worktree: "new-child",
+        launch: { name: deriveWorktreeName("run_f", "task_f1") },
+      },
+    });
+    const started = await startSupervisedWorker({
+      taskId: "task_f1",
+      agent: "claude",
+      runId: "run_f",
+      from: "term_c",
+      worktree: "new-child",
+      setup: "inherit",
+    });
+    const call = readLog().find((c) => c.argv[1] === "worker-start")!;
+    // runOrca appends --json, so the log's argv carries it as a trailing entry.
+    const argvNoJson = call.argv.filter((a) => a !== "--json");
+    assert.ok(call.argv.includes("--worktree") && call.argv.includes("new-child"));
+    assert.deepEqual(
+      argvNoJson.slice(argvNoJson.indexOf("--name")),
+      ["--name", deriveWorktreeName("run_f", "task_f1"), "--setup", "inherit"],
+      "the derived name is baked into the exact argv",
+    );
+    assert.ok(!call.argv.includes("--repo"), "no --repo on a child");
+    assert.equal(started.dispatchId, "ctx_f1");
+    assert.equal(started.receipt?.effective.name, deriveWorktreeName("run_f", "task_f1"));
+  });
+
+  it("sends the full local new-top-level creation flags and never touches Git", async () => {
+    useRuntime({ workspace: root });
+    writeScript({ workerStart: { dispatchId: "ctx_f2", status: "ready", worktree: "new-top-level" } });
+    const started = await startSupervisedWorker({
+      taskId: "task_f2",
+      agent: "codex",
+      runId: "run_f",
+      from: "term_c",
+      worktree: "new-top-level",
+      repo: "id:repoA",
+      name: "top-wt",
+      baseBranch: "main",
+      displayName: "Top lane",
+      comment: "independent lane",
+      setup: "skip",
+    });
+    const call = readLog().find((c) => c.argv[1] === "worker-start")!;
+    const argvNoJson = call.argv.filter((a) => a !== "--json");
+    assert.deepEqual(argvNoJson.slice(argvNoJson.indexOf("--repo")), [
+      "--repo",
+      "id:repoA",
+      "--name",
+      "top-wt",
+      "--base-branch",
+      "main",
+      "--display-name",
+      "Top lane",
+      "--comment",
+      "independent lane",
+      "--setup",
+      "skip",
+    ]);
+    assert.equal(started.dispatchId, "ctx_f2");
+    // The adapter's contract: creation happens ONLY through worker-start —
+    // no `git worktree` command is spawned, ever.
+    assert.ok(readLog().every((c) => !c.argv.includes("git")), "no git invocation");
+  });
+
+  it("refuses local creation-flag misuse WITHOUT spawning the CLI", async () => {
+    useRuntime({ workspace: root });
+    const callsBefore = readLog().length;
+    await assert.rejects(
+      startSupervisedWorker({
+        taskId: "task_f3",
+        agent: "claude",
+        runId: "run_f",
+        from: "term_c",
+        worktree: "current",
+        name: "sneaky",
+      }),
+      (err: OrcaCliError) => err.code === "invalid_argument" && /creation flags/.test(err.message),
+    );
+    await assert.rejects(
+      startSupervisedWorker({
+        taskId: "task_f3",
+        agent: "claude",
+        runId: "run_f",
+        from: "term_c",
+        worktree: "new-child",
+        name: "kid",
+        repo: "id:repoA",
+      }),
+      (err: OrcaCliError) => err.code === "invalid_argument" && /--repo/.test(err.message),
+    );
+    assert.equal(readLog().length, callsBefore, "no Orca mutation may be attempted");
+  });
+});
+
+describe("placement foundation: exact worktree/repo revalidation (fake CLI)", () => {
+  it("showWorktree returns the discovered row for an exact selector", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      worktrees: [
+        {
+          id: "id:repoA::/srv/ws",
+          repoId: "repoA",
+          path: "/srv/ws",
+          displayName: "ws",
+          branch: "refs/heads/main",
+          hostId: null,
+          parentWorktreeId: null,
+          isMainWorktree: false,
+        },
+      ],
+    });
+    const row = await showWorktree("id:repoA::/srv/ws");
+    assert.equal(row?.id, "id:repoA::/srv/ws");
+    assert.equal(row?.path, "/srv/ws");
+    const call = readLog().find((c) => c.argv[0] === "worktree" && c.argv[1] === "show")!;
+    assert.ok(call.argv.includes("--worktree") && call.argv.includes("id:repoA::/srv/ws"));
+  });
+
+  it("showWorktree nulls an unknown selector and never throws a transport error for it", async () => {
+    useRuntime({ workspace: root });
+    writeScript({ worktrees: [] });
+    assert.equal(await showWorktree("id:ghost::/nowhere"), null);
+  });
+
+  it("showRepo returns the registered repo and nulls an unknown selector", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      repos: [{ id: "repoA", path: "/srv/repo", displayName: "repo-a", kind: "git", executionHostId: "ssh:h1" }],
+    });
+    const repo: OrcaRepoRow | null = await showRepo("id:repoA");
+    assert.equal(repo?.id, "repoA");
+    assert.equal(repo?.kind, "git");
+    assert.equal(await showRepo("id:ghost"), null);
+  });
+
+  it("scopes revalidation through --environment when one is named", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      worktrees: [{ id: "id:repoA::/srv/remote", repoId: "repoA", path: "/srv/remote" }],
+    });
+    const row = await showWorktree("id:repoA::/srv/remote", "env_remote");
+    assert.equal(row?.id, "id:repoA::/srv/remote");
+    const call = readLog().find((c) => c.argv[0] === "worktree" && c.argv[1] === "show")!;
+    assert.ok(call.argv.includes("--environment") && call.argv.includes("env_remote"));
+  });
+});
+
+// --- Operations epic: abandon, focus, paged Runs, exact lookup, file review,
+// --- worktree removal, umbrella capabilities --------------------------------
+
+describe("abandonWorkerReceipt (fake CLI)", () => {
+  it("sends worker-abandon under a durable retry-request id and parses the receipt", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      workerAbandon: {
+        result: {
+          dispatchId: "ctx_ab",
+          state: "abandoned",
+          alreadySettled: false,
+          processAction: null,
+          warning: "resources may remain live",
+        },
+      },
+    });
+    const receipt = await abandonWorkerReceipt("ctx_ab", { retryRequestId: "req_fixed" });
+    assert.equal(receipt.dispatchId, "ctx_ab");
+    assert.equal(receipt.state, "abandoned");
+    assert.equal(receipt.alreadySettled, false);
+    assert.equal(receipt.processAction, null, "abandon performs no process action");
+    assert.equal(receipt.warning, "resources may remain live");
+    assert.equal(receipt.requestId, "req_fixed", "the durable request id is echoed back");
+    assert.equal(receipt.raw.state, "abandoned", "verbatim lifecycle evidence is preserved");
+    const call = readLog().find((c) => c.argv[1] === "worker-abandon")!;
+    assert.deepEqual(call.argv.slice(0, 6), [
+      "orchestration",
+      "worker-abandon",
+      "--dispatch",
+      "ctx_ab",
+      "--retry-request",
+      "req_fixed",
+    ]);
+    assert.ok(call.argv.includes("--json"));
+  });
+
+  it("preserves evidence and fails closed when the abandon response is lost", async () => {
+    useRuntime({ workspace: root });
+    writeScript({ workerAbandon: { rawError: "segmentation fault (core dumped)", exitCode: 2 } });
+    await assert.rejects(
+      abandonWorkerReceipt("ctx_lost", { retryRequestId: "req_lost" }),
+      (err: unknown) => {
+        assert.ok(err instanceof OrcaCliError);
+        assert.equal((err as OrcaCliError).code, RESPONSE_LOST);
+        assert.match((err as Error).message, /worker-abandon/, "the full argv stays in the evidence");
+        return true;
+      },
+    );
+    // No blind replay: resolving a lost mutation is request-show's job with
+    // the SAME id — the adapter itself must not fire a second mutation.
+    assert.equal(readLog().filter((c) => c.argv[1] === "worker-abandon").length, 1);
+  });
+
+  it("keeps the runtime's typed refusal verbatim instead of swallowing it", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      workerAbandon: {
+        rawError: JSON.stringify({ ok: false, error: { code: "consumer_fenced", message: "fenced" } }),
+        exitCode: 1,
+      },
+    });
+    await assert.rejects(
+      abandonWorkerReceipt("ctx_fenced", { retryRequestId: "req_fenced" }),
+      (err: unknown) => {
+        assert.ok(err instanceof OrcaCliError);
+        assert.equal((err as OrcaCliError).code, "consumer_fenced");
+        return true;
+      },
+    );
+  });
+});
+
+describe("focusTerminal (fake CLI)", () => {
+  it("switches to the exact runtime-issued handle and nothing else", async () => {
+    useRuntime({ workspace: root });
+    writeScript({ terminalSwitch: { switched: true, handle: "term_exact" } });
+    const receipt = await focusTerminal("term_exact");
+    assert.equal(receipt.handle, "term_exact");
+    assert.equal(receipt.raw.switched, true);
+    const call = readLog().find((c) => c.argv[0] === "terminal" && c.argv[1] === "switch")!;
+    assert.deepEqual(call.argv.slice(0, 4), ["terminal", "switch", "--terminal", "term_exact"]);
+  });
+
+  it("refuses an empty handle locally without spawning the CLI", async () => {
+    useRuntime({ workspace: root });
+    await assert.rejects(
+      focusTerminal("   "),
+      (err: unknown) => {
+        assert.ok(err instanceof OrcaCliError);
+        assert.equal((err as OrcaCliError).code, "invalid_argument");
+        return true;
+      },
+    );
+    assert.equal(readLog().length, 0, "no ambient focus target may ever be resolved");
+  });
+});
+
+describe("listRuns cursor pagination (fake CLI)", () => {
+  const run = (id: string, created_at: string, legacy = 0) => ({
+    id,
+    objective: id,
+    coordinator_handle: null,
+    consumer_generation: 1,
+    legacy,
+    created_at,
+    updated_at: created_at,
+  });
+
+  it("follows top-level run-list cursors and preserves the legacy filter + newest-first order", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      runPages: {
+        __first__: {
+          runs: [run("run_new", "2026-09-22T01:00:00Z"), run("run_tomb", "2026-09-22T00:59:00Z", 1)],
+          nextCursor: "cur+/=1",
+        },
+        "cur+/=1": { runs: [], nextCursor: "cur2" },
+        cur2: { runs: [run("run_old", "2026-09-21T00:00:00Z")], nextCursor: null },
+      },
+    });
+    const runs = await listRuns();
+    assert.deepEqual(
+      runs.map((r) => r.id),
+      ["run_new", "run_old"],
+      "empty middle pages are followed and the tombstone stays filtered",
+    );
+    const calls = readLog().filter((c) => c.argv[1] === "run-list");
+    assert.equal(calls.length, 3);
+    assert.deepEqual(calls[0].argv.slice(0, 4), ["orchestration", "run-list", "--limit", "100"]);
+    assert.ok(!calls[0].argv.includes("--cursor"), "the first page carries no cursor");
+    assert.equal(calls[1].argv[calls[1].argv.indexOf("--cursor") + 1], "cur+/=1");
+    assert.equal(calls[2].argv[calls[2].argv.indexOf("--cursor") + 1], "cur2");
+  });
+
+  it("refuses an endless pagination loop instead of spinning", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      runPages: {
+        __first__: { runs: [run("run_a", "2026-09-22T00:00:00Z")], nextCursor: "same" },
+        same: { runs: [], nextCursor: "same" },
+      },
+    });
+    await assert.rejects(listRuns(), (err: unknown) => {
+      assert.ok(err instanceof OrcaCliError);
+      assert.equal((err as OrcaCliError).code, "invalid_pagination");
+      assert.match((err as Error).message, /repeated nextCursor/);
+      return true;
+    });
+  });
+});
+
+describe("showRun exact lookup (fake CLI)", () => {
+  it("returns the row for an exact id and nulls only Orca's own run_not_found", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      runsById: {
+        run_known: {
+          id: "run_known",
+          objective: "o",
+          coordinator_handle: "term_c",
+          consumer_generation: 1,
+          legacy: 0,
+          created_at: "t",
+          updated_at: "t",
+        },
+      },
+    });
+    const run = await showRun("run_known");
+    assert.equal(run?.coordinator_handle, "term_c");
+    const call = readLog().find((c) => c.argv[1] === "run-show")!;
+    assert.deepEqual(call.argv.slice(0, 4), ["orchestration", "run-show", "--id", "run_known"]);
+    assert.equal(await showRun("run_missing"), null, "a definite absence stays null");
+  });
+
+  it("never re-answers a lost response as 'no such Run' — contact loss throws", async () => {
+    useRuntime({ workspace: root });
+    writeScript({ runShow: { rawError: "connection reset", exitCode: 1 } });
+    await assert.rejects(showRun("run_x"), (err: unknown) => {
+      assert.ok(err instanceof OrcaCliError);
+      assert.equal((err as OrcaCliError).code, RESPONSE_LOST);
+      return true;
+    });
+  });
+});
+
+describe("workspace file review (fake CLI)", () => {
+  it("opens one file against an exact worktree selector", async () => {
+    useRuntime({ workspace: root });
+    writeScript({ fileResult: { path: "src/App.tsx", worktree: "id:repo::/srv/ws" } });
+    const receipt = await openWorkspaceFile("src/App.tsx", { worktree: "id:repo::/srv/ws" });
+    assert.equal(receipt.path, "src/App.tsx");
+    assert.equal(receipt.worktree, "id:repo::/srv/ws");
+    const call = readLog().find((c) => c.argv[0] === "file")!;
+    assert.deepEqual(call.argv.slice(0, 5), [
+      "file",
+      "open",
+      "src/App.tsx",
+      "--worktree",
+      "id:repo::/srv/ws",
+    ]);
+  });
+
+  it("diffs with --staged only when requested", async () => {
+    useRuntime({ workspace: root });
+    await openWorkspaceFileDiff("src/App.tsx", { staged: true });
+    await openWorkspaceFileDiff("README.md");
+    const calls = readLog().filter((c) => c.argv[0] === "file" && c.argv[1] === "diff");
+    assert.equal(calls.length, 2);
+    assert.ok(calls[0].argv.includes("--staged"));
+    assert.ok(!calls[1].argv.includes("--staged"), "unstaged is the default and sends no flag");
+    assert.equal(calls[1].argv[2], "README.md");
+  });
+
+  it("refuses an empty path locally without spawning the CLI", async () => {
+    useRuntime({ workspace: root });
+    await assert.rejects(
+      openWorkspaceFile("   "),
+      (err: unknown) => {
+        assert.ok(err instanceof OrcaCliError);
+        assert.equal((err as OrcaCliError).code, "invalid_argument");
+        return true;
+      },
+    );
+    await assert.rejects(
+      openWorkspaceFileDiff(""),
+      (err: unknown) => {
+        assert.equal((err as OrcaCliError).code, "invalid_argument");
+        return true;
+      },
+    );
+    assert.equal(readLog().length, 0, "no ambient file target may ever be resolved");
+  });
+
+  it("passes --mode through and refuses modes outside the documented union locally", async () => {
+    useRuntime({ workspace: root });
+    await openWorkspaceChangedFiles({ mode: "both", worktree: "active" });
+    const call = readLog().find((c) => c.argv[1] === "open-changed")!;
+    assert.deepEqual(call.argv.slice(0, 6), [
+      "file",
+      "open-changed",
+      "--mode",
+      "both",
+      "--worktree",
+      "active",
+    ]);
+    await assert.rejects(
+      openWorkspaceChangedFiles({ mode: "revert" as unknown as WorkspaceChangedMode }),
+      (err: unknown) => {
+        assert.ok(err instanceof OrcaCliError);
+        assert.equal((err as OrcaCliError).code, "invalid_argument");
+        return true;
+      },
+    );
+    assert.equal(
+      readLog().filter((c) => c.argv[1] === "open-changed").length,
+      1,
+      "the invalid mode never reached the CLI",
+    );
+  });
+});
+
+describe("worktree rm with archive-hook semantics (fake CLI)", () => {
+  it("pins run-hooks + waiver argv and preserves archiveHookOverride verbatim", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      worktreeRm: {
+        result: { removed: true, archiveHookOverride: { hook: "orca.yaml:archive", exitCode: 3 } },
+      },
+    });
+    const receipt = await removeWorktree("id:repo::/srv/ws", {
+      runHooks: true,
+      allowFailedArchiveHook: true,
+    });
+    assert.equal(receipt.worktree, "id:repo::/srv/ws");
+    assert.deepEqual(receipt.archiveHookOverride, { hook: "orca.yaml:archive", exitCode: 3 });
+    const call = readLog().find((c) => c.argv[0] === "worktree" && c.argv[1] === "rm")!;
+    assert.deepEqual(call.argv.slice(0, 4), ["worktree", "rm", "--worktree", "id:repo::/srv/ws"]);
+    assert.ok(call.argv.includes("--run-hooks"));
+    assert.ok(call.argv.includes("--allow-failed-archive-hook"));
+    assert.ok(!call.argv.includes("--force"));
+  });
+
+  it("refuses the waiver without --run-hooks locally, never spawning the CLI", async () => {
+    useRuntime({ workspace: root });
+    await assert.rejects(
+      removeWorktree("id:repo::/srv/ws", { allowFailedArchiveHook: true }),
+      (err: unknown) => {
+        assert.ok(err instanceof OrcaCliError);
+        assert.equal((err as OrcaCliError).code, "invalid_argument");
+        return true;
+      },
+    );
+    assert.equal(readLog().length, 0, "the documented precondition fails before any call");
+  });
+
+  it("fails closed on a blocking archive hook: typed evidence, no auto-waiver", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      worktreeRm: {
+        fail: true,
+        error: { code: "worktree_archive_hook_failed", message: "archive hook 'archive' exited 3" },
+      },
+    });
+    await assert.rejects(
+      removeWorktree("id:repo::/srv/ws", { runHooks: true, force: true }),
+      (err: unknown) => {
+        // --force must NOT waive a failed archive hook (documented), so the
+        // typed failure surfaces verbatim and nothing was removed.
+        assert.ok(isArchiveHookFailure(err));
+        assert.equal((err as OrcaCliError).code, "worktree_archive_hook_failed");
+        assert.match((err as Error).message, /archive hook/);
+        return true;
+      },
+    );
+    const calls = readLog().filter((c) => c.argv[0] === "worktree" && c.argv[1] === "rm");
+    assert.equal(calls.length, 1, "the adapter never retries with --allow-failed-archive-hook on its own");
+    assert.ok(calls[0].argv.includes("--force"), "force is passed but cannot waive a hook failure");
+  });
+
+  it("keeps base argv minimal and skips hooks unless --run-hooks is requested", async () => {
+    useRuntime({ workspace: root });
+    writeScript({ worktreeRm: { result: { removed: true } } });
+    const receipt = await removeWorktree("id:repo::/srv/ws");
+    assert.equal(receipt.worktree, "id:repo::/srv/ws");
+    assert.equal(receipt.archiveHookOverride, null);
+    const call = readLog().find((c) => c.argv[0] === "worktree" && c.argv[1] === "rm")!;
+    assert.deepEqual(call.argv.slice(0, 4), ["worktree", "rm", "--worktree", "id:repo::/srv/ws"]);
+    assert.ok(!call.argv.includes("--run-hooks"));
+    assert.ok(!call.argv.includes("--allow-failed-archive-hook"));
+    assert.ok(!call.argv.includes("--force"));
+  });
+});
+
+describe("computer capabilities umbrella parsing", () => {
+  it("flattens the supports umbrella and gates support on positive booleans only", () => {
+    const cap = parseComputerCapabilities({
+      platform: "linux",
+      provider: "orca-computer-use-linux",
+      providerVersion: "1.0.0",
+      protocolVersion: 1,
+      supports: {
+        windows: { list: true, focus: false },
+        actions: { click: true, hotkey: false },
+        meta: { revision: 7 },
+        futureGroup: { nextThing: true },
+      },
+    });
+    assert.equal(cap.platform, "linux");
+    assert.equal(cap.provider, "orca-computer-use-linux");
+    assert.equal(cap.providerVersion, "1.0.0");
+    assert.equal(cap.protocolVersion, 1);
+    assert.equal(cap.advertised, true);
+    assert.equal(computerSupports(cap, "windows", "focus"), false, "a false leaf is unsupported");
+    assert.equal(computerSupports(cap, "actions", "click"), true);
+    assert.equal(computerSupports(cap, "actions", "hotkey"), false);
+    assert.equal(computerSupports(cap, "windows", "typeText"), false, "a missing leaf is unsupported");
+    assert.equal(
+      computerSupports(cap, "meta", "revision"),
+      false,
+      "non-boolean leaves carry no capability claim",
+    );
+    assert.equal(
+      computerSupports(cap, "futureGroup", "nextThing"),
+      true,
+      "unknown newer groups still parse verbatim",
+    );
+    assert.equal((cap.raw.futureGroup as Record<string, unknown>).nextThing, true);
+  });
+
+  it("treats a receipt without a supports map as 'nothing advertised' (fail closed)", () => {
+    const cap: ComputerUseCapabilities = parseComputerCapabilities({ platform: "linux" });
+    assert.equal(cap.advertised, false);
+    assert.deepEqual(cap.capabilities, []);
+    assert.equal(computerSupports(cap, "actions", "click"), false);
+  });
+
+  it("fetches through the resolved CLI with the exact two-verb argv", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      computerCapabilities: {
+        result: {
+          platform: "linux",
+          provider: "p",
+          providerVersion: "1",
+          protocolVersion: 1,
+          supports: { actions: { click: true } },
+        },
+      },
+    });
+    const cap = await fetchComputerCapabilities();
+    assert.equal(computerSupports(cap, "actions", "click"), true);
+    const call = readLog().find((c) => c.argv[0] === "computer")!;
+    assert.deepEqual(call.argv, ["computer", "capabilities", "--json"]);
+  });
+
+  it("propagates response loss as an error instead of an empty capability set", async () => {
+    useRuntime({ workspace: root });
+    writeScript({ computerCapabilities: { rawError: "killed", exitCode: 9 } });
+    await assert.rejects(fetchComputerCapabilities(), (err: unknown) => {
+      assert.ok(err instanceof OrcaCliError);
+      assert.equal((err as OrcaCliError).code, RESPONSE_LOST);
+      return true;
+    });
   });
 });

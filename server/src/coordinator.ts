@@ -4,12 +4,14 @@ import {
   checkInbox,
   closeTerminal,
   closeTerminalStrict,
+  deriveWorktreeName,
   ensureCoordinatorTerminal,
   followableNextAction,
   getOrcaRuntime,
   listGates,
   listTasks,
   listTerminals,
+  listWorktrees,
   listWorkers,
   newRequestId,
   normalizeLiveness,
@@ -22,12 +24,15 @@ import {
   replyToMessage,
   retainWorker,
   runNextAction,
+  runOrca,
   showEnvironment,
   showRun,
+  showWorktree,
   startLegacyWorker,
   startSupervisedWorker,
   stopWorkerReceipt,
   taskUpdate,
+  type Gate,
   type OrcaMessage,
   type OrcaDelivery,
   type OrcaTask,
@@ -38,7 +43,7 @@ import {
   type WorkerTerminalReceipt,
 } from "./orca";
 import type { MutationRequestMeta } from "./requestLedger";
-import type { PlacementSpec } from "./config";
+import type { LaneSeedPlacement, PlacementSpec, WorktreeLaneSpec } from "./config";
 
 /**
  * Self-driven coordinator (Phase 3: closed supervised-worker lifecycle).
@@ -68,6 +73,245 @@ import type { PlacementSpec } from "./config";
  * coordinator owns one (`ensureCoordinatorTerminal`) and binds it on start.
  * That fences whoever was bound before — see `startCoordinator`.
  */
+
+/**
+ * Workspace lanes (worktree-lanes epic) — scheduling-side lane support.
+ *
+ * A lane is ONE non-current workspace shared by a dependency-ordered task
+ * chain (`worktreeLanes` seed + `laneByTask` membership in StartOpts). The
+ * rules this module enforces, all upstream of any Orca mutation:
+ *
+ *  - A lane's member tasks must be totally ordered by dependency reachability
+ *    (`validateLaneTotalOrder`) — tasks in one lane never run concurrently,
+ *    so an unordered pair would silently serialize independent work.
+ *  - The lane's exact workspace identity is POSITIVE Orca evidence only:
+ *    a worker-start receipt echo, a worker-list launch projection, or a
+ *    worktree discovery row. A name, branch, or path from the seed is never
+ *    upgraded into a selector ("never reconstruct it from a name, branch, or
+ *    path"), and missing identity produces `unverifiable`, never a guessed
+ *    start or a replacement worktree.
+ *  - A downstream task whose dependencies cross lanes (any direct dependency
+ *    assigned to a different lane than the task's own — which subsumes "deps
+ *    span multiple lanes", since a multi-lane dep set always contains a lane
+ *    different from the task's own) is parked behind ONE idempotent Orca
+ *    decision gate carrying INTEGRATION_GATE_MARKER, whose only resolution is
+ *    `integrated`. Dependency completion is not merge evidence; only a human
+ *    assertion is.
+ *  - The coordinator performs no git operation of any kind. Every mutation
+ *    goes through the resolved Orca CLI; "integration" is asserted by a
+ *    human through the gate, never executed here.
+ */
+
+/** Stable viewer marker embedding in every integration gate's question. */
+export const INTEGRATION_GATE_MARKER = "[orca-dag:integration]";
+
+/** The ONLY resolution an integration gate offers (and accepts as unblocking). */
+export const INTEGRATION_RESOLUTION = "integrated";
+
+/**
+ * Launch-echo values that identify a MODE, not a workspace. A receipt echo
+ * carrying one of these says what the start asked for, never where the
+ * worker actually lives — adopting one as a lane selector would reconstruct
+ * placement from intent instead of evidence.
+ */
+const RESERVED_WORKTREE_ECHOES = new Set(["current", "new-child", "new-top-level", "active"]);
+
+/** The task's direct dependencies (OrcaTask.deps is a JSON string array). */
+export function taskDeps(task: Pick<OrcaTask, "deps">): string[] {
+  try {
+    const parsed = JSON.parse(task.deps || "[]");
+    return Array.isArray(parsed) ? parsed.filter((d): d is string => typeof d === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The task's lane id, or null for the IMPLICIT CURRENT lane: absence of a
+ * laneByTask entry (or of any lane at all) is the coordinator workspace the
+ * pre-lane viewer always used. Current is a real lane for classification and
+ * join detection, but — deliberately — not for serialization: unordered
+ * tasks on the coordinator workspace have always run in parallel and the
+ * two-wave DAG depends on it. Only explicit non-current lanes serialize.
+ */
+export function laneOfTask(
+  taskId: string,
+  laneByTask: Record<string, string> | null | undefined,
+): string | null {
+  return laneByTask?.[taskId] ?? null;
+}
+
+/**
+ * Cross-lane join predicate: the task's own lane differs from some direct
+ * dependency's lane. A current-lane task joining a lane's output
+ * (current-to-non-current) and a lane task joining another lane's output
+ * (non-current-to-non-current) are both joins; same-lane and all-current
+ * dependencies are not.
+ */
+export function isCrossLaneJoin(
+  task: Pick<OrcaTask, "id" | "deps">,
+  laneByTask: Record<string, string> | null | undefined,
+): boolean {
+  const own = laneOfTask(task.id, laneByTask);
+  return taskDeps(task).some((dep) => laneOfTask(dep, laneByTask) !== own);
+}
+
+/** One reason a lane's membership is not schedulable (reject BEFORE mutation). */
+export interface LaneOrderingIssue {
+  laneId: string;
+  /** unknown_task: membership names a task this Run does not have. */
+  /** unordered_pair: two members no dependency path orders against each other. */
+  kind: "unknown_task" | "unordered_pair";
+  taskIds: string[];
+  detail: string;
+}
+
+/**
+ * Validate every lane's membership as a TOTALLY DEPENDENCY-ORDERED subgraph:
+ * for each pair of tasks in one lane, a dependency path must order one
+ * against the other (transitive reachability over direct deps). Any
+ * unreachable pair would be parallel-ready at some point — exactly the
+ * concurrency a lane forbids — so the lane is rejected as a whole.
+ */
+export function validateLaneTotalOrder(
+  tasks: OrcaTask[],
+  laneByTask: Record<string, string> | null | undefined,
+): LaneOrderingIssue[] {
+  const issues: LaneOrderingIssue[] = [];
+  if (!laneByTask) return issues;
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+
+  // members per lane, preserving assignment order
+  const members = new Map<string, string[]>();
+  for (const [taskId, laneId] of Object.entries(laneByTask)) {
+    if (!members.has(laneId)) members.set(laneId, []);
+    members.get(laneId)!.push(taskId);
+  }
+
+  // Reachability closure: direct deps per task, then DFS per lane member.
+  const directDeps = new Map<string, string[]>();
+  for (const t of tasks) directDeps.set(t.id, taskDeps(t));
+  const reaches = (from: string, to: string): boolean => {
+    const seen = new Set<string>([from]);
+    const stack = [...(directDeps.get(from) ?? [])];
+    while (stack.length) {
+      const cur = stack.pop()!;
+      if (cur === to) return true;
+      if (seen.has(cur)) continue;
+      seen.add(cur);
+      stack.push(...(directDeps.get(cur) ?? []));
+    }
+    return false;
+  };
+
+  for (const [laneId, taskIds] of members) {
+    for (const taskId of taskIds) {
+      if (!byId.has(taskId)) {
+        issues.push({
+          laneId,
+          kind: "unknown_task",
+          taskIds: [taskId],
+          detail: `laneByTask.${taskId} names task ${taskId}, which does not exist in this Run`,
+        });
+      }
+    }
+    // Pairwise total-order check on the known members.
+    const known = taskIds.filter((id) => byId.has(id));
+    for (let i = 0; i < known.length; i++) {
+      for (let j = i + 1; j < known.length; j++) {
+        const a = known[i];
+        const b = known[j];
+        if (reaches(a, b) || reaches(b, a)) continue;
+        issues.push({
+          laneId,
+          kind: "unordered_pair",
+          taskIds: [a, b],
+          detail: `lane "${laneId}" members ${a} and ${b} are not ordered by any dependency path — ` +
+            `one lane runs one task at a time, so unordered work must live in different lanes`,
+        });
+      }
+    }
+  }
+  return issues;
+}
+
+/** One lane's renderable runtime projection (TECH_SPEC "Runtime projections"). */
+export type WorktreeLaneState =
+  | "planned"
+  | "creating"
+  | "active"
+  | "integration_required"
+  | "settled"
+  | "unverifiable"
+  | "removal_blocked"
+  | "removed";
+
+/** Where a lane's workspace identity came from — positive Orca evidence only. */
+export type WorktreeLaneIdentitySource =
+  | "worker_start_receipt"
+  | "worker_list"
+  | "worker_show"
+  | "worktree_show"
+  | null;
+
+export interface WorktreeLaneRuntimeView {
+  laneId: string;
+  taskIds: string[];
+  state: WorktreeLaneState;
+  selector: string | null;
+  worktreeId: string | null;
+  path: string | null;
+  branch: string | null;
+  head: string | null;
+  creationDispatchId: string | null;
+  activeDispatchIds: string[];
+  source: WorktreeLaneIdentitySource;
+  warnings: string[];
+}
+
+/** Coordinator-side lane record: the seed plus positively-adopted identity. */
+interface LaneRuntime {
+  laneId: string;
+  seed: LaneSeedPlacement;
+  /** Member task ids, assignment order. */
+  taskIds: string[];
+  /** The EXACT Orca workspace selector, once positively adopted. */
+  selector: string | null;
+  worktreeId: string | null;
+  path: string | null;
+  branch: string | null;
+  head: string | null;
+  /** The Dispatch that (possibly) created the lane's workspace. */
+  creationDispatchId: string | null;
+  source: WorktreeLaneIdentitySource;
+  /** Sticky: a creation start landed but identity never became positive. */
+  identityMissing: boolean;
+  warnings: string[];
+}
+
+/**
+ * The stable integration-gate question for one join task. The marker prefix
+ * is the durable identity: restart recovery finds the gate by Run-scoped
+ * gate-list reads + this marker (gate ids are never persisted as launch
+ * preferences), and duplicate creation is refused while one exists.
+ */
+export function integrationGateQuestion(taskId: string): string {
+  return (
+    `${INTEGRATION_GATE_MARKER} Cross-lane integration for task ${taskId}: this task joins work ` +
+    `from another workspace lane. Integrate the lane workspaces yourself (Orca-dag never merges, ` +
+    `rebases, commits, pushes, or deletes branches), then resolve "integrated".`
+  );
+}
+
+/** True when a gate row is one of THIS viewer's integration gates. */
+function isIntegrationGate(gate: Gate): boolean {
+  return gate.question.includes(INTEGRATION_GATE_MARKER);
+}
+
+/** True when the gate is resolved with the one unblocking resolution. */
+function gateIntegrated(gate: Gate | null | undefined): boolean {
+  return !!gate && gate.status === "resolved" && gate.resolution === INTEGRATION_RESOLUTION;
+}
 
 /** Launch preferences for one attempt (Phase 5): what we asked for vs what the runtime echoed back. */
 export interface LaunchPrefs {
@@ -266,6 +510,19 @@ export interface StartOpts {
    */
   placementByTask?: Record<string, PlacementSpec>;
   /**
+   * Durable workspace lanes (worktree-lanes epic): lane id → seed placement.
+   * A lane's seed is never `current` — a lane exists to share ONE non-current
+   * workspace across a dependency-ordered chain. Launch intent only: runtime
+   * identity is recovered from positive Orca evidence, never from here.
+   */
+  worktreeLanes?: Record<string, WorktreeLaneSpec>;
+  /**
+   * Task → lane membership. A member task takes its placement from its
+   * lane's seed; it must not also carry a `placementByTask` entry (the
+   * security boundary refuses the combination).
+   */
+  laneByTask?: Record<string, string>;
+  /**
    * Dispatches this viewer positively stopped earlier. A fresh POST /api/run
    * is an explicit resume decision, but only these durable identities may
    * turn a stopped `blocked` Task back into a retry. Fleet state is still the
@@ -417,6 +674,20 @@ interface State {
   recovery: RecoverySummary | null;
   /** Stopped Dispatch lineage to consume when its re-queued Task is placed. */
   retryOfByTask: Map<string, string>;
+  /**
+   * Workspace lanes (worktree-lanes epic): seed + positively-adopted identity
+   * per lane. Built at start from opts, enriched by recovery and by every
+   * start receipt / discovery read. Never persisted — Orca's own records are
+   * the durable side; this map is rebuilt from them at startup.
+   */
+  lanes: Map<string, LaneRuntime>;
+  /**
+   * TaskIds currently parked behind an unresolved integration gate (or one
+   * resolved with anything but `integrated`). Refreshed every reconcile pass;
+   * consulted by the dispatch batch, the reuse filter, and the completion
+   * boundary (a gated join holds the run open — it is human-owed work).
+   */
+  integrationParked: Set<string>;
   /** Recent check receipts for the live Chat trace, oldest first. */
   checks: CoordinatorCheckReceipt[];
   checkSequence: number;
@@ -465,6 +736,8 @@ const state: State = {
   unownedDispatches: [],
   recovery: null,
   retryOfByTask: new Map(),
+  lanes: new Map(),
+  integrationParked: new Set(),
   checks: [],
   checkSequence: 0,
 };
@@ -493,6 +766,8 @@ export function resetCoordinatorForTests(): void {
   state.unownedDispatches = [];
   state.recovery = null;
   state.retryOfByTask = new Map();
+  state.lanes = new Map();
+  state.integrationParked = new Set();
   state.checks = [];
   state.checkSequence = 0;
 }
@@ -573,6 +848,8 @@ export function coordinatorStatus() {
     lastStopReport: state.lastStopReport,
     unownedDispatches: [...state.unownedDispatches],
     recovery: state.recovery,
+    /** Workspace-lane projections (worktree-lanes epic): identity + lifecycle. */
+    worktreeLanes: laneViews(),
     checks: state.checks.map((receipt) => ({
       ...receipt,
       messageTypes: [...receipt.messageTypes],
@@ -594,6 +871,10 @@ export type CoordinatorStatus = ReturnType<typeof coordinatorStatus>;
 export async function startCoordinator(opts: StartOpts): Promise<void> {
   if (state.running) return;
   state.running = true;
+  // Supersede any loop that might still be draining its final iteration (see
+  // the generation comment above): a completing Run's loop must observe the
+  // bump and exit instead of racing this new incarnation.
+  const myLoop = ++coordinatorLoopGeneration;
   state.phase = "binding";
   state.opts = opts;
   state.attempts = new Map();
@@ -610,17 +891,48 @@ export async function startCoordinator(opts: StartOpts): Promise<void> {
   state.unownedDispatches = [];
   state.recovery = null;
   state.retryOfByTask = new Map();
+  state.lanes = new Map();
+  state.integrationParked = new Set();
   state.checks = [];
   state.checkSequence = 0;
   state.startedAt = Date.now();
 
+  // The coordinator terminal created below is PROVISIONAL until the loop is
+  // actually running: any throw after its creation — a bindRun refusal, a
+  // failed startup recovery — must close it on the way out, or the failed
+  // start leaks a pane titled for THIS workspace that turns every retry into
+  // coordinator_conflict.
+  let provisionalHandle: string | null = null;
   try {
-    // Phase 4 restart: the crashed viewer's coordinator terminal is still
-    // connected — the pane runs `sleep infinity` independently of the viewer
-    // process, so a kill leaves it behind, holding this Run's coordinator
-    // slot. The Run record names its coordinator handle: when that handle is
-    // one of OUR main-title terminals for this workspace, it is a dead
-    // incarnation of THIS Run's coordinator, not another live viewer. Taking
+    // Worktree lanes (worktree-lanes epic): validate the lane plan BEFORE any
+    // mutation — before a terminal is created, before the Run is bound, before
+    // anything can fence a previous coordinator. Two gates must pass:
+    //   1. every member task exists (a dangling membership would silently run
+    //      on `current`, which looks intended but isn't), and
+    //   2. each lane's members are totally ordered by dependency reachability —
+    //      a lane runs ONE task at a time, so unordered members would be
+    //      silently serialized. A rejected plan refuses startup loudly; it is
+    //      never "fixed" by dropping members or splitting lanes behind the
+    //      user's back.
+    if (opts.laneByTask && Object.keys(opts.laneByTask).length > 0) {
+      const laneTasks = await listTasks(opts.runId);
+      const laneIssues = validateLaneTotalOrder(laneTasks, opts.laneByTask);
+      if (laneIssues.length > 0) {
+        const first = laneIssues[0];
+        throw new OrcaCliError(
+          `Invalid workspace lane plan: ${first.detail}`,
+          "invalid_lane",
+        );
+      }
+    }
+    buildLaneRuntimes(opts);
+    // Phase 4 restart: a crashed viewer's coordinator terminal may still be
+    // connected — panes created by OLDER orca-dag builds run `sleep infinity`
+    // (no backend watcher), and even a watcher pane can outlive its process
+    // briefly, so a kill can leave the pane behind, holding this Run's
+    // coordinator slot. The Run record names its coordinator handle: when that
+    // handle is one of OUR main-title terminals for this workspace, it is a
+    // dead incarnation of THIS Run's coordinator, not another live viewer. Taking
     // the Run over (the user explicitly started it) reclaims the slot: close
     // the stale pane so ensureCoordinatorTerminal's live-viewer conflict check
     // below cannot wedge every restart. A live second viewer for the SAME run
@@ -628,6 +940,7 @@ export async function startCoordinator(opts: StartOpts): Promise<void> {
     // confirmed start behavior — so this adoption creates no new exposure.
     await adoptDeadCoordinatorTerminal(opts.runId);
     const handle = await ensureCoordinatorTerminal(opts.worktree);
+    provisionalHandle = handle;
     // The user may have hit stop while we were creating/binding — if so the
     // stop already ran with no handle to close, so close it here ourselves.
     if (!state.running) {
@@ -652,14 +965,25 @@ export async function startCoordinator(opts: StartOpts): Promise<void> {
       return;
     }
     state.phase = "running";
+    // The loop now owns the handle (stop/close flows through the normal
+    // coordinator teardown from here); the provisional guard retires.
+    provisionalHandle = null;
   } catch (err) {
     state.running = false;
     state.phase = "error";
     state.error = String((err as Error).message ?? err);
+    // bindRun refused, startup recovery threw, or stop raced the start: the
+    // provisional pane must not outlive the failed start. `closeTerminal` is
+    // best-effort (the pane may already be gone); clearing the stale handle
+    // keeps the errored projection from naming a terminal nothing owns.
+    if (provisionalHandle) {
+      await closeTerminal(provisionalHandle);
+      if (state.coordinatorHandle === provisionalHandle) state.coordinatorHandle = null;
+    }
     throw err;
   }
 
-  void loop();
+  void loop(myLoop);
 }
 
 /**
@@ -690,6 +1014,247 @@ async function adoptDeadCoordinatorTerminal(runId: string): Promise<void> {
 /** The resolved workspace hash, for coordinator-title scoping checks. */
 function getWorkspaceHash(): string {
   return getOrcaRuntime().workspace.hash;
+}
+
+/**
+ * Build the coordinator-side lane records from launch intent (StartOpts).
+ * Membership comes from `laneByTask`; a referenced lane with no entry in
+ * `worktreeLanes` cannot happen (the security boundary refuses dangling
+ * references), but this stays defensive: such a task is not silently moved to
+ * `current`, it simply has no lane record and its start refuses below.
+ */
+function buildLaneRuntimes(opts: StartOpts): void {
+  state.lanes = new Map();
+  for (const [laneId, spec] of Object.entries(opts.worktreeLanes ?? {})) {
+    state.lanes.set(laneId, {
+      laneId,
+      seed: spec.placement,
+      taskIds: Object.entries(opts.laneByTask ?? {})
+        .filter(([, id]) => id === laneId)
+        .map(([taskId]) => taskId),
+      selector: null,
+      worktreeId: null,
+      path: null,
+      branch: null,
+      head: null,
+      creationDispatchId: null,
+      source: null,
+      identityMissing: false,
+      warnings: [],
+    });
+  }
+}
+
+/**
+ * A POSITIVE exact workspace selector: non-empty and not a placement-mode
+ * literal. This is the only shape a launch echo or discovery row may take
+ * before it is adopted as a lane's reusable identity.
+ */
+function positiveSelector(value: string | null | undefined): value is string {
+  return typeof value === "string" && value.trim().length > 0 && !RESERVED_WORKTREE_ECHOES.has(value);
+}
+
+/** The worktree name a creation lane targets (explicit, else deterministic). */
+function laneWorktreeName(opts: StartOpts, lane: LaneRuntime): string {
+  const explicit =
+    lane.seed.kind === "new-child" || lane.seed.kind === "new-top-level" ? lane.seed.name : undefined;
+  return explicit ?? deriveWorktreeName(opts.runId, lane.laneId);
+}
+
+/**
+ * Adopt a positively-observed selector into a lane's identity. First positive
+ * observation wins; a LATER observation that disagrees is a conflict — kept
+ * as a warning, never silently overwritten (two workspaces claiming one lane
+ * means something is wrong that a human must look at).
+ */
+function adoptLaneSelector(
+  lane: LaneRuntime,
+  selector: string,
+  source: Exclude<WorktreeLaneIdentitySource, null>,
+  extra: { worktreeId?: string | null; path?: string | null; branch?: string | null } = {},
+): void {
+  if (lane.selector && lane.selector !== selector) {
+    const warning = `conflicting workspace identity evidence: "${selector}" (${source}) vs adopted "${lane.selector}"`;
+    if (!lane.warnings.includes(warning)) lane.warnings.push(warning);
+    return;
+  }
+  if (lane.selector) return; // already adopted — idempotent
+  lane.selector = selector;
+  lane.worktreeId = extra.worktreeId ?? selector;
+  lane.path = extra.path ?? null;
+  lane.branch = extra.branch ?? null;
+  lane.source = source;
+  lane.identityMissing = false;
+}
+
+/**
+ * Recovery of a lane's workspace identity from Orca's durable records
+ * (restart adoption). Evidence is tried in honesty order:
+ *
+ *  1. worker-list launch projections of the lane's own Dispatches — the
+ *     runtime's durable echo of where each worker actually runs. A single
+ *     distinct exact selector is adopted; MULTIPLE distinct selectors are a
+ *     conflict (surfaced, never resolved by picking one);
+ *  2. worktree discovery by the lane's exact (explicit or deterministic)
+ *     name — the positive record a creating start left behind even when no
+ *     launch echo survived. A discovery match adopts the ROW's exact id as
+ *     the selector; the name itself is never used as one.
+ *
+ * Neither source answering is not an error: a planned lane simply has no
+ * identity yet. Nothing here ever synthesizes, guesses, or replaces a
+ * workspace.
+ */
+async function recoverLaneIdentity(opts: StartOpts, rows: OrcaWorkerRow[]): Promise<void> {
+  if (state.lanes.size === 0) return;
+  for (const lane of state.lanes.values()) {
+    const memberTaskIds = new Set(lane.taskIds);
+    const echoes = new Set<string>();
+    for (const row of rows) {
+      if (!memberTaskIds.has(row.taskId)) continue;
+      const echo = row.projection?.launch?.worktree ?? null;
+      if (positiveSelector(echo)) echoes.add(echo);
+    }
+    if (echoes.size === 1) {
+      adoptLaneSelector(lane, [...echoes][0], "worker_list");
+      continue;
+    }
+    if (echoes.size > 1) {
+      lane.warnings.push(
+        `worker-list reports conflicting workspaces for this lane: ${[...echoes].join(", ")} — ` +
+          `no selector is adopted until the conflict is resolved`,
+      );
+      continue;
+    }
+    await discoverLaneIdentity(opts, lane);
+    // Rows exist for this lane's tasks but NO row names its workspace, and
+    // discovery found nothing: the lane ran, its identity did not survive.
+    // The verdict is sticky so a later lane task REFUSES instead of running a
+    // creation start that could mint a replacement workspace.
+    const everDispatched = rows.some((r) => memberTaskIds.has(r.taskId));
+    if (everDispatched && lane.seed.kind !== "existing" && !lane.selector) {
+      lane.identityMissing = true;
+      lane.warnings.push(
+        "Orca rows show this lane's work ran, but none names its workspace — identity is " +
+          "unverifiable, so further lane starts are refused until positive evidence exists",
+      );
+    }
+  }
+}
+
+/**
+ * Positive discovery of a creation lane's workspace by exact name match in
+ * Orca's own worktree listing. The deterministic per-(Run, lane) name is what
+ * makes this safe: only a row Orca itself names exactly that is evidence, and
+ * what gets adopted is the row's EXACT id (never the name). Ambiguous
+ * matches (two rows) are refused as unverifiable.
+ */
+async function discoverLaneIdentity(opts: StartOpts, lane: LaneRuntime): Promise<void> {
+  if (lane.seed.kind === "existing") return; // existing lanes carry their selector in the seed
+  const name = laneWorktreeName(opts, lane);
+  let rows: Awaited<ReturnType<typeof listWorktrees>>;
+  try {
+    rows = await listWorktrees();
+  } catch (err) {
+    lane.warnings.push(
+      `worktree discovery failed: ${String((err as Error).message ?? err)} — identity stays unproven`,
+    );
+    return;
+  }
+  const matches = rows.filter((r) => r.displayName === name || r.path?.endsWith(`/${name}`));
+  if (matches.length === 1) {
+    const row = matches[0];
+    adoptLaneSelector(lane, row.id, "worktree_show", {
+      worktreeId: row.id,
+      path: row.path,
+      branch: row.branch,
+    });
+  } else if (matches.length > 1) {
+    lane.warnings.push(
+      `worktree discovery found ${matches.length} workspaces named "${name}" — ambiguous, nothing adopted`,
+    );
+  }
+}
+
+/**
+ * The lane's renderable projection, derived fresh from the attempt map so a
+ * status read never shows a stale lifecycle. State precedence (top wins):
+ * human-owed integration > missing identity > in-flight creation > active
+ * work > never started > all members settled.
+ */
+function laneViews(): WorktreeLaneRuntimeView[] {
+  const opts = state.opts;
+  if (!opts || state.lanes.size === 0) return [];
+  const views: WorktreeLaneRuntimeView[] = [];
+  for (const lane of state.lanes.values()) {
+    const attempts = lane.taskIds
+      .map((taskId) => state.attempts.get(taskId))
+      .filter((a): a is NonNullable<typeof a> => !!a);
+    const anyUnsettled = attempts.some((a) => !a.settled);
+    const anyParked = lane.taskIds.some((taskId) => state.integrationParked.has(taskId));
+    let derived: WorktreeLaneState;
+    if (anyParked) {
+      derived = "integration_required";
+    } else if (lane.identityMissing || (lane.seed.kind !== "existing" && !lane.selector && lane.creationDispatchId)) {
+      derived = "unverifiable";
+    } else if (anyUnsettled && !lane.selector && lane.seed.kind !== "existing") {
+      derived = "creating";
+    } else if (attempts.length === 0) {
+      derived = "planned";
+    } else if (anyUnsettled || attempts.length < lane.taskIds.length) {
+      derived = "active";
+    } else {
+      derived = "settled";
+    }
+    views.push({
+      laneId: lane.laneId,
+      taskIds: [...lane.taskIds],
+      state: derived,
+      selector: lane.selector,
+      worktreeId: lane.worktreeId,
+      path: lane.path,
+      branch: lane.branch,
+      head: lane.head,
+      creationDispatchId: lane.creationDispatchId,
+      activeDispatchIds: attempts.filter((a) => !a.settled && a.dispatchId).map((a) => a.dispatchId!),
+      source: lane.source,
+      warnings: [...lane.warnings],
+    });
+  }
+  return views.sort((a, b) => (a.laneId < b.laneId ? -1 : 1));
+}
+
+/**
+ * Create the ONE integration decision gate for a cross-lane join task:
+ * stable viewer marker in the question, `integrated` as the only option, bound
+ * to the task so Orca itself holds it out of dispatch. Idempotency lives in
+ * the marker + task binding: the caller only creates after a Run-scoped
+ * gate-list read found no marker gate for the task, so a restarted viewer (or
+ * a lost create response that actually landed) converges on exactly one gate.
+ * Gate ids are never persisted as launch preferences — recovery re-reads them.
+ */
+async function createIntegrationGate(task: OrcaTask): Promise<void> {
+  const from = state.coordinatorHandle!;
+  try {
+    await runOrca([
+      "orchestration",
+      "gate-create",
+      "--task",
+      task.id,
+      "--question",
+      integrationGateQuestion(task.id),
+      "--options",
+      JSON.stringify([INTEGRATION_RESOLUTION]),
+      "--from",
+      from,
+    ]);
+  } catch (err) {
+    // The join stays parked either way — an uncreated gate can never be
+    // resolved, so the task must not run this pass. The error surfaces; the
+    // next pass re-checks existence and retries the create (a create that
+    // DID land despite the error is found by the marker read, not repeated).
+    const detail = String((err as Error).message ?? err);
+    state.error = `Failed to create integration gate for task ${task.id}: ${detail}`;
+  }
 }
 
 /**
@@ -864,6 +1429,13 @@ async function recoverState(opts: StartOpts): Promise<void> {
     }
   }
 
+  // Worktree lanes: adopt each lane's workspace identity from the same
+  // authoritative rows the attempts were rebuilt from (plus, when no launch
+  // echo survives, positive worktree discovery). Runs before the dispatch
+  // loop starts so a lane's SECOND task already reuses the exact selector —
+  // restart adoption is what makes a lane durable across viewer restarts.
+  await recoverLaneIdentity(opts, rows);
+
   state.recovery = summary;
 }
 
@@ -1031,6 +1603,8 @@ export async function stopCoordinator(): Promise<StopReport> {
   state.pendingDeliveryId = null;
   state.inbox = [];
   state.pendingOwnership = new Set();
+  state.lanes = new Map();
+  state.integrationParked = new Set();
   state.lastStopReport = {
     results,
     clean: results.every((r) => r.result !== "unknown"),
@@ -1205,9 +1779,26 @@ export function shouldPersistCoordinatorCheck(
   return checkAgentState(receipt) !== checkAgentState(previous);
 }
 
-async function loop(): Promise<void> {
+/**
+ * How many dispatch loops have been started. Every `startCoordinator` bumps
+ * the generation BEFORE its slow startup awaits, and hands its own number to
+ * `loop`; a loop whose generation was superseded exits at its next gate.
+ *
+ * Why this exists: a Run that COMPLETES can be restarted immediately (the
+ * user clicks Run again). The completion boundary runs inside the loop's own
+ * reconcile and awaits `closeTerminalStrict` — and that await yields to the
+ * test/caller, which can observe `completed` and start the next coordinator
+ * BEFORE the old loop reaches its `!state.running` break. Without a
+ * generation guard the old loop sees `running` flipped back to true and a
+ * SECOND dispatch loop runs against reset state (null Run, stale opts), able
+ * to place tasks with the previous Run's launch preferences. Observed live by
+ * the lane restart-adoption test (2026-09-22).
+ */
+let coordinatorLoopGeneration = 0;
+
+async function loop(myLoop: number): Promise<void> {
   const waitMs = state.opts?.tickWaitMs ?? CHECK_WAIT_MS;
-  while (state.running) {
+  while (state.running && myLoop === coordinatorLoopGeneration) {
     const iterStart = Date.now();
     let delivery: OrcaDelivery | null = null;
     let passError: string | null = null;
@@ -1219,32 +1810,37 @@ async function loop(): Promise<void> {
         types: WAKE_TYPES,
         waitMs,
       });
+      if (!stillMyTurn(myLoop)) break;
       await processDelivery(delivery);
     } catch (e) {
       passError = String((e as Error).message ?? e);
       state.error = passError;
     }
-    if (state.running) {
-      try {
-        await reconcile();
-      } catch (e) {
-        const detail = String((e as Error).message ?? e);
-        passError = passError ? `${passError}; reconcile: ${detail}` : detail;
-        state.error = detail;
-      }
+    if (!stillMyTurn(myLoop)) break;
+    try {
+      await reconcile();
+    } catch (e) {
+      const detail = String((e as Error).message ?? e);
+      passError = passError ? `${passError}; reconcile: ${detail}` : detail;
+      state.error = detail;
     }
     // Capture AFTER reconciliation so each receipt carries the freshest
     // worker-list projection the same check pass observed. A failed or empty
     // check is still recorded: both are meaningful coordinator health facts.
     const check = recordCheckReceipt(delivery, iterStart, passError);
     if (check.persist) await emitCoordinatorCheck(check.receipt);
-    if (!state.running) break;
+    if (!stillMyTurn(myLoop)) break;
     // In production `check --wait` consumed the interval already; this floor
     // only matters when the check returned instantly (empty inbox fast path,
     // or a failed call) — without it an erroring loop would hot-spin the CLI.
     const elapsed = Date.now() - iterStart;
     if (elapsed < waitMs) await sleep(waitMs - elapsed);
   }
+}
+
+/** True when this loop's coordinator incarnation is still the live one. */
+function stillMyTurn(myLoop: number): boolean {
+  return state.running && myLoop === coordinatorLoopGeneration;
 }
 
 function recordCheckReceipt(
@@ -1568,6 +2164,16 @@ async function reconcile(): Promise<void> {
   let tasks = await listTasks(runId);
   const byId = new Map(tasks.map((t) => [t.id, t]));
 
+  // Gate state is read when ANY task is blocked (entry or integration gates)
+  // or ANY ready task is a cross-lane join — the join's gate must exist before
+  // its first dispatch could ever happen. One Run-scoped read per pass, only
+  // when the pass can actually use it.
+  const blocked = tasks.filter((t) => t.status === "blocked");
+  const readyJoins = tasks.filter(
+    (t) => t.status === "ready" && isCrossLaneJoin(t, opts.laneByTask),
+  );
+  const gates = blocked.length > 0 || readyJoins.length > 0 ? await listGates(runId) : [];
+
   // Release any task still `blocked` whose entry gate has already been
   // approved. Orca records the gate resolution but does NOT flip the gated
   // task out of `blocked` — and an approval done through the viewer's
@@ -1577,12 +2183,18 @@ async function reconcile(): Promise<void> {
   // `ready` tasks and stop on the first tick. As the bound consumer (alive
   // for the whole run) we nudge it to `ready` ourselves. `rejected` gates are
   // left `blocked` — turning those into `failed` is a caller's call, not ours.
-  const blocked = tasks.filter((t) => t.status === "blocked");
+  // Worktree lanes: an integration gate (stable marker) unblocks ONLY on the
+  // `integrated` resolution — a human's positive assertion that the lane
+  // workspaces were reconciled. Dependency completion alone never counts.
   if (blocked.length > 0) {
-    const gates = await listGates(runId);
     const approvedTaskIds = new Set(
       gates
-        .filter((g) => g.taskId && g.status === "resolved" && g.resolution === "approved")
+        .filter((g) => {
+          if (!g.taskId || g.status !== "resolved") return false;
+          return isIntegrationGate(g)
+            ? g.resolution === INTEGRATION_RESOLUTION
+            : g.resolution === "approved";
+        })
         .map((g) => g.taskId!),
     );
     const toRelease = blocked.filter((t) => approvedTaskIds.has(t.id));
@@ -1593,6 +2205,25 @@ async function reconcile(): Promise<void> {
       tasks = await listTasks(runId);
       for (const t of tasks) byId.set(t.id, t);
     }
+  }
+
+  // Integration parking (worktree-lanes epic). A cross-lane join may not
+  // start until ONE idempotent Orca decision gate — stable marker, only the
+  // `integrated` resolution — exists for it and has been resolved by a human:
+  //   - ready join with NO marker gate → create it once (idempotent; the
+  //     next pass's gate-list finds it), park until resolution;
+  //   - join whose marker gate is pending (or resolved with anything but
+  //     `integrated`) → parked, never started;
+  //   - join whose marker gate is resolved `integrated` → free to dispatch.
+  // A BLOCKED task with no marker gate is an entry gate — not ours to create.
+  state.integrationParked = new Set();
+  for (const task of [...readyJoins, ...blocked]) {
+    const gate = gates.find((g) => g.taskId === task.id && isIntegrationGate(g)) ?? null;
+    if (!gate) {
+      if (task.status !== "ready") continue;
+      await createIntegrationGate(task);
+    }
+    if (!gateIntegrated(gate)) state.integrationParked.add(task.id);
   }
 
   // Fleet-level accounting for OUR attempts: one worker-list replaces the old
@@ -1703,7 +2334,30 @@ async function reconcile(): Promise<void> {
   const ready = tasks.filter((t) => t.status === "ready");
   const activeAttempts = [...state.attempts.values()].filter((a) => !a.settled).length;
   const budget = Math.max(0, opts.maxConcurrency - activeAttempts - unownedCount);
-  const batch = ready.filter((t) => !state.attempts.has(t.id)).slice(0, budget);
+  // One unsettled Dispatch per lane (worktree-lanes epic): a lane with an
+  // in-flight attempt — ours, or a dispatched task we never started (pending
+  // adoption) — cannot take a second worker, so a lane's chain advances one
+  // task per tick. Distinct lanes stay independent: each may consume its own
+  // concurrency slot, and joins between them are gated (see parking above).
+  const busyLanes = new Set<string>();
+  for (const [taskId, laneId] of Object.entries(opts.laneByTask ?? {})) {
+    const attempt = state.attempts.get(taskId);
+    const taskRow = byId.get(taskId);
+    if ((attempt && !attempt.settled) || (!attempt && taskRow?.status === "dispatched")) {
+      busyLanes.add(laneId);
+    }
+  }
+  const batch = ready
+    .filter((t) => !state.attempts.has(t.id))
+    // A join behind an unresolved integration gate is unstartable, whatever
+    // the budget says. (Orca has it `blocked`; the ready snapshot above can
+    // still carry the pass the gate was created in.)
+    .filter((t) => !state.integrationParked.has(t.id))
+    .filter((t) => {
+      const laneId = laneOfTask(t.id, opts.laneByTask);
+      return laneId === null || !busyLanes.has(laneId);
+    })
+    .slice(0, budget);
   if (batch.length === 0) {
     await evaluateCompletionBoundary(tasks);
     return;
@@ -1876,6 +2530,14 @@ async function decideTerminalOwnership(attempt: Attempt, opts: StartOpts, readyT
       // Phase 6: a follow-up pinned to another workspace or a saved
       // environment needs its own worker — it must not inherit this terminal.
       if (opts.environmentByTask?.[t.id]) return false;
+      // Worktree lanes: a lane member runs in its lane's own workspace — it
+      // must never inherit the coordinator-workspace terminal that reuse
+      // hands over (its placement reads as non-current via laneOfTask, not
+      // via placementByTask, so the explicit check below is load-bearing).
+      if (laneOfTask(t.id, opts.laneByTask)) return false;
+      // A join behind an unresolved integration gate must not start through
+      // the reuse path either — it bypasses the dispatch batch's filter.
+      if (state.integrationParked.has(t.id)) return false;
       const candidatePlacement = opts.placementByTask?.[t.id] ?? ({ kind: "current" } as PlacementSpec);
       if (candidatePlacement.kind !== "current") return false;
       return true;
@@ -2055,7 +2717,12 @@ async function evaluateCompletionBoundary(tasks: OrcaTask[]): Promise<void> {
     [...state.attempts.values()].filter((a) => a.settledVia === "start_failed").map((a) => a.taskId),
   );
   const readyOrDispatched = tasks.filter(
-    (t) => (t.status === "ready" || t.status === "dispatched") && !parked.has(t.id),
+    (t) =>
+      (t.status === "ready" || t.status === "dispatched") &&
+      !parked.has(t.id) &&
+      // A join parked behind its integration gate is neither ready work nor
+      // finished work — it is human-owed work, handled by its own clause below.
+      !state.integrationParked.has(t.id),
   );
 
   // A question/escalation still open → human input owed, not completion.
@@ -2077,6 +2744,17 @@ async function evaluateCompletionBoundary(tasks: OrcaTask[]): Promise<void> {
   }
   if (readyOrDispatched.length > 0 || unsettled.length > 0) {
     state.phase = "running";
+    return;
+  }
+
+  // Worktree lanes: a cross-lane join is parked behind an unresolved
+  // integration gate. Integration is a human assertion — the coordinator
+  // never merges, rebases, commits, pushes, or deletes — so the run waits in
+  // `awaiting_input` instead of completing around the gate. Resolving the
+  // gate `integrated` (the only resolution its options carry) releases the
+  // task back to ready on a later pass.
+  if (state.integrationParked.size > 0) {
+    state.phase = "awaiting_input";
     return;
   }
 
@@ -2171,27 +2849,168 @@ async function startOne(
   // its exact placement is an existing workspace selector or a new-top-level
   // descriptor. Everything absent = local/current — the zero-configuration
   // default, byte-identical to the pre-Phase-6 wire shape.
+  // Worktree lanes: a lane MEMBER takes its lane's seed — a direct
+  // placementByTask entry alongside membership is refused at the security
+  // boundary and is never read here. The exact selector a lane start uses is
+  // resolved INSIDE the try (it may require Orca reads), so every refusal
+  // lands as a retained start_failed record instead of a wedged reservation.
   const environment = opts.environmentByTask?.[task.id] ?? null;
-  const placement: PlacementSpec = opts.placementByTask?.[task.id] ?? { kind: "current" };
-  const placementArgs: { worktree?: string; repo?: string; name?: string } =
-    placement.kind === "existing"
-      ? { worktree: placement.selector }
-      : placement.kind === "new-top-level"
-        ? { worktree: "new-top-level", repo: placement.repo, name: placement.name }
-        : {};
+  const laneId = laneOfTask(task.id, opts.laneByTask);
+  const lane = laneId ? state.lanes.get(laneId) ?? null : null;
+  const placement: PlacementSpec = lane ? lane.seed : opts.placementByTask?.[task.id] ?? { kind: "current" };
   // Phase 5: record what THIS start asks for — the "requested" half of the
   // requested/effective pair the UI displays. Effort only ever rides with a
-  // model (`--effort requires --model`), so it is normalized here too.
+  // model (`--effort requires --model`), so it is normalized here too. The
+  // worktree half starts as the placement intent and is refined below once
+  // the exact start args (selector vs creation mode) are resolved.
   const model = opts.modelByTask[task.id] ?? null;
   attempt.requested = {
     agent: attempt.harness,
     model,
     effort: model ? opts.effortByTask?.[task.id] ?? null : null,
-    worktree: placementArgs.worktree ?? "current",
+    worktree:
+      lane?.selector ??
+      (placement.kind === "existing"
+        ? placement.selector
+        : placement.kind === "new-child"
+          ? "new-child"
+          : placement.kind === "new-top-level"
+            ? "new-top-level"
+            : "current"),
     terminal: reuseTerminal ?? null,
     on: environment,
   };
   try {
+    // --- Worktree-lane pre-flight: every refusal below happens BEFORE Orca
+    // --- sees a mutation, and lands as a parked start_failed record.
+    //
+    // 0. A membership naming an unknown lane cannot be placed: silently
+    //    running on `current` would look intended while violating the plan.
+    if (laneId && !lane) {
+      throw new OrcaCliError(
+        `Cannot start task ${task.id}: laneByTask assigns it to lane "${laneId}", which has no ` +
+          `worktreeLanes entry in this coordinator's plan.`,
+        "unknown_lane",
+      );
+    }
+    // 1. Integration gate (defense in depth): the dispatch batch never hands
+    //    a parked join here, but the terminal-reuse path and explicit retries
+    //    reach startOne directly — the gate check must hold at the point of
+    //    start, not only at batch selection. Dependency completion is not
+    //    merge evidence; only the human's `integrated` resolution is.
+    if (state.integrationParked.has(task.id)) {
+      throw new OrcaCliError(
+        `Cannot start task ${task.id}: its cross-lane integration gate is not resolved ` +
+          `"${INTEGRATION_RESOLUTION}" yet. Integrate the lane workspaces and resolve the gate first.`,
+        "integration_gate_pending",
+      );
+    }
+    // 2. The legacy path creates a LOCAL terminal in the coordinator worktree
+    //    — it can never honor a non-current lane. Refuse before a terminal or
+    //    Dispatch exists (the same rule remote placement has always had).
+    if (lane && (attempt.harness === "opencode" || attempt.harness === "custom")) {
+      throw new OrcaCliError(
+        `Cannot start task ${task.id} in lane "${laneId}": the ${attempt.harness} harness runs through ` +
+          `the viewer's local legacy path and cannot honor non-current placement. ` +
+          `Pick a supervised harness (claude/codex/…) for lane nodes.`,
+        "lane_legacy_unsupported",
+      );
+    }
+    // 3. A remote new-child anchors on the wrong server — refused here before
+    //    a terminal exists; the adapter re-refuses it as the last gate.
+    if (lane && environment && placement.kind === "new-child") {
+      throw new OrcaCliError(
+        `Cannot start task ${task.id} in lane "${laneId}" on environment "${environment}": remote ` +
+          `new-child placement is invalid — a stacked child would anchor on the wrong server.`,
+        "invalid_placement",
+      );
+    }
+
+    // Exact start placement, resolved in the spec's dispatch-time order:
+    //   recovered identity → exact selector, no creation flags;
+    //   existing seed → revalidate through Orca, then the exact selector;
+    //   creation seed → discover (a prior creation may be positively
+    //   recorded), else create with the seed's creation fields.
+    let wt: {
+      worktree?: string;
+      repo?: string;
+      name?: string;
+      baseBranch?: string;
+      displayName?: string;
+      comment?: string;
+      setup?: string;
+    } = {};
+    if (lane) {
+      if (lane.selector) {
+        wt = { worktree: lane.selector };
+      } else if (placement.kind === "existing") {
+        let row: Awaited<ReturnType<typeof showWorktree>> = null;
+        try {
+          row = await showWorktree(placement.selector);
+        } catch (err) {
+          throw new OrcaCliError(
+            `Cannot start task ${task.id} in lane "${laneId}": the workspace selector could not be ` +
+              `verified (${String((err as Error).message ?? err)}). Refusing to start without positive identity.`,
+            "workspace_unverifiable",
+          );
+        }
+        if (!row) {
+          throw new OrcaCliError(
+            `Cannot start task ${task.id} in lane "${laneId}": Orca reports no workspace for ` +
+              `selector "${placement.selector}". Recover the workspace or re-point the lane; ` +
+              `this viewer never substitutes a different one.`,
+            "workspace_not_found",
+          );
+        }
+        adoptLaneSelector(lane, row.id, "worktree_show", {
+          worktreeId: row.id,
+          path: row.path,
+          branch: row.branch,
+        });
+        wt = { worktree: row.id };
+      } else {
+        // Creation seed without recovered identity. A sticky unverifiable
+        // verdict REFUSES outright: re-running a creation start here could
+        // mint a REPLACEMENT workspace while the original may still exist
+        // unseen — absence of evidence never authorizes a replacement.
+        if (lane.identityMissing) {
+          throw new OrcaCliError(
+            `Cannot start task ${task.id} in lane "${laneId}": the lane's workspace identity is ` +
+              `unverifiable — Orca evidence names no exact workspace for this lane's earlier creation. ` +
+              `Recover the workspace through Orca first; this viewer never creates a replacement.`,
+            "lane_identity_unverifiable",
+          );
+        }
+        await discoverLaneIdentity(opts, lane);
+        if (lane.selector) wt = { worktree: lane.selector };
+      }
+    }
+    if (!wt.worktree && placement.kind === "existing") {
+      wt = { worktree: placement.selector };
+    } else if (!wt.worktree && placement.kind === "new-child") {
+      wt = {
+        worktree: "new-child",
+        // A lane derives its deterministic fallback name from the LANE id so
+        // every creation attempt for the lane targets the same identity;
+        // direct placements keep the adapter's task-derived default.
+        name: placement.name ?? (lane ? deriveWorktreeName(opts.runId, laneId!) : undefined),
+        baseBranch: placement.baseBranch,
+        displayName: placement.displayName,
+        comment: placement.comment,
+        setup: placement.setup,
+      };
+    } else if (!wt.worktree && placement.kind === "new-top-level") {
+      wt = {
+        worktree: "new-top-level",
+        repo: placement.repo,
+        name: placement.name ?? (lane ? deriveWorktreeName(opts.runId, laneId!) : undefined),
+        baseBranch: placement.baseBranch,
+        displayName: placement.displayName,
+        comment: placement.comment,
+        setup: placement.setup,
+      };
+    }
+    attempt.requested = { ...attempt.requested, worktree: wt.worktree ?? "current" };
     // Phase 6 capability gate: remote model/effort forwarding happens ONLY
     // when the peer advertises it. The environment row is re-inspected per
     // start (a reconnect can restore capabilities; a vanished environment
@@ -2269,12 +3088,17 @@ async function startOne(
           agent: attempt.harness,
           runId,
           from,
-          // Phase 6: exact placement (selector or new-top-level) rides to the
-          // adapter, which re-validates the remote current/new-child refusal
-          // as the last gate before the CLI.
-          worktree: placementArgs.worktree,
-          repo: placementArgs.repo,
-          name: placementArgs.name,
+          // Exact placement (lane-recovered selector, existing selector, or a
+          // creation mode with its creation fields) rides to the adapter,
+          // which re-validates the remote current/new-child refusal as the
+          // last gate before the CLI.
+          worktree: wt.worktree,
+          repo: wt.repo,
+          name: wt.name,
+          baseBranch: wt.baseBranch,
+          displayName: wt.displayName,
+          comment: wt.comment,
+          setup: wt.setup,
           on: environment ?? undefined,
           model: model ?? undefined,
           // Phase 5: per-task effort (model-gated) and terminal reuse are
@@ -2291,8 +3115,10 @@ async function startOne(
         // command) can't go through worker-start — compose it by hand instead.
         // Phase 6: never for a remote placement — the legacy fallback would
         // run the task on the LOCAL server behind the user's back.
+        // Worktree lanes: likewise never for a lane member — the bare-shell
+        // fallback always runs in the coordinator worktree.
         const code = (err as OrcaCliError).code;
-        if (environment || !code || !UNCONFIGURED_AGENT_CODES.has(code)) throw err;
+        if (environment || lane || !code || !UNCONFIGURED_AGENT_CODES.has(code)) throw err;
         started = await startLegacyWorker({
           taskId: task.id,
           harness: attempt.harness,
@@ -2326,6 +3152,32 @@ async function startOne(
         terminal: e.terminal,
         on: e.on,
       };
+    }
+    // Worktree lanes: this start may be the lane's CREATION event — capture
+    // the workspace identity from positive evidence only, in honesty order:
+    //   1. the receipt's launch echo, when it names an exact workspace (a
+    //      mode literal like "new-child" is intent, not identity);
+    //   2. Orca worktree discovery by the lane's exact deterministic name.
+    // Neither answering leaves the lane `unverifiable`: the running dispatch
+    // is untouched, but later lane tasks refuse to start — absence of
+    // evidence never authorizes a guessed selector, a replacement worktree,
+    // or a fallback to current.
+    if (lane) {
+      const creationStart = wt.worktree === "new-child" || wt.worktree === "new-top-level";
+      if (creationStart) lane.creationDispatchId = started.dispatchId ?? lane.creationDispatchId;
+      const echo = started.receipt?.effective?.worktree ?? null;
+      if (positiveSelector(echo)) {
+        adoptLaneSelector(lane, echo, "worker_start_receipt");
+      } else if (!lane.selector && lane.seed.kind !== "existing") {
+        await discoverLaneIdentity(opts, lane);
+        if (!lane.selector) {
+          lane.identityMissing = true;
+          lane.warnings.push(
+            `creation dispatch ${started.dispatchId ?? "?"} landed without positive workspace ` +
+              `identity — later lane tasks refuse to start until Orca evidence names the workspace`,
+          );
+        }
+      }
     }
     attempt.startRequestId = null; // outcome known — the id is no longer pending
     await noteRequest({

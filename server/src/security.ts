@@ -1,6 +1,16 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { NextFunction, Request, RequestHandler, Response } from "express";
-import type { PlacementSpec } from "./config";
+import {
+  // The placement grammar constants live in config.ts, next to the stored
+  // shape they describe — one grammar, consumed by the strict HTTP validators
+  // below and by the tolerant config sanitizer. They cannot drift apart.
+  BASE_BRANCH_PATTERN,
+  COMMENT_MAX,
+  DISPLAY_NAME_MAX,
+  PLACEMENT_NAME_PATTERN,
+  SETUP_POLICIES,
+} from "./config";
+import type { CreationOptions, PlacementSpec, SetupPolicy, WorktreeLaneSpec } from "./config";
 
 /**
  * Local control-plane security (Phase 1 of the hardening plan).
@@ -347,9 +357,10 @@ export function validateSelector(raw: unknown, field: string): string {
   return v;
 }
 
-/** Explicit worktree names (`--name`): a short single token, not a path. */
-const PLACEMENT_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-
+/**
+ * Explicit worktree names (`--name`): a short single token, not a path.
+ * The pattern itself lives in config.ts (shared with the tolerant sanitizer).
+ */
 function validatePlacementName(raw: unknown, field: string): string {
   const v = String(raw ?? "").trim();
   if (!v) throw new ValidationError(`${field} must not be empty`, "invalid_placement");
@@ -366,33 +377,200 @@ function validatePlacementName(raw: unknown, field: string): string {
 export type ValidatedPlacement = PlacementSpec;
 
 /**
- * One placement spec from a request body. Remote-ambiguous shapes are
- * rejected HERE with a 400 — `new-child` is not a supported kind at all, and
- * `current` never combines with an environment (the coordinator refuses that
- * combination again at start time; belt and suspenders on purpose). Returns
- * the shared `PlacementSpec` union so a validated map is directly assignable
- * to the coordinator's StartOpts — no widening, no casts.
+ * True when a creation-only field is PRESENT on a raw placement object.
+ * Absent means the key is missing, null, undefined, or an explicit empty
+ * string — the same "empty is absent" rule every task-value map applies, so
+ * a UI that round-trips `name: ""` for "no name" is not a conflict.
  */
-export function validatePlacementSpec(raw: unknown, field: string): PlacementSpec {
+function creationFieldPresent(r: Record<string, unknown>, key: string): boolean {
+  const v = r[key];
+  return v !== undefined && v !== null && v !== "";
+}
+
+/**
+ * The creation-only field names, used to refuse them where they do not
+ * belong (current/existing placements — Orca's own CLI refuses the flags
+ * there too, but refusing here fails before any Orca call) and to name them
+ * in error messages.
+ */
+const CREATION_FIELDS = ["repo", "name", "baseBranch", "displayName", "comment", "setup"] as const;
+
+/** One strict setup-policy value (`worker-start --setup run|skip|inherit`). */
+export function validateSetupPolicy(raw: unknown, field = "setup"): SetupPolicy {
+  const v = String(raw ?? "").trim();
+  if (!v) throw new ValidationError(`${field} must not be empty`, "invalid_setup");
+  if (!SETUP_POLICIES.has(v)) {
+    throw new ValidationError(
+      `${field} "${v.slice(0, 32)}" is not a setup policy (run, skip or inherit)`,
+      "invalid_setup",
+    );
+  }
+  return v as SetupPolicy;
+}
+
+/**
+ * One base branch/ref (`--base-branch`). Charset-bounded by
+ * `BASE_BRANCH_PATTERN` plus the ref-shaped exclusions git itself refuses:
+ * no `..` climb, no trailing `/` or `.`.
+ */
+export function validateBaseBranch(raw: unknown, field = "baseBranch"): string {
+  const v = String(raw ?? "").trim();
+  if (!v) throw new ValidationError(`${field} must not be empty`, "invalid_base_branch");
+  if (
+    v.length > 128 ||
+    !BASE_BRANCH_PATTERN.test(v) ||
+    v.includes("..") ||
+    v.endsWith("/") ||
+    v.endsWith(".")
+  ) {
+    throw new ValidationError(
+      `${field} ${JSON.stringify(v.slice(0, 64))} is not a usable git ref ` +
+        `(letters, digits, . _ / -; no "..", no trailing "/" or ".")`,
+      "invalid_base_branch",
+    );
+  }
+  return v;
+}
+
+/**
+ * The creation-only fields of one new-worktree placement, validated STRICTLY
+ * (the HTTP boundary) with the same normalization the tolerant config
+ * sanitizer applies: an absent `setup` becomes Orca's default `"run"`, so
+ * every in-memory creation spec carries an explicit policy. Fields left out
+ * of the request stay out of the result — except `setup`, which is never
+ * optional in memory.
+ */
+export function validateCreationOptions(raw: unknown, field: string): CreationOptions {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new ValidationError(`${field} must be an object like {"kind":"existing","selector":"…"} or {"kind":"new-top-level","repo":"…","name":"…"}`, "invalid_placement");
+    throw new ValidationError(`${field} must be an object of creation fields`, "invalid_placement");
+  }
+  const r = raw as Record<string, unknown>;
+  const out: CreationOptions = {
+    setup: creationFieldPresent(r, "setup") ? validateSetupPolicy(r.setup, `${field}.setup`) : "run",
+  };
+  if (creationFieldPresent(r, "name")) out.name = validatePlacementName(r.name, `${field}.name`);
+  if (creationFieldPresent(r, "baseBranch")) {
+    out.baseBranch = validateBaseBranch(r.baseBranch, `${field}.baseBranch`);
+  }
+  if (creationFieldPresent(r, "displayName")) {
+    const dn = validateText(r.displayName, `${field}.displayName`, DISPLAY_NAME_MAX);
+    if (dn !== null) out.displayName = dn;
+  }
+  if (creationFieldPresent(r, "comment")) {
+    const comment = validateText(r.comment, `${field}.comment`, COMMENT_MAX);
+    if (comment !== null) out.comment = comment;
+  }
+  return out;
+}
+
+/**
+ * Lift validated creation options onto a concrete placement shape. Plain
+ * spreads (no casts): `setup` is always present on `creation`, the optional
+ * fields ride along only when the request carried them.
+ */
+function childPlacement(creation: CreationOptions): PlacementSpec {
+  return { kind: "new-child", ...creation };
+}
+
+function topLevelPlacement(repo: string, creation: CreationOptions): PlacementSpec {
+  return { kind: "new-top-level", repo, ...creation };
+}
+
+/**
+ * One placement spec from a request body, covering the FULL local matrix —
+ * `current`, exact `existing`, `new-child`, `new-top-level` with creation
+ * metadata — plus the remote restriction via `opts.remote`:
+ *
+ *  - `current` and `new-child` are meaningless on another server (remote =
+ *    a saved environment): refused HERE with a 400, and the adapter refuses
+ *    the same combination again as the last gate before Orca runs;
+ *  - remote `new-top-level` requires an explicit `name` — the execution
+ *    host cannot guess one, and derivation is a LOCAL convenience;
+ *  - creation fields on current/existing are refused outright (conflicting
+ *    fields), and `repo` on `new-child` is refused (a child anchors on the
+ *    current workspace's own repo — it cannot select another).
+ *
+ * Returns the shared `PlacementSpec` union so a validated map is directly
+ * assignable to the coordinator's StartOpts — no widening, no casts.
+ */
+export function validatePlacementSpec(
+  raw: unknown,
+  field: string,
+  opts: { remote?: boolean } = {},
+): PlacementSpec {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new ValidationError(
+      `${field} must be an object like {"kind":"existing","selector":"…"}, ` +
+        `{"kind":"new-child","name":"…"}, or {"kind":"new-top-level","repo":"…","name":"…"}`,
+      "invalid_placement",
+    );
   }
   const r = raw as Record<string, unknown>;
   const kind = typeof r.kind === "string" ? r.kind : "";
-  if (kind === "current") return { kind: "current" };
+  if (kind === "current") {
+    const conflicting = CREATION_FIELDS.filter((f) => creationFieldPresent(r, f));
+    if (conflicting.length > 0) {
+      throw new ValidationError(
+        `${field} (current) rejects creation fields (${conflicting.join(", ")}) — ` +
+          "the current workspace is never created and never reruns setup",
+        "invalid_placement",
+      );
+    }
+    if (opts.remote) {
+      throw new ValidationError(
+        `${field}: remote placement "current" is ambiguous across servers — ` +
+          `choose an exact existing workspace selector discovered on the target environment, ` +
+          `or new-top-level with an explicit repo and name.`,
+        "invalid_placement",
+      );
+    }
+    return { kind: "current" };
+  }
   if (kind === "existing") {
     const selector = validateSelector(r.selector, `${field}.selector`);
+    const conflicting = CREATION_FIELDS.filter((f) => creationFieldPresent(r, f));
+    if (conflicting.length > 0) {
+      throw new ValidationError(
+        `${field} (existing) rejects creation fields (${conflicting.join(", ")}) — ` +
+          "an exact existing workspace is never created and never reruns setup",
+        "invalid_placement",
+      );
+    }
     return { kind: "existing", selector };
+  }
+  if (kind === "new-child") {
+    if (opts.remote) {
+      throw new ValidationError(
+        `${field}: remote placement "new-child" is invalid — a stacked child would anchor on ` +
+          `the wrong server. Use an exact existing workspace selector or new-top-level.`,
+        "invalid_placement",
+      );
+    }
+    if (creationFieldPresent(r, "repo")) {
+      throw new ValidationError(
+        `${field} (new-child) rejects "repo" — a stacked child anchors on the current ` +
+          `workspace's own repo; use new-top-level to select one`,
+        "invalid_placement",
+      );
+    }
+    const creation = validateCreationOptions(r, field);
+    return childPlacement(creation);
   }
   if (kind === "new-top-level") {
     const repo = validateSelector(r.repo, `${field}.repo`);
-    const name = validatePlacementName(r.name, `${field}.name`);
-    return { kind: "new-top-level", repo, name };
+    const creation = validateCreationOptions(r, field);
+    if (opts.remote && !creation.name) {
+      throw new ValidationError(
+        `${field}: remote new-top-level requires an explicit name — the execution ` +
+          `host cannot derive one`,
+        "invalid_placement",
+      );
+    }
+    return topLevelPlacement(repo, creation);
   }
   throw new ValidationError(
-    `${field}.kind must be "current", "existing", or "new-top-level" — ` +
-      `"${String(r.kind).slice(0, 32)}" is not a supported placement` +
-      (kind === "new-child" ? " (new-child is remote-ambiguous and unsupported)" : ""),
+    `${field}.kind must be "current", "existing", "new-child", or "new-top-level" — ` +
+      `"${String(r.kind).slice(0, 32)}" is not a supported placement`,
     "invalid_placement",
   );
 }
@@ -400,11 +578,13 @@ export function validatePlacementSpec(raw: unknown, field: string): PlacementSpe
 /**
  * A `{ taskId: PlacementSpec }` map. Strict like every task-value map: the
  * request is rejected on the first malformed entry rather than silently
- * degraded — a half-understood placement must never reach Orca.
+ * degraded — a half-understood placement must never reach Orca. The optional
+ * placement options (remote matrix) are passed through to every entry.
  */
 export function validatePlacementTaskMap(
   raw: unknown,
   field: string,
+  opts: { remote?: boolean } = {},
 ): Record<string, PlacementSpec> | null {
   if (raw === undefined || raw === null) return null;
   if (typeof raw !== "object" || Array.isArray(raw)) {
@@ -420,9 +600,128 @@ export function validatePlacementTaskMap(
       throw new ValidationError(`${field} has an invalid task id key: ${JSON.stringify(key.slice(0, 64))}`);
     }
     if (value === undefined || value === null) continue;
-    out[key] = validatePlacementSpec(value, `${field}.${key}`);
+    out[key] = validatePlacementSpec(value, `${field}.${key}`, opts);
   }
   return Object.keys(out).length > 0 ? out : null;
+}
+
+/**
+ * A `{ laneId: WorktreeLaneSpec }` map (`worktreeLanes`). A lane's seed
+ * placement may be exact existing, `new-child`, or `new-top-level` — never
+ * `current`, which would quietly re-create the "serial chain on the
+ * coordinator workspace" ambiguity lanes exist to remove.
+ */
+export function validateWorktreeLaneMap(
+  raw: unknown,
+  field: string,
+): Record<string, WorktreeLaneSpec> | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new ValidationError(`${field} must be an object of { laneId: { placement } }`);
+  }
+  const entries = Object.entries(raw as Record<string, unknown>);
+  if (entries.length > 200) {
+    throw new ValidationError(`${field} has too many entries (max 200)`);
+  }
+  const out: Record<string, WorktreeLaneSpec> = {};
+  for (const [laneId, value] of entries) {
+    const id = laneId.trim();
+    if (!ID_PATTERN.test(id)) {
+      throw new ValidationError(`${field} has an invalid lane id key: ${JSON.stringify(laneId.slice(0, 64))}`);
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new ValidationError(`${field}.${id} must be an object with a "placement"`);
+    }
+    const placement = validatePlacementSpec(
+      (value as Record<string, unknown>).placement,
+      `${field}.${id}.placement`,
+    );
+    if (placement.kind === "current") {
+      throw new ValidationError(
+        `${field}.${id}.placement must not be "current" — a lane seeds from an exact ` +
+          `existing workspace or a new worktree`,
+        "invalid_placement",
+      );
+    }
+    out[id] = { placement: placement as WorktreeLaneSpec["placement"] };
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/**
+ * A `{ taskId: laneId }` map (`laneByTask`). Both sides are Orca-style ids;
+ * whether every lane id names a real `worktreeLanes` entry is checked by
+ * `assertLaneReferences` at the same boundary.
+ */
+export function validateLaneTaskMap(raw: unknown, field: string): Record<string, string> | null {
+  return validateTaskValueMap(raw, field, { maxKeys: 500, valueKind: "lane id" }, (v, key) => {
+    const laneId = validateId(v, `${field}.${key}`);
+    if (!laneId) throw new ValidationError(`${field}.${key} must not be empty`, "invalid_lane");
+    return laneId;
+  });
+}
+
+/**
+ * Every lane id a task references must name a declared lane in the SAME
+ * request — a dangling membership would start a worker with no placement at
+ * all (or silently on `current`, which is worse because it looks intended).
+ */
+export function assertLaneReferences(
+  laneByTask: Record<string, string> | null,
+  worktreeLanes: Record<string, WorktreeLaneSpec> | null,
+): void {
+  if (!laneByTask) return;
+  for (const [taskId, laneId] of Object.entries(laneByTask)) {
+    if (!worktreeLanes?.[laneId]) {
+      throw new ValidationError(
+        `laneByTask.${taskId} references lane "${laneId}", which has no worktreeLanes entry`,
+        "unknown_lane",
+      );
+    }
+  }
+}
+
+/**
+ * The task-level placement conflict: a task carries EITHER a direct
+ * `placementByTask` entry OR a `laneByTask` membership, never both. A task in
+ * a lane takes the lane's seed placement; a direct entry alongside it would
+ * make "where does this worker run" depend on map iteration order.
+ */
+export function assertLanePlacementDisjoint(
+  placementByTask: Record<string, PlacementSpec> | null,
+  laneByTask: Record<string, string> | null,
+): void {
+  if (!placementByTask || !laneByTask) return;
+  for (const taskId of Object.keys(placementByTask)) {
+    if (laneByTask[taskId]) {
+      throw new ValidationError(
+        `task ${taskId} has both a placementByTask entry and a laneByTask membership ` +
+          `("${laneByTask[taskId]}") — a task is placed directly OR by its lane, never both`,
+        "conflicting_placement",
+      );
+    }
+  }
+}
+
+/**
+ * The task-level local/remote matrix: a task with a saved environment runs on
+ * another server, where only exact-existing and new-top-level placement have
+ * meaning. `current`/`new-child` (and a nameless remote new-top-level) are
+ * refused here so the request fails at the boundary instead of at the
+ * adapter's last gate.
+ */
+export function assertEnvironmentPlacementCompatibility(
+  environmentByTask: Record<string, string> | null,
+  placementByTask: Record<string, PlacementSpec> | null,
+): void {
+  if (!environmentByTask || !placementByTask) return;
+  for (const taskId of Object.keys(environmentByTask)) {
+    const placement = placementByTask[taskId];
+    if (!placement) continue;
+    // Re-run the remote rules through the same validator (never a hand copy):
+    // the placement is already well-formed, so this only re-checks the matrix.
+    validatePlacementSpec(placement, `placementByTask.${taskId}`, { remote: true });
+  }
 }
 
 /**

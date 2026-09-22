@@ -5022,3 +5022,258 @@ body {
   cursor: pointer;
   user-select: none;
 }
+
+/* --- Phase 7: placement editor, workspace lanes, per-worker intervention ---
+   Everything below renders in the same crayon register: paper washes, wonky
+   radii, dashed outlines where evidence is missing, and one accent per
+   meaning (butter = creating, sky = active, lilac = waiting on a human,
+   meadow = settled, coral = destructive, ink-faint dashes = unknown). */
+
+/* Placement editor inside the node panel: mode picker on top, then the
+   creation-only metadata grid. Creation fields render ONLY for the two
+   new-worktree kinds; current/existing show their "no creation fields"
+   hint instead — the visual difference is the contract. */
+.placement {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+.placement__repo {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.placement__creation {
+  border: 2px dashed var(--line-strong);
+  border-radius: 12px 9px 13px 10px;
+  background: var(--paper-2);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.placement__row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.placement__field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.placement__field .node-panel__custom {
+  width: 100%;
+}
+.placement__comment {
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--paper);
+  border: 2px solid var(--line-strong);
+  border-radius: 10px 8px 12px 9px;
+  padding: 7px 9px;
+  resize: vertical;
+}
+.placement__comment:focus {
+  outline: none;
+  border-color: var(--sky);
+  box-shadow: 0 0 0 3px var(--sky-wash);
+}
+.placement__warn {
+  color: var(--coral);
+}
+
+/* "Remove from lane" — a quiet ghost-level button under the lane editor. */
+.node-panel__lane-remove {
+  align-self: flex-start;
+  font-family: var(--font-body);
+  font-size: 12px;
+  color: var(--coral);
+  background: none;
+  border: none;
+  border-bottom: 1.5px dashed var(--coral);
+  padding: 1px 2px;
+  cursor: pointer;
+}
+.node-panel__lane-remove:hover {
+  color: #c23b2e;
+}
+
+/* Workspace-lanes runtime panel (Operations tab). Shares the .gates/.gate
+   card vocabulary; each lane row is one workspace's evidence sheet. */
+.communication-center__operations .lanes .gate {
+  background: #f2f7ee;
+  border-color: var(--meadow);
+}
+.lanes__row {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px 0 4px;
+  border-top: 1.5px dashed var(--line-strong);
+}
+.lanes__row:first-of-type {
+  border-top: none;
+  padding-top: 2px;
+}
+.lanes__head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+.lanes__state {
+  font-family: var(--font-display);
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 10px 12px 9px 13px;
+  border: 2px solid var(--line-strong);
+  background: var(--paper);
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+.lanes__state[data-state="planned"] {
+  color: var(--ink-soft);
+  border-style: dashed;
+}
+.lanes__state[data-state="creating"] {
+  color: #b37f16;
+  border-color: #eedeb4;
+  background: #fdf4e1;
+}
+.lanes__state[data-state="active"] {
+  color: var(--sky-ink);
+  border-color: var(--sky);
+  background: var(--sky-wash);
+}
+.lanes__state[data-state="integration_required"] {
+  color: #7b5cb8;
+  border-color: var(--lilac);
+  background: #f2edfb;
+}
+.lanes__state[data-state="settled"] {
+  color: #3e9a55;
+  border-color: #bfe4c7;
+  background: #eef8f0;
+}
+.lanes__state[data-state="unverifiable"] {
+  color: var(--coral);
+  border-color: var(--coral);
+  border-style: dashed;
+  background: #fdece9;
+}
+.lanes__state[data-state="removal_blocked"] {
+  color: #c23b2e;
+  border-color: var(--coral);
+  background: #fdece9;
+}
+.lanes__state[data-state="removed"] {
+  color: var(--ink-faint);
+  border-style: dashed;
+}
+.lanes__id {
+  font-size: 12.5px;
+}
+.lanes__facts {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12.5px;
+  color: var(--ink);
+}
+.lanes__facts i {
+  color: var(--ink-faint);
+}
+.lanes__hint {
+  margin: 0;
+  font-size: 11.5px;
+}
+.lanes__warning {
+  color: #b3540e;
+  background: #fdf1e3;
+  border: 1.5px dashed #eedeb4;
+  border-radius: 9px 12px 10px 13px;
+  padding: 5px 9px;
+  font-size: 12.5px;
+}
+
+/* Per-worker intervention buttons share the row with release/retain; a
+   touch of separation keeps "lifecycle decision" apart from "intervention". */
+.workers__ctl {
+  border-style: dashed;
+}
+
+/* Run picker: exact-ID navigation + older-page control. The exact field is
+   deliberately plain — it wants a pasted id, not a dropdown. */
+.runpick__more {
+  flex: none;
+}
+.runpick__exact {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.runpick__exact-input {
+  width: 150px;
+  min-width: 0;
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  color: var(--ink);
+  background: var(--paper);
+  border: 2px solid var(--line-strong);
+  border-radius: 10px 8px 12px 9px;
+  padding: 6px 9px;
+}
+.runpick__exact-input:focus {
+  outline: none;
+  border-color: var(--sky);
+  box-shadow: 0 0 0 3px var(--sky-wash);
+}
+.runpick__exact-input::placeholder {
+  color: var(--ink-faint);
+}
+
+/* Integration gates: the honest cross-lane checkpoint. Lilac like every
+   gate, with an explanation block that states exactly what resolving
+   `integrated` does and does NOT assert. */
+.gate--integration {
+  background: #f2edfb;
+  border-color: var(--lilac);
+}
+.gate__explain {
+  margin: 0 0 11px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+.gate__explain code {
+  font-size: 11.5px;
+  background: var(--paper);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 0 4px;
+}
+
+/* Umbrella capability rows: informational, visually quieter than a real
+   Supported/absent verdict, with a badge that says what they are. */
+.cap__item--umbrella .cap__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.cap__umbrella {
+  font-size: 10px;
+  letter-spacing: 0.4px;
+  color: var(--ink-faint);
+  border: 1.5px dashed var(--line-strong);
+  border-radius: 8px 10px 9px 11px;
+  padding: 1px 7px;
+  white-space: nowrap;
+}

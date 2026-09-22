@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { fetchCapabilities } from "../api";
-import type { RuntimeCapabilitiesResponse } from "../types";
+import { UMBRELLA_CAPABILITY_IDS, type RuntimeCapabilitiesResponse } from "../types";
 
 /**
  * Read-only runtime capability matrix (operations epic O1, Phase 1).
@@ -77,10 +77,23 @@ export function CapabilityPanel() {
       )}
       <ul className="cap__list">
         {view.capabilities.map((cap) => {
-          const meta = STATE_META[cap.state];
+          // Umbrella rows (orchestration.contract.v1 / federation.v1) are
+          // INFORMATIONAL: they name a family of narrower capabilities and
+          // must never read as "everything under this is on". They render
+          // their own badge and never gate a control (controls gate on the
+          // specific canonical id / peer capability instead).
+          const umbrella = UMBRELLA_CAPABILITY_IDS.has(cap.id);
+          const meta = STATE_META[cap.state] ?? STATE_META.absent;
           return (
-            <li key={cap.id} className="cap__item" title={`${cap.id}\n${cap.explanation}`}>
-              <span className="cap__label">{cap.label}</span>
+            <li
+              key={cap.id}
+              className={`cap__item${umbrella ? " cap__item--umbrella" : ""}`}
+              title={`${cap.id}\n${cap.explanation}${umbrella ? "\n\nUmbrella row: informational only — it does not enable the narrower capabilities under it." : ""}`}
+            >
+              <span className="cap__label">
+                {cap.label}
+                {umbrella && <span className="cap__umbrella">umbrella · informational</span>}
+              </span>
               <span className={`cap__state ${meta.cls}`}>{meta.label}</span>
               <span className="cap__explain">{cap.explanation}</span>
             </li>
@@ -90,6 +103,12 @@ export function CapabilityPanel() {
       {view.unknownAdvertised.length > 0 && (
         <p className="cap__note">
           Advertised but unrecognized here (kept off): {view.unknownAdvertised.join(", ")}
+        </p>
+      )}
+      {view.capabilities.some((c) => UMBRELLA_CAPABILITY_IDS.has(c.id)) && (
+        <p className="cap__note">
+          Umbrella rows summarize capability families. They are display-only: the viewer enables a
+          control only on the specific capability it belongs to, never on an umbrella alone.
         </p>
       )}
     </section>

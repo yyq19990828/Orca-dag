@@ -7,7 +7,23 @@
 
 import { useSyncExternalStore } from "react";
 import { fetchConfig, fetchReadiness, initSession, saveConfig } from "./api";
-import type { LayoutKind, OrcaReadiness, PlacementSpec, ViewerConfig } from "./types";
+import {
+  BASE_BRANCH_PATTERN,
+  COMMENT_MAX,
+  DISPLAY_NAME_MAX,
+  PLACEMENT_NAME_PATTERN,
+  boundedText,
+} from "./placement";
+import type {
+  CreationOptions,
+  LayoutKind,
+  OrcaReadiness,
+  PlacementSpec,
+  SetupPolicy,
+  ViewerConfig,
+  WorktreeLaneSpec,
+} from "./types";
+import { SETUP_POLICIES } from "./types";
 
 const NODE_PREFIX = "orca-dag:harness:";
 const MODEL_PREFIX = "orca-dag:model:";
@@ -23,6 +39,8 @@ const DEFAULTS: ViewerConfig = {
   retainByTask: {},
   environmentByTask: {},
   placementByTask: {},
+  worktreeLanes: {},
+  laneByTask: {},
   leadTaskByRun: {},
   maxConcurrency: 4,
   layout: "",
@@ -131,6 +149,11 @@ export async function initConfig(): Promise<void> {
     // keys, and hydration must NOT invent them (local/current stays default).
     environmentByTask: asHarnessMap(server.environmentByTask) ?? {},
     placementByTask: asPlacementMap(server.placementByTask) ?? {},
+    // Phase 7 maps: lanes are launch intent; hydration mirrors the server's
+    // sanitizer (only the three non-current seed kinds survive) and a
+    // membership pointing at a dropped lane degrades to per-task placement.
+    worktreeLanes: asLaneMap(server.worktreeLanes) ?? {},
+    laneByTask: asLaneMembership(server.laneByTask, server.worktreeLanes) ?? {},
     // Viewer-only semantic ownership. One map entry naturally enforces at
     // most one lead Task per Run, while old config files simply hydrate empty.
     leadTaskByRun: asHarnessMap(server.leadTaskByRun) ?? {},
@@ -221,29 +244,97 @@ function asLayout(v: unknown): LayoutKind | "" {
 }
 
 /**
- * Tolerant placement-map hydration (Phase 6): mirrors the server's sanitizer —
- * only the three known kinds with their required fields survive; anything
- * else is dropped so a malformed entry degrades to local/current rather than
- * to a guessed remote shape.
+ * Tolerant placement-map hydration (Phase 6/7): mirrors the server's
+ * sanitizer — only the four known kinds with their required fields survive;
+ * anything else is dropped so a malformed entry degrades to local/current
+ * rather than to a guessed creation shape. Creation fields are kept
+ * field-level tolerant (a bad comment must not erase an otherwise valid
+ * placement), exactly like the server's sanitizePlacementSpec.
  */
 function asPlacementMap(v: unknown): Record<string, PlacementSpec> | null {
   if (!v || typeof v !== "object" || Array.isArray(v)) return null;
   const map: Record<string, PlacementSpec> = {};
   for (const [k, raw] of Object.entries(v as Record<string, unknown>)) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
-    const r = raw as Record<string, unknown>;
-    if (r.kind === "current") map[k] = { kind: "current" };
-    else if (r.kind === "existing" && typeof r.selector === "string" && r.selector.trim()) {
-      map[k] = { kind: "existing", selector: r.selector.trim() };
-    } else if (
-      r.kind === "new-top-level" &&
-      typeof r.repo === "string" &&
-      r.repo.trim() &&
-      typeof r.name === "string" &&
-      r.name.trim()
-    ) {
-      map[k] = { kind: "new-top-level", repo: r.repo.trim(), name: r.name.trim() };
+    const parsed = asPlacementSpec(raw);
+    if (parsed) map[k] = parsed;
+  }
+  return map;
+}
+
+/** Tolerant parse of ONE stored placement entry; null = drop (malformed). */
+function asPlacementSpec(raw: unknown): PlacementSpec | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  if (r.kind === "current") return { kind: "current" };
+  if (r.kind === "existing" && typeof r.selector === "string" && r.selector.trim()) {
+    return { kind: "existing", selector: r.selector.trim() };
+  }
+  const creation = asCreationOptions(r);
+  if (r.kind === "new-child") return { kind: "new-child", ...creation };
+  if (r.kind === "new-top-level" && typeof r.repo === "string" && r.repo.trim()) {
+    return { kind: "new-top-level", repo: r.repo.trim(), ...creation };
+  }
+  return null;
+}
+
+/**
+ * Tolerant parse of the creation-only fields. An absent/invalid `setup`
+ * normalizes to Orca's default "run" (mirrors the server, so every in-memory
+ * spec carries an explicit policy); out-of-bounds free-text fields are
+ * STRIPPED, never guessed into a shorter shape.
+ */
+function asCreationOptions(r: Record<string, unknown>): CreationOptions {
+  const out: CreationOptions = {
+    setup: SETUP_POLICIES.includes(r.setup as SetupPolicy) ? (r.setup as SetupPolicy) : "run",
+  };
+  if (typeof r.name === "string" && PLACEMENT_NAME_PATTERN.test(r.name.trim())) {
+    out.name = r.name.trim();
+  }
+  if (typeof r.baseBranch === "string") {
+    const branch = r.baseBranch.trim();
+    if (BASE_BRANCH_PATTERN.test(branch) && !branch.includes("..") && !branch.endsWith("/") && !branch.endsWith(".")) {
+      out.baseBranch = branch;
     }
+  }
+  const displayName = typeof r.displayName === "string" ? boundedText(r.displayName, DISPLAY_NAME_MAX) : undefined;
+  if (displayName !== undefined) out.displayName = displayName;
+  const comment = typeof r.comment === "string" ? boundedText(r.comment, COMMENT_MAX) : undefined;
+  if (comment !== undefined) out.comment = comment;
+  return out;
+}
+
+/**
+ * Tolerant lane-map hydration (Phase 7): a lane seeded by `current` is
+ * dropped — lanes exist to share ONE non-current workspace, and a "current
+ * lane" would silently recreate the serial-vs-parallel ambiguity lanes are
+ * defined to avoid.
+ */
+function asLaneMap(v: unknown): Record<string, WorktreeLaneSpec> | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const map: Record<string, WorktreeLaneSpec> = {};
+  for (const [laneId, raw] of Object.entries(v as Record<string, unknown>)) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const placement = asPlacementSpec((raw as Record<string, unknown>).placement);
+    if (!placement || placement.kind === "current") continue;
+    map[laneId] = { placement };
+  }
+  return map;
+}
+
+/**
+ * Lane membership hydration: entries whose lane failed hydration (or was
+ * dropped as `current`) are dropped with it — a member of a nonexistent lane
+ * must degrade to per-task placement, never dangle.
+ */
+function asLaneMembership(
+  v: unknown,
+  laneSource: unknown,
+): Record<string, string> | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const lanes = asLaneMap(laneSource) ?? {};
+  const map: Record<string, string> = {};
+  for (const [taskId, laneId] of Object.entries(v as Record<string, unknown>)) {
+    if (typeof laneId === "string" && lanes[laneId]) map[taskId] = laneId;
   }
   return map;
 }
@@ -310,15 +401,17 @@ export function getNodeEnvironment(taskId: string): string | null {
 export function setNodeEnvironment(taskId: string, envId: string | null): void {
   const environmentByTask = { ...config.environmentByTask };
   const placementByTask = { ...config.placementByTask };
+  const laneByTask = { ...config.laneByTask };
   if (envId) environmentByTask[taskId] = envId;
-  else {
-    delete environmentByTask[taskId];
-    // Back to local → the exact placement loses its meaning (it was chosen
-    // for the remote's discovered selectors). Clear it so the store never
-    // keeps a placement an environment picker no longer shows.
-    delete placementByTask[taskId];
-  }
-  update({ environmentByTask, placementByTask });
+  else delete environmentByTask[taskId];
+  // Back to local → the exact placement loses its meaning (it was chosen
+  // for the remote's discovered selectors). Clear it so the store never
+  // keeps a placement an environment picker no longer shows.
+  delete placementByTask[taskId];
+  // Lanes are LOCAL placements: a task pinned to a saved environment can no
+  // longer be a lane member, and the ambiguity must never persist.
+  delete laneByTask[taskId];
+  update({ environmentByTask, placementByTask, laneByTask });
 }
 
 /** The node's exact placement; null = current (coordinator workspace). */
@@ -328,9 +421,81 @@ export function getNodePlacement(taskId: string): PlacementSpec | null {
 
 export function setNodePlacement(taskId: string, placement: PlacementSpec | null): void {
   const placementByTask = { ...config.placementByTask };
+  const laneByTask = { ...config.laneByTask };
   if (placement) placementByTask[taskId] = placement;
   else delete placementByTask[taskId];
-  update({ placementByTask });
+  // A task cannot have both a direct placement and a lane membership — the
+  // lane owns its members' placement, so a direct choice evicts the task.
+  delete laneByTask[taskId];
+  update({ placementByTask, laneByTask });
+}
+
+// --- Phase 7: durable workspace lanes -----------------------------------------
+
+/** All lane ids with a surviving seed, in insertion order. */
+export function allLaneIds(): string[] {
+  return Object.keys(config.worktreeLanes);
+}
+
+/** One lane's seed placement; null when the lane does not exist. */
+export function getLaneSpec(laneId: string): WorktreeLaneSpec | null {
+  return config.worktreeLanes[laneId] ?? null;
+}
+
+/**
+ * Create/replace a lane's seed. Null deletes the lane AND its memberships —
+ * a member of a deleted lane must degrade to per-task placement, never dangle.
+ */
+export function setLaneSpec(laneId: string, spec: WorktreeLaneSpec | null): void {
+  const worktreeLanes = { ...config.worktreeLanes };
+  const laneByTask = { ...config.laneByTask };
+  if (spec) worktreeLanes[laneId] = spec;
+  else {
+    delete worktreeLanes[laneId];
+    for (const [taskId, memberOf] of Object.entries(laneByTask)) {
+      if (memberOf === laneId) delete laneByTask[taskId];
+    }
+  }
+  update({ worktreeLanes, laneByTask });
+}
+
+/** The lane a task belongs to; null = per-task placement (or the default). */
+export function getTaskLane(taskId: string): string | null {
+  return config.laneByTask[taskId] ?? null;
+}
+
+/**
+ * Assign/remove a task's lane membership. A lane member takes its placement
+ * from the lane, so a direct placement (and a saved-environment pin — lanes
+ * are local) is cleared on assignment. Removal restores per-task choice.
+ */
+export function setTaskLane(taskId: string, laneId: string | null): void {
+  const laneByTask = { ...config.laneByTask };
+  const placementByTask = { ...config.placementByTask };
+  const environmentByTask = { ...config.environmentByTask };
+  if (laneId && config.worktreeLanes[laneId]) {
+    laneByTask[taskId] = laneId;
+    delete placementByTask[taskId];
+    delete environmentByTask[taskId];
+  } else {
+    delete laneByTask[taskId];
+  }
+  update({ laneByTask, placementByTask, environmentByTask });
+}
+
+/** Lane membership for the tasks that have one (the map POSTed to /api/run). */
+export function laneMap(taskIds: string[]): Record<string, string> {
+  const m: Record<string, string> = {};
+  for (const id of taskIds) {
+    const laneId = getTaskLane(id);
+    if (laneId) m[id] = laneId;
+  }
+  return m;
+}
+
+/** The whole lane seed map (the other half of the lane plan POSTed to /api/run). */
+export function lanesSpecMap(): Record<string, WorktreeLaneSpec> {
+  return { ...config.worktreeLanes };
 }
 
 /** Semantic lead stage for one Run; unrelated to live Orca coordinator authority. */

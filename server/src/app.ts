@@ -4,12 +4,17 @@ import { fileURLToPath } from "node:url";
 import { dirname, extname, join } from "node:path";
 import {
   OrcaCliError,
+  RESPONSE_LOST,
+  WORKTREE_ARCHIVE_HOOK_FAILED,
+  abandonWorkerReceipt,
   bindRun,
   checkReadiness,
   closeTerminal,
   createRun,
   createTempCoordinatorTerminal,
   explainReadiness,
+  focusTerminal,
+  isArchiveHookFailure,
   listEnvironments,
   listGates,
   listModels,
@@ -17,6 +22,7 @@ import {
   listRepos,
   listRunMessages,
   listRunMessagePage,
+  listRuns,
   listWorkspaceRuns,
   listTasks,
   listTerminals,
@@ -25,30 +31,41 @@ import {
   normalizeLiveness,
   describeRuntimeCapabilities,
   FLEET_CAPABILITY_GAP_REASONS,
+  newRequestId,
+  openWorkspaceChangedFiles,
+  openWorkspaceFile,
+  openWorkspaceFileDiff,
   parseWorkerDonePayload,
   parsePeerCapabilities,
   previewRunAudiences,
   readWorkerOutput,
   releaseWorker,
+  removeWorktree,
   replyToMessage,
   resolveGate,
   retainWorker,
   runOrca,
   sendCoordinatorGroupMessage,
   sendCoordinatorMessage,
+  showRepo,
   showRun,
   showRequest,
+  showWorktree,
   showWorkerDetail,
+  stopWorkerReceipt,
   tasksToDag,
-  newRequestId,
+  type OrcaRun,
   type OrcaReadiness,
+  type OrcaWorktreeRow,
+  type WorkspaceChangedMode,
+  type WorktreeRemovalReceipt,
   type WorkerObservation,
 } from "./orca";
 import { buildRunHealth, type RunHealthView } from "./runHealth";
 import { loadConfig, saveConfig } from "./config";
 import {
   answerInboxItem,
-  coordinatorStatus,
+  coordinatorStatus as liveCoordinatorStatus,
   noteManualRelease,
   retryWorker,
   startCoordinator,
@@ -56,6 +73,9 @@ import {
 } from "./coordinator";
 import {
   assertDiscoveredWorktreeAudience,
+  assertEnvironmentPlacementCompatibility,
+  assertLanePlacementDisjoint,
+  assertLaneReferences,
   requireToken,
   validateBooleanTaskMap,
   validateConcurrency,
@@ -67,11 +87,13 @@ import {
   validateGroupMessageType,
   validateHarness,
   validateId,
+  validateLaneTaskMap,
   validateModel,
   validatePlacementTaskMap,
   validateSelector,
   validateTaskValueMap,
   validateText,
+  validateWorktreeLaneMap,
   ValidationError,
   type SecurityPolicy,
 } from "./security";
@@ -89,6 +111,9 @@ import { RequestLedger } from "./requestLedger";
  * home). index.ts keeps only process concerns: subcommand dispatch, skill
  * installation, listening, and opening the browser.
  */
+
+/** The coordinator's live status projection, as the app and lane routes see it. */
+export type CoordinatorStatusSnapshot = ReturnType<typeof liveCoordinatorStatus>;
 
 export interface CreateAppOptions {
   /** Workspace the viewer config lives in (and `active` worktrees resolve from). */
@@ -108,6 +133,14 @@ export interface CreateAppOptions {
    * awaits this on every mutating orchestration route.
    */
   readiness?: () => Promise<OrcaReadiness>;
+  /**
+   * Coordinator status provider, injectable for tests. Defaults to the real
+   * module singleton. The lane view and the lane-scoped review/removal
+   * routes read lanes from THIS projection (lane identity is viewer-
+   * coordinator state — Orca has no lane table), so tests inject a snapshot
+   * with lanes the same way they inject `readiness`.
+   */
+  coordinatorStatus?: () => CoordinatorStatusSnapshot;
 }
 
 /** Turn an Orca CLI failure into a response the UI can explain to the user. */
@@ -127,15 +160,25 @@ function fail(res: express.Response, err: unknown): void {
       ? 409
       : code === "coordinator_conflict"
         ? 409 // another live viewer owns this workspace's coordinator slot
-        : code === "not_running" ||
-            code === "active_dispatch_required" ||
-            code === "dispatch_not_active" ||
-            code === "inbox_item_not_found" ||
-            code === "message_not_found" ||
-            code === "retry_not_allowed" ||
-            code === "retry_target_not_found"
-          ? 409 // Phase 4 safe-retry refusals: the state forbids it, not the request shape
-          : 500;
+        : code === WORKTREE_ARCHIVE_HOOK_FAILED ||
+            code === "abandon_refused" ||
+            code === "focus_unavailable" ||
+            code === "worktree_in_use" ||
+            code === "main_worktree_protected" ||
+            code === "current_workspace_protected"
+          ? 409 // lifecycle/ownership refusals: the state forbids it, not the request shape
+          : code === "not_running" ||
+              code === "lane_not_found" ||
+              code === "lane_not_settled" ||
+              code === "lane_unverifiable" ||
+              code === "active_dispatch_required" ||
+              code === "dispatch_not_active" ||
+              code === "inbox_item_not_found" ||
+              code === "message_not_found" ||
+              code === "retry_not_allowed" ||
+              code === "retry_target_not_found"
+            ? 409 // Phase 4 safe-retry refusals: the state forbids it, not the request shape
+            : 500;
   // Orca hands back the exact unblocking command for some refusals — most
   // usefully `run-use --takeover-legacy` for a Run adopted by the 1.4.160
   // migration, which plain `run-use` refuses while it still has live work.
@@ -168,7 +211,7 @@ function route(h: (req: express.Request, res: express.Response) => Promise<void>
  * Run's coordinator slot (which would keep the user's agent fenced).
  */
 async function asCoordinator<T>(runId: string, worktree: string, fn: (from: string) => Promise<T>): Promise<T> {
-  const live = coordinatorStatus();
+  const live = liveCoordinatorStatus();
   if (live.running && live.coordinatorHandle && live.runId === runId) {
     return fn(live.coordinatorHandle);
   }
@@ -232,6 +275,116 @@ async function resolveReplyIdentity(
   return { taskId, dispatchId };
 }
 
+/**
+ * Path containment for workspace file review (`file open` / `file diff`).
+ *
+ * Orca resolves the path against the SELECTED worktree (relative paths, or
+ * absolute paths inside it) and does its own resolution inside the CLI. The
+ * HTTP boundary still refuses everything that is never a legitimate
+ * workspace file, so a hostile body cannot even name an outside target:
+ *   - `..` segments in either separator convention (the classic traversal),
+ *   - backslashes entirely (Windows-style separators have no meaning here and
+ *     only ever appear in traversal attempts against a POSIX runtime),
+ *   - control characters / NUL (argv and receipt corruption),
+ *   - a leading `~` (home expansion is a shell concern this route never has),
+ *   - Windows drive-letter forms (`C:/…` — a colon in the first segment).
+ * Absolute POSIX paths pass through: the CLI confines them to the selected
+ * worktree, and worktree-relative spellings are the common case.
+ */
+export function validateWorkspacePath(raw: unknown, field = "path"): string {
+  const v = String(raw ?? "").trim();
+  if (!v) {
+    throw new ValidationError(`${field} must not be empty`, "invalid_path");
+  }
+  if (v.length > 1024) {
+    throw new ValidationError(`${field} is too long (max 1024 characters)`, "invalid_path");
+  }
+  if (v.includes("\\")) {
+    throw new ValidationError(
+      `${field} must use "/" separators — a backslash is never part of a workspace path`,
+      "invalid_path",
+    );
+  }
+  if (v.split("/").includes("..")) {
+    throw new ValidationError(
+      `${field} must stay inside the selected worktree — ".." segments are refused`,
+      "invalid_path",
+    );
+  }
+  if (v.startsWith("~")) {
+    throw new ValidationError(`${field} must not start with "~"`, "invalid_path");
+  }
+  if (/^[A-Za-z]:/.test(v)) {
+    throw new ValidationError(`${field} must not be a drive-letter path`, "invalid_path");
+  }
+  for (const ch of v) {
+    if (ch < " " || ch === "\u007f") {
+      throw new ValidationError(
+        `${field} contains a control character`,
+        "invalid_path",
+      );
+    }
+  }
+  return v;
+}
+
+/**
+ * First present string field of a verbatim CLI receipt (worktree rm results
+ * are passthrough records whose optional state/reason spellings vary by
+ * runtime) — used to echo honest removal facts back to the UI without
+ * re-interpreting the receipt.
+ */
+function pickReceiptString(raw: Record<string, unknown>, ...keys: string[]): string | null {
+  for (const key of keys) {
+    const value = raw?.[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return null;
+}
+
+/**
+ * Removal preconditions for one freshly-discovered worktree row — the pure
+ * core of POST /api/worktrees/remove, factored out so every refusal branch is
+ * testable without a CLI. `ownedSelectors` names the workspaces this viewer
+ * itself occupies (the coordinator/worker workspace spellings); `activeSelectors`
+ * names workspaces the live coordinator currently works (unsettled attempts +
+ * non-settled lanes). A row that fails no precondition returns void; anything
+ * else throws the exact 409 code the route maps.
+ */
+export function assertWorktreeRemovalPreconditions(
+  row: OrcaWorktreeRow,
+  selector: string,
+  opts: {
+    ownedSelectors: Iterable<string>;
+    activeSelectors: Iterable<string>;
+  },
+): void {
+  // The main worktree IS the checkout: removing it would destroy the user's
+  // primary copy, not a disposable lane workspace.
+  if (row.isMainWorktree === true) {
+    throw new OrcaCliError(
+      `${selector} is a repository's main worktree — the viewer removes only secondary workspaces.`,
+      "main_worktree_protected",
+    );
+  }
+  for (const owned of opts.ownedSelectors) {
+    if (owned && owned === selector) {
+      throw new OrcaCliError(
+        `${selector} is this viewer's own workspace — removal would pull the coordinator out from under the Run.`,
+        "current_workspace_protected",
+      );
+    }
+  }
+  for (const active of opts.activeSelectors) {
+    if (active && active === selector) {
+      throw new OrcaCliError(
+        `${selector} hosts an active worker or an unsettled lane of this viewer's coordinator — stop them first.`,
+        "worktree_in_use",
+      );
+    }
+  }
+}
+
 export function createApp(opts: CreateAppOptions): { app: express.Express; servingUI: boolean } {
   const { workspaceDir, worktree, policy } = opts;
   const readiness = opts.readiness ?? checkReadiness;
@@ -246,6 +399,10 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
   // ALWAYS re-read live from Orca (`request-show`); this ledger never
   // becomes a second lifecycle authority.
   const requestLedger = new RequestLedger(workspaceDir);
+
+  // The status provider, resolved once: the live module singleton by default,
+  // an injected snapshot under test (same pattern as `readiness` above).
+  const coordinatorStatus = opts.coordinatorStatus ?? liveCoordinatorStatus;
 
   /**
    * One bounded, strictly Run-scoped activity projection. Message history is
@@ -343,32 +500,47 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
   };
 
   /**
-   * Run a one-off terminal mutation (release/retain) under a durable,
-   * ledger-recorded request id (Phase 5). Run/Task scope is recorded ONLY
-   * when this viewer's own coordinator projection positively proves it;
-   * anything else stays unscoped ("scope unknown") rather than being
-   * mis-attributed to whatever Run happens to be open. The mint record
-   * lands BEFORE the CLI call, so even a lost response leaves the id
-   * inspectable via `request-show`.
+   * Run a one-off terminal mutation (release/retain/stop/abandon) under a
+   * durable, ledger-recorded request id (Phase 5). Run/Task scope is recorded
+   * ONLY from positive evidence — either the caller's fresh pre-action
+   * `worker-show` receipt (stop/abandon/focus re-read it immediately before
+   * acting) or this viewer's own coordinator projection — anything else stays
+   * unscoped ("scope unknown") rather than being mis-attributed to whatever
+   * Run happens to be open. The mint record lands BEFORE the CLI call, so
+   * even a lost response leaves the id inspectable via `request-show`.
+   * Returns the requestId so the route can journal it onto the Activity row
+   * (the durable request identity of that mutation).
    */
-  const terminalMutationWithLedger = async (
-    operation: "worker-release" | "worker-retain",
+  const terminalMutationWithLedger = async <
+    T extends { state: string },
+  >(
+    operation: "worker-release" | "worker-retain" | "worker-stop" | "worker-abandon",
     dispatchId: string,
-    run: (requestId: string) => Promise<{ state: string }>,
-  ): Promise<{ state: string }> => {
-    const live = coordinatorStatus();
-    const attempt =
-      live.running && live.runId
-        ? live.attempts.find((a) => a.dispatchId === dispatchId)
-        : undefined;
-    const runId = attempt ? live.runId : null;
-    const taskId = attempt?.taskId ?? null;
+    run: (requestId: string) => Promise<T>,
+    evidence?: { runId: string | null; taskId: string | null },
+  ): Promise<{ requestId: string; receipt: T & { requestId: string } }> => {
+    let runId = evidence?.runId ?? null;
+    let taskId = evidence?.taskId ?? null;
+    if (!evidence) {
+      const live = coordinatorStatus();
+      const attempt =
+        live.running && live.runId
+          ? live.attempts.find((a) => a.dispatchId === dispatchId)
+          : undefined;
+      runId = attempt ? live.runId : null;
+      taskId = attempt?.taskId ?? null;
+    }
     const requestId = newRequestId();
     await requestLedger
       .record({ requestId, operation, runId, taskId, dispatchId })
       .catch(() => {});
     try {
       const receipt = await run(requestId);
+      // A resolved receipt is a definitive viewer observation. The one
+      // exception is release/retain's `release_unknown` state, which means
+      // Orca itself could not decide — the debt stays open in that case.
+      const settledLocally =
+        receipt.state === "release_unknown" ? false : true;
       await requestLedger
         .record({
           requestId,
@@ -376,25 +548,178 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
           runId,
           taskId,
           dispatchId,
-          settledLocally: receipt.state !== "release_unknown",
-          note: `viewer-observed terminal state: ${receipt.state}`,
+          settledLocally,
+          // The stop note mirrors stopCoordinator's format exactly: the
+          // resume path (`resumeStoppedDispatchIds`) admits only dispatches
+          // with a positively-observed `stopped` state, whichever surface
+          // performed the stop.
+          note:
+            operation === "worker-stop"
+              ? `viewer-observed stop state: ${receipt.state}`
+              : `viewer-observed terminal state: ${receipt.state}`,
         })
         .catch(() => {});
-      return receipt;
+      return {
+        requestId,
+        // The receipt ECHOES the durable id: current runtimes replay the
+        // `--retry-request` value back, and the viewer guarantees that echo
+        // even when an older receipt omits it — the id a client (or a human)
+        // cites for request-show recovery is always visible where the
+        // receipt is.
+        receipt: { ...receipt, requestId },
+      };
+    } catch (err) {
+      const lost = err instanceof OrcaCliError && err.code === RESPONSE_LOST;
+      await requestLedger
+        .record({
+          requestId,
+          operation,
+          runId,
+          taskId,
+          dispatchId,
+          // A lost response is precisely NOT settled locally — the ledger
+          // keeps the id inspectable via `request-show` instead of guessing.
+          settledLocally: false,
+          note: lost
+            ? "response lost; resolve with request-show / --retry-request"
+            : `mutation failed: ${String((err as Error)?.message ?? err)}`,
+        })
+        .catch(() => {});
+      // Carry the minted id on the error untouched (the error itself still
+      // flows to fail() unchanged) so the route can point the client at the
+      // `request-show` probe for exactly this attempt.
+      try {
+        (err as { requestId?: string }).requestId = requestId;
+      } catch {
+        /* a frozen error still throws unchanged */
+      }
+      throw err;
+    }
+  };
+
+  /**
+   * The same durable-identity discipline for mutations Orca does NOT run
+   * under a `--retry-request` id (worktree removal, terminal focus, file
+   * review opens): mint a viewer-side request id, record it with the exact
+   * target BEFORE the CLI call, and close the row with the verbatim receipt
+   * outcome afterwards. Orca receipt semantics are preserved by storing what
+   * the receipt SAID (bounded, one line) — never a re-interpretation of it;
+   * the response still carries the full receipt verbatim.
+   */
+  const viewerMutationWithLedger = async <T>(
+    operation: "worktree-remove" | "terminal-focus" | "file-open" | "file-diff" | "file-open-changed",
+    target: string,
+    run: (requestId: string) => Promise<T>,
+    describe: (receipt: T) => { settled: boolean; note: string },
+    scope?: { runId: string | null; taskId?: string | null; dispatchId?: string | null },
+  ): Promise<{ requestId: string; receipt: T }> => {
+    const requestId = newRequestId();
+    await requestLedger
+      .record({
+        requestId,
+        operation,
+        runId: scope?.runId ?? null,
+        taskId: scope?.taskId ?? null,
+        dispatchId: scope?.dispatchId ?? null,
+        target,
+      })
+      .catch(() => {});
+    try {
+      const receipt = await run(requestId);
+      const { settled, note } = describe(receipt);
+      await requestLedger
+        .record({
+          requestId,
+          operation,
+          runId: scope?.runId ?? null,
+          taskId: scope?.taskId ?? null,
+          dispatchId: scope?.dispatchId ?? null,
+          target,
+          settledLocally: settled,
+          note,
+        })
+        .catch(() => {});
+      return { requestId, receipt };
     } catch (err) {
       await requestLedger
         .record({
           requestId,
           operation,
-          runId,
-          taskId,
-          dispatchId,
+          runId: scope?.runId ?? null,
+          taskId: scope?.taskId ?? null,
+          dispatchId: scope?.dispatchId ?? null,
+          target,
           settledLocally: false,
-          note: `mutation failed: ${String((err as Error)?.message ?? err)}`,
+          // An archive-hook block is not a generic mutation failure: the note
+          // carries the stable "archive hook failed" marker (plus the verbatim
+          // CLI message) because this row is the durable waiver evidence a
+          // later `allowFailedArchiveHook` attempt must cite — and nothing
+          // else may ever match that marker.
+          note: isArchiveHookFailure(err)
+            ? `archive hook failed — removal blocked, nothing was removed (${String((err as Error)?.message ?? err)})`
+            : `mutation failed: ${String((err as Error)?.message ?? err)}`,
         })
         .catch(() => {});
+      try {
+        (err as { requestId?: string }).requestId = requestId;
+      } catch {
+        /* a frozen error still throws unchanged */
+      }
       throw err;
     }
+  };
+
+  /**
+   * The Run scope a workspace-level mutation (lane worktree removal) can be
+   * POSITIVELY journaled under: only when this viewer's live coordinator has
+   * a lane whose adopted selector is the one being mutated. Anything else
+   * leaves the journal row out entirely — Activity is Run-scoped, and no
+   * scope is invented from the request body alone.
+   */
+  const laneRunScopeFor = (
+    selector: string,
+    status: CoordinatorStatusSnapshot,
+  ): string | null => {
+    if (!status.running || !status.runId) return null;
+    return status.worktreeLanes.some((lane) => lane.selector === selector)
+      ? status.runId
+      : null;
+  };
+
+  /**
+   * The pre-action evidence re-read every one-Dispatch lifecycle mutation
+   * runs IMMEDIATELY before acting (never a cached row): one fresh
+   * `worker-show` carries all four facts at once — liveness, agent-wait,
+   * workspace identity (terminal facts), and ownership (the durable runId).
+   * A missing Dispatch or one whose durable Run scope does not match the
+   * requested Run is refused here, before any mutation can be minted.
+   */
+  const revalidateWorkerForMutation = async (
+    dispatchId: string,
+    runId: string,
+  ): Promise<
+    | { ok: true; detail: Awaited<ReturnType<typeof showWorkerDetail>> & object }
+    | { ok: false; status: 404; body: { error: string; code: string } }
+  > => {
+    const detail = await showWorkerDetail(dispatchId);
+    if (!detail) {
+      return {
+        ok: false,
+        status: 404,
+        body: { error: "no such worker dispatch", code: "worker_not_found" },
+      };
+    }
+    if (!detail.runId || detail.runId !== runId) {
+      return {
+        ok: false,
+        status: 404,
+        body: {
+          error: "worker belongs to a different Run",
+          code: "worker_run_mismatch",
+        },
+      };
+    }
+    return { ok: true, detail };
   };
 
   const app = express();
@@ -571,6 +896,179 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
     }),
   );
 
+  // --- Approved local worktree/repo discovery --------------------------------
+  //
+  // The LOCAL-server counterparts of the per-environment routes above (no
+  // --environment flag: these list the zero-configuration local server, which
+  // is exactly what placement pickers and removal targets need). "Approved"
+  // is the operative property: rows come only from Orca's own discovery —
+  // the UI never offers, and no route ever accepts, a workspace Orca did not
+  // name itself. Read-only and token-free like every discovery read.
+
+  /**
+   * A discovery read fails LOUDLY: the surfaced message leads with the
+   * adapter's own classification (`response_lost: …`), so a client can tell
+   * "Orca is unreachable" apart from "the list is empty" — an empty list
+   * would render as "no other workspace exists" and invite a bogus creation.
+   */
+  const discoveryRead = async <T>(read: () => Promise<T>): Promise<T> => {
+    try {
+      return await read();
+    } catch (err) {
+      const code = err instanceof OrcaCliError && typeof err.code === "string" ? err.code : "discovery_failed";
+      throw new OrcaCliError(`${code}: ${String((err as Error)?.message ?? err)}`, code);
+    }
+  };
+
+  /** Exact workspaces on the local server (`worktree list`, no environment). */
+  app.get(
+    "/api/worktrees",
+    route(async (_req, res) => {
+      res.json({ worktrees: await discoveryRead(() => listWorktrees()) });
+    }),
+  );
+
+  /** Repositories registered on the local server (`repo list`, no environment). */
+  app.get(
+    "/api/repos",
+    route(async (_req, res) => {
+      res.json({ repos: await discoveryRead(() => listRepos()) });
+    }),
+  );
+
+  /**
+   * One worktree by its EXACT selector (`worktree show`) — the same
+   * identity-revalidation read the removal route runs, exposed so the UI can
+   * display the durable identity (id / branch / host) before offering any
+   * action on it. 404 only on Orca's own definite absence; a transport
+   * failure propagates (unverifiable is never rendered as "missing").
+   */
+  app.get(
+    "/api/worktrees/:worktreeId",
+    route(async (req, res) => {
+      const selector = validateSelector(req.params.worktreeId, "worktree");
+      const row = await showWorktree(selector);
+      if (!row) {
+        res.status(404).json({ error: "no such worktree", code: "worktree_not_found" });
+        return;
+      }
+      res.json({ worktree: row });
+    }),
+  );
+
+  /**
+   * Cursor-paged Run lookup — ONE raw `run-list` page, verbatim.
+   *
+   * `GET /api/runs` (below) remains the fully-materialized, workspace-scoped
+   * picker feed; this route is the paging primitive for surfaces that want to
+   * walk the registry without the unbounded sweep. The opaque `nextCursor` is
+   * passed through byte-for-byte (null = last page), so pagination semantics
+   * stay exactly Orca's own — a stale cursor surfaces whatever the runtime
+   * does with it, never a synthesized empty page.
+   *
+   * Run records carry no workspace field, so each row is annotated with the
+   * CHEAP local evidence only (this process created it / the workspace
+   * config names it); exact workspace ownership needs the task-creator
+   * marker and lives on `GET /api/runs/:runId`.
+   */
+  app.get(
+    "/api/runs/page",
+    route(async (req, res) => {
+      const cursor = validateText(req.query.cursor, "cursor", 512);
+      const configuredRunId = (await loadConfig(workspaceDir)).runId;
+      // listRuns() follows every page internally; for one HTTP page we ask
+      // the CLI directly through the same adapter contract (limit 100, the
+      // runtime's documented ceiling) so the cursor stays honest.
+      const args = ["orchestration", "run-list", "--limit", "100"];
+      if (cursor) args.push("--cursor", cursor);
+      const receipt = await runOrca<{ runs?: unknown; nextCursor?: unknown }>(args);
+      if (!Array.isArray(receipt.runs)) {
+        throw new OrcaCliError("run-list returned an invalid receipt: runs must be an array", "invalid_pagination");
+      }
+      const rawNext = receipt.nextCursor;
+      const nextCursor =
+        typeof rawNext === "string" && rawNext.length > 0 ? rawNext : null;
+      const runs = (receipt.runs as OrcaRun[])
+        .filter((r) => r && typeof r.id === "string" && r.legacy !== 1);
+      res.json({
+        runs: runs.map((run) => ({
+          ...run,
+          viewerCreated: viewerCreatedRunIds.has(run.id),
+          configured: configuredRunId === run.id,
+        })),
+        nextCursor,
+      });
+    }),
+  );
+
+  /**
+   * Exact Run lookup (`run-show --id`) with the workspace-ownership evidence
+   * the picker only approximates. 404 `run_not_found` ONLY on Orca's own
+   * definite absence — a transport failure propagates, because "unreachable"
+   * must never masquerade as "no such Run" (the caller would treat that as an
+   * ownership dead-end). Ownership is positive-evidence: a Task created by a
+   * process in THIS workspace (`::${workspaceDir}@@` marker), this process
+   * having created the Run, or the workspace config naming it. A Run with no
+   * local evidence reads `owned: false` — visible, but flagged foreign —
+   * never silently relabeled as ours.
+   */
+  app.get(
+    "/api/runs/:runId",
+    route(async (req, res) => {
+      const runId = validateId(req.params.runId, "run id");
+      if (!runId) {
+        res.status(400).json({ error: "run id required" });
+        return;
+      }
+      const run = await showRun(runId);
+      if (!run) {
+        res.status(404).json({ error: "no such run", code: "run_not_found" });
+        return;
+      }
+      const configuredRunId = (await loadConfig(workspaceDir)).runId;
+      const marker = `::${workspaceDir}@@`;
+      let taskEvidence: "creator_marker" | "none" | "unreadable" = "none";
+      try {
+        const tasks = await listTasks(runId, { brief: true });
+        taskEvidence = tasks.some(
+          (task) =>
+            typeof task.created_by_process_incarnation === "string" &&
+            task.created_by_process_incarnation.includes(marker),
+        )
+          ? "creator_marker"
+          : tasks.length > 0
+            ? "none"
+            : // An empty Run has no tasks to prove anything — the explicit
+              // inclusions below are the only local evidence available.
+              "none";
+      } catch {
+        taskEvidence = "unreadable";
+      }
+      const owned =
+        taskEvidence === "creator_marker" ||
+        viewerCreatedRunIds.has(runId) ||
+        configuredRunId === runId;
+      res.json({
+        run,
+        workspace: {
+          // True only on positive evidence; an unreadable Task read keeps
+          // ownership UNKNOWN (false here, with the reason spelled out).
+          owned,
+          evidence:
+            taskEvidence === "creator_marker"
+              ? "task creator marker"
+              : viewerCreatedRunIds.has(runId)
+                ? "created by this viewer"
+                : configuredRunId === runId
+                  ? "named in workspace config"
+                  : taskEvidence === "unreadable"
+                    ? "task evidence unreadable"
+                    : "no task in this Run was created from this workspace",
+        },
+      });
+    }),
+  );
+
   /**
    * Start the self-driven coordinator on one Run. It binds a coordinator terminal
    * (fencing any agent currently coordinating that Run) and then dispatches every
@@ -632,6 +1130,18 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       // and the adapter re-refuses remote current/new-child as the last gate.
       const environmentByTask = validateEnvironmentTaskMap(req.body?.environmentByTask, "environmentByTask");
       const placementByTask = validatePlacementTaskMap(req.body?.placementByTask, "placementByTask");
+      // Workspace lanes (worktree-lanes epic): the full lane shapes are
+      // validated here with the same strictness as placement, plus the two
+      // semantic cross-checks — every laneByTask reference must name a
+      // declared lane, and a task is placed directly OR by its lane, never
+      // both. Whether a lane's seed workspace really exists is checked at
+      // start time (exact-selector revalidation in the coordinator), exactly
+      // like environment existence.
+      const worktreeLanes = validateWorktreeLaneMap(req.body?.worktreeLanes, "worktreeLanes");
+      const laneByTask = validateLaneTaskMap(req.body?.laneByTask, "laneByTask");
+      assertLaneReferences(laneByTask, worktreeLanes);
+      assertLanePlacementDisjoint(placementByTask, laneByTask);
+      assertEnvironmentPlacementCompatibility(environmentByTask, placementByTask);
       // Per-task opt-out from automatic release (plan §7.3 retainByTask).
       // The request wins; the persisted config fills it in so a hand-edited
       // `.orca-dag.config.json` works without any UI for it yet. Absent
@@ -670,6 +1180,8 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         retainByTask: retainByTask ?? undefined,
         environmentByTask: environmentByTask ?? undefined,
         placementByTask: placementByTask ?? undefined,
+        worktreeLanes: worktreeLanes ?? undefined,
+        laneByTask: laneByTask ?? undefined,
         resumeStoppedDispatchIds,
         onActivity: async (event) => {
           await recordActivity(
@@ -737,6 +1249,199 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
   app.get("/api/run-status", (_req, res) => {
     res.json(coordinatorStatus());
   });
+
+  /**
+   * Run-scoped workspace-lane view (worktree-lanes epic). The coordinator's
+   * lane projection (`worktreeLanes` in its status) is derived fresh from the
+   * attempt map on every read, so this never shows a stale lifecycle — but it
+   * only exists while THIS viewer coordinates a Run, and it must never leak
+   * across the Run boundary: a lane view for any other Run is an empty answer
+   * with `running: false`, not the live coordinator's lanes. Exact workspace
+   * identity inside each lane is positive Orca evidence only (see
+   * `WorktreeLaneIdentitySource`) — absence renders as warnings, never as a
+   * reconstructed selector. This is the read half of the spec's
+   * `/api/worktree-lanes` operator API; the action halves below are
+   * lane-scoped so the UI never has to know how a lane maps to a selector.
+   */
+  app.get(
+    "/api/worktree-lanes",
+    route(async (req, res) => {
+      const runId = validateId(req.query.run, "run");
+      if (!runId) {
+        res.status(400).json({ error: "run query parameter required", code: "run_required" });
+        return;
+      }
+      const status = coordinatorStatus();
+      const scoped = status.running && status.runId === runId;
+      res.json({
+        runId,
+        running: scoped,
+        lanes: scoped ? status.worktreeLanes : [],
+      });
+    }),
+  );
+
+  /**
+   * Lane resolution shared by the two lane actions below. A lane exists only
+   * while THIS viewer coordinates a Run (Orca has no lane table — the
+   * projection is coordinator state), so a missing/unscoped coordinator is a
+   * `not_running` refusal, never an empty answer: an action needs the same
+   * live identity a view may honestly lack.
+   */
+  const requireLiveLane = (
+    laneId: string | null,
+  ): { status: CoordinatorStatusSnapshot; runId: string; lane: CoordinatorStatusSnapshot["worktreeLanes"][number] } => {
+    if (!laneId) {
+      throw new ValidationError("lane id required", "invalid_input");
+    }
+    const status = coordinatorStatus();
+    if (!status.running || !status.runId) {
+      throw new OrcaCliError(
+        "Coordinator is not running — workspace lanes exist only while this viewer coordinates a Run.",
+        "not_running",
+      );
+    }
+    const lane = status.worktreeLanes.find((candidate) => candidate.laneId === laneId);
+    if (!lane) {
+      throw new OrcaCliError(
+        `No lane ${laneId} is tracked for the live Run ${status.runId}.`,
+        "lane_not_found",
+      );
+    }
+    return { status, runId: status.runId, lane };
+  };
+
+  /**
+   * The lane's workspace selector for a review open — positive Orca evidence
+   * only. An adopted `selector` is used verbatim; when only the workspace
+   * PATH was positively observed, `path:<abs>` is Orca's own exact selector
+   * spelling (the same form WORKSPACE_DIR resolves to), NOT the forbidden
+   * reconstruction: that rule guards lane identity ADOPTION for worker
+   * placement (never start a worker on a name/branch/path guess), while a
+   * review open is a read-only Orca navigation into a workspace Orca itself
+   * reported — and Orca re-validates the exact workspace before opening.
+   * A lane with neither fact is refused: unverifiable authorizes nothing.
+   */
+  const laneReviewSelector = (lane: CoordinatorStatusSnapshot["worktreeLanes"][number]): string => {
+    if (lane.selector) return lane.selector;
+    if (lane.path) return `path:${lane.path}`;
+    throw new OrcaCliError(
+      `Lane ${lane.laneId} has no positively identified workspace — nothing will be opened in a guessed one.`,
+      "lane_unverifiable",
+    );
+  };
+
+  /**
+   * Review one lane's workspace through Orca (spec operator API): open its
+   * changed files (`mode: "files"` → adapter `edit`) or its diff (`mode:
+   * "diff"`). The UI verbs are mapped HERE so the adapter's closed union is
+   * the only spelling that ever reaches argv. Ledger + activity ride the same
+   * discipline as the workspace-scoped review route.
+   */
+  app.post(
+    "/api/worktree-lanes/:laneId/open-changed",
+    requireToken(policy),
+    route(async (req, res) => {
+      const laneId = validateId(req.params.laneId, "lane id");
+      const modeRaw = validateText(req.body?.mode, "mode", 8);
+      if (modeRaw !== "files" && modeRaw !== "diff") {
+        throw new ValidationError(
+          `mode must be "files" or "diff" (got ${JSON.stringify(modeRaw)})`,
+          "invalid_mode",
+        );
+      }
+      const mode: WorkspaceChangedMode = modeRaw === "diff" ? "diff" : "edit";
+      const { runId, lane } = requireLiveLane(laneId);
+      const selector = validateSelector(laneReviewSelector(lane), "selector");
+      const { requestId, receipt } = await viewerMutationWithLedger(
+        "file-open-changed",
+        selector,
+        () => openWorkspaceChangedFiles({ mode, worktree: selector }),
+        () => ({ settled: true, note: `opened changed files (mode: ${mode})` }),
+        { runId },
+      );
+      await recordActivity(
+        createViewerActivity({
+          runId,
+          kind: "file_review",
+          title: `Opened the lane's ${modeRaw === "diff" ? "diff" : "changed files"}`,
+          summary: `Lane ${laneId} → ${selector} (mode: ${mode}).`,
+          requestId,
+        }),
+      );
+      res.json({ ok: true, requestId, receipt: { laneId, workspace: selector, note: null, requestId } });
+    }),
+  );
+
+  /**
+   * Remove one settled lane's worktree through `orca worktree rm` (spec
+   * operator API). Gates, in order, before anything is minted: live
+   * coordinator + known lane → settled ownership → positive selector → the
+   * typed confirmation, compared SERVER-side against the token recomputed
+   * from the same positive evidence (the UI prompt is a courtesy copy, the
+   * server is the authority) → then the SHARED removal core below, which is
+   * the exact gate stack the workspace-scoped route runs (execution gate,
+   * owned-workspace refusal, fresh Orca discovery, main/active protections).
+   */
+  app.post(
+    "/api/worktree-lanes/:laneId/remove",
+    requireToken(policy),
+    route(async (req, res) => {
+      const laneId = validateId(req.params.laneId, "lane id");
+      const confirm = typeof req.body?.confirm === "string" ? req.body.confirm : "";
+      const { runId, lane } = requireLiveLane(laneId);
+      if (lane.state !== "settled") {
+        throw new OrcaCliError(
+          `Lane ${laneId} is ${lane.state} — removal needs settled ownership (every task in the lane settled, no active dispatch).`,
+          "lane_not_settled",
+        );
+      }
+      if (!lane.selector) {
+        throw new OrcaCliError(
+          `Lane ${laneId} has no positively identified workspace — nothing will be removed by a guess.`,
+          "lane_unverifiable",
+        );
+      }
+      const selector = validateSelector(lane.selector, "selector");
+      // Same derivation the UI performs (worktree id, else path tail, else
+      // the lane id) — but recomputed here from coordinator evidence, so a
+      // crafted body can never substitute its own "known" token.
+      const expectedToken = lane.worktreeId ?? lane.path?.split("/").filter(Boolean).pop() ?? lane.laneId;
+      if (confirm !== expectedToken) {
+        throw new ValidationError(
+          "The confirmation text did not match the lane worktree's identity — nothing was removed.",
+          "confirm_mismatch",
+        );
+      }
+      const result = await removeWorktreeThroughOrca(selector, {
+        runHooks: false,
+        force: false,
+        allowFailedArchiveHook: false,
+        evidenceRequestId: null,
+        runId,
+      });
+      if (!result.ok) {
+        res.status(result.status).json(result.body);
+        return;
+      }
+      const { requestId, receipt } = result;
+      res.json({
+        ok: true,
+        requestId,
+        receipt: {
+          laneId,
+          worktreeId: receipt.worktree,
+          state: pickReceiptString(receipt.raw, "state") ?? "removed",
+          reason:
+            pickReceiptString(receipt.raw, "reason", "detail", "warning") ??
+            (receipt.archiveHookOverride != null
+              ? "removed past an explicitly waived archive-hook failure"
+              : null),
+          requestId,
+        },
+      });
+    }),
+  );
 
   /**
    * Read-only runtime capability projection (operations epic O1).
@@ -1415,6 +2120,236 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
   );
 
   /**
+   * Stop ONE Dispatch (one-Dispatch lifecycle control). Distinct from
+   * /api/run-stop (which tears the whole coordinator down): this stops a
+   * single worker's Dispatch and touches nothing else — no other attempt is
+   * settled, closed, or even re-decided.
+   *
+   * Ordering inside the handler:
+   *   1. token (middleware) → 2. id validation → 3. execution gate →
+   *   4. FRESH `worker-show` re-read (liveness + agentWait + workspace
+   *   identity + ownership, immediately before acting — never a cached row) →
+   *   5. durable `--retry-request` mint + ledger record → 6. `worker-stop`.
+   * A lost response answers 502 `response_lost` with the minted requestId so
+   * the client resolves the outcome through the request-show probe instead of
+   * retrying blind. Stop is deliberately allowed for every lifecycle state
+   * the re-read can show (live, unverifiable, exited, already settled) —
+   * de-escalation is safe and Orca's receipt reports what actually happened;
+   * only MISSING or UNVERIFIABLE evidence (no Dispatch, foreign Run, failed
+   * read) authorizes no mutation.
+   */
+  app.post(
+    "/api/workers/:dispatchId/stop",
+    requireToken(policy),
+    route(async (req, res) => {
+      const dispatchId = validateId(req.params.dispatchId, "dispatch id");
+      const runId = validateId(req.body?.runId, "runId");
+      if (!dispatchId || !runId) {
+        res.status(400).json({ error: "runId required" });
+        return;
+      }
+      await requireExecutionEnabled();
+      const evidence = await revalidateWorkerForMutation(dispatchId, runId);
+      if (!evidence.ok) {
+        res.status(evidence.status).json(evidence.body);
+        return;
+      }
+      const detail = evidence.detail;
+      try {
+        const { requestId, receipt } = await terminalMutationWithLedger(
+          "worker-stop",
+          dispatchId,
+          (rid) => stopWorkerReceipt(dispatchId, { retryRequestId: rid }),
+          { runId: detail.runId, taskId: detail.taskId },
+        );
+        await recordActivity(
+          createViewerActivity({
+            runId: detail.runId!,
+            kind: "stop",
+            taskId: detail.taskId,
+            dispatchId,
+            title: receipt.alreadySettled ? "Stop found the Dispatch already settled" : "Coordinator stopped a worker",
+            summary: `Stop state: ${receipt.state}.`,
+            detail: receipt.warning ?? null,
+            severity: receipt.state === "stopped" || receipt.alreadySettled ? "info" : "warning",
+            requestId,
+          }),
+        );
+        res.json({
+          ok: true,
+          requestId,
+          receipt,
+          // The fresh evidence this action was authorized by — the same
+          // read that gated it, returned so the UI can show its basis.
+          evidence: {
+            liveness: detail.liveness,
+            agentWait: detail.observation?.agentWait ?? null,
+            workspace: detail.terminal
+              ? { worktreePath: detail.terminal.worktreePath, branch: detail.terminal.branch }
+              : null,
+          },
+        });
+      } catch (err) {
+        if (err instanceof OrcaCliError && err.code === RESPONSE_LOST) {
+          res.status(502).json({
+            error: String((err as Error).message),
+            code: RESPONSE_LOST,
+            requestId: (err as { requestId?: string }).requestId ?? null,
+          });
+          return;
+        }
+        throw err;
+      }
+    }),
+  );
+
+  /**
+   * Abandon ONE Dispatch (`worker-abandon`) — the outcome_unknown tool for
+   * when stop is NOT right: it fences the worker from orchestration while
+   * explicitly NOT claiming its process stopped. That contract is why the
+   * lifecycle gate differs from stop's: abandoning a worker Orca proves LIVE
+   * would fence a working agent, so that state is REFUSED with
+   * `abandon_refused` (use stop). Unverifiable liveness is abandon's exact
+   * purpose, and an exited/settled Dispatch converges to `alreadySettled`.
+   * Same evidence, ledger, and response-loss semantics as stop.
+   */
+  app.post(
+    "/api/workers/:dispatchId/abandon",
+    requireToken(policy),
+    route(async (req, res) => {
+      const dispatchId = validateId(req.params.dispatchId, "dispatch id");
+      const runId = validateId(req.body?.runId, "runId");
+      if (!dispatchId || !runId) {
+        res.status(400).json({ error: "runId required" });
+        return;
+      }
+      await requireExecutionEnabled();
+      const evidence = await revalidateWorkerForMutation(dispatchId, runId);
+      if (!evidence.ok) {
+        res.status(evidence.status).json(evidence.body);
+        return;
+      }
+      const detail = evidence.detail;
+      if (
+        normalizeLiveness(detail.liveness?.verdict) === "live" &&
+        (detail.dispatch?.status ?? null) === "dispatched"
+      ) {
+        res.status(409).json({
+          error:
+            "Orca proves this Dispatch live — abandoning it would fence a working agent. Stop it instead.",
+          code: "abandon_refused",
+        });
+        return;
+      }
+      try {
+        const { requestId, receipt } = await terminalMutationWithLedger(
+          "worker-abandon",
+          dispatchId,
+          (rid) => abandonWorkerReceipt(dispatchId, { retryRequestId: rid }),
+          { runId: detail.runId, taskId: detail.taskId },
+        );
+        await recordActivity(
+          createViewerActivity({
+            runId: detail.runId!,
+            kind: "abandon",
+            taskId: detail.taskId,
+            dispatchId,
+            title: receipt.alreadySettled ? "Abandon found the Dispatch already settled" : "Coordinator abandoned a worker",
+            summary: `Abandon state: ${receipt.state}. The worker is fenced from orchestration; its process was not touched.`,
+            detail: receipt.warning ?? null,
+            severity: receipt.alreadySettled ? "info" : "warning",
+            requestId,
+          }),
+        );
+        res.json({
+          ok: true,
+          requestId,
+          receipt,
+          evidence: {
+            liveness: detail.liveness,
+            agentWait: detail.observation?.agentWait ?? null,
+            workspace: detail.terminal
+              ? { worktreePath: detail.terminal.worktreePath, branch: detail.terminal.branch }
+              : null,
+          },
+        });
+      } catch (err) {
+        if (err instanceof OrcaCliError && err.code === RESPONSE_LOST) {
+          res.status(502).json({
+            error: String((err as Error).message),
+            code: RESPONSE_LOST,
+            requestId: (err as { requestId?: string }).requestId ?? null,
+          });
+          return;
+        }
+        throw err;
+      }
+    }),
+  );
+
+  /**
+   * Focus ONE worker's agent terminal (`terminal switch --terminal`) — a
+   * surface-level UI action, not an orchestration mutation: it changes which
+   * pane is visible and nothing else, so unlike stop/abandon it stays
+   * available on view-only runtimes (no execution gate). The same fresh
+   * evidence re-read still gates it: a Dispatch without positive terminal
+   * facts (remote worker, archived terminal) has nothing to focus and is
+   * refused with `focus_unavailable` — the focus handle always comes from
+   * Orca's own receipt, never from the request body.
+   */
+  app.post(
+    "/api/workers/:dispatchId/focus",
+    requireToken(policy),
+    route(async (req, res) => {
+      const dispatchId = validateId(req.params.dispatchId, "dispatch id");
+      const runId = validateId(req.body?.runId, "runId");
+      if (!dispatchId || !runId) {
+        res.status(400).json({ error: "runId required" });
+        return;
+      }
+      const evidence = await revalidateWorkerForMutation(dispatchId, runId);
+      if (!evidence.ok) {
+        res.status(evidence.status).json(evidence.body);
+        return;
+      }
+      const detail = evidence.detail;
+      // The focus handle comes ONLY from the fresh receipt's terminal facts —
+      // the PTY observation layer. The fleet row's `agentTerminalHandle` is
+      // accounting state that can outlive an archived/closed terminal (and is
+      // absent entirely for a remote worker), so falling back to it could
+      // switch to whatever pane happens to own that stale handle. No positive
+      // terminal facts → nothing to focus → refuse, never guess.
+      const handle = detail.terminal?.handle ?? null;
+      if (!handle) {
+        res.status(409).json({
+          error: "This worker has no terminal this viewer can focus (remote or archived).",
+          code: "focus_unavailable",
+        });
+        return;
+      }
+      const { requestId, receipt } = await viewerMutationWithLedger(
+        "terminal-focus",
+        handle,
+        () => focusTerminal(handle),
+        () => ({ settled: true, note: `focused terminal ${handle}` }),
+        { runId: detail.runId, taskId: detail.taskId, dispatchId },
+      );
+      await recordActivity(
+        createViewerActivity({
+          runId: detail.runId!,
+          kind: "focus",
+          taskId: detail.taskId,
+          dispatchId,
+          title: "Focused a worker terminal",
+          summary: `Terminal ${handle} is now the focused pane.`,
+          requestId,
+        }),
+      );
+      res.json({ ok: true, requestId, receipt });
+    }),
+  );
+
+  /**
    * Explicit post-settlement worker release — the way a user resolves
    * release_unknown/close debt the coordinator refuses to guess its way out
    * of. `worker-release` takes no `--from`: ownership follows the Dispatch.
@@ -1429,8 +2364,8 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         return;
       }
       await requireExecutionEnabled();
-      const receipt = await terminalMutationWithLedger("worker-release", dispatchId, (requestId) =>
-        releaseWorker(dispatchId, { retryRequestId: requestId }),
+      const { requestId, receipt } = await terminalMutationWithLedger("worker-release", dispatchId, (r) =>
+        releaseWorker(dispatchId, { retryRequestId: r }),
       );
       // Fold the receipt into the coordinator projection — a KNOWN terminal
       // state resolves the attempt + its debt; unknown/pending keeps them.
@@ -1445,10 +2380,11 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
             title: "Coordinator released a worker",
             summary: `Terminal ownership is ${receipt.state}.`,
             severity: receipt.state === "released" || receipt.state === "already_released" ? "success" : "warning",
+            requestId,
           }),
         );
       }
-      res.json({ ok: true, receipt });
+      res.json({ ok: true, requestId, receipt });
     }),
   );
 
@@ -1465,8 +2401,8 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         return;
       }
       await requireExecutionEnabled();
-      const receipt = await terminalMutationWithLedger("worker-retain", dispatchId, (requestId) =>
-        retainWorker(dispatchId, { retryRequestId: requestId }),
+      const { requestId, receipt } = await terminalMutationWithLedger("worker-retain", dispatchId, (r) =>
+        retainWorker(dispatchId, { retryRequestId: r }),
       );
       noteManualRelease(dispatchId, receipt.state);
       const live = coordinatorStatus();
@@ -1478,10 +2414,336 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
             dispatchId,
             title: "Coordinator retained a worker",
             summary: "The terminal remains available for debugging.",
+            requestId,
           }),
         );
       }
-      res.json({ ok: true, receipt });
+      res.json({ ok: true, requestId, receipt });
+    }),
+  );
+
+  // --- Local file/diff review ------------------------------------------------
+  //
+  // The viewer never reads the worktree filesystem itself: "open this file",
+  // "show me the diff", "open what changed" all drive Orca's own editor
+  // surface through the adapter, with the worktree selector passed through
+  // verbatim from a discovery read (never inferred). Paths are contained at
+  // the HTTP boundary (validateWorkspacePath — traversal, separators, control
+  // characters) and every request mints a durable ledger identity with the
+  // exact path as target, so a review action is auditable even though the
+  // CLI call has no Orca-side request id. These are editor-surface actions,
+  // not orchestration mutations, so they stay available on view-only
+  // runtimes (token still required).
+
+  /** Open one workspace file in the Orca editor (`file open`). */
+  app.post(
+    "/api/files/open",
+    requireToken(policy),
+    route(async (req, res) => {
+      const path = validateWorkspacePath(req.body?.path);
+      const worktree = req.body?.worktree ? validateSelector(req.body.worktree, "worktree") : undefined;
+      const runId = req.body?.runId ? validateId(req.body.runId, "runId") : null;
+      const { requestId, receipt } = await viewerMutationWithLedger(
+        "file-open",
+        path,
+        () => openWorkspaceFile(path, { worktree }),
+        () => ({ settled: true, note: `opened ${path}` }),
+        { runId },
+      );
+      if (runId) {
+        await recordActivity(
+          createViewerActivity({
+            runId,
+            kind: "file_review",
+            title: "Opened a workspace file for review",
+            summary: path,
+            detail: worktree ? `Worktree: ${worktree}` : null,
+            requestId,
+          }),
+        );
+      }
+      res.json({ ok: true, requestId, receipt });
+    }),
+  );
+
+  /** Open one file's source-control diff in the Orca editor (`file diff`). */
+  app.post(
+    "/api/files/diff",
+    requireToken(policy),
+    route(async (req, res) => {
+      const path = validateWorkspacePath(req.body?.path);
+      const staged = req.body?.staged === true;
+      const worktree = req.body?.worktree ? validateSelector(req.body.worktree, "worktree") : undefined;
+      const runId = req.body?.runId ? validateId(req.body.runId, "runId") : null;
+      const { requestId, receipt } = await viewerMutationWithLedger(
+        "file-diff",
+        path,
+        () => openWorkspaceFileDiff(path, { staged, worktree }),
+        () => ({ settled: true, note: `opened ${staged ? "staged " : ""}diff for ${path}` }),
+        { runId },
+      );
+      if (runId) {
+        await recordActivity(
+          createViewerActivity({
+            runId,
+            kind: "file_review",
+            title: `Opened a ${staged ? "staged " : ""}diff for review`,
+            summary: path,
+            detail: worktree ? `Worktree: ${worktree}` : null,
+            requestId,
+          }),
+        );
+      }
+      res.json({ ok: true, requestId, receipt });
+    }),
+  );
+
+  /**
+   * Open every changed file of a workspace in the Orca editor
+   * (`file open-changed`). The mode is the adapter's closed union — a typo
+   * fails here as 400 before any CLI call.
+   */
+  app.post(
+    "/api/files/open-changed",
+    requireToken(policy),
+    route(async (req, res) => {
+      const modeRaw = validateText(req.body?.mode, "mode", 8);
+      if (modeRaw && !["edit", "diff", "both"].includes(modeRaw)) {
+        throw new ValidationError(
+          `mode must be one of edit|diff|both (got ${JSON.stringify(modeRaw)})`,
+          "invalid_mode",
+        );
+      }
+      const mode = (modeRaw || undefined) as WorkspaceChangedMode | undefined;
+      const worktree = req.body?.worktree ? validateSelector(req.body.worktree, "worktree") : undefined;
+      const runId = req.body?.runId ? validateId(req.body.runId, "runId") : null;
+      const { requestId, receipt } = await viewerMutationWithLedger(
+        "file-open-changed",
+        worktree ?? workspaceDir,
+        () => openWorkspaceChangedFiles({ mode, worktree }),
+        () => ({ settled: true, note: `opened changed files (mode: ${mode ?? "both"})` }),
+        { runId },
+      );
+      if (runId) {
+        await recordActivity(
+          createViewerActivity({
+            runId,
+            kind: "file_review",
+            title: "Opened the workspace's changed files",
+            summary: `Mode: ${mode ?? "both"}.`,
+            requestId,
+          }),
+        );
+      }
+      res.json({ ok: true, requestId, receipt });
+    }),
+  );
+
+  /**
+   * The shared execution core of evidence-gated worktree removal
+   * (`worktree rm`) — used verbatim by the workspace-scoped route below AND
+   * by the lane-scoped removal route (spec operator API), so both surfaces
+   * run the SAME gate stack in the SAME order and can never drift:
+   *
+   *   1. execution gate → 2. this viewer's own workspace is refused BEFORE
+   *   any discovery read (the protection is absolute and local — removal
+   *   would pull the coordinator out from under the Run — so it must not
+   *   depend on Orca listing the workspace under this exact selector
+   *   spelling) → 3. fresh `worktree show` re-read: the row is the evidence
+   *   a removal is authorized on; Orca's definite absence is a 404-shaped
+   *   refusal, a failed read propagates (unverifiable authorizes nothing) →
+   *   4. preconditions (assertWorktreeRemovalPreconditions): main worktree
+   *   and any workspace hosting an active attempt or unsettled lane are
+   *   refused → 5. waiver evidence from THIS workspace's durable ledger →
+   *   6. the removal itself, ledger'd before and after, Run-scoped activity
+   *   when the scope is positively known.
+   *
+   * Refusals come back as a typed result (the established
+   * `revalidateWorkerForMutation` shape) so each route maps them to its own
+   * response verbatim; the archive-hook block additionally carries the
+   * minted requestId — the ONLY id a later waiver may cite.
+   */
+  const removeWorktreeThroughOrca = async (
+    selector: string,
+    flags: {
+      runHooks: boolean;
+      force: boolean;
+      allowFailedArchiveHook: boolean;
+      evidenceRequestId: string | null;
+      /** Requested Run scope; null falls back to a positively-matched lane. */
+      runId: string | null;
+    },
+  ): Promise<
+    | { ok: false; status: number; body: Record<string, unknown> }
+    | { ok: true; requestId: string; receipt: WorktreeRemovalReceipt }
+  > => {
+    await requireExecutionEnabled();
+
+    for (const owned of new Set([worktree, `path:${workspaceDir}`])) {
+      if (owned && owned === selector) {
+        throw new OrcaCliError(
+          `${selector} is this viewer's own workspace — removal would pull the coordinator out from under the Run.`,
+          "current_workspace_protected",
+        );
+      }
+    }
+
+    // Fresh identity re-read through Orca: `null` is Orca's own definite
+    // absence; anything else (transport, timeout) throws — unverifiable is
+    // never rendered as "no such workspace".
+    const row = await showWorktree(selector);
+    if (!row) {
+      return {
+        ok: false,
+        status: 404,
+        body: { error: "no such worktree", code: "worktree_not_found" },
+      };
+    }
+
+    // Precondition inputs: the workspaces hosting active work (unsettled
+    // attempts + non-settled lanes). Ownership was already refused above.
+    const activeSelectors = new Set<string>();
+    const status = coordinatorStatus();
+    if (status.running) {
+      for (const attempt of status.attempts) {
+        if (attempt.settled) continue;
+        for (const prefs of [attempt.requested, attempt.effective]) {
+          if (prefs?.worktree) activeSelectors.add(prefs.worktree);
+        }
+      }
+      for (const lane of status.worktreeLanes) {
+        if (lane.selector && lane.state !== "settled" && lane.state !== "removed") {
+          activeSelectors.add(lane.selector);
+        }
+      }
+    }
+    assertWorktreeRemovalPreconditions(row, selector, {
+      ownedSelectors: new Set([worktree, `path:${workspaceDir}`]),
+      activeSelectors,
+    });
+
+    // Waiver evidence is read from THIS workspace's durable ledger: the id
+    // must name a previous removal attempt against the SAME selector that
+    // was blocked by the archive hook. Orca's request-show cannot confirm
+    // a worktree-rm (no --retry-request), so the viewer's own durable
+    // record of the blocked attempt is the evidence — and absence of that
+    // record authorizes nothing.
+    if (flags.allowFailedArchiveHook && flags.evidenceRequestId) {
+      const rows = await requestLedger.list();
+      const evidence = rows.find(
+        (candidate) =>
+          candidate.requestId === flags.evidenceRequestId &&
+          candidate.operation === "worktree-remove" &&
+          candidate.target === selector &&
+          (candidate.note ?? "").includes("archive hook failed"),
+      );
+      if (!evidence) {
+        return {
+          ok: false,
+          status: 403,
+          body: {
+            error:
+              "No durable evidence that this worktree's removal was blocked by a failed archive hook — " +
+              "waiving the hook requires the ledger id of that blocked attempt.",
+            code: "removal_evidence_required",
+          },
+        };
+      }
+    }
+
+    try {
+      const scopeRunId = flags.runId ?? laneRunScopeFor(selector, status);
+      const { requestId, receipt } = await viewerMutationWithLedger(
+        "worktree-remove",
+        selector,
+        () =>
+          removeWorktree(selector, {
+            runHooks: flags.runHooks,
+            force: flags.force,
+            allowFailedArchiveHook: flags.allowFailedArchiveHook,
+          }),
+        (r) => ({
+          settled: true,
+          note:
+            r.archiveHookOverride != null
+              ? "removed with waived archive-hook failure"
+              : "removed",
+        }),
+        { runId: scopeRunId },
+      );
+      if (scopeRunId) {
+        await recordActivity(
+          createViewerActivity({
+            runId: scopeRunId,
+            kind: "worktree",
+            title: "Removed a worktree",
+            summary: `${selector} was removed from Orca and git.`,
+            detail:
+              receipt.archiveHookOverride != null
+                ? "Removal proceeded past an explicitly waived archive-hook failure."
+                : null,
+            severity: receipt.archiveHookOverride != null ? "warning" : "info",
+            requestId,
+          }),
+        );
+      }
+      return { ok: true, requestId, receipt };
+    } catch (err) {
+      if (isArchiveHookFailure(err)) {
+        // Nothing was removed (documented 1.4.206 contract). The result
+        // carries this attempt's requestId: the ONLY id a later waiver can
+        // cite as evidence.
+        return {
+          ok: false,
+          status: 409,
+          body: {
+            error: String((err as Error).message),
+            code: WORKTREE_ARCHIVE_HOOK_FAILED,
+            requestId: (err as { requestId?: string }).requestId ?? null,
+            hint: "Retry with runHooks + allowFailedArchiveHook + evidenceRequestId=<this requestId> to waive.",
+          },
+        };
+      }
+      throw err;
+    }
+  };
+
+  /**
+   * Evidence-gated worktree removal (`worktree rm`), workspace-scoped form:
+   * the caller names the exact selector. Every gate lives in the shared
+   * `removeWorktreeThroughOrca` core above — this handler only validates the
+   * request shape and maps the core's typed result onto the response.
+   */
+  app.post(
+    "/api/worktrees/remove",
+    requireToken(policy),
+    route(async (req, res) => {
+      const selector = validateSelector(req.body?.worktree, "worktree");
+      const runHooks = req.body?.runHooks === true;
+      const force = req.body?.force === true;
+      const allowFailedArchiveHook = req.body?.allowFailedArchiveHook === true;
+      const evidenceRequestId = req.body?.evidenceRequestId
+        ? validateId(req.body.evidenceRequestId, "evidenceRequestId")
+        : null;
+      const runId = req.body?.runId ? validateId(req.body.runId, "runId") : null;
+      if (allowFailedArchiveHook && !evidenceRequestId) {
+        throw new ValidationError(
+          "allowFailedArchiveHook requires evidenceRequestId — the ledger id of the blocked removal this waiver resolves",
+          "removal_evidence_required",
+        );
+      }
+      const result = await removeWorktreeThroughOrca(selector, {
+        runHooks,
+        force,
+        allowFailedArchiveHook,
+        evidenceRequestId,
+        runId,
+      });
+      if (!result.ok) {
+        res.status(result.status).json(result.body);
+        return;
+      }
+      res.json({ ok: true, requestId: result.requestId, receipt: result.receipt });
     }),
   );
 
@@ -1594,8 +2856,17 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       // the same strictness as the run request — the store keeps viewer
       // PREFERENCES, and a malformed placement must 400 here rather than sit
       // in the file waiting to fail a future run.
-      validateEnvironmentTaskMap(body.environmentByTask, "environmentByTask");
-      validatePlacementTaskMap(body.placementByTask, "placementByTask");
+      const configEnvironmentByTask = validateEnvironmentTaskMap(body.environmentByTask, "environmentByTask");
+      const configPlacementByTask = validatePlacementTaskMap(body.placementByTask, "placementByTask");
+      // Workspace lanes (worktree-lanes epic): the full lane shapes get the
+      // same strictness, plus the same semantic cross-checks as the run
+      // request — lane references must resolve, placement and lane
+      // membership stay disjoint, and the environment/placement matrix holds.
+      const configWorktreeLanes = validateWorktreeLaneMap(body.worktreeLanes, "worktreeLanes");
+      const configLaneByTask = validateLaneTaskMap(body.laneByTask, "laneByTask");
+      assertLaneReferences(configLaneByTask, configWorktreeLanes);
+      assertLanePlacementDisjoint(configPlacementByTask, configLaneByTask);
+      assertEnvironmentPlacementCompatibility(configEnvironmentByTask, configPlacementByTask);
       // One semantic lead Task per Run. It is presentation metadata rather
       // than an Orca mutation, but both sides of the map are still real Orca
       // ids and receive the same strict HTTP-boundary validation as Task maps.

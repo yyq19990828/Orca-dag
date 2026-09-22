@@ -25,6 +25,11 @@ export type ActivityKind =
   | "gate"
   | "recovery"
   | "release"
+  | "stop"
+  | "abandon"
+  | "focus"
+  | "worktree"
+  | "file_review"
   | "cleanup_debt"
   | "unknown";
 
@@ -77,6 +82,13 @@ export interface ActivityEvent {
     terminalHandle?: string;
     payload?: unknown;
     argv?: string[];
+    /**
+     * The durable request identity of the viewer mutation this row journals
+     * (the `--retry-request` id for Orca-receipted mutations, the ledger id
+     * for viewer-receipted ones). Present on mutation rows only — a row
+     * without one is not a lifecycle mutation, and no id is ever invented.
+     */
+    requestId?: string;
     provenance: "orca_message" | "fleet" | "coordinator" | "viewer_journal";
   };
 }
@@ -891,6 +903,12 @@ export function createViewerActivity(input: {
    * id et al.) until the authoritative Orca row supersedes it.
    */
   payload?: unknown;
+  /**
+   * The durable request identity of the mutation this row journals (see
+   * `ActivityEvent.technical.requestId`). Viewer-side provenance only — it
+   * links the row to the request ledger, never overrides an Orca receipt.
+   */
+  requestId?: string | null;
 }): ActivityEvent {
   const createdAt = new Date().toISOString();
   return {
@@ -916,7 +934,12 @@ export function createViewerActivity(input: {
     createdAt,
     groupedCount: 1,
     actionable: input.actionable ?? null,
-    technical: { argv: input.argv, payload: input.payload, provenance: "viewer_journal" },
+    technical: {
+      argv: input.argv,
+      payload: input.payload,
+      requestId: input.requestId ?? undefined,
+      provenance: "viewer_journal",
+    },
   };
 }
 

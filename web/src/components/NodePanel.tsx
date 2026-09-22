@@ -1,21 +1,27 @@
 import { useEffect, useState } from "react";
-import { fetchEnvironmentRepos, fetchEnvironmentWorktrees, fetchEnvironments, fetchModels } from "../api";
+import { fetchEnvironments, fetchModels } from "../api";
 import { formatDateTime } from "../format";
+import { lanePlanProblems, laneLabel } from "../placement";
 import {
   effectiveHarness,
+  allLaneIds,
   getDefaultHarness,
+  getLaneSpec,
   getNodeHarness,
   getNodeModel,
   getNodeEffort,
   getNodeRetain,
   getNodeEnvironment,
   getNodePlacement,
+  getTaskLane,
+  setLaneSpec,
   setNodeHarness,
   setNodeModel,
   setNodeEffort,
   setNodeRetain,
   setNodeEnvironment,
   setNodePlacement,
+  setTaskLane,
   useConfig,
   useFlags,
 } from "../harness";
@@ -25,19 +31,26 @@ import {
   EFFORT_SUPPORTED,
   MODEL_PICKER,
   STATUS_META,
+  type DagEdge,
   type DagNode,
   type DagNodeReadiness,
   type OrcaEnvironmentView,
-  type OrcaRepoView,
-  type OrcaWorktreeView,
   type PlacementSpec,
 } from "../types";
 import { DoodleSelect } from "./DoodleSelect";
+import { PlacementEditor } from "./PlacementEditor";
 
 const INHERIT = "__inherit__";
 const CUSTOM = "__custom__";
+const NEW_LANE = "__new_lane__";
 const KNOWN = HARNESSES as readonly string[];
 const CUSTOM_OFF_HINT = "Custom commands are disabled — start the viewer with ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1";
+
+/** Short seed summary for a lane picker row (never the raw placement JSON). */
+function laneSpecOf(laneId: string): string {
+  const spec = getLaneSpec(laneId);
+  return spec ? laneLabel(spec) : "(no seed — pick a placement below)";
+}
 
 interface WorkerReportResult {
   provenance?: string;
@@ -136,6 +149,10 @@ interface NodePanelProps {
   childLabels: string[];
   /** Server-projected readiness explanation for this node (Phase 4). */
   readiness: DagNodeReadiness | null;
+  /** This Run's dependency edges — the lane ordering preflight reads them. */
+  edges: DagEdge[];
+  /** Labels for task ids in this Run (lane member lists, warnings). */
+  labelsById: Record<string, string>;
   onLeadChange: (taskId: string | null) => void;
   /** Evidence accumulated from worker-list for this Run during this page session. */
   permanentlyLocked: boolean;
@@ -160,6 +177,8 @@ export function NodePanel({
   parentLabel,
   childLabels,
   readiness,
+  edges,
+  labelsById,
   onLeadChange,
   permanentlyLocked,
   temporarilyLocked,
@@ -217,14 +236,12 @@ export function NodePanel({
     setNodeHarness(node.id, v.trim() || null);
   }
 
-  // --- per-node environment + exact placement (Phase 6) ----------------
+  // --- per-node environment + exact placement + workspace lanes (Phase 6/7)
   // The environment picker lists ONLY what `orca environment list` discovered
   // (Local default + saved environments) — the viewer never invents a target.
-  // Selecting a remote environment reveals the placement editor, whose two
-  // forms are the only remote-safe ones Orca supports: an exact existing
-  // workspace (full `id:<repo>::<path>` selector, verbatim) or a new
-  // top-level worktree (exact repo selector + explicit name). Remote
-  // `current` and `new-child` are never offered — they are invalid.
+  // Local placement offers the full four-choice matrix through PlacementEditor;
+  // a saved environment swaps it for the two remote-safe choices. A workspace
+  // lane overrides both: its members take placement from the lane's seed.
   const [envs, setEnvs] = useState<OrcaEnvironmentView[] | null>(null);
   useEffect(() => {
     let alive = true;
@@ -235,6 +252,7 @@ export function NodePanel({
       alive = false;
     };
   }, []);
+  const config = useConfig();
   const envId = getNodeEnvironment(node.id);
   const placement = getNodePlacement(node.id);
   const selectedEnv = envs?.find((e) => e.id === envId) ?? null;
@@ -242,38 +260,46 @@ export function NodePanel({
   // the matching controls hide rather than mislead (mixed-version peers).
   const peerModelEffort = !envId || (selectedEnv?.peer.modelEffort ?? false);
 
-  // Exact-workspace and repo discovery for the placement editor, loaded per
-  // selected environment (cached list data; empty on failure → the pickers
-  // stay empty with a hint, never filled with guesses).
-  const [worktrees, setWorktrees] = useState<OrcaWorktreeView[] | null>(null);
-  const [repos, setRepos] = useState<OrcaRepoView[] | null>(null);
-  useEffect(() => {
-    if (!envId) {
-      setWorktrees(null);
-      setRepos(null);
-      return;
-    }
-    let alive = true;
-    fetchEnvironmentWorktrees(envId)
-      .then((w) => alive && setWorktrees(w))
-      .catch(() => alive && setWorktrees([]));
-    fetchEnvironmentRepos(envId)
-      .then((r) => alive && setRepos(r))
-      .catch(() => alive && setRepos([]));
-    return () => {
-      alive = false;
-    };
-  }, [envId]);
+  const laneId = getTaskLane(node.id);
+  const laneSpec = laneId ? getLaneSpec(laneId) : null;
+  const laneMembers = laneId
+    ? Object.entries(config.laneByTask)
+        .filter(([, memberOf]) => memberOf === laneId)
+        .map(([taskId]) => taskId)
+    : [];
+  // The lane ordering preflight runs over the whole plan but only THIS
+  // lane's problems are this panel's business.
+  const laneProblems = lanePlanProblems(
+    config.laneByTask,
+    config.worktreeLanes,
+    config.placementByTask,
+    config.environmentByTask,
+    edges,
+  ).filter((p) => laneId && p.startsWith(`Lane ${laneId}:`));
 
   function pickEnvironment(v: string) {
     if (launchLocked) return;
-    // "" = Local. setNodeEnvironment clears a stale placement with the env.
+    // "" = Local. setNodeEnvironment clears a stale placement (and lane
+    // membership — lanes are local) with the environment.
     setNodeEnvironment(node.id, v || null);
   }
 
   function pickPlacement(p: PlacementSpec | null) {
     if (launchLocked) return;
     setNodePlacement(node.id, p);
+  }
+
+  function pickLane(v: string) {
+    if (launchLocked) return;
+    if (v === NEW_LANE) {
+      // Mint a viewer-local lane id. It is launch intent only — the server
+      // derives Orca worktree names from the Run and this id deterministically.
+      const fresh = `lane-${Date.now().toString(36)}`;
+      setLaneSpec(fresh, { placement: { kind: "new-child", setup: "run" } });
+      setTaskLane(node.id, fresh);
+      return;
+    }
+    setTaskLane(node.id, v || null);
   }
 
   // --- per-node model ------------------------------------------------
@@ -446,7 +472,12 @@ export function NodePanel({
         <DoodleSelect
           value={envId ?? ""}
           onChange={pickEnvironment}
-          disabled={launchLocked}
+          disabled={launchLocked || Boolean(laneId)}
+          title={
+            laneId
+              ? "This task runs in a local workspace lane — remove it from the lane to pin a remote environment."
+              : undefined
+          }
           loading={envs === null}
           options={[
             { value: "", label: `Local (this server)` },
@@ -468,63 +499,95 @@ export function NodePanel({
         )}
       </div>
 
-      {/* Placement editor: ONLY for a remote environment, ONLY in the two
-          remote-safe forms. Local/current needs no editor (the default). */}
-      {envId && (
+      {/* Phase 7: durable workspace lanes. A lane is ONE shared local
+          non-current workspace for a dependency-ordered task chain. The seed
+          editor is the same placement grammar minus `current` (`current` is
+          no lane), and the ordering preflight explains — before any mutation
+          — why an unordered set of tasks cannot share a lane. */}
+      <div className="node-panel__field">
+        <span className="node-panel__key">Workspace lane (serial tasks sharing one workspace)</span>
+        <DoodleSelect
+          value={laneId ?? ""}
+          onChange={pickLane}
+          disabled={launchLocked}
+          options={[
+            { value: "", label: "(no lane — per-task placement)" },
+            ...allLaneIds().map((id) => ({
+              value: id,
+              label: `${id} · ${laneSpecOf(id)}`,
+              hint: id,
+            })),
+            { value: NEW_LANE, label: "＋ New lane…", disabled: launchLocked },
+          ]}
+        />
+        {laneId && laneSpec && (
+          <>
+            <PlacementEditor
+              scope="lane"
+              envId={null}
+              title="Lane placement (shared by every task in the lane)"
+              value={laneSpec.placement}
+              onChange={(p) => {
+                if (launchLocked || !laneId || p === null || p.kind === "current") return;
+                setLaneSpec(laneId, { placement: p });
+              }}
+              disabled={launchLocked}
+            />
+            {laneMembers.length > 1 && (
+              <span className="node-panel__hint">
+                Lane members (run one after another):{" "}
+                {laneMembers.map((id) => labelsById[id] ?? id).join(" → ")}
+              </span>
+            )}
+            {laneProblems.map((p) => (
+              <span key={p} className="node-panel__hint placement__warn">
+                ⚠ {p}
+              </span>
+            ))}
+            {!launchLocked && (
+              <button
+                type="button"
+                className="node-panel__lane-remove"
+                onClick={() => pickLane("")}
+                title="Remove this task from the lane (the lane itself stays if other tasks still use it)"
+              >
+                Remove from lane
+              </button>
+            )}
+          </>
+        )}
+        {!laneId && (
+          <span className="node-panel__hint">
+            Tasks in one lane never run concurrently; different lanes may. Leave empty for per-task placement.
+          </span>
+        )}
+      </div>
+
+      {/* Per-task placement editor — skipped while the task is in a lane (the
+          lane owns its members' placement). Local offers the full four-choice
+          matrix; a saved environment offers the two remote-safe choices. */}
+      {!laneId && !envId && (
         <div className="node-panel__field">
-          <span className="node-panel__key">Placement on {selectedEnv?.name ?? envId}</span>
-          <DoodleSelect
-            value={placement?.kind === "existing" ? `existing:${placement.selector}` : placement?.kind === "new-top-level" ? "new-top-level" : ""}
-            onChange={(v) => {
-              if (launchLocked) return;
-              if (v.startsWith("existing:")) pickPlacement({ kind: "existing", selector: v.slice("existing:".length) });
-              else if (v === "new-top-level") {
-                const repo = repos?.[0]?.id ?? "";
-                pickPlacement(repo ? { kind: "new-top-level", repo, name: `${node.id.slice(0, 24)}-wt` } : null);
-              } else pickPlacement(null);
-            }}
+          <PlacementEditor
+            scope="local"
+            envId={null}
+            title="Placement (local workspace)"
+            value={placement}
+            onChange={pickPlacement}
             disabled={launchLocked}
-            loading={worktrees === null || repos === null}
-            options={[
-              { value: "", label: "(pick a workspace…)" },
-              ...(worktrees ?? []).map((w) => ({
-                value: `existing:${w.id}`,
-                label: `▸ ${w.displayName ?? w.path ?? w.id}${w.branch ? ` · ${w.branch.replace(/^refs\/heads\//, "")}` : ""}`,
-                hint: w.id,
-              })),
-              ...(repos && repos.length > 0
-                ? [{ value: "new-top-level", label: "＋ New top-level worktree…" }]
-                : []),
-            ]}
           />
-          {placement?.kind === "existing" && (
-            <span className="node-panel__hint">
-              Exact workspace: <code>{placement.selector}</code>
-            </span>
-          )}
-          {placement?.kind === "new-top-level" && (
-            <div className="node-panel__custom-block">
-              <DoodleSelect
-                value={placement.repo}
-                onChange={(repo) => pickPlacement({ ...placement, repo })}
-                disabled={launchLocked}
-                loading={repos === null}
-                options={(repos ?? []).map((r) => ({ value: r.id, label: r.displayName ?? r.id }))}
-              />
-              <input
-                className="node-panel__custom"
-                value={placement.name}
-                placeholder="worktree name"
-                onChange={(e) => {
-                  if (launchLocked) return;
-                  const name = e.target.value.trim();
-                  pickPlacement(name ? { ...placement, name } : null);
-                }}
-                disabled={launchLocked}
-              />
-              <span className="node-panel__hint">New independent top-level worktree: exact repo + explicit name.</span>
-            </div>
-          )}
+        </div>
+      )}
+      {!laneId && envId && (
+        <div className="node-panel__field">
+          <PlacementEditor
+            scope="remote"
+            envId={envId}
+            title={`Placement on ${selectedEnv?.name ?? envId}`}
+            value={placement}
+            onChange={pickPlacement}
+            disabled={launchLocked}
+          />
           {placement === null && (
             <span className="node-panel__hint">
               Pick an exact workspace or a new top-level worktree — remote “current” is not a valid placement.

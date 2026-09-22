@@ -79,30 +79,80 @@ describe("config: environmentByTask + placementByTask (Phase 6)", () => {
     assert.deepEqual(loaded.environmentByTask, { task_a: "env_remote" });
   });
 
-  it("round-trips all three placement kinds verbatim", async () => {
+  it("round-trips all four placement kinds and their creation metadata", async () => {
     await saveConfig(dir, {
       placementByTask: {
         task_local: { kind: "current" },
         task_existing: { kind: "existing", selector: "id:repoA::/srv/ws" },
-        task_new: { kind: "new-top-level", repo: "id:repoA", name: "phase6-wt" },
+        task_child: {
+          kind: "new-child",
+          name: "kid-wt",
+          setup: "inherit",
+          baseBranch: "feature/x",
+          displayName: "Kid worktree",
+          comment: "stacked lane",
+        },
+        task_new: {
+          kind: "new-top-level",
+          repo: "id:repoA",
+          name: "phase6-wt",
+          setup: "skip",
+          baseBranch: "main",
+        },
       },
     });
     const loaded = await loadConfig(dir);
     assert.deepEqual(loaded.placementByTask, {
       task_local: { kind: "current" },
       task_existing: { kind: "existing", selector: "id:repoA::/srv/ws" },
-      task_new: { kind: "new-top-level", repo: "id:repoA", name: "phase6-wt" },
+      task_child: {
+        kind: "new-child",
+        name: "kid-wt",
+        setup: "inherit",
+        baseBranch: "feature/x",
+        displayName: "Kid worktree",
+        comment: "stacked lane",
+      },
+      task_new: { kind: "new-top-level", repo: "id:repoA", name: "phase6-wt", setup: "skip", baseBranch: "main" },
     });
   });
 
-  it("drops placement entries it cannot parse instead of guessing a shape", async () => {
+  it("normalizes an absent setup policy to Orca's default run (old and new files alike)", async () => {
     await saveConfig(dir, {
       placementByTask: {
-        bad_kind: { kind: "new-child" }, // remote-ambiguous and unpersistable
+        no_setup: { kind: "new-top-level", repo: "id:repoA", name: "wt" },
+      },
+    });
+    const loaded = await loadConfig(dir);
+    assert.equal(
+      (loaded.placementByTask?.no_setup as { setup: string }).setup,
+      "run",
+    );
+  });
+
+  it("keeps a nameless creation placement (the server derives a bounded name at start)", async () => {
+    await saveConfig(dir, {
+      placementByTask: {
+        derived: { kind: "new-child", setup: "run" },
+        derived_top: { kind: "new-top-level", repo: "id:repoA", setup: "skip" },
+      },
+    });
+    const loaded = await loadConfig(dir);
+    assert.deepEqual(loaded.placementByTask?.derived, { kind: "new-child", setup: "run" });
+    assert.deepEqual(loaded.placementByTask?.derived_top, {
+      kind: "new-top-level",
+      repo: "id:repoA",
+      setup: "skip",
+    });
+  });
+
+  it("drops structurally malformed entries instead of guessing a shape", async () => {
+    await saveConfig(dir, {
+      placementByTask: {
+        bad_kind: { kind: "new-sibling" }, // no such kind — dropped outright
         missing_selector: { kind: "existing" },
         empty_selector: { kind: "existing", selector: "  " },
         missing_repo: { kind: "new-top-level", name: "wt" },
-        missing_name: { kind: "new-top-level", repo: "id:repoA" },
         not_object: "path:/srv/ws",
         extra_keys_survive: { kind: "existing", selector: "path:/srv/ws", host: "nope" },
       },
@@ -110,6 +160,34 @@ describe("config: environmentByTask + placementByTask (Phase 6)", () => {
     const loaded = await loadConfig(dir);
     assert.deepEqual(loaded.placementByTask, {
       extra_keys_survive: { kind: "existing", selector: "path:/srv/ws" },
+    });
+  });
+
+  it("strips malformed creation fields field-by-field, keeping the safe placement", async () => {
+    await saveConfig(dir, {
+      placementByTask: {
+        child: {
+          kind: "new-child",
+          name: "bad name; rm", // not a bounded single token — stripped
+          setup: "yolo", // not a policy — normalized to run
+          baseBranch: "../escape", // ref traversal — stripped
+          displayName: "ok display",
+          comment: "x".repeat(501), // over the bound — stripped
+        },
+        // Creation fields on a current/existing placement are meaningless and
+        // stripped; the SAFE part of the intent (the exact selector) survives.
+        existing_with_setup: { kind: "existing", selector: "path:/srv/ws", setup: "skip", name: "wt" },
+      },
+    });
+    const loaded = await loadConfig(dir);
+    assert.deepEqual(loaded.placementByTask?.child, {
+      kind: "new-child",
+      setup: "run",
+      displayName: "ok display",
+    });
+    assert.deepEqual(loaded.placementByTask?.existing_with_setup, {
+      kind: "existing",
+      selector: "path:/srv/ws",
     });
   });
 
@@ -180,5 +258,56 @@ describe("config: leadTaskByRun", () => {
       }),
     );
     assert.deepEqual((await loadConfig(dir)).leadTaskByRun, { run_ok: "task_ok" });
+  });
+});
+
+/**
+ * Worktree-lane persistence (placement foundation). A lane is launch intent
+ * only — one seed placement shared by a dependency-ordered task chain. The
+ * sanitizer must keep well-formed lanes verbatim, drop lanes seeded by
+ * `current` (a "current lane" is the default, not a lane), and keep the
+ * task→lane membership map trim-tight like every other id map.
+ */
+describe("config: worktreeLanes + laneByTask (placement foundation)", () => {
+  it("round-trips lanes seeded by each non-current placement kind", async () => {
+    await saveConfig(dir, {
+      worktreeLanes: {
+        lane_existing: { placement: { kind: "existing", selector: "id:repoA::/srv/ws" } },
+        lane_child: { placement: { kind: "new-child", name: "kid", setup: "inherit" } },
+        lane_top: { placement: { kind: "new-top-level", repo: "id:repoA", setup: "run" } },
+      },
+      laneByTask: { task_1: "lane_child", task_2: " lane_child " },
+    });
+    const loaded = await loadConfig(dir);
+    assert.deepEqual(loaded.worktreeLanes, {
+      lane_existing: { placement: { kind: "existing", selector: "id:repoA::/srv/ws" } },
+      lane_child: { placement: { kind: "new-child", name: "kid", setup: "inherit" } },
+      lane_top: { placement: { kind: "new-top-level", repo: "id:repoA", setup: "run" } },
+    });
+    assert.deepEqual(loaded.laneByTask, { task_1: "lane_child", task_2: "lane_child" });
+  });
+
+  it("drops a lane seeded by current and other malformed lane entries", async () => {
+    await saveConfig(dir, {
+      worktreeLanes: {
+        lane_current: { placement: { kind: "current" } }, // no such thing as a current lane
+        lane_broken: { placement: { kind: "new-top-level" } }, // no repo
+        lane_not_object: "path:/srv/ws",
+        lane_ok: { placement: { kind: "new-child", setup: "skip" } },
+      },
+    });
+    const loaded = await loadConfig(dir);
+    assert.deepEqual(loaded.worktreeLanes, {
+      lane_ok: { placement: { kind: "new-child", setup: "skip" } },
+    });
+  });
+
+  it("keeps lane membership of dropped lanes (conflict checks are validation's job)", async () => {
+    await saveConfig(dir, {
+      worktreeLanes: { lane_ok: { placement: { kind: "new-child" } } },
+      laneByTask: { task_dangling: "lane_missing", task_ok: "lane_ok", task_blank: "  " },
+    });
+    const loaded = await loadConfig(dir);
+    assert.deepEqual(loaded.laneByTask, { task_dangling: "lane_missing", task_ok: "lane_ok" });
   });
 });

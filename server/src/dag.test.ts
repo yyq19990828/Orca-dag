@@ -12,6 +12,7 @@ import {
   type OrcaTask,
   type SchedulerOccupancy,
 } from "./orca";
+import { isCrossLaneJoin, laneOfTask, taskDeps, validateLaneTotalOrder } from "./coordinator";
 import { createApp, listenLoopback } from "./app";
 import { createSecurityPolicy, type SecurityPolicy } from "./security";
 
@@ -339,5 +340,128 @@ process.stdout.write(JSON.stringify(out));
     assert.equal(dag.readiness.task_b.runnable, true);
     assert.deepEqual(dag.readiness.task_c.codes, ["unmet_dependencies", "pending_gate"]);
     assert.deepEqual(dag.readiness.task_c.pendingGateIds, ["gate_1"]);
+  });
+});
+
+// --- workspace lanes: pure DAG validation (worktree-lanes epic) -------------
+
+/** Minimal OrcaTask rows for the pure lane validators (deps is a JSON array). */
+function laneTask(id: string, deps: string[]): OrcaTask {
+  return {
+    id,
+    parent_id: null,
+    created_by_terminal_handle: null,
+    spec: `spec for ${id}`,
+    status: "pending",
+    deps: JSON.stringify(deps),
+    result: null,
+    created_at: "2026-09-21T00:00:00Z",
+    completed_at: null,
+    task_title: id,
+    display_name: null,
+    run_id: "run_test",
+  };
+}
+
+describe("lane validation: total dependency order", () => {
+  it("accepts a lane whose members form a direct dependency chain", () => {
+    const tasks = [laneTask("t1", []), laneTask("t2", ["t1"]), laneTask("t3", ["t2"])];
+    const issues = validateLaneTotalOrder(tasks, { t1: "L", t2: "L", t3: "L" });
+    assert.deepEqual(issues, [], "a totally ordered chain is a valid lane");
+  });
+
+  it("accepts transitive ordering, not just direct dependencies", () => {
+    // t3 does not directly depend on t1, but the path t1→t2→t3 orders them.
+    const tasks = [laneTask("t1", []), laneTask("t2", ["t1"]), laneTask("t3", ["t2"])];
+    const issues = validateLaneTotalOrder(tasks, { t1: "L", t3: "L" });
+    assert.deepEqual(issues, [], "a dependency PATH orders a pair, not only a direct edge");
+  });
+
+  it("rejects a lane with an unordered pair — parallel-ready members", () => {
+    const tasks = [laneTask("t1", []), laneTask("t2", []), laneTask("t3", ["t1"])];
+    const issues = validateLaneTotalOrder(tasks, { t1: "L", t2: "L" });
+    assert.equal(issues.length, 1);
+    assert.equal(issues[0].laneId, "L");
+    assert.equal(issues[0].kind, "unordered_pair");
+    assert.deepEqual(issues[0].taskIds, ["t1", "t2"]);
+    assert.match(issues[0].detail, /not ordered by any dependency path/);
+  });
+
+  it("rejects diamond siblings: shared ancestors do not order the siblings themselves", () => {
+    // B and C both depend on A; neither orders against the other — in one
+    // lane they would be parallel-ready the moment A settles.
+    const tasks = [
+      laneTask("A", []),
+      laneTask("B", ["A"]),
+      laneTask("C", ["A"]),
+      laneTask("D", ["B", "C"]),
+    ];
+    const issues = validateLaneTotalOrder(tasks, { B: "L", C: "L" });
+    assert.equal(issues.length, 1);
+    assert.deepEqual(issues[0].taskIds, ["B", "C"]);
+    // Downstream-only membership is fine: B before D is a real order.
+    assert.deepEqual(validateLaneTotalOrder(tasks, { B: "L2", D: "L2" }), []);
+  });
+
+  it("rejects membership naming a task outside the Run", () => {
+    const tasks = [laneTask("t1", [])];
+    const issues = validateLaneTotalOrder(tasks, { t1: "L", ghost: "L" });
+    assert.equal(issues.length, 1);
+    assert.equal(issues[0].kind, "unknown_task");
+    assert.deepEqual(issues[0].taskIds, ["ghost"]);
+  });
+
+  it("reports nothing without lane membership (the implicit current lane is not validated)", () => {
+    const tasks = [laneTask("t1", []), laneTask("t2", [])];
+    assert.deepEqual(validateLaneTotalOrder(tasks, null), []);
+    assert.deepEqual(validateLaneTotalOrder(tasks, {}), []);
+    // Unordered tasks on the coordinator workspace are the historical default.
+    assert.deepEqual(validateLaneTotalOrder(tasks, { t1: "current-ish", t2: "other" }), []);
+  });
+});
+
+describe("cross-lane join classification", () => {
+  const laneByTask = { laneA_t: "lane_a", laneB_t: "lane_b" };
+
+  it("sees no join when a task and all its deps live on the implicit current lane", () => {
+    const t = laneTask("cur", ["dep1", "dep2"]);
+    assert.equal(isCrossLaneJoin(t, laneByTask), false);
+  });
+
+  it("sees a current-to-non-current join: a current task depending on a lane's output", () => {
+    const t = laneTask("joiner", ["laneA_t"]);
+    assert.equal(isCrossLaneJoin(t, laneByTask), true);
+  });
+
+  it("sees no join within one lane: a lane chain is not a cross-lane join", () => {
+    const t = laneTask("laneA_next", ["laneA_t"]);
+    assert.equal(isCrossLaneJoin(t, { ...laneByTask, laneA_next: "lane_a" }), false);
+  });
+
+  it("sees a non-current-to-non-current join: a lane task depending on another lane", () => {
+    const t = laneTask("laneB_t", ["laneA_t"]);
+    assert.equal(isCrossLaneJoin(t, laneByTask), true);
+  });
+
+  it("sees a join when a lane task mixes own-lane and current deps", () => {
+    const t = laneTask("laneA_mix", ["laneA_t", "cur_dep"]);
+    assert.equal(isCrossLaneJoin(t, { ...laneByTask, laneA_mix: "lane_a" }), true);
+  });
+
+  it("never sees a join without dependencies", () => {
+    assert.equal(isCrossLaneJoin(laneTask("root", []), laneByTask), false);
+  });
+
+  it("classifies the implicit current lane as null, not as a made-up lane id", () => {
+    assert.equal(laneOfTask("anything", laneByTask), null);
+    assert.equal(laneOfTask("laneA_t", laneByTask), "lane_a");
+    assert.equal(laneOfTask("x", null), null);
+  });
+
+  it("parses deps defensively: malformed JSON and non-strings are dropped", () => {
+    assert.deepEqual(taskDeps({ deps: '["a","b"]' }), ["a", "b"]);
+    assert.deepEqual(taskDeps({ deps: "" }), []);
+    assert.deepEqual(taskDeps({ deps: "not json" }), []);
+    assert.deepEqual(taskDeps({ deps: "[1,\"a\"]" }), ["a"]);
   });
 });

@@ -15,6 +15,7 @@ import { CapabilityPanel } from "./components/CapabilityPanel";
 import { fetchDag, fetchRunStatus, fetchWorkers } from "./api";
 import { initConfig, setLayout, setLeadTask, setRunId, useConfig, useReadiness } from "./harness";
 import { usePageVisible } from "./visibility";
+import { LanesPanel } from "./components/LanesPanel";
 import {
   LAYOUTS,
   STATUS_META,
@@ -481,6 +482,13 @@ export default function App() {
   }, {});
 
   const selected = visibleDag.nodes.find((n) => n.id === selectedId) ?? null;
+  // Labels by task id within THIS Run — lane member lists resolve through it
+  // so a member that vanished from the graph still shows its raw id.
+  const labelsById = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const n of visibleDag.nodes) map[n.id] = n.label;
+    return map;
+  }, [visibleDag.nodes]);
   // Phase 4: the selected node's ownership + readiness context. Parent/child
   // labels resolve within THIS Run only; a dangling parent_id (parent not in
   // the Run) shows its raw id so the fact is not silently hidden.
@@ -672,6 +680,7 @@ export default function App() {
               <ExecControls
                 runId={runId}
                 taskIds={visibleDag.nodes.map((n) => n.id)}
+                edges={visibleDag.edges}
                 readyCount={counts.ready ?? 0}
                 startingRunId={startingRunId}
                 status={runStatus}
@@ -796,6 +805,15 @@ export default function App() {
                         disabled={execOff}
                         disabledReason={readiness?.reason}
                       />
+                      {/* Phase 7: runtime lane state — workspace identity,
+                          warnings, review, and explicit removal. Mounted
+                          only while the tab is active like the other
+                          polling operations panels. */}
+                      <LanesPanel
+                        runId={runId}
+                        disabled={execOff}
+                        disabledReason={readiness?.reason}
+                      />
                       <RequestAuditPanel runId={runId} />
                       <CapabilityPanel />
                     </div>
@@ -885,6 +903,8 @@ export default function App() {
                   parentLabel={selectedParentLabel}
                   childLabels={selectedChildLabels}
                   readiness={selectedReadiness}
+                  edges={visibleDag.edges}
+                  labelsById={labelsById}
                   onLeadChange={(taskId) => setLeadTask(runId, taskId)}
                   permanentlyLocked={startedTaskIds.has(selected.id)}
                   temporarilyLocked={selectedRunExecuting}

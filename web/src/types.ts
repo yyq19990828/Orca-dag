@@ -746,6 +746,15 @@ export interface ViewerConfig {
   environmentByTask: Record<string, string>;
   /** Per-task exact placement; absent = current (Phase 6). */
   placementByTask: Record<string, PlacementSpec>;
+  /**
+   * Durable workspace lanes: lane id → seed placement. Launch intent only —
+   * runtime identity comes from Orca receipts (Phase 7). A task in a lane
+   * takes its placement from the lane and must not also carry a
+   * `placementByTask` entry (the store and the server both enforce this).
+   */
+  worktreeLanes: Record<string, WorktreeLaneSpec>;
+  /** Task → lane membership; a lane member's placement comes from its lane. */
+  laneByTask: Record<string, string>;
   /** Explicit semantic lead stage for each Run; presentation metadata only. */
   leadTaskByRun: Record<string, string>;
   maxConcurrency: number;
@@ -781,15 +790,158 @@ export const EFFORT_LEVELS = ["low", "medium", "high"] as const;
 // --- Phase 6: saved environments, peer capabilities, exact placement ---------
 
 /**
- * One exact placement choice, mirrored from server/src/config.ts. The two
- * remote-capable shapes (existing selector / new-top-level descriptor) are
- * the only ones the UI offers for a remote environment; remote `current` and
- * `new-child` are deliberately inexpressible here.
+ * Setup policy for Orca repo-defined setup hooks on NEW worktrees
+ * (`worker-start --setup <run|skip|inherit>`). "run" is Orca's own default.
+ * A creation-only field: current/existing placement never reruns setup.
+ * Mirrored from server/src/config.ts.
+ */
+export type SetupPolicy = "run" | "skip" | "inherit";
+
+export const SETUP_POLICIES: readonly SetupPolicy[] = ["run", "skip", "inherit"];
+
+/**
+ * Creation-only metadata, legal ONLY on the two new-worktree placements
+ * (`new-child`, `new-top-level`). Current/existing reject every one of these
+ * fields — the server refuses the flags, and the UI never renders the inputs
+ * for those modes. Bounds mirror server/src/config.ts exactly so a field the
+ * editor accepts is a field the server accepts.
+ */
+export interface CreationOptions {
+  /** Explicit worktree name (`--name`). Optional: absent → server derives a
+   *  deterministic bounded name. Remote new-top-level still requires one. */
+  name?: string;
+  /** Setup-hook policy; defaults to Orca's own "run". */
+  setup: SetupPolicy;
+  /** Base branch/ref to create the worktree from. */
+  baseBranch?: string;
+  /** Orca display-name override. */
+  displayName?: string;
+  /** Comment stored in Orca worktree metadata. */
+  comment?: string;
+}
+
+/**
+ * One exact placement choice, mirrored from server/src/config.ts. The full
+ * LOCAL matrix is expressible: `current` (coordinator workspace), an exact
+ * existing workspace selector as Orca discovery returned it, `new-child`
+ * (a stacked worktree Orca creates), and `new-top-level` (an independent
+ * worktree created from an exact repo selector). The two remote-capable
+ * shapes (existing / new-top-level) are the only ones the UI offers for a
+ * saved environment; remote `current` and `new-child` are invalid and the
+ * editors never produce them.
  */
 export type PlacementSpec =
   | { kind: "current" }
   | { kind: "existing"; selector: string }
-  | { kind: "new-top-level"; repo: string; name: string };
+  | (CreationOptions & { kind: "new-child" })
+  | (CreationOptions & { kind: "new-top-level"; repo: string });
+
+/** A lane's seed placement — every non-current kind (`current` is no lane). */
+export type LaneSeedPlacement = Exclude<PlacementSpec, { kind: "current" }>;
+
+/**
+ * One workspace lane (launch intent, stored in `.orca-dag.config.json`):
+ * ONE shared non-current workspace for a dependency-ordered task chain. The
+ * seed is exact existing, `new-child`, or `new-top-level` — never `current`.
+ * Runtime worktree ids/paths/handles NEVER live here; positive Orca receipts
+ * are the only source of the selector a later lane task reuses.
+ */
+export interface WorktreeLaneSpec {
+  placement: LaneSeedPlacement;
+}
+
+/**
+ * The server's runtime projection of ONE lane (GET /api/worktree-lanes).
+ * Every field is evidence from Orca receipts/reads: null means "not yet
+ * positively known" — the UI renders unknown and never reconstructs a
+ * selector from a name, branch, or path. `unverifiable` (missing identity)
+ * authorizes nothing destructive.
+ */
+export interface WorktreeLaneRuntimeView {
+  laneId: string;
+  taskIds: string[];
+  state:
+    | "planned"
+    | "creating"
+    | "active"
+    | "integration_required"
+    | "settled"
+    | "unverifiable"
+    | "removal_blocked"
+    | "removed"
+    | (string & {});
+  selector: string | null;
+  worktreeId: string | null;
+  path: string | null;
+  branch: string | null;
+  head: string | null;
+  creationDispatchId: string | null;
+  activeDispatchIds: string[];
+  source:
+    | "worker_start_receipt"
+    | "worker_list"
+    | "worker_show"
+    | "worktree_show"
+    | null;
+  warnings: string[];
+}
+
+/** GET /api/worktree-lanes?run=<id> — every lane the coordinator tracks. */
+export interface WorktreeLanesResponse {
+  runId: string;
+  lanes: WorktreeLaneRuntimeView[];
+}
+
+/** Receipt of one lane review action (open changed files / open diff). */
+export interface LaneReviewReceiptView {
+  laneId: string;
+  /** The workspace the action opened through Orca, verbatim (null = unknown). */
+  workspace: string | null;
+  /** Orca's own note / prescribed command, verbatim. */
+  note: string | null;
+  requestId: string | null;
+}
+
+/** Receipt of one token-confirmed worktree removal (`orca worktree rm`). */
+export interface WorktreeRemovalReceiptView {
+  laneId: string;
+  worktreeId: string | null;
+  state: string | null;
+  reason: string | null;
+  requestId: string | null;
+}
+
+/**
+ * Receipt of one per-Dispatch operator mutation (stop / abandon / focus).
+ * `state`/`reason` are Orca's verbatim verdict — an ambiguous outcome stays
+ * auditable through the request ledger instead of being retried.
+ */
+export interface WorkerControlReceiptView {
+  dispatchId: string;
+  action: "stop" | "abandon" | "focus";
+  state: string | null;
+  reason: string | null;
+  detail: string | null;
+  requestId: string | null;
+}
+
+/** One cursor page of Run discovery (GET /api/runs?cursor=&limit=). */
+export interface RunsPageView {
+  runs: OrcaRun[];
+  /** Opaque cursor for the next older page; null = exhausted. */
+  nextCursor: string | null;
+}
+
+/**
+ * Umbrella capability rows (Orca 1.4.206). Recognized for DISPLAY only:
+ * they summarize families of narrower capabilities and must never enable a
+ * narrower control by themselves — the viewer gates every control on the
+ * specific canonical id (or peer gate) it belongs to.
+ */
+export const UMBRELLA_CAPABILITY_IDS: ReadonlySet<string> = new Set([
+  "orchestration.contract.v1",
+  "orchestration.federation.v1",
+]);
 
 /** Which remote operations a peer advertised (parsed server-side). */
 export interface PeerCapabilitiesView {

@@ -98,6 +98,7 @@ const status = (runId = "run_a"): CoordinatorStatus =>
     lastStopReport: null,
     unownedDispatches: [],
     recovery: null,
+    worktreeLanes: [],
     checks: [
       {
         sequence: 1,

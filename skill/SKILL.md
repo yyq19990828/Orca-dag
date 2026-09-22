@@ -56,6 +56,8 @@ One Run holds one DAG — Orca only treats a Run as a namespace, so this is a co
 - **Create tasks one by one**, passing each task's dependencies as a **JSON array** of earlier task ids. Deps may only point at tasks **within the same Run**, and they are what make the viewer execute in the right order — **remember every returned task id**.
 - **Self-check the graph after each batch** with a Run-scoped read (`task-list --run <run_id> --json`): verify the dependency arrows, because a wrong edge **cannot be fixed after creation** (see Boundaries).
 - **Write self-contained specs** — the guide's *Task-spec contract* is the floor: target, change, constraints, ownership, observable acceptance. The future executing worker must **never have to ask a question or enter plan mode**; use imperative sentences and avoid vague phrasing like "investigate" or "as appropriate".
+- **Plan workspace placement through the viewer, not the graph**: by default every task executes in the coordinator's current workspace. Tasks that must not share one working tree can be executed in isolated local workspaces — an exact existing workspace, a stacked child worktree, or an independent top-level one — and a dependency-ordered chain may share one such workspace as a serial lane. Which task goes where is **viewer-side launch configuration**, not Orca task state; when isolation matters, say so in the task spec ("run in your own isolated workspace; do not write outside it") and let the operator pick the placement per node in the viewer.
+- **Expect integration checkpoints at converging branches**: work done in different workspaces never merges itself. If two branches of your DAG will converge on a downstream task, say in that task's spec that it builds on **integrated** code — the viewer holds such a join behind an explicit human integration checkpoint before starting it.
 - **Add a decision gate** where human approval is needed (e.g. "approve the TECH_SPEC and move to execution?") — the guide's gates reference has the rules; the viewer surfaces approve/reject buttons.
 
 ## After the DAG is built: open the viewer and let it execute
@@ -63,7 +65,7 @@ Once the graph is right, ask the user to open the viewer and **tell them the Run
 ```bash
 npx orca-dag    # run in the current project directory; serves http://localhost:8787 and opens the browser
 ```
-(If it's already running — likely, since that command also installed this skill — they just reselect the Run.) The user picks your Run in the top bar, chooses a harness (and optionally model/effort) per node, and clicks **"▶ Run with Orca"**: the viewer's coordinator uses Orca's supervised-worker primitives to execute the whole graph in dependency-parallel order and resolve approval gates as they pop.
+(If it's already running — likely, since that command also installed this skill — they just reselect the Run.) The user picks your Run in the top bar, chooses a harness (and optionally model/effort and a workspace placement) per node, and clicks **"▶ Run with Orca"**: the viewer's coordinator uses Orca's supervised-worker primitives to execute the whole graph in dependency-parallel order and resolve approval gates as they pop.
 
 **Prefer firing execution from the backend.** When you are asked to start the run yourself, trigger the same call the button makes through the viewer's local HTTP API — do not hand-drive orchestration from your terminal:
 

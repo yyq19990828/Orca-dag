@@ -1,11 +1,14 @@
 // Durable mutation-request ledger (Phase 5: recovery and output audit).
 //
 // Every viewer-originated mutation that carries a durable `--retry-request`
-// id (worker-start / worker-release / worker-retain / worker-stop) is
-// recorded HERE, before the CLI call, with the ids needed to later ask Orca
-// `request-show --request <id>` what happened — including after a response
-// loss or a viewer restart, which is exactly when the coordinator's
-// in-memory attempt projection no longer exists.
+// id (worker-start / worker-release / worker-retain / worker-stop /
+// worker-abandon) is recorded HERE, before the CLI call, with the ids needed
+// to later ask Orca `request-show --request <id>` what happened — including
+// after a response loss or a viewer restart, which is exactly when the
+// coordinator's in-memory attempt projection no longer exists. Mutations
+// without an Orca-side request id (worktree removal, terminal focus, file
+// review opens) get a viewer-minted durable id and carry their verbatim
+// receipt outcome in the bounded note instead.
 //
 // Hard limits, by design:
 //   * The ledger is NOT a second lifecycle authority. It stores identities
@@ -26,8 +29,26 @@ import { join } from "node:path";
 
 export const REQUESTS_FILE = ".orca-dag.requests.jsonl";
 
-/** The only mutations this viewer runs under a durable retry-request id. */
-export type RequestOperation = "worker-start" | "worker-release" | "worker-retain" | "worker-stop";
+/**
+ * Every viewer-originated mutation this ledger records. Operations Orca runs
+ * under a durable `--retry-request` id use that id verbatim (the recorded
+ * state is then inspectable live via `request-show`). The remaining
+ * operations (`worktree-remove`, `terminal-focus`, `file-*`) have no Orca-side
+ * request id — the ledger still mints a durable request identity for them and
+ * records the verbatim receipt outcome in the bounded note, so every POST
+ * mutation has an inspectable id even where `request-show` does not apply.
+ */
+export type RequestOperation =
+  | "worker-start"
+  | "worker-release"
+  | "worker-retain"
+  | "worker-stop"
+  | "worker-abandon"
+  | "worktree-remove"
+  | "terminal-focus"
+  | "file-open"
+  | "file-diff"
+  | "file-open-changed";
 
 /**
  * Bounded metadata for one viewer-originated mutation request. Ids only —
@@ -47,6 +68,13 @@ export interface MutationRequestMeta {
   /** Task/Dispatch linkage, when known at record time (start learns it late). */
   taskId: string | null;
   dispatchId: string | null;
+  /**
+   * The exact non-Run target the operation names, when it has one: the
+   * worktree selector for `worktree-remove`, the workspace path for `file-*`
+   * review. Bounded like every id field — it is audit identity, never a
+   * receipt body.
+   */
+  target?: string | null;
   /** Bounded, viewer-observed note (≤300 chars). Null = nothing observed yet. */
   note?: string | null;
   /**
@@ -64,6 +92,7 @@ interface PersistedRequestRecord {
   runId: string | null;
   taskId: string | null;
   dispatchId: string | null;
+  target: string | null;
   note: string | null;
   settledLocally: boolean | null;
   /** First time this request id was minted. */
@@ -82,12 +111,21 @@ const JOURNAL_KEEP_BYTES = 2 * 1024 * 1024;
 const MAX_RECORDS = 200;
 const MAX_NOTE = 300;
 const MAX_ID = 128;
+/** Selectors/paths are longer than ids (`id:<repoId>::<path>`); still bounded. */
+const MAX_TARGET = 256;
 
 /** Clamp an id-shaped field to what the security boundary already allows. */
 function clampId(value: string | null | undefined): string | null {
   if (typeof value !== "string") return null;
   const v = value.trim();
   return v ? v.slice(0, MAX_ID) : null;
+}
+
+/** Clamp a target selector/path — same discipline, larger budget. */
+function clampTarget(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const v = value.trim();
+  return v ? v.slice(0, MAX_TARGET) : null;
 }
 
 /** Clamp a free-text note: single line budget, no unbounded receipts. */
@@ -125,6 +163,7 @@ export class RequestLedger {
       runId: clampId(meta.runId),
       taskId: clampId(meta.taskId),
       dispatchId: clampId(meta.dispatchId),
+      target: clampTarget(meta.target),
       note: clampNote(meta.note),
       settledLocally:
         typeof meta.settledLocally === "boolean" ? meta.settledLocally : null,
@@ -170,6 +209,7 @@ export class RequestLedger {
           runId: clampId(parsed.runId) ?? existing?.runId ?? null,
           taskId: clampId(parsed.taskId) ?? existing?.taskId ?? null,
           dispatchId: clampId(parsed.dispatchId) ?? existing?.dispatchId ?? null,
+          target: clampTarget(parsed.target) ?? existing?.target ?? null,
           note: clampNote(parsed.note) ?? existing?.note ?? null,
           settledLocally:
             typeof parsed.settledLocally === "boolean"

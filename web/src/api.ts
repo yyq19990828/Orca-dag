@@ -2,6 +2,7 @@ import type {
   ActivitySnapshot,
   AudiencePreviewResponse,
   DagResponse,
+  LaneReviewReceiptView,
   OrcaEnvironmentView,
   OrcaReadiness,
   OrcaRepoView,
@@ -11,13 +12,18 @@ import type {
   RequestDetailResponse,
   RequestLedgerRowView,
   RunHealthView,
+  RunsPageView,
   RunStatus,
   StopResultEntry,
   ViewerConfig,
+  WorkerControlReceiptView,
   WorkerDetailView,
   WorkerOutputView,
   WorkerRowView,
   WorkerTerminalReceiptView,
+  WorktreeLaneSpec,
+  WorktreeLanesResponse,
+  WorktreeRemovalReceiptView,
   RuntimeCapabilitiesResponse,
 } from "./types";
 
@@ -133,6 +139,34 @@ export async function fetchRuns(): Promise<OrcaRun[]> {
   return runs ?? [];
 }
 
+/**
+ * One cursor page of Run discovery (Phase 7). `cursor` is the opaque token
+ * the previous page returned; `nextCursor: null` means the history is
+ * exhausted. Workspace ownership is preserved server-side — a Run from
+ * another workspace never appears here, no matter how it was addressed.
+ */
+export async function fetchRunsPage(opts: { cursor?: string; limit?: number } = {}): Promise<RunsPageView> {
+  const params = new URLSearchParams();
+  if (opts.cursor) params.set("cursor", opts.cursor);
+  if (opts.limit) params.set("limit", String(opts.limit));
+  const qs = params.toString();
+  const page = await get<Partial<RunsPageView>>(`/api/runs${qs ? `?${qs}` : ""}`);
+  return { runs: page.runs ?? [], nextCursor: page.nextCursor ?? null };
+}
+
+/**
+ * Exact Run ID lookup (Phase 7). Lets the operator open one Run by its full
+ * id even when pagination has not reached it. A 404 means "no such Run in
+ * this workspace" — never an invitation to search Orca globally.
+ */
+export async function fetchRunById(runId: string): Promise<OrcaRun> {
+  const { run } = await get<{ run: OrcaRun | null }>(`/api/runs/${encodeURIComponent(runId)}`);
+  if (!run) {
+    throw new ApiError(`Run ${runId} was not found in this workspace.`, "run_not_found", 404);
+  }
+  return run;
+}
+
 export async function createRun(objective: string): Promise<OrcaRun> {
   const { run } = await post<{ run: OrcaRun }>("/api/runs", { objective });
   return run;
@@ -223,6 +257,8 @@ export async function startRun(
   retainByTask: Record<string, boolean> = {},
   environmentByTask: Record<string, string> = {},
   placementByTask: Record<string, PlacementSpec> = {},
+  worktreeLanes: Record<string, WorktreeLaneSpec> = {},
+  laneByTask: Record<string, string> = {},
 ): Promise<RunStatus> {
   return post(`/api/run`, {
     runId,
@@ -234,6 +270,10 @@ export async function startRun(
     retainByTask,
     environmentByTask,
     placementByTask,
+    // Phase 7: the lane plan rides along explicitly (same reason as
+    // placement — avoids the 250ms config-write debounce racing the run).
+    worktreeLanes,
+    laneByTask,
   });
 }
 
@@ -417,4 +457,141 @@ export async function fetchEnvironmentRepos(envId: string): Promise<OrcaRepoView
     `/api/environments/${encodeURIComponent(envId)}/repos`,
   );
   return repos ?? [];
+}
+
+// --- Phase 7: local placement discovery + workspace lanes --------------------
+//
+// The LOCAL placement editor is populated exclusively from these endpoints —
+// the exact same discovery Orca's own IDE shows. The viewer never invents a
+// workspace or repo, never shortens a selector, and never turns a folder into
+// a git-worktree target (folders are valid exact-existing targets only).
+// Cached for 30s like the environment lists: the editors re-render per
+// keystroke and discovery is runtime-owned state.
+
+let localWorkspaceCache: { at: number; workspaces: OrcaWorktreeView[] } | null = null;
+let localRepoCache: { at: number; repos: OrcaRepoView[] } | null = null;
+const LOCAL_CACHE_MS = 30_000;
+
+/** Orca-discovered LOCAL workspaces (exact selectors included). */
+export async function fetchLocalWorkspaces(force = false): Promise<OrcaWorktreeView[]> {
+  if (!force && localWorkspaceCache && Date.now() - localWorkspaceCache.at < LOCAL_CACHE_MS) {
+    return localWorkspaceCache.workspaces;
+  }
+  const { worktrees } = await get<{ worktrees: OrcaWorktreeView[] }>("/api/worktrees");
+  const workspaces = worktrees ?? [];
+  localWorkspaceCache = { at: Date.now(), workspaces };
+  return workspaces;
+}
+
+/** Orca-discovered LOCAL repositories (for the new-top-level repo picker). */
+export async function fetchLocalRepos(force = false): Promise<OrcaRepoView[]> {
+  if (!force && localRepoCache && Date.now() - localRepoCache.at < LOCAL_CACHE_MS) {
+    return localRepoCache.repos;
+  }
+  const { repos } = await get<{ repos: OrcaRepoView[] }>("/api/repos");
+  const reposList = repos ?? [];
+  localRepoCache = { at: Date.now(), repos: reposList };
+  return reposList;
+}
+
+/**
+ * The coordinator's runtime projection of every workspace lane on a Run.
+ * Pure read: null fields mean "not positively known yet", and an
+ * `unverifiable` lane is surfaced, never reconstructed or acted on.
+ */
+export async function fetchWorktreeLanes(runId: string): Promise<WorktreeLanesResponse> {
+  return get<WorktreeLanesResponse>(`/api/worktree-lanes?run=${encodeURIComponent(runId)}`);
+}
+
+/**
+ * Open the lane workspace's changed files through Orca (`mode: "files"`), or
+ * its diff (`mode: "diff"`). Orca opens them in the PROVEN workspace — the
+ * server refuses when the lane's workspace identity is not positively known.
+ */
+export async function openLaneChanges(
+  laneId: string,
+  mode: "files" | "diff",
+): Promise<LaneReviewReceiptView> {
+  const { receipt } = await post<{ receipt: LaneReviewReceiptView }>(
+    `/api/worktree-lanes/${encodeURIComponent(laneId)}/open-changed`,
+    { mode },
+  );
+  return receipt;
+}
+
+/**
+ * Remove the lane's Orca worktree — explicit, ownership-checked, and only
+ * ever executed as `orca worktree rm`. `confirm` is the literal token the
+ * operator typed (the worktree id/name); the server compares it before it
+ * acts, and `settled` ownership is a precondition, not a UI courtesy.
+ */
+export async function removeLaneWorktree(
+  laneId: string,
+  confirm: string,
+): Promise<WorktreeRemovalReceiptView> {
+  const { receipt } = await post<{ receipt: WorktreeRemovalReceiptView }>(
+    `/api/worktree-lanes/${encodeURIComponent(laneId)}/remove`,
+    { confirm },
+  );
+  return receipt;
+}
+
+// --- Phase 7: per-Dispatch intervention ---------------------------------------
+//
+// Each action is evidence-gated SERVER-side; these wrappers exist so the UI
+// can show Orca's verdict verbatim. A 409 with a reason (missing/stale/
+// unverifiable evidence) is surfaced, never retried blindly.
+//
+// The wire carries `{ requestId, receipt }` where `receipt` is the adapter's
+// VERBATIM Orca receipt (`{dispatchId, state, alreadySettled, processAction,
+// warning}`) — the viewer projection fields the panel renders (`action`,
+// `reason`, `detail`, `requestId`) are mapped HERE, at the single boundary,
+// so neither side has to guess about the other's shape.
+
+/**
+ * One worker-control action's body → the panel's receipt view. `warning` is
+ * Orca's verbatim verdict note, surfaced as `detail` (with `reason` falling
+ * back to it) so nothing the runtime said is dropped.
+ */
+function controlReceiptView(
+  action: WorkerControlReceiptView["action"],
+  body: { requestId?: unknown; receipt?: Record<string, unknown> | null },
+): WorkerControlReceiptView {
+  const receipt = body.receipt ?? {};
+  const warning = typeof receipt.warning === "string" && receipt.warning ? receipt.warning : null;
+  return {
+    dispatchId: typeof receipt.dispatchId === "string" ? receipt.dispatchId : "",
+    action,
+    state: typeof receipt.state === "string" ? receipt.state : null,
+    reason: typeof receipt.reason === "string" && receipt.reason ? receipt.reason : warning,
+    detail: typeof receipt.detail === "string" && receipt.detail ? receipt.detail : warning,
+    requestId: typeof body.requestId === "string" ? body.requestId : null,
+  };
+}
+
+/** Stop one positively-identified ACTIVE Dispatch (Run-scoped evidence re-read). */
+export async function stopWorker(dispatchId: string, runId: string): Promise<WorkerControlReceiptView> {
+  const body = await post<{ requestId?: unknown; receipt?: Record<string, unknown> | null }>(
+    `/api/workers/${encodeURIComponent(dispatchId)}/stop`,
+    { runId },
+  );
+  return controlReceiptView("stop", body);
+}
+
+/** Abandon one positively-exited (or Orca-prescribed outcome-unknown) Dispatch. */
+export async function abandonWorker(dispatchId: string, runId: string): Promise<WorkerControlReceiptView> {
+  const body = await post<{ requestId?: unknown; receipt?: Record<string, unknown> | null }>(
+    `/api/workers/${encodeURIComponent(dispatchId)}/abandon`,
+    { runId },
+  );
+  return controlReceiptView("abandon", body);
+}
+
+/** Focus one local worker terminal with positive fresh `agentWait` evidence. */
+export async function focusWorker(dispatchId: string, runId: string): Promise<WorkerControlReceiptView> {
+  const body = await post<{ requestId?: unknown; receipt?: Record<string, unknown> | null }>(
+    `/api/workers/${encodeURIComponent(dispatchId)}/focus`,
+    { runId },
+  );
+  return controlReceiptView("focus", body);
 }

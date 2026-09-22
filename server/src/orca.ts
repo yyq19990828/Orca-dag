@@ -8,6 +8,15 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 // The audience allowlist is a security-boundary concept, so the adapter
 // consumes it from security.ts (which never imports this module — no cycle).
 import { KNOWN_HARNESSES, WORKTREE_AUDIENCE_PREFIX } from "./security";
+// The creation-metadata grammar lives in config.ts next to the stored
+// placement shape; the adapter re-checks it as the LAST gate before Orca.
+import {
+  BASE_BRANCH_PATTERN,
+  COMMENT_MAX,
+  DISPLAY_NAME_MAX,
+  PLACEMENT_NAME_PATTERN,
+  SETUP_POLICIES,
+} from "./config";
 
 const pExecFile = promisify(execFile);
 
@@ -611,10 +620,61 @@ function parseDeps(deps: string | null | undefined): string[] {
 
 // --- Runs ------------------------------------------------------------------
 
-/** List Runs, newest first. Read-only: needs no coordinator terminal. */
+/**
+ * List Runs, newest first. Read-only: needs no coordinator terminal.
+ *
+ * `run-list` pages past its per-receipt cap through a top-level `nextCursor`
+ * (verified against 1.4.206: the last page carries `nextCursor: null`, and
+ * unlike worker-list there is no `page.hasMore` boolean — a non-empty cursor
+ * IS the "more pages" signal). The opaque cursor is followed byte-for-byte
+ * until the snapshot ends: returning only the first page would silently hide
+ * older Runs from the picker, so every page is concatenated while the
+ * historical flat-array contract is preserved for every caller.
+ */
 export async function listRuns(): Promise<OrcaRun[]> {
-  const result = await runOrca<{ runs?: OrcaRun[] }>(["orchestration", "run-list", "--limit", "50"]);
-  const runs = result.runs ?? [];
+  const runs: OrcaRun[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | null = null;
+
+  /** Fail closed: a truncated history must never look complete. */
+  const invalidReceipt = (message: string): never => {
+    throw new OrcaCliError(`run-list returned an invalid receipt: ${message}`, "invalid_pagination");
+  };
+
+  for (let pageNumber = 0; pageNumber < 10_000; pageNumber += 1) {
+    // 100 is the runtime's documented --limit ceiling (1.4.206 rejects
+    // anything larger with invalid_argument), so page at exactly that cap.
+    const args = ["orchestration", "run-list", "--limit", "100"];
+    if (cursor) args.push("--cursor", cursor);
+
+    const result = await runOrca<unknown>(args);
+    if (!result || typeof result !== "object" || Array.isArray(result)) {
+      invalidReceipt("result must be an object");
+    }
+    const receipt = result as Record<string, unknown>;
+    if (!Array.isArray(receipt.runs)) {
+      invalidReceipt("runs must be an array");
+    }
+    runs.push(...(receipt.runs as OrcaRun[]));
+
+    // No hasMore boolean on this command: absent/null/empty cursor is the
+    // terminal page; anything else is opaque bytes to pass back verbatim.
+    const rawNext = receipt.nextCursor;
+    if (rawNext !== undefined && rawNext !== null && typeof rawNext !== "string") {
+      invalidReceipt("nextCursor must be a string or null");
+    }
+    const nextCursor = typeof rawNext === "string" && rawNext.length > 0 ? rawNext : null;
+    if (nextCursor === null) break;
+    if (seenCursors.has(nextCursor)) {
+      throw new OrcaCliError(
+        "run-list repeated nextCursor; refusing an infinite pagination loop.",
+        "invalid_pagination",
+      );
+    }
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+
   return runs
     .filter((r) => r.legacy !== 1) // the audit tombstone is inspect-only and always empty
     .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
@@ -705,14 +765,23 @@ export async function bindRun(runId: string, from: string): Promise<OrcaRun> {
   return result.run;
 }
 
-/** Inspect one Run (read-only): its record names the bound coordinator handle. */
+/**
+ * Inspect ONE Run by its exact id (read-only): its record names the bound
+ * coordinator handle. Returns `null` only when Orca itself answers
+ * `run_not_found` — a definite absence. Every other failure (timeout, contact
+ * loss, garbage output) throws with its evidence: a lost response must never
+ * masquerade as "no such Run", because callers treat null as an ownership
+ * dead-end while contact loss is merely unverifiable.
+ */
 export async function showRun(runId: string): Promise<OrcaRun | null> {
+  let result: { run?: OrcaRun };
   try {
-    const result = await runOrca<{ run?: OrcaRun }>(["orchestration", "run-show", "--id", runId]);
-    return result.run ?? null;
-  } catch {
-    return null;
+    result = await runOrca<{ run?: OrcaRun }>(["orchestration", "run-show", "--id", runId]);
+  } catch (err) {
+    if (err instanceof OrcaCliError && err.code === "run_not_found") return null;
+    throw err;
   }
+  return result.run ?? null;
 }
 
 // --- Read paths (no coordinator terminal needed) ---------------------------
@@ -928,11 +997,30 @@ const HASH_RE = /^[0-9a-f]{8}$/;
  * terminal's whole life, which is what title-based reuse, conflict detection
  * and uninstall cleanup all key off.
  */
-export function coordinatorTerminalCommand(title: string): string {
+export function coordinatorTerminalCommand(
+  title: string,
+  backendPid: number = process.pid,
+): string {
   // Single-quoted printf argument: the title's charset is ours ([a-z0-9 ·-]),
   // so quoting is only about robustness. `exec` replaces the shell so nothing
-  // can rewrite the title afterward; closing the terminal kills the sleep.
-  return `printf '\\033]0;%s\\007' '${title}' && exec sleep infinity`;
+  // can rewrite the title afterward.
+  //
+  // The exec'd watcher ties the pane's lifetime to THIS backend process: the
+  // old `exec sleep infinity` parked the pane forever, so a crashed or killed
+  // viewer left its coordinator terminal behind — still connected, holding
+  // the workspace's coordinator slot and (once bound) fencing the Run —
+  // until a manual `npx orca-dag uninstall`. The watcher is deliberately
+  // plain POSIX (sh + `kill -0` + `sleep`; no GNU `tail --pid`, no procfs)
+  // so the same command works wherever Orca does. `kill -0` never signals:
+  // it is the documented existence probe, so the loop is a silent 2-second
+  // heartbeat. When this process exits — clean stop, crash, kill -9 — the
+  // next probe fails and the pane's process exits with it, closing the
+  // terminal. The watcher must run as the same user as the backend (it
+  // always does: the backend spawns the CLI that creates the pane); a
+  // recycled PID could in principle outlive us, which merely defers the
+  // cleanup to uninstall — it never keeps a dead viewer's pane alive past a
+  // reboot.
+  return `printf '\\033]0;%s\\007' '${title}' && exec sh -c 'while kill -0 ${backendPid} 2>/dev/null; do sleep 2; done'`;
 }
 
 /** Decompose a terminal title into our coordinator identity, or null. */
@@ -1089,6 +1177,39 @@ export async function closeTerminal(handle: string): Promise<void> {
  */
 export async function closeTerminalStrict(handle: string): Promise<void> {
   await runOrca(["terminal", "close", "--terminal", handle]);
+}
+
+/**
+ * Bring one exact terminal to the foreground in the Orca UI
+ * (`terminal switch --terminal <handle>`).
+ *
+ * UI FOCUS ONLY: this changes which terminal tab is active, nothing else. It
+ * is not a lifecycle action — it never claims liveness, never settles a
+ * Dispatch, and never closes anything (and closing a pane is NEVER a
+ * substitute for a worker lifecycle decision — stop/abandon/release prove
+ * their own outcomes through Orca receipts, `terminal close` proves nothing).
+ * The handle must be the exact runtime-issued string (from `terminal list`,
+ * a worker row, or a receipt); the adapter never constructs or "fixes" one.
+ */
+export interface TerminalFocusReceipt {
+  /** Echo of the exact handle that was focused. */
+  handle: string;
+  /** The runtime's verbatim result. */
+  raw: Record<string, unknown>;
+}
+
+export async function focusTerminal(handle: string): Promise<TerminalFocusReceipt> {
+  if (!handle.trim()) {
+    // An empty handle would let the CLI resolve some ambient target — exactly
+    // the "focus whatever happens to be there" behavior the exact-selector
+    // contract forbids. Fail here, before anything is spawned.
+    throw new OrcaCliError(
+      "terminal switch requires the exact runtime-issued terminal handle",
+      "invalid_argument",
+    );
+  }
+  const result = await runOrca<Record<string, unknown>>(["terminal", "switch", "--terminal", handle]);
+  return { handle, raw: asRecord(result) };
 }
 
 // --- Readiness (Phase 2) ----------------------------------------------------
@@ -2411,6 +2532,58 @@ export async function stopWorkerReceipt(
   };
 }
 
+/** Typed `worker-abandon` receipt — the same contract as stop: outcomes, never swallows. */
+export interface WorkerAbandonReceipt {
+  dispatchId: string;
+  state: string;
+  alreadySettled: boolean;
+  /** Abandon performs no process action BY CONTRACT; kept verbatim if a runtime echoes one. */
+  processAction: string | null;
+  warning: string | null;
+  /** Echo of the durable `--retry-request` id this abandon ran under (Phase 4). */
+  requestId: string;
+  /** The runtime's verbatim receipt — lifecycle evidence outlives the call. */
+  raw: Record<string, unknown>;
+}
+
+/**
+ * Abandon one supervised Dispatch (`orchestration worker-abandon`).
+ *
+ * The outcome_unknown tool for when stop is NOT right: abandon FENCES the
+ * worker from orchestration (its mutations stop counting) while explicitly
+ * NOT claiming its process stopped — the runtime retains all possibly-live
+ * resources and performs no remote, process, or filesystem action (1.4.206).
+ * This mirrors the existing worker-stop adapter exactly: same durable
+ * `--retry-request` id, same receipt-or-rethrow contract — a lost response
+ * surfaces as `RESPONSE_LOST` carrying the full argv so the caller resolves
+ * it through `request-show` with the SAME id instead of replaying blind.
+ * Never substituted by `terminal close`: closing a pane proves nothing about
+ * a Dispatch and only orphans its lifecycle row.
+ */
+export async function abandonWorkerReceipt(
+  dispatchId: string,
+  opts: { retryRequestId?: string } = {},
+): Promise<WorkerAbandonReceipt> {
+  const requestId = opts.retryRequestId ?? newRequestId();
+  const result = await runOrca<Partial<WorkerAbandonReceipt>>([
+    "orchestration",
+    "worker-abandon",
+    "--dispatch",
+    dispatchId,
+    "--retry-request",
+    requestId,
+  ]);
+  return {
+    dispatchId: String(result.dispatchId ?? dispatchId),
+    state: String(result.state ?? "unknown"),
+    alreadySettled: Boolean(result.alreadySettled),
+    processAction: result.processAction ?? null,
+    warning: result.warning ?? null,
+    requestId,
+    raw: asRecord(result),
+  };
+}
+
 // --- Literal nextAction (Phase 4 item 6) ------------------------------------
 //
 // worker-list projections can carry `nextAction: { kind, argv }` — Orca's own
@@ -2558,6 +2731,14 @@ export interface WorkerStartReceipt {
      * unknown rather than assuming local or remote.
      */
     on: string | null;
+    /**
+     * Effective worktree name/branch/display name for a creating start.
+     * Echoed by the runtime only when it applied them; `null` = unconfirmed,
+     * never assumed (the "requested vs effective" rule above).
+     */
+    name: string | null;
+    baseBranch: string | null;
+    displayName: string | null;
   };
   /** The complete receipt as received — the UI shows this on demand. */
   raw: Record<string, unknown>;
@@ -2639,6 +2820,12 @@ export function parseWorkerStartReceipt(payload: unknown, ok: boolean): WorkerSt
         "serverName",
         "server_name",
       ),
+      // Creation metadata the receipt echoes back for a creating start.
+      // Same rule as every effective field: only a present, non-empty echo
+      // counts; absence stays null and the UI reports "unknown".
+      name: pickString(launchRecord, "name", "worktreeName", "worktree_name"),
+      baseBranch: pickString(launchRecord, "baseBranch", "base_branch", "baseRef"),
+      displayName: pickString(launchRecord, "displayName", "display_name"),
     },
     raw,
   };
@@ -3018,6 +3205,86 @@ export function parsePeerCapabilities(advertised: string[] | null): PeerCapabili
   };
 }
 
+// --- Informational umbrella capabilities (`computer capabilities`) ----------
+//
+// One command (`orca computer capabilities`) reports the computer-use
+// provider's whole capability surface as an umbrella `supports` tree of
+// boolean leaves grouped by area (`windows.focus`, `actions.click`, …).
+// INFORMATIONAL: it is a read-only display/inspection surface — it gates no
+// mutation by itself. Parsing still fails closed: only a positively `true`
+// boolean leaf counts as support (missing, false, and non-boolean shapes are
+// all "not proven"), a receipt without a `supports` map advertises nothing,
+// and unknown groups/leaves stay visible in `raw` so a newer provider's new
+// knobs can be inspected instead of silently dropped.
+
+/** One flattened leaf of the `supports` umbrella. */
+export interface ComputerCapabilityLeaf {
+  /** Group as the provider names it ("windows", "actions", …), verbatim. */
+  group: string;
+  /** Leaf name inside the group ("focus", "click", …), verbatim. */
+  name: string;
+  /** True ONLY on a positively `true` boolean leaf. */
+  supported: boolean;
+}
+
+export interface ComputerUseCapabilities {
+  platform: string | null;
+  provider: string | null;
+  providerVersion: string | null;
+  protocolVersion: number | null;
+  /** True when the receipt carried a `supports` map at all. */
+  advertised: boolean;
+  /** Every boolean leaf of the umbrella, flattened. */
+  capabilities: ComputerCapabilityLeaf[];
+  /** The verbatim `supports` map — unknown newer knobs stay inspectable. */
+  raw: Record<string, unknown>;
+}
+
+export function parseComputerCapabilities(result: unknown): ComputerUseCapabilities {
+  const body = asRecord(result);
+  const supports = body.supports;
+  const advertised = Boolean(supports && typeof supports === "object" && !Array.isArray(supports));
+  const capabilities: ComputerCapabilityLeaf[] = [];
+  if (advertised) {
+    for (const [group, leaves] of Object.entries(supports as Record<string, unknown>)) {
+      // A group body must be an object of leaves; anything else (a scalar, a
+      // list) carries no boolean claims and is skipped — never guessed.
+      const leafRecord = asRecord(leaves);
+      for (const [name, value] of Object.entries(leafRecord)) {
+        if (typeof value === "boolean") {
+          capabilities.push({ group, name, supported: value });
+        }
+      }
+    }
+  }
+  return {
+    platform: pickString(body, "platform"),
+    provider: pickString(body, "provider"),
+    providerVersion: pickString(body, "providerVersion", "provider_version"),
+    protocolVersion: typeof body.protocolVersion === "number" ? body.protocolVersion : null,
+    advertised,
+    capabilities,
+    raw: asRecord(supports),
+  };
+}
+
+/** Positive-only lookup: exactly the advertised group+leaf pair, no guessing. */
+export function computerSupports(cap: ComputerUseCapabilities, group: string, name: string): boolean {
+  return cap.capabilities.some((leaf) => leaf.group === group && leaf.name === name && leaf.supported);
+}
+
+/**
+ * Read the provider's umbrella capability statement through the resolved CLI
+ * (`computer capabilities` — informational and read-only). Failures propagate
+ * with their evidence: an unreadable response must never flatten into "the
+ * provider supports nothing", which would look like a definite answer.
+ */
+export async function fetchComputerCapabilities(environmentId?: string): Promise<ComputerUseCapabilities> {
+  return parseComputerCapabilities(
+    await runOrca<unknown>(["computer", "capabilities", ...environmentArgs(environmentId)]),
+  );
+}
+
 /** List saved Orca runtime environments. Read-only: needs no coordinator. */
 export async function listEnvironments(): Promise<OrcaEnvironment[]> {
   const result = await runOrca<{ environments?: unknown[] }>(["environment", "list"]);
@@ -3094,20 +3361,21 @@ function environmentArgs(environmentId: string | undefined): string[] {
 
 export async function listRepos(environmentId?: string): Promise<OrcaRepoRow[]> {
   const result = await runOrca<{ repos?: unknown[] }>(["repo", "list", ...environmentArgs(environmentId)]);
-  return (result.repos ?? [])
-    .map((raw: unknown): OrcaRepoRow | null => {
-      const r = asRecord(raw);
-      const id = pickString(r, "id");
-      if (!id) return null;
-      return {
-        id,
-        path: pickString(r, "path"),
-        displayName: pickString(r, "displayName", "display_name", "name"),
-        kind: pickString(r, "kind"),
-        hostId: pickString(r, "executionHostId", "execution_host_id", "hostId", "host_id"),
-      };
-    })
-    .filter((r): r is OrcaRepoRow => r !== null);
+  return (result.repos ?? []).map(parseRepoRow).filter((r): r is OrcaRepoRow => r !== null);
+}
+
+/** Tolerant `repo list`/`repo show` row parser — a row without an id is dropped, never guessed. */
+function parseRepoRow(raw: unknown): OrcaRepoRow | null {
+  const r = asRecord(raw);
+  const id = pickString(r, "id");
+  if (!id) return null;
+  return {
+    id,
+    path: pickString(r, "path"),
+    displayName: pickString(r, "displayName", "display_name", "name"),
+    kind: pickString(r, "kind"),
+    hostId: pickString(r, "executionHostId", "execution_host_id", "hostId", "host_id"),
+  };
 }
 
 export async function listWorktrees(
@@ -3122,23 +3390,86 @@ export async function listWorktrees(
     ...(opts.limit ? ["--limit", String(opts.limit)] : []),
   ];
   const result = await runOrca<{ worktrees?: unknown[] }>(args);
-  return (result.worktrees ?? [])
-    .map((raw: unknown): OrcaWorktreeRow | null => {
-      const r = asRecord(raw);
-      const id = pickString(r, "id");
-      if (!id) return null;
-      return {
-        id,
-        repoId: pickString(r, "repoId", "repo_id"),
-        path: pickString(r, "path"),
-        displayName: pickString(r, "displayName", "display_name", "name"),
-        branch: pickString(r, "branch"),
-        hostId: pickString(r, "hostId", "host_id"),
-        parentWorktreeId: pickString(r, "parentWorktreeId", "parent_worktree_id"),
-        isMainWorktree: typeof r.isMainWorktree === "boolean" ? r.isMainWorktree : null,
-      };
-    })
-    .filter((r): r is OrcaWorktreeRow => r !== null);
+  return (result.worktrees ?? []).map(parseWorktreeRow).filter((r): r is OrcaWorktreeRow => r !== null);
+}
+
+/** Tolerant `worktree list`/`worktree show` row parser (same drop rule as repos). */
+function parseWorktreeRow(raw: unknown): OrcaWorktreeRow | null {
+  const r = asRecord(raw);
+  const id = pickString(r, "id");
+  if (!id) return null;
+  return {
+    id,
+    repoId: pickString(r, "repoId", "repo_id"),
+    path: pickString(r, "path"),
+    displayName: pickString(r, "displayName", "display_name", "name"),
+    branch: pickString(r, "branch"),
+    hostId: pickString(r, "hostId", "host_id"),
+    parentWorktreeId: pickString(r, "parentWorktreeId", "parent_worktree_id"),
+    isMainWorktree: typeof r.isMainWorktree === "boolean" ? r.isMainWorktree : null,
+  };
+}
+
+/**
+ * Inspect ONE worktree by its EXACT selector — the pre-start revalidation the
+ * placement contract requires ("exact workspace identity is revalidated
+ * through Orca; missing or unverifiable identity is refused rather than
+ * reconstructed"). Returns `null` only when Orca itself says no workspace
+ * matches (`selector_not_found`); a transport failure throws, so an
+ * unreachable runtime is never misrepresented as "no such workspace" and
+ * never silently reroutes a task to a different placement.
+ */
+export async function showWorktree(
+  selector: string,
+  environmentId?: string,
+): Promise<OrcaWorktreeRow | null> {
+  let result: Record<string, unknown>;
+  try {
+    result = await runOrca<Record<string, unknown>>([
+      "worktree",
+      "show",
+      "--worktree",
+      selector,
+      ...environmentArgs(environmentId),
+    ]);
+  } catch (err) {
+    if (err instanceof OrcaCliError && (err.code === "selector_not_found" || err.code === "not_found")) {
+      return null;
+    }
+    throw err;
+  }
+  // The row sits under `worktree` on current runtimes; a top-level row keeps
+  // working (tolerant digging, same as showEnvironment).
+  const body = asRecord(result.worktree ?? result);
+  return parseWorktreeRow({ ...body, id: pickString(body, "id") ?? selector });
+}
+
+/**
+ * Inspect ONE registered repository by exact selector — the new-top-level
+ * counterpart of `showWorktree`. `null` only on Orca's own `repo_not_found`;
+ * transport failures throw for the same reason.
+ */
+export async function showRepo(
+  repoSelector: string,
+  environmentId?: string,
+): Promise<OrcaRepoRow | null> {
+  let result: Record<string, unknown>;
+  try {
+    result = await runOrca<Record<string, unknown>>([
+      "repo",
+      "show",
+      "--repo",
+      repoSelector,
+      ...environmentArgs(environmentId),
+    ]);
+  } catch (err) {
+    if (err instanceof OrcaCliError && (err.code === "repo_not_found" || err.code === "not_found")) {
+      return null;
+    }
+    throw err;
+  }
+  const body = asRecord(result.repo ?? result);
+  return parseRepoRow({ ...body, id: pickString(body, "id") ?? repoSelector });
 }
 
 export async function listProjects(environmentId?: string): Promise<OrcaProjectRow[]> {
@@ -3159,6 +3490,188 @@ export async function listProjects(environmentId?: string): Promise<OrcaProjectR
       };
     })
     .filter((r): r is OrcaProjectRow => r !== null);
+}
+
+// --- Orca-native file review and workspace cleanup --------------------------
+//
+// These adapters are the viewer's ONLY path to "open this file in the
+// editor", "show me the diff", and "open what changed": each asks the Orca
+// CLI to drive its own editor surface. The viewer process never invokes Git
+// and never touches the worktree filesystem — even `file open-changed`'s
+// changed-file discovery happens inside Orca (its docs: the list comes from
+// git status for the SELECTED worktree). Paths may be worktree-relative or
+// absolute-inside-the-worktree per the CLI docs; worktree selectors are
+// passed through verbatim, never inferred.
+
+/** Documented `file open-changed --mode` union (1.4.206: edit | diff | both). */
+export type WorkspaceChangedMode = "edit" | "diff" | "both";
+
+export interface WorkspaceFileReceipt {
+  /** The path Orca acknowledged, when the receipt names one. */
+  path: string | null;
+  /** The worktree the operation resolved against, when the receipt echoes it. */
+  worktree: string | null;
+  /** The runtime's verbatim result — review evidence outlives the call. */
+  raw: Record<string, unknown>;
+}
+
+function parseWorkspaceFileReceipt(result: unknown): WorkspaceFileReceipt {
+  const body = asRecord(result);
+  return {
+    path: pickString(body, "path", "filePath", "file_path"),
+    worktree: pickString(body, "worktree", "worktreeId", "worktree_id"),
+    raw: body,
+  };
+}
+
+/** Open one workspace file in the Orca editor (`file open`). */
+export async function openWorkspaceFile(
+  path: string,
+  opts: { worktree?: string; environmentId?: string } = {},
+): Promise<WorkspaceFileReceipt> {
+  if (!path.trim()) {
+    // Fail before spawning: an empty path would have the CLI resolve some
+    // ambient target instead of the exact file the user pointed at.
+    throw new OrcaCliError("file open requires a non-empty path", "invalid_argument");
+  }
+  const result = await runOrca<unknown>([
+    "file",
+    "open",
+    path,
+    ...(opts.worktree ? ["--worktree", opts.worktree] : []),
+    ...environmentArgs(opts.environmentId),
+  ]);
+  return parseWorkspaceFileReceipt(result);
+}
+
+/**
+ * Open one file's source-control diff in the Orca editor (`file diff`).
+ * Diffs default to unstaged changes; `--staged` opens the staged diff.
+ */
+export async function openWorkspaceFileDiff(
+  path: string,
+  opts: { staged?: boolean; worktree?: string; environmentId?: string } = {},
+): Promise<WorkspaceFileReceipt> {
+  if (!path.trim()) {
+    throw new OrcaCliError("file diff requires a non-empty path", "invalid_argument");
+  }
+  const result = await runOrca<unknown>([
+    "file",
+    "diff",
+    path,
+    ...(opts.staged ? ["--staged"] : []),
+    ...(opts.worktree ? ["--worktree", opts.worktree] : []),
+    ...environmentArgs(opts.environmentId),
+  ]);
+  return parseWorkspaceFileReceipt(result);
+}
+
+/**
+ * Open every changed file of a workspace in the Orca editor
+ * (`file open-changed`). The mode is a closed documented union — anything
+ * outside edit|diff|both is refused HERE so a typo fails locally and never
+ * travels as argv.
+ */
+export async function openWorkspaceChangedFiles(
+  opts: { mode?: WorkspaceChangedMode; worktree?: string; environmentId?: string } = {},
+): Promise<WorkspaceFileReceipt> {
+  if (opts.mode && !["edit", "diff", "both"].includes(opts.mode)) {
+    throw new OrcaCliError(
+      `file open-changed mode must be one of edit|diff|both, got ${JSON.stringify(opts.mode)}`,
+      "invalid_argument",
+    );
+  }
+  const result = await runOrca<unknown>([
+    "file",
+    "open-changed",
+    ...(opts.mode ? ["--mode", opts.mode] : []),
+    ...(opts.worktree ? ["--worktree", opts.worktree] : []),
+    ...environmentArgs(opts.environmentId),
+  ]);
+  return parseWorkspaceFileReceipt(result);
+}
+
+// --- Worktree removal (archive-hook semantics) ------------------------------
+//
+// `worktree rm` removes a worktree from Orca AND git. Its archive-hook
+// contract (documented 1.4.206, pinned here because it is a safety floor):
+//   - Repo-defined orca.yaml archive hooks are SKIPPED unless `--run-hooks`.
+//   - With `--run-hooks`, a failed archive hook BLOCKS the removal — nothing
+//     is stopped, deleted, or deregistered — and the CLI exits non-zero with
+//     error code `worktree_archive_hook_failed`. `--force` does NOT waive it.
+//   - `--allow-failed-archive-hook` deletes anyway after the hook has run and
+//     failed; the waived failure is reported back on `result.archiveHookOverride`.
+//     It REQUIRES `--run-hooks` (with no hook running there is no failure to
+//     waive) and is rejected by the runtime without it.
+// The adapter never adds `--allow-failed-archive-hook` on its own after a
+// hook failure: waiving is an explicit caller decision, so the typed error
+// propagates with the full envelope and removal state stays "nothing happened".
+// The deletion itself runs inside Orca — this process never invokes git or
+// touches the filesystem directly.
+
+/** The documented 1.4.206 code for "an archive hook ran and failed". */
+export const WORKTREE_ARCHIVE_HOOK_FAILED = "worktree_archive_hook_failed";
+
+/** True when `worktree rm` was blocked by a failed archive hook (nothing was removed). */
+export function isArchiveHookFailure(err: unknown): boolean {
+  return err instanceof OrcaCliError && err.code === WORKTREE_ARCHIVE_HOOK_FAILED;
+}
+
+export interface WorktreeRemovalReceipt {
+  /** Echo of the exact selector the removal was requested with. */
+  worktree: string;
+  /**
+   * The runtime's verbatim waived-failure report (`result.archiveHookOverride`),
+   * present only when removal proceeded past an explicitly waived hook failure.
+   */
+  archiveHookOverride: unknown;
+  /** The runtime's verbatim result. */
+  raw: Record<string, unknown>;
+}
+
+/**
+ * Remove an Orca-managed worktree by its EXACT selector (`worktree rm`).
+ * Fail-closed by construction: the waiver flag is validated against its
+ * documented `--run-hooks` precondition BEFORE any call, and every failure
+ * (hook failure included) throws with its verbatim code, message, and
+ * envelope — the caller decides what, if anything, to waive and retry.
+ */
+export async function removeWorktree(
+  selector: string,
+  opts: {
+    runHooks?: boolean;
+    allowFailedArchiveHook?: boolean;
+    force?: boolean;
+    environmentId?: string;
+  } = {},
+): Promise<WorktreeRemovalReceipt> {
+  if (!selector.trim()) {
+    throw new OrcaCliError(
+      "worktree rm requires an exact non-empty worktree selector",
+      "invalid_argument",
+    );
+  }
+  if (opts.allowFailedArchiveHook && !opts.runHooks) {
+    throw new OrcaCliError(
+      "--allow-failed-archive-hook requires --run-hooks (there is no failure to waive without running hooks)",
+      "invalid_argument",
+    );
+  }
+  const result = await runOrca<Record<string, unknown>>([
+    "worktree",
+    "rm",
+    "--worktree",
+    selector,
+    ...(opts.force ? ["--force"] : []),
+    ...(opts.runHooks ? ["--run-hooks"] : []),
+    ...(opts.allowFailedArchiveHook ? ["--allow-failed-archive-hook"] : []),
+    ...environmentArgs(opts.environmentId),
+  ]);
+  return {
+    worktree: pickString(result, "worktree", "worktreeId", "worktree_id") ?? selector,
+    archiveHookOverride: result.archiveHookOverride ?? null,
+    raw: result,
+  };
 }
 
 // --- Starting workers ------------------------------------------------------
@@ -3236,7 +3749,7 @@ function readDispatchId(result: unknown): string | null {
  * this function trusts nothing upstream). Every refusal here is an
  * `invalid_argument` thrown without spawning a process.
  *
- * Phase 6 placement rules (remote = `on` present):
+ * Placement rules (remote = `on` present):
  *   * remote `current`/`active` and `new-child` are refused outright —
  *     "whatever this server has checked out" and "stacked on the coordinator's
  *     workspace" are meaningless on a different machine;
@@ -3245,8 +3758,20 @@ function readDispatchId(result: unknown): string | null {
  *   * `--on` never combines with `--terminal`: reuse addresses an agent
  *     terminal this viewer can see, and substituting a remote terminal handle
  *     is forbidden (remote workers are addressed by Dispatch ID only);
- *   * creation flags (`--repo`, `--name`) only ever ride on `new-top-level`
- *     (the CLI rejects them for current/existing worktrees).
+ *   * creation flags (`--repo`, `--name`, `--base-branch`, `--display-name`,
+ *     `--comment`, `--setup`) ride ONLY on the two new-worktree modes — Orca
+ *     rejects them for current/existing worktrees, and this gate refuses
+ *     earlier without a spawn;
+ *   * `--repo` applies ONLY to `new-top-level`: a `new-child` anchors on the
+ *     current workspace's own repo and cannot select another;
+ *   * creation metadata is charset/bounds-checked here too (same grammar as
+ *     the HTTP layer), because the coordinator passes stored-config values
+ *     straight through and this function's contract is to trust nothing.
+ *
+ * By validation time the request MUST carry a name for a creating start —
+ * `startSupervisedWorker` fills a missing local name via
+ * `withDerivedCreationDefaults` BEFORE calling this gate, so a direct caller
+ * skipping that step is the bug this refusal reports.
  */
 /**
  * The placement-relevant slice of a worker-start request. Everything except
@@ -3265,6 +3790,14 @@ export interface WorkerStartRequest {
   on?: string;
   repo?: string;
   name?: string;
+  /** Base branch/ref the new worktree is created from (`--base-branch`). */
+  baseBranch?: string;
+  /** Orca display-name override for the new worktree (`--display-name`). */
+  displayName?: string;
+  /** Comment stored in Orca worktree metadata (`--comment`). */
+  comment?: string;
+  /** Setup-hook policy for the new worktree (`--setup run|skip|inherit`). */
+  setup?: string;
 }
 
 export function assertValidWorkerStart(opts: WorkerStartRequest): void {
@@ -3288,6 +3821,7 @@ export function assertValidWorkerStart(opts: WorkerStartRequest): void {
     );
   }
   const worktree = opts.worktree ?? "current";
+  const creating = worktree === "new-top-level" || worktree === "new-child";
   if (opts.on) {
     if (worktree === "current" || worktree === "active") {
       throw new OrcaCliError(
@@ -3318,18 +3852,107 @@ export function assertValidWorkerStart(opts: WorkerStartRequest): void {
       }
     }
   }
-  if ((opts.repo || opts.name) && worktree !== "new-top-level" && worktree !== "new-child") {
+  // Creation flags are creation-mode-only. One check for the whole family —
+  // current/existing worktrees are never created and never rerun setup, so
+  // ANY creation field there is a caller bug, not a preference to drop.
+  if (
+    !creating &&
+    (opts.repo || opts.name || opts.baseBranch || opts.displayName || opts.comment || opts.setup)
+  ) {
     throw new OrcaCliError(
-      "worker-start: --repo/--name are creation flags and only apply to new-top-level (or new-child) worktrees.",
+      "worker-start: creation flags (--repo, --name, --base-branch, --display-name, --comment, --setup) " +
+        "only apply to new-top-level (or new-child) worktrees.",
       "invalid_argument",
     );
   }
-  if ((worktree === "new-top-level" || worktree === "new-child") && !opts.name) {
+  if (creating && opts.repo && worktree !== "new-top-level") {
     throw new OrcaCliError(
-      `worker-start: ${worktree} creates a worktree and requires an explicit --name.`,
+      "worker-start: --repo only applies to new-top-level — a new-child anchors on the " +
+        "current workspace's own repo.",
       "invalid_argument",
     );
   }
+  // Metadata charset/bounds — the same grammar the HTTP layer enforces, re-checked
+  // here because this gate's contract is to trust nothing upstream (the
+  // coordinator feeds it stored-config values directly).
+  if (opts.name && !PLACEMENT_NAME_PATTERN.test(opts.name)) {
+    throw new OrcaCliError(
+      `worker-start: --name ${JSON.stringify(opts.name.slice(0, 64))} must be a short name ` +
+        "(letters, digits, . _ -).",
+      "invalid_argument",
+    );
+  }
+  if (opts.baseBranch) {
+    const branch = opts.baseBranch;
+    if (branch.length > 128 || !BASE_BRANCH_PATTERN.test(branch) || branch.includes("..") || branch.endsWith("/") || branch.endsWith(".")) {
+      throw new OrcaCliError(
+        `worker-start: --base-branch ${JSON.stringify(branch.slice(0, 64))} is not a usable git ref.`,
+        "invalid_argument",
+      );
+    }
+  }
+  for (const [flag, value, max] of [
+    ["--display-name", opts.displayName, DISPLAY_NAME_MAX],
+    ["--comment", opts.comment, COMMENT_MAX],
+  ] as const) {
+    if (!value) continue;
+    // eslint-disable-next-line no-control-regex — exactly what we are screening for
+    if (value.length > max || /[\u0000-\u0008\u000b-\u001f\u007f]/.test(value)) {
+      throw new OrcaCliError(
+        `worker-start: ${flag} must be bounded free text without control characters (max ${max}).`,
+        "invalid_argument",
+      );
+    }
+  }
+  if (opts.setup && !SETUP_POLICIES.has(opts.setup)) {
+    throw new OrcaCliError(
+      `worker-start: --setup ${JSON.stringify(opts.setup.slice(0, 32))} must be run, skip or inherit.`,
+      "invalid_argument",
+    );
+  }
+  if (creating && !opts.name) {
+    throw new OrcaCliError(
+      `worker-start: ${worktree} creates a worktree and requires an explicit --name ` +
+        "(local starts get one derived via withDerivedCreationDefaults before this gate).",
+      "invalid_argument",
+    );
+  }
+}
+
+/**
+ * A deterministic, bounded worktree name derived from the Run and the
+ * Task/lane identity — the fallback for a creating start whose placement
+ * spec carried no explicit `name`. Deterministic so a replayed start (same
+ * request id, same argv) and a retry that must recreate can both reproduce
+ * the SAME name; bounded so it always satisfies the `--name` grammar
+ * (PLACEMENT_NAME_PATTERN) Orca accepts.
+ */
+export function deriveWorktreeName(runId: string, scopeId: string): string {
+  const digest = createHash("sha256").update(`${runId}\u0000${scopeId}`).digest("hex").slice(0, 8);
+  // Keep the human-readable prefix of the task/lane id, collapse anything
+  // outside the name grammar to "-", and trim so base + "-" + 8 digest chars
+  // always fit the 64-char bound with a leading alphanumeric.
+  const base =
+    scopeId
+      .replace(/[^A-Za-z0-9._-]+/g, "-")
+      .replace(/^[-.]+|[-.]+$/g, "")
+      .slice(0, 40) || "wt";
+  return `${base}-${digest}`;
+}
+
+/**
+ * Fill the creation-name default for a LOCAL creating start: `new-child` /
+ * `new-top-level` without an explicit name get `deriveWorktreeName(runId,
+ * taskId)`. Remote starts are left untouched — a saved-environment
+ * new-top-level must carry an explicit name (validated next gate), and a
+ * request without taskId/runId cannot derive anything and is refused rather
+ * than guessed.
+ */
+export function withDerivedCreationDefaults<T extends WorkerStartRequest>(opts: T): T {
+  const worktree = opts.worktree ?? "current";
+  if (worktree !== "new-child" && worktree !== "new-top-level") return opts;
+  if (opts.name || opts.on || !opts.taskId || !opts.runId) return opts;
+  return { ...opts, name: deriveWorktreeName(opts.runId, opts.taskId) };
 }
 
 /**
@@ -3352,6 +3975,10 @@ export function buildWorkerStartArgv(
     on?: string;
     repo?: string;
     name?: string;
+    baseBranch?: string;
+    displayName?: string;
+    comment?: string;
+    setup?: string;
   },
   requestId: string,
 ): string[] {
@@ -3382,10 +4009,19 @@ export function buildWorkerStartArgv(
   // command, and every later operation stay on the local server. It appears
   // here and nowhere else in the viewer's Orca surface.
   if (opts.on) args.push("--on", opts.on);
-  // Creation flags only on new worktrees (validated above).
+  // Creation flags ONLY on the two new-worktree modes — structurally, not
+  // just via the validator: this builder also builds the REPLAYED argv after
+  // a lost response, and a creation flag that leaked onto a current/existing
+  // start would make the replay a different (rejected) command. `--repo` is
+  // new-top-level-only even within the creation branch: a new-child anchors
+  // on the current workspace's own repo and cannot select another.
   if (opts.worktree === "new-top-level" || opts.worktree === "new-child") {
-    if (opts.repo) args.push("--repo", opts.repo);
+    if (opts.worktree === "new-top-level" && opts.repo) args.push("--repo", opts.repo);
     if (opts.name) args.push("--name", opts.name);
+    if (opts.baseBranch) args.push("--base-branch", opts.baseBranch);
+    if (opts.displayName) args.push("--display-name", opts.displayName);
+    if (opts.comment) args.push("--comment", opts.comment);
+    if (opts.setup) args.push("--setup", opts.setup);
   }
   return args;
 }
@@ -3422,16 +4058,35 @@ export async function startSupervisedWorker(opts: {
    * reaches Orca.
    */
   on?: string;
-  /** Exact repo selector for a remote (or local) new-top-level worktree. */
+  /** Exact repo selector for a (remote or local) new-top-level worktree. */
   repo?: string;
-  /** Explicit name for a new-top-level/new-child worktree. */
+  /**
+   * Explicit name for a new-top-level/new-child worktree. Optional on LOCAL
+   * creating starts: when absent, a deterministic bounded name is derived
+   * from the Run and Task ids (`withDerivedCreationDefaults`) BEFORE
+   * validation, so the derived name is part of the argv any replay reuses.
+   * Remote new-top-level still requires an explicit name.
+   */
   name?: string;
+  /** Base branch/ref the new worktree is created from (creation modes only). */
+  baseBranch?: string;
+  /** Orca display-name override for the new worktree (creation modes only). */
+  displayName?: string;
+  /** Comment stored in Orca worktree metadata (creation modes only). */
+  comment?: string;
+  /** Setup-hook policy for the new worktree (creation modes only). */
+  setup?: string;
 }): Promise<StartedWorker> {
+  // Local creating starts get their derived name BEFORE the last gate, so the
+  // gate's "creation requires a name" rule stays absolute and the derived
+  // name is baked into the exact argv a replay must reuse.
+  const request = withDerivedCreationDefaults(opts);
   // The last gate before the CLI: remote current/new-child, --on+--terminal,
-  // unpaired effort, and creation-flag misuse all refuse WITHOUT a spawn.
-  assertValidWorkerStart(opts);
+  // unpaired effort, creation-flag misuse, and malformed metadata all refuse
+  // WITHOUT a spawn.
+  assertValidWorkerStart(request);
   const requestId = opts.retryRequestId ?? newRequestId();
-  const buildArgs = (): string[] => buildWorkerStartArgv(opts, requestId);
+  const buildArgs = (): string[] => buildWorkerStartArgv(request, requestId);
 
   let result: Record<string, unknown>;
   try {
@@ -3600,7 +4255,13 @@ export async function listModels(harness: string): Promise<string[]> {
  *   2. dispatch for tracking only (no `--inject`) to mint a real dispatch_id,
  *   3. fetch the preamble — it now carries that real dispatch_id AND the
  *      worker handle as `--from`, both required for worker_done to settle,
- *   4. run `opencode run --auto "$(cat <preamble-file>)"` in the shell.
+ *   4. `exec opencode run --auto "$(cat <preamble-file>)"` in the shell.
+ *
+ * `exec` is load-bearing: without it, a completed/crashed opencode process
+ * returns to the bare zsh. Any best-effort Orca wake-up text that was still in
+ * the PTY input buffer is then interpreted as shell commands, and the terminal
+ * looks live even though the agent is gone. Replacing the shell makes process
+ * exit observable and prevents post-completion messages from landing in zsh.
  *
  * opencode executes the preamble's `orca orchestration send --type worker_done`
  * via its Bash tool, settling the task (`completed`), which the coordinator
@@ -3673,7 +4334,10 @@ async function startOpencodeWorker(opts: {
   // #variant suffix, so no quote, space or shell operator can be inside.
   // `--auto` is the mandatory autonomous flag (see the docstring).
   const modelArg = opts.model ? ` -m "${opts.model}"` : "";
-  const cmd = `opencode run --auto${modelArg} "$(cat ${preambleFile})"`;
+  // Replace the bare shell instead of leaving it behind after the one-shot
+  // agent exits. Besides avoiding a stale terminal, this guarantees buffered
+  // orchestration nudges can never fall through and execute as zsh commands.
+  const cmd = `exec opencode run --auto${modelArg} "$(cat ${preambleFile})"`;
   await runOrca(["terminal", "send", "--terminal", handle, "--text", cmd, "--enter"]);
 
   return { mode: "legacy", dispatchId, handle, receipt: null, replayed: false, adopted: false };

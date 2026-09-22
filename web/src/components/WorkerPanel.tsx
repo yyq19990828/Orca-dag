@@ -1,13 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  abandonWorker,
   fetchEnvironments,
   fetchWorkerDetail,
   fetchWorkerOutput,
+  focusWorker,
   releaseWorker,
   retainWorker,
+  stopWorker,
 } from "../api";
+import { useDecisionDialog } from "./DecisionDialog";
 import type {
   RunStatus,
+  WorkerControlReceiptView,
   WorkerDetailView,
   WorkerOutputView,
   WorkerRowView,
@@ -86,6 +91,15 @@ export function WorkerPanel({
   } | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // Phase 7: receipts of the per-Dispatch interventions (stop/abandon/focus),
+  // kept next to the release/retain decision receipt so the row shows Orca's
+  // verdict verbatim instead of silently swallowing an ambiguous outcome.
+  const [control, setControl] = useState<{
+    dispatchId: string;
+    action: WorkerControlReceiptView["action"];
+    receipt: WorkerControlReceiptView;
+  } | null>(null);
+  const dialog = useDecisionDialog();
   const [terminalFilter, setTerminalFilter] = useState<string>("all");
   const [attentionFilter, setAttentionFilter] = useState<string>("all");
   // Structured-read source picker + the environment capability list it is
@@ -139,6 +153,7 @@ export function WorkerPanel({
       setOutputErr(null);
       setOutputFilter("");
       setDecision(null);
+      setControl(null);
       setSource("auto");
       try {
         setDetail(await fetchWorkerDetail(runId, dispatchId));
@@ -187,6 +202,117 @@ export function WorkerPanel({
     try {
       const receipt = await (kind === "release" ? releaseWorker(dispatchId) : retainWorker(dispatchId));
       setDecision({ dispatchId, kind, receipt });
+    } catch (e) {
+      setErr(String((e as Error).message ?? e));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  // --- Phase 7: one-worker stop / abandon / focus ---------------------------
+  //
+  // Evidence gates (PRD): stop needs a positively ACTIVE dispatch; abandon
+  // needs a positively EXITED dispatch or Orca's own prescribed next action
+  // (outcome unknown); focus needs a local terminal with positive fresh
+  // `agentWait` observation. Missing, stale, remote, or unverifiable
+  // evidence authorizes no action — the buttons stay disabled with the
+  // reason in their tooltip, and every fired action confirms first with the
+  // evidence summary that justified it.
+
+  type Evidence = {
+    canStop: boolean;
+    canAbandon: boolean;
+    canFocus: boolean;
+    stopWhy: string;
+    abandonWhy: string;
+    focusWhy: string;
+  };
+
+  function evidenceFor(row: WorkerRowView, detail: WorkerDetailView | null): Evidence {
+    const liveness = detail?.liveness;
+    const fleetLive = liveness?.verdict === "live" || (liveness?.qualifiedWorking ?? false);
+    const fleetExited = liveness?.verdict === "exited";
+    const prescribed = detail?.fleet?.projection?.nextAction;
+    const hasPrescribed = Boolean(prescribed && prescribed.argv.length > 0);
+    const local = detail?.fleet?.projection?.host?.kind === "local";
+    // Tri-state: an OBJECT is positive wait evidence; null = looked, none;
+    // undefined = this host never looked (unknown — never "waiting").
+    const wait = detail?.observation?.agentWait;
+    const waitPositive = wait != null;
+    const notSettled = !(attemptSettledFor(row));
+    return {
+      canStop: fleetLive && notSettled,
+      canAbandon: fleetExited || hasPrescribed,
+      canFocus: Boolean(local && waitPositive && row.agentTerminalHandle),
+      stopWhy: notSettled
+        ? fleetLive
+          ? `positive live evidence${liveness?.fleetReason ? ` (${liveness.fleetReason})` : ""}`
+          : "no positive live evidence — the fleet verdict is not “live”"
+        : "this dispatch is already settled",
+      abandonWhy: hasPrescribed
+        ? "Orca prescribes a next action (outcome unknown)"
+        : fleetExited
+          ? `positive exit evidence${liveness?.fleetReason ? ` (${liveness.fleetReason})` : ""}`
+          : "no positive exit evidence and no Orca-prescribed action",
+      focusWhy: !local
+        ? "focus is local-only — this worker is not on this server"
+        : !waitPositive
+          ? "no positive agent-wait observation (unknown or none detected)"
+          : row.agentTerminalHandle
+            ? `agent-wait: ${wait?.kind ?? "observed"}${wait?.detail ? ` — ${wait.detail}` : ""}`
+            : "no worker terminal handle reported",
+    };
+  }
+
+  function attemptSettledFor(row: WorkerRowView): boolean {
+    const attempt = attempts.find(
+      (candidate) =>
+        (row.dispatchId && candidate.dispatchId === row.dispatchId) || candidate.taskId === row.taskId,
+    );
+    return attempt?.settled ?? false;
+  }
+
+  async function intervene(
+    row: WorkerRowView,
+    action: WorkerControlReceiptView["action"],
+    why: string,
+  ) {
+    const dispatchId = row.dispatchId;
+    const titles: Record<typeof action, string> = {
+      stop: "Stop this worker?",
+      abandon: "Abandon this dispatch?",
+      focus: "Focus this worker's terminal?",
+    };
+    const messages: Record<typeof action, string> = {
+      stop:
+        `worker-stop on ${dispatchId}.\n\nEvidence: ${why}.\n\n` +
+        "The dispatch is stopped through Orca; the task stays in the Run and can be retried safely.",
+      abandon:
+        `worker abandon on ${dispatchId}.\n\nEvidence: ${why}.\n\n` +
+        "Abandoning closes a positively-exited (or runtime-prescribed outcome-unknown) attempt " +
+        "without touching anything live.",
+      focus:
+        `Focus the local terminal for ${dispatchId}.\n\nEvidence: ${why}.\n\n` +
+        "Orca brings the worker terminal to the front — nothing about the dispatch changes.",
+    };
+    const ok = await dialog.confirm({
+      title: titles[action],
+      message: messages[action],
+      confirmLabel: action === "stop" ? "Stop worker" : action === "abandon" ? "Abandon" : "Focus terminal",
+      tone: action === "abandon" ? "danger" : "default",
+    });
+    if (!ok) return;
+    setBusyId(dispatchId);
+    setErr(null);
+    try {
+      // The runId rides along: the server positively re-scopes the evidence
+      // re-read (worker-show) to THIS Run before any mutation is minted.
+      const receipt = await (action === "stop"
+        ? stopWorker(dispatchId, row.runId)
+        : action === "abandon"
+          ? abandonWorker(dispatchId, row.runId)
+          : focusWorker(dispatchId, row.runId));
+      setControl({ dispatchId, action, receipt });
     } catch (e) {
       setErr(String((e as Error).message ?? e));
     } finally {
@@ -261,6 +387,9 @@ export function WorkerPanel({
               (row.dispatchId && candidate.dispatchId === row.dispatchId) ||
               candidate.taskId === row.taskId,
           );
+          // Evidence gates only matter on the expanded row — the one whose
+          // worker-show detail is on screen.
+          const evidence = open ? evidenceFor(row, detail) : null;
           const host = projection?.host ?? null;
           const hostLabel =
             host == null
@@ -435,6 +564,31 @@ export function WorkerPanel({
                           Orca prescribes: <code>{detail.fleet.projection.nextAction.argv.join(" ")}</code>
                         </div>
                       )}
+                      {/* Requested vs effective WORKSPACE facts (Phase 7):
+                          where the viewer asked this worker to run vs what
+                          the runtime receipt echoed. Null stays "unknown" —
+                          the effective side only ever comes from Orca. */}
+                      {(attempt?.requested.worktree ||
+                        attempt?.requested.on ||
+                        detail?.fleet?.projection?.launch?.worktree ||
+                        detail?.fleet?.projection?.launch?.on ||
+                        detail?.fleet?.projection?.workspace) && (
+                        <div className="inbox__body">
+                          Workspace —{" "}
+                          <b>
+                            {attempt?.requested.worktree ??
+                              attempt?.requested.on ??
+                              "unknown (not started here)"}
+                          </b>
+                          {" → effective "}
+                          <b>
+                            {detail?.fleet?.projection?.launch?.worktree ??
+                              detail?.fleet?.projection?.workspace ??
+                              detail?.fleet?.projection?.launch?.on ??
+                              "unknown (no receipt echo)"}
+                          </b>
+                        </div>
+                      )}
                       {/* Raw receipts live ONLY in this collapsed diagnostic section. */}
                       <details className="workers__raw">
                         <summary>Diagnostic receipt</summary>
@@ -546,6 +700,23 @@ export function WorkerPanel({
                     </div>
                   )}
 
+                  {control && control.dispatchId === row.dispatchId && (
+                    <div className="inbox__body workers__decision" data-testid="control-receipt">
+                      {control.action} receipt: <b>{control.receipt.state ?? "unknown"}</b>
+                      {control.receipt.reason ? ` — ${control.receipt.reason}` : ""}
+                      {control.receipt.requestId && (
+                        <>
+                          {" "}· request <code>{control.receipt.requestId.slice(0, 8)}…</code>
+                        </>
+                      )}
+                      {control.receipt.detail && <div className="inbox__meta">{control.receipt.detail}</div>}
+                      <div className="inbox__meta">
+                        Orca's verdict verbatim — an ambiguous outcome stays auditable in the request
+                        ledger and is never retried with a new request id.
+                      </div>
+                    </div>
+                  )}
+
                   <div className="gate__actions">
                     {output?.dispatchId !== row.dispatchId && (
                       <button
@@ -595,6 +766,49 @@ export function WorkerPanel({
                           title="worker-retain — keep this terminal alive for inspection"
                         >
                           Retain for debugging
+                        </button>
+                      </>
+                    )}
+                    {/* Phase 7: one-worker intervention. Each button is
+                        enabled only on its own positive evidence, says what
+                        that evidence is, and confirms before it fires. */}
+                    {evidence && row.dispatchId && (
+                      <>
+                        <button
+                          className="btn btn--gate workers__ctl"
+                          disabled={!evidence.canFocus || disabled || busyId === row.dispatchId}
+                          title={
+                            evidence.canFocus
+                              ? `Focus — evidence: ${evidence.focusWhy}`
+                              : `Focus unavailable — ${evidence.focusWhy}`
+                          }
+                          onClick={() => row.dispatchId && void intervene(row, "focus", evidence.focusWhy)}
+                        >
+                          ◎ Focus
+                        </button>
+                        <button
+                          className="btn btn--gate btn--danger workers__ctl"
+                          disabled={!evidence.canStop || disabled || busyId === row.dispatchId}
+                          title={
+                            evidence.canStop
+                              ? `Stop — evidence: ${evidence.stopWhy}`
+                              : `Stop unavailable — ${evidence.stopWhy}`
+                          }
+                          onClick={() => row.dispatchId && void intervene(row, "stop", evidence.stopWhy)}
+                        >
+                          ⏹ Stop worker
+                        </button>
+                        <button
+                          className="btn btn--gate workers__ctl"
+                          disabled={!evidence.canAbandon || disabled || busyId === row.dispatchId}
+                          title={
+                            evidence.canAbandon
+                              ? `Abandon — evidence: ${evidence.abandonWhy}`
+                              : `Abandon unavailable — ${evidence.abandonWhy}`
+                          }
+                          onClick={() => row.dispatchId && void intervene(row, "abandon", evidence.abandonWhy)}
+                        >
+                          Abandon
                         </button>
                       </>
                     )}

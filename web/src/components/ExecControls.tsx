@@ -16,7 +16,9 @@ import {
   useFlags,
   useReadiness,
 } from "../harness";
-import { HARNESSES, type RunStatus } from "../types";
+import { HARNESSES, type DagEdge, type RunStatus } from "../types";
+import { lanePlanProblems } from "../placement";
+import { laneMap, lanesSpecMap } from "../harness";
 
 const CUSTOM = "__custom__";
 const KNOWN = HARNESSES as readonly string[];
@@ -37,6 +39,7 @@ const CUSTOM_OFF_HINT = "Custom commands are disabled — start the viewer with 
 export function ExecControls({
   runId,
   taskIds,
+  edges = [],
   readyCount = 0,
   startingRunId = null,
   status = null,
@@ -49,6 +52,8 @@ export function ExecControls({
   /** Run to execute. Mutations are Run-scoped since Orca 1.4.160. */
   runId: string;
   taskIds: string[];
+  /** Dependency edges — the lane-plan preflight reads them (Phase 7). */
+  edges?: DagEdge[];
   /** ready-but-unfired tasks — the Run button nudges itself when there are any */
   readyCount?: number;
   /** Local App signal raised before POST /api/run can report a bound runId. */
@@ -189,6 +194,21 @@ export function ExecControls({
         return;
       }
     }
+    // Phase 7: validate the whole placement plan BEFORE any mutation (PRD
+    // UX). The server is the authority and re-validates everything; this
+    // preflight surfaces lane problems (unordered members, dangling refs,
+    // double-placed tasks) before a terminal is bound.
+    const laneProblems = lanePlanProblems(
+      config.laneByTask,
+      config.worktreeLanes,
+      config.placementByTask,
+      config.environmentByTask,
+      edges,
+    );
+    if (laneProblems.length > 0) {
+      setErr(`Placement plan needs a fix before this Run can start — ${laneProblems[0]}`);
+      return;
+    }
     // Binding is the only way to get mutation authority on a Run, and it fences
     // whoever held it — usually the agent terminal that drew this DAG.
     const ok = await dialog.confirm({
@@ -224,6 +244,9 @@ export function ExecControls({
         // config-write debounce racing the run request).
         environmentMap(taskIdsRef.current),
         placementMap(taskIdsRef.current),
+        // Phase 7: the lane plan rides along the same way.
+        lanesSpecMap(),
+        laneMap(taskIdsRef.current),
       );
       startedStatus = s;
     } catch (e) {

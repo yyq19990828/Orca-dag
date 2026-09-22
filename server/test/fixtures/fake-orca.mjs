@@ -63,7 +63,41 @@ function save() {
  * Land one supervised worker-start: mint the Dispatch, flip the task, return
  * the receipt outcome. Shared by the normal path and both recovery replays so
  * "exactly one Dispatch per landed start" is structural, not incidental.
+ *
+ * Creating placements (`--worktree new-child|new-top-level`) resolve to a
+ * durable worktree row: the runtime creates (or finds, for a retried
+ * creation) the workspace and reports its EXACT selector back — in the
+ * receipt echo and in the dispatch row's launch projection. That echo is the
+ * positive evidence the coordinator's lane identity recovery adopts;
+ * `laneDiscoveryOnly` suppresses it to exercise the discovery fallback.
  */
+function resolveWorktreeIdentity() {
+  const wt = flag("--worktree");
+  if (wt !== "new-child" && wt !== "new-top-level") return wt ?? null;
+  const name = flag("--name");
+  if (!name) fail("invalid_argument", "creating placements require --name");
+  state.worktrees ??= [];
+  const repoSel = wt === "new-top-level" ? (flag("--repo") ?? "") : "";
+  const repoId = repoSel.startsWith("id:") ? repoSel.slice(3) : repoSel ? null : "repoL";
+  let row = state.worktrees.find(
+    (w) => (w.displayName ?? w.name) === name && (wt !== "new-top-level" || w.repoId === repoId),
+  );
+  if (!row) {
+    row = {
+      id: `id:${repoId ?? "repoX"}::/ws/${name}`,
+      repoId,
+      path: `/ws/${name}`,
+      displayName: name,
+      branch: flag("--base-branch") ?? `orca/${name}`,
+      hostId: null,
+      parentWorktreeId: wt === "new-child" ? "id:repoL::/ws/main" : null,
+      isMainWorktree: false,
+    };
+    state.worktrees.push(row);
+  }
+  return row.id;
+}
+
 function landSupervised(taskId, runId) {
   state.seq ??= {};
   state.seq.dispatch = (state.seq.dispatch ?? 0) + 1;
@@ -84,6 +118,8 @@ function landSupervised(taskId, runId) {
       }
     }
   }
+  const effectiveWorktree = resolveWorktreeIdentity();
+  const discoveryOnly = state.laneDiscoveryOnly === true;
   state.dispatches[id] = {
     id,
     task_id: taskId,
@@ -102,7 +138,9 @@ function landSupervised(taskId, runId) {
       agent: flag("--agent") ?? null,
       model: flag("--model") ?? null,
       effort: flag("--effort") ?? null,
-      worktree: flag("--worktree") ?? null,
+      // The resolved workspace — the durable exact-selector evidence a
+      // restarting viewer recovers a lane's identity from.
+      worktree: discoveryOnly ? null : effectiveWorktree,
       terminal: reuseHandle ?? null,
       on: flag("--on") ?? null,
     },
@@ -119,8 +157,8 @@ function landSupervised(taskId, runId) {
   // The receipt echoes what actually ran — the "effective" half of the
   // requested/effective pair. A remote start echoes its environment.
   const outcome = { dispatchId: id, status: "ready" };
+  if (!discoveryOnly && flag("--worktree")) outcome.worktree = effectiveWorktree;
   if (flag("--on")) outcome.on = flag("--on");
-  if (flag("--worktree")) outcome.worktree = flag("--worktree");
   if (flag("--agent")) outcome.agent = flag("--agent");
   return outcome;
 }
@@ -274,12 +312,56 @@ if (ns === "orchestration" && verb === "task-list") {
   ok({ tasks: Object.values(state.tasks ?? {}) });
 } else if (ns === "orchestration" && verb === "gate-list") {
   ok({ gates: state.gates ?? [] });
+} else if (ns === "orchestration" && verb === "gate-create") {
+  const taskId = flag("--task");
+  const question = flag("--question") ?? "";
+  let options = ["approved", "rejected"];
+  try {
+    const parsed = JSON.parse(flag("--options") ?? "null");
+    if (Array.isArray(parsed)) options = parsed.map(String);
+  } catch {
+    /* default options */
+  }
+  const t = state.tasks?.[taskId];
+  if (!t) fail("task_not_found", `no task ${taskId}`);
+  state.gates ??= [];
+  // Durable idempotency: the viewer's stable marker + task binding is the
+  // dedupe key. A repeated create for the same join returns the existing
+  // gate verbatim — never a second one (duplicate-gate prevention).
+  if (question.includes("[orca-dag:integration]")) {
+    const existing = state.gates.find(
+      (g) => g.task_id === taskId && String(g.question ?? "").includes("[orca-dag:integration]"),
+    );
+    if (existing) {
+      ok({ gate: existing, deduped: true });
+    }
+  }
+  state.seq ??= {};
+  state.seq.gate = (state.seq.gate ?? 0) + 1;
+  const gate = {
+    id: `gate_${state.seq.gate}`,
+    task_id: taskId,
+    question,
+    options,
+    status: "pending",
+    resolution: null,
+  };
+  state.gates.push(gate);
+  // A gate BLOCKS its task — the runtime parks a ready task the moment the
+  // gate exists, and it stays blocked until a resolution nudges it out.
+  if (t.status === "ready") t.status = "blocked";
+  ok({ gate });
 } else if (ns === "orchestration" && verb === "task-update") {
   const t = state.tasks?.[flag("--id")];
   if (t) t.status = flag("--status");
   ok({});
 } else if (ns === "orchestration" && verb === "run-use") {
   const runId = flag("--id");
+  // Scripted startup failure (coordinator-lifecycle coverage): the Run
+  // refuses a new coordinator binding AFTER the terminal was created, so
+  // startCoordinator must fail AND close its provisional pane. Default-off —
+  // no existing test sets it.
+  if (state.runUseFail) fail("run_use_refused", "scripted: binding refused");
   ok({ run: state.runs?.[runId] ?? { id: runId, objective: "", legacy: 0 } });
 } else if (ns === "orchestration" && verb === "run-show") {
   // Read-only: the Run record names its bound coordinator handle — the key a
@@ -602,7 +684,17 @@ if (ns === "orchestration" && verb === "task-list") {
 } else if (ns === "repo" && verb === "list") {
   ok({ repos: state.repos ?? [] });
 } else if (ns === "worktree" && verb === "list") {
-  ok({ worktrees: state.worktrees ?? [] });
+  // hideWorktrees simulates a workspace Orca holds but this listing cannot
+  // see (scoped/host-paged listings) — the identity-exists-but-unverifiable
+  // case, which the coordinator must treat as REFUSAL, not replacement.
+  ok({ worktrees: state.hideWorktrees ? [] : state.worktrees ?? [] });
+} else if (ns === "worktree" && verb === "show") {
+  // Exact-selector revalidation: only a row Orca positively holds answers;
+  // an unknown selector is `selector_not_found` (the refusal evidence).
+  const sel = flag("--worktree");
+  const row = (state.worktrees ?? []).find((w) => w.id === sel || w.path === sel);
+  if (!row) fail("selector_not_found", `no workspace matches ${sel}`);
+  ok({ worktree: row });
 } else if (ns === "project" && verb === "list") {
   ok({ projects: state.projects ?? [] });
 } else if (ns === "terminal" && verb === "list") {
