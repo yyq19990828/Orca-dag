@@ -792,7 +792,7 @@ describe("execution gate over HTTP", () => {
     assert.equal(bad.status, 400);
   });
 
-  it("gates Run creation, gate resolution and reset after their own validation", async () => {
+  it("gates Run creation and gate resolution after their own validation", async () => {
     const noObjective = await call("POST", "/api/runs", {}, policy.token);
     assert.equal(noObjective.status, 400); // validation first
     const create = await call("POST", "/api/runs", { objective: "x" }, policy.token);
@@ -803,11 +803,14 @@ describe("execution gate over HTTP", () => {
     assert.equal(noIds.status, 400); // validation first
     const gate = await call("POST", "/api/gates/gate_1/resolve", { runId: "run_x", resolution: "approved" }, policy.token);
     assert.equal(gate.status, 503);
+  });
 
-    const noConfirm = await call("POST", "/api/reset", {}, policy.token);
-    assert.equal(noConfirm.status, 400); // confirm-first contract unchanged
+  it("answers POST /api/reset with the normal unknown-route 404 (reset removed)", async () => {
+    // `orca orchestration reset --tasks` wipes every local Run — the viewer
+    // deliberately ships no route for it. A fresh Run is the only redraw path.
     const reset = await call("POST", "/api/reset", { confirmAllRuns: true }, policy.token);
-    assert.equal(reset.status, 503);
+    assert.equal(reset.status, 404);
+    assert.equal(reset.json.code, "not_found");
   });
 
   it("leaves stopping available in view-only mode (de-escalation is safe)", async () => {

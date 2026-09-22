@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { fetchRequestDetail, fetchRequests } from "../api";
 import { formatTimestamp } from "../format";
+import { usePageVisible } from "../visibility";
 import type { RequestLedgerRowView, RequestReceiptView } from "../types";
 
 /**
@@ -53,7 +54,13 @@ export function RequestAuditPanel({ runId }: { runId: string }) {
   const [receipts, setReceipts] = useState<Map<string, RequestReceiptView>>(new Map());
   const [open, setOpen] = useState<string | null>(null);
 
+  const visible = usePageVisible();
   useEffect(() => {
+    // Interval paused while hidden — this panel lives in the Operations tab,
+    // but the tab can stay selected under a backgrounded page, and its 4s
+    // ledger poll must not survive that. Returning visible re-runs the
+    // effect: one immediate load, then the interval re-arms.
+    if (!visible) return;
     let alive = true;
     const load = async () => {
       try {
@@ -73,7 +80,7 @@ export function RequestAuditPanel({ runId }: { runId: string }) {
       alive = false;
       window.clearInterval(t);
     };
-  }, [runId]);
+  }, [runId, visible]);
 
   // Probes are keyed by request id AND kept per Run switch — a stale probe
   // from another Run must never dress up this Run's rows.

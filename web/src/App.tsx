@@ -12,9 +12,9 @@ import { WorkerPanel } from "./components/WorkerPanel";
 import { RunPicker } from "./components/RunPicker";
 import { RunHealthBadge } from "./components/RunHealthBadge";
 import { CapabilityPanel } from "./components/CapabilityPanel";
-import { useDecisionDialog } from "./components/DecisionDialog";
-import { fetchDag, fetchRunStatus, fetchWorkers, resetTasks } from "./api";
+import { fetchDag, fetchRunStatus, fetchWorkers } from "./api";
 import { initConfig, setLayout, setLeadTask, setRunId, useConfig, useReadiness } from "./harness";
+import { usePageVisible } from "./visibility";
 import {
   LAYOUTS,
   STATUS_META,
@@ -55,24 +55,6 @@ const CANVAS_MIN_WIDTH = 320;
  *  rendering this change anything the user can see", and it always answers. */
 function sameJson(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
-}
-
-/**
- * Whether this viewer tab can actually be seen. Orca's embedded browser
- * disables background-tab timer throttling (IntensiveWakeUpThrottling is off
- * in its launch flags), so a hidden tab keeps firing 2s polls at full speed
- * and re-rasterizing feTurbulence regions nobody is watching — one of the
- * heaviest costs this page has. Callers tear their intervals down while
- * hidden and re-arm with an immediate refresh on return.
- */
-function usePageVisible(): boolean {
-  const [visible, setVisible] = useState(() => document.visibilityState === "visible");
-  useEffect(() => {
-    const onChange = () => setVisible(document.visibilityState === "visible");
-    document.addEventListener("visibilitychange", onChange);
-    return () => document.removeEventListener("visibilitychange", onChange);
-  }, []);
-  return visible;
 }
 
 /**
@@ -208,7 +190,6 @@ function HandDrawnDefs() {
 }
 
 export default function App() {
-  const dialog = useDecisionDialog();
   const [dag, setDag] = useState<DagResponse>(EMPTY);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [stageOpen, setStageOpen] = useState(false);
@@ -482,6 +463,14 @@ export default function App() {
     if (status && selectedRunRef.current === id) setRunStatus(status);
   }, []);
 
+  // App is the ONLY periodic owner of /api/run-status (ExecControls and
+  // RecoveryPanel receive it as a prop). After an explicit Stop the 2s tick
+  // would leave the stop report and running flag stale for up to one interval,
+  // so ExecControls raises this callback instead of fetching itself: one
+  // one-off reconciliation pass, guarded by the same Run/seq checks the
+  // periodic path uses, and no second poller.
+  const onRunStopped = useCallback(() => refreshExecutionState(), [refreshExecutionState]);
+
   // Until the selected Run's first scoped response arrives, an old Run's DAG
   // is not displayable under the new Run. This complements the request guards
   // above for the one render between setRunId and the effect cleanup.
@@ -511,6 +500,16 @@ export default function App() {
   const selectedRunExecuting = Boolean(runStatus?.running && runStatus.runId === runId);
   const selectedRunStarting = startingRunId === runId;
   const leadTaskId = runId ? config.leadTaskByRun[runId] ?? null : null;
+  // One string drives both the conn pill's tooltip and its accessible name:
+  // the pill is focusable (role="status"), so a keyboard user tabbing to it
+  // hears the same detail a mouse user sees on hover.
+  const connDetail =
+    connError ??
+    (execOff
+      ? readiness?.reason ?? "Execution unavailable — view-only"
+      : readiness
+        ? `Connected to Orca ${readiness.version ?? ""} · ${readiness.cli} (execution enabled)`
+        : "Connected to Orca");
 
   // the toolbar's bottom edge doubles as a crayon progress strip
   const total = visibleDag.nodes.length || 1;
@@ -518,45 +517,19 @@ export default function App() {
   const pctFail = ((counts.failed ?? 0) / total) * 100;
   const pctRun = ((counts.dispatched ?? 0) / total) * 100;
 
-  async function onReset() {
-    // Mirror the readiness gate for a clear message; the server enforces it
-    // (503 execution_disabled) regardless.
-    if (execOff) {
-      await dialog.alert({
-        title: "Execution unavailable",
-        message: readiness?.reason ?? "Execution is unavailable on this Orca runtime.",
-      });
-      return;
-    }
-    // `orca orchestration reset` has no --run flag: it clears the whole local
-    // orchestration database, not just the Run on screen. Say so plainly.
-    const ok = await dialog.confirm({
-      title: "Clear tasks in every local Run?",
-      message:
-        "Orca's reset command has no Run scope. It deletes tasks in every local Run, " +
-        "not only the graph on screen. This cannot be undone.",
-      confirmLabel: "Clear all tasks",
-      cancelLabel: "Keep tasks",
-      tone: "danger",
-    });
-    if (!ok) return;
-    try {
-      await resetTasks();
-      setSelectedId(null);
-      setStageOpen(false);
-      refresh();
-    } catch (err) {
-      await dialog.alert({
-        title: "Task reset failed",
-        message: String(err),
-        tone: "danger",
-      });
-    }
-  }
+  // The top bar deliberately offers no way to wipe tasks: `orca orchestration
+  // reset` has no --run flag and deletes every local Run's tasks at once, so
+  // the viewer never exposes it. Redrawing a graph means creating a fresh Run
+  // (New Run).
 
   return (
     <div className="app">
       <HandDrawnDefs />
+      {/* Header = three regions, laid out by CSS across three width bands
+          (single row on desktop; brand+status over the Run row below 1024px;
+          a full-width Run row below 620px — see the header media queries in
+          styles.css). The markup order brand → run → status is the tab order;
+          the two-row/phone arrangements are pure `order` + wrapping. */}
       <header className="topbar">
         <div className="topbar__brand">
           {/* the mascot is drawn, not typeset — and it's an ORCA, not a whale:
@@ -586,41 +559,33 @@ export default function App() {
               <path d="M26 12 C29 8 31 7 33 6" />
             </g>
           </svg>
-          <div>
+          <div className="topbar__brand-text">
             <div className="topbar__title">Orca DAG Viewer</div>
             <div className="topbar__subtitle">Chat with your agent to build the graph · pick harnesses, let Orca run it in parallel</div>
           </div>
         </div>
-        <span className="topbar__tape" aria-hidden="true" />
-        <div className="topbar__right">
+        {/* The flexible middle region: the Run context (selector + New Run).
+            On desktop it centers in all spare width; below 1024px CSS drops
+            it to its own header row. */}
+        <div className="topbar__run">
           <RunPicker runId={runId} onPick={pickRun} autoPick={hydrated} />
+        </div>
+        {/* Run/Orca status cluster, pinned right on desktop. The conn pill is
+            focusable with a live-region role so its state is reachable and
+            announced without hovering. */}
+        <div className="topbar__status">
           <RunHealthBadge runId={runId} />
           <div
             className={`conn ${connError ? "conn--bad" : execOff ? "conn--warn" : "conn--ok"}`}
-            title={
-              connError ??
-              (execOff
-                ? readiness?.reason ?? "Execution unavailable — view-only"
-                : readiness
-                  ? `Connected to Orca ${readiness.version ?? ""} · ${readiness.cli} (execution enabled)`
-                  : "Connected to Orca")
-            }
+            role="status"
+            tabIndex={0}
+            title={connDetail}
+            aria-label={connDetail}
           >
             {connError ? "Fetch failed" : execOff ? "View-only" : "Orca connected"}
           </div>
-          <button
-            className="btn btn--ghost"
-            onClick={onReset}
-            disabled={execOff}
-            title={
-              execOff
-                ? readiness?.reason ?? "Execution is unavailable"
-                : "Clear tasks in all local Runs"
-            }
-          >
-            Clear tasks
-          </button>
         </div>
+        <span className="topbar__tape" aria-hidden="true" />
       </header>
 
       <div className="layout">
@@ -709,10 +674,12 @@ export default function App() {
                 taskIds={visibleDag.nodes.map((n) => n.id)}
                 readyCount={counts.ready ?? 0}
                 startingRunId={startingRunId}
+                status={runStatus}
                 workerHistoryLoading={workerHistoryLoading}
                 workerHistoryError={workerHistoryError}
                 onRunStarting={onRunStarting}
                 onRunStartFinished={onRunStartFinished}
+                onRunStopped={onRunStopped}
               />
             </div>
 
@@ -791,35 +758,48 @@ export default function App() {
                         disabledReason={readiness?.reason}
                       />
                   </div>
-                  <div hidden={communicationTab !== "operations"} className="communication-center__operations">
-                    {/* Promoted from a collapsed drawer under the timeline to
-                        its own tab: gates, recovery, the durable fleet view,
-                        the mutation audit and capability facts are operational
-                        state, not an afterthought. */}
-                    <GatePanel
-                      gates={visibleDag.gates}
-                      runId={runId}
-                      onResolved={refresh}
-                      disabled={execOff}
-                      disabledReason={readiness?.reason}
-                    />
-                    <RecoveryPanel
-                      runId={runId}
-                      onRetried={refresh}
-                      disabled={execOff}
-                      disabledReason={readiness?.reason}
-                    />
-                    <WorkerPanel
-                      runId={runId}
-                      rows={workerRows}
-                      rowsError={workerHistoryError}
-                      status={runStatus}
-                      disabled={execOff}
-                      disabledReason={readiness?.reason}
-                    />
-                    <RequestAuditPanel runId={runId} />
-                    <CapabilityPanel />
-                  </div>
+                  {communicationTab === "operations" && (
+                    // Mounted ONLY while the tab is active. The operations
+                    // panels poll (recovery reads, request-audit ledger), and
+                    // keeping them alive behind `hidden` meant a backgrounded
+                    // page kept issuing viewer API requests; unmounting tears
+                    // their intervals down, remounting re-arms them with an
+                    // immediate load. Activity and Chat stay mounted — their
+                    // warm state (unread counts, conversation) is the point.
+                    <div className="communication-center__operations">
+                      {/* Promoted from a collapsed drawer under the timeline to
+                          its own tab: gates, recovery, the durable fleet view,
+                          the mutation audit and capability facts are operational
+                          state, not an afterthought. */}
+                      <GatePanel
+                        gates={visibleDag.gates}
+                        runId={runId}
+                        onResolved={refresh}
+                        disabled={execOff}
+                        disabledReason={readiness?.reason}
+                      />
+                      {/* Recovery no longer polls: App owns /api/run-status and
+                          passes it down, so there is exactly one periodic
+                          caller of that endpoint in the whole app. */}
+                      <RecoveryPanel
+                        runId={runId}
+                        status={runStatus}
+                        onRetried={refresh}
+                        disabled={execOff}
+                        disabledReason={readiness?.reason}
+                      />
+                      <WorkerPanel
+                        runId={runId}
+                        rows={workerRows}
+                        rowsError={workerHistoryError}
+                        status={runStatus}
+                        disabled={execOff}
+                        disabledReason={readiness?.reason}
+                      />
+                      <RequestAuditPanel runId={runId} />
+                      <CapabilityPanel />
+                    </div>
+                  )}
                   <div hidden={communicationTab !== "chat"} className="communication-center__chat">
                     <ChatPanel
                       runId={runId}
@@ -890,7 +870,7 @@ export default function App() {
                   <p className="empty-run__title">Pick a Run first</p>
                   <p className="empty-run__body">
                     Since Orca 1.4.160 tasks belong to a Run — they are no longer global. Pick one with
-                    the Run dropdown in the top-right, or have your agent run{" "}
+                    the Run dropdown in the header, or have your agent run{" "}
                     <code>orca orchestration run-create</code> to start a new one.
                   </p>
                 </div>

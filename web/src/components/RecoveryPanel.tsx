@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { fetchRunStatus, retryWorker } from "../api";
+import { useCallback, useState } from "react";
+import { retryWorker } from "../api";
 import type { RunAttempt, RunStatus } from "../types";
 
 /**
@@ -9,46 +9,30 @@ import type { RunAttempt, RunStatus } from "../types";
  * adoption summaries, Orca's literal prescribed nextAction — never a guess.
  *
  * The panel renders only when there is something recovery-shaped to show; a
- * boring healthy run renders nothing at all. Like the inbox, it polls the
- * coordinator status itself so recovery state surfaces within one tick.
+ * boring healthy run renders nothing at all. It no longer polls the
+ * coordinator status itself: App owns the single visibility-gated
+ * /api/run-status poll and passes the snapshot down, so a backgrounded page
+ * never hears a second caller of that endpoint.
  */
 export function RecoveryPanel({
   runId,
+  status = null,
   onRetried,
   disabled = false,
   disabledReason,
-  pollMs = 2000,
 }: {
   runId: string;
+  /** The process-local run-status snapshot from App (see ExecControls). */
+  status?: RunStatus | null;
   /** Called after a successful retry so the parent can refresh. */
   onRetried: () => void;
   /** Execution disabled (readiness gate) — inputs render but stay off. */
   disabled?: boolean;
   disabledReason?: string | null;
-  pollMs?: number;
 }) {
-  const [status, setStatus] = useState<RunStatus | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
-
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const s = await fetchRunStatus();
-        if (alive) setStatus(s);
-      } catch {
-        /* transient — keep the last known state */
-      }
-    };
-    void load();
-    const t = window.setInterval(load, pollMs);
-    return () => {
-      alive = false;
-      window.clearInterval(t);
-    };
-  }, [pollMs]);
 
   // `/api/run-status` is process-local. Never render Run A's recovery while
   // the inspector is showing Run B.

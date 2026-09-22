@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { createRun, fetchRuns } from "../api";
 import type { OrcaRun } from "../types";
+import { usePageVisible } from "../visibility";
 import { DoodleSelect } from "./DoodleSelect";
 import { useDecisionDialog } from "./DecisionDialog";
 
@@ -45,11 +46,17 @@ export function RunPicker({
     }
   }, [runId, onPick, autoPick]);
 
+  // Interval paused while the tab is hidden (Orca never throttles
+  // background timers, so the 10s list poll would run forever unseen). The
+  // effect re-run on becoming visible doubles as the immediate refresh: one
+  // load, then the interval re-arms.
+  const visible = usePageVisible();
   useEffect(() => {
+    if (!visible) return;
     load();
     const t = window.setInterval(load, 10_000);
     return () => window.clearInterval(t);
-  }, [load]);
+  }, [load, visible]);
 
   async function onCreate() {
     const objective = await dialog.prompt({
@@ -57,7 +64,7 @@ export function RunPicker({
       message: "A Run is an orchestration namespace for one task graph. Give this one a concise objective.",
       fieldLabel: "Objective",
       placeholder: "What should this Run accomplish?",
-      confirmLabel: "Create Run",
+      confirmLabel: "New Run",
       required: true,
     });
     if (!objective?.trim()) return;
@@ -98,7 +105,7 @@ export function RunPicker({
         disabled={disabled || creating}
         title="Create an empty Run in this workspace and select it"
       >
-        ＋ Create Run
+        ＋ New Run
       </button>
       {err && <span className="exec__err">⚠️ {err}</span>}
     </div>

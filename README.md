@@ -67,7 +67,7 @@ All of this is resolved **once at startup** and then never changes for the life 
 
 - **The executable**, in this order: `ORCA_CLI_COMMAND` (exact quoted argv — parsed without a shell; pipes, redirections and `$()` are rejected rather than silently unexpanded) → `orca-dev` when `ORCA_DEV_REPO_ROOT` is set → `orca-ide` on **Linux outside an Orca terminal** (bare `orca` there is GNOME's screen reader, `/usr/bin/orca`) → plain `orca` otherwise. Every CLI call runs through that one spec with `shell: false`, in the workspace directory as cwd.
 - **The workspace**: `WORKSPACE_DIR` (default: the current directory) must exist and is resolved to its **real path** — symlinks and different spellings of the same directory collapse to one identity. It becomes the exact Orca worktree selector `path:<WORKSPACE_DIR>`, so a viewer started in directory A with `WORKSPACE_DIR=/abs/B` puts its coordinator **and its workers in B**. An explicit `ORCA_WORKTREE` still wins if you set it.
-- **Whether execution is allowed** (`GET /api/readiness`): **Orca ≥ 1.4.205** is required to run DAGs — that's where the supervised Dispatch contract landed. Orca **1.4.160–1.4.204 stays view-only**: the DAG, gates and statuses render fine, but the Run/gate/reset controls disable themselves with an upgrade pointer (and the server answers `503 execution_disabled` if a mutation is forced). If the CLI can't be found at all, readiness says so with the exact resolution it tried.
+- **Whether execution is allowed** (`GET /api/readiness`): **Orca ≥ 1.4.205** is required to run DAGs — that's where the supervised Dispatch contract landed. Orca **1.4.160–1.4.204 stays view-only**: the DAG, gates and statuses render fine, but the Run/gate controls disable themselves with an upgrade pointer (and the server answers `503 execution_disabled` if a mutation is forced). If the CLI can't be found at all, readiness says so with the exact resolution it tried.
 
 ## Prerequisites
 
@@ -201,7 +201,7 @@ The viewer is a control plane into Orca — starting a Run fences whoever was co
 
 ## Readiness and view-only mode
 
-`GET /api/readiness` reports `{ cli, workspace, worktree, version, executionEnabled, reason }`. Execution — Run start, gate resolution, Run creation, task reset — is enabled only on **Orca ≥ 1.4.205**; on 1.4.160–1.4.204 the UI disables those controls (Run button reads "View-only", gate buttons dim with the reason, the top-bar badge turns amber) and the server answers `503 execution_disabled` to any mutation that slips through. Reads (DAG, runs, terminals, config) always stay available.
+`GET /api/readiness` reports `{ cli, workspace, worktree, version, executionEnabled, reason }`. Execution — Run start, gate resolution, Run creation — is enabled only on **Orca ≥ 1.4.205**; on 1.4.160–1.4.204 the UI disables those controls (Run button reads "View-only", gate buttons dim with the reason, the top-bar badge turns amber) and the server answers `503 execution_disabled` to any mutation that slips through. Reads (DAG, runs, terminals, config) always stay available.
 
 ## HTTP API
 
@@ -234,7 +234,6 @@ All `POST`/`PUT` routes require the `X-Orca-Dag-Token` header (see the security 
 | `GET` | `/api/requests/:requestId?run=<id>` | One ledger row plus a fresh, read-only `request-show` probe: `{ state: completed\|pending\|absent\|unknown, interpretation, outcome }` — never replays a mutation |
 | `POST` | `/api/workers/:id/release` / `/retain` | Explicit post-settlement terminal release / retain-for-debugging |
 | `POST` | `/api/workers/:id/retry` | Re-place one positively failed attempt (same harness/model/effort/placement) |
-| `POST` | `/api/reset` | `{ confirmAllRuns: true }`: `orca orchestration reset --tasks` — clears tasks in **all** Runs |
 | `GET` | `/api/models/:harness` | Models selectable for a harness (currently only opencode enumerates) |
 | `GET` | `/api/environments` | Saved connected environments (`environment list`), each with parsed `peer` capabilities the UI gates remote controls on |
 | `GET` | `/api/environments/:envId/worktrees?repo=` | Exact workspaces on one environment — full `id:<repoId>::<path>` selectors for the placement picker |
@@ -244,7 +243,7 @@ All `POST`/`PUT` routes require the `X-Orca-Dag-Token` header (see the security 
 | `PUT` | `/api/config` | Merge-write the viewer config |
 | `GET` | `/api/health` | Health check (returns the workspace directory) |
 
-Mutation routes that drive execution (`POST /api/runs`, `POST /api/run`, gate resolve, reset) additionally answer `503 execution_disabled` when readiness says the runtime can't execute — see [Readiness](#readiness-and-view-only-mode). Starting the coordinator against a workspace another viewer is already coordinating answers `409 coordinator_conflict`.
+Mutation routes that drive execution (`POST /api/runs`, `POST /api/run`, gate resolve) additionally answer `503 execution_disabled` when readiness says the runtime can't execute — see [Readiness](#readiness-and-view-only-mode). Starting the coordinator against a workspace another viewer is already coordinating answers `409 coordinator_conflict`.
 
 ## Code layout
 
@@ -252,7 +251,7 @@ Mutation routes that drive execution (`POST /api/runs`, `POST /api/run`, gate re
 skill/SKILL.md            thin project workflow: PRD → design → task DAG → viewer; delegates command syntax to the runtime-matched guide (skills get orchestration)
 server/src/
   index.ts                process entry: subcommands (--help / uninstall), CLI+workspace resolution, skill install, loopback listener
-  app.ts                  the Express app (createApp): readiness / dag / session / runs / run / run-stop / run-status / activity / inbox / messages / gates / workers / requests / environments / reset / models / config + SPA serving
+  app.ts                  the Express app (createApp): readiness / dag / session / runs / run / run-stop / run-status / activity / inbox / messages / gates / workers / requests / environments / models / config + SPA serving
   activity.ts             Run-scoped readable event parser + bounded viewer Activity journal
   requestLedger.ts        bounded, atomic ledger of viewer-originated mutation-request ids (.orca-dag.requests.jsonl) — metadata only, state always re-read live via request-show
   security.ts             loopback policy: per-process mutation token, request validation, custom-command gate
@@ -295,4 +294,4 @@ scripts/
 - **opencode goes through its own path**: `worker-start --agent opencode` opens the TUI but the injected preamble never lands, so the coordinator opens a bare shell, mints a tracking dispatch, and runs `opencode run --auto "$(cat <preamble>)"` (`--auto` is mandatory — the default permission policy silently auto-rejects tool calls).
 - **Remote placement is exact or it doesn't happen**: a node pinned to a saved environment starts via `worker-start --on <environment>` — and `--on` appears on that one call only; every later read, message, stop, and release addresses the **Dispatch ID** (the execution host owns the process, filesystem, transcript, stop, and cleanup facts). Only two placement forms exist remotely — an exact existing workspace selector discovered on that environment, or a new top-level worktree with an exact repo selector and an explicit name; remote `current`/`new-child` are refused at the HTTP boundary and again in the adapter, before any Orca call. There is no synthetic local fallback: an unknown environment or an unproven capability fails the start with its reason on record. Model/effort forwarding and structured transcript reads are gated on what the peer **advertises**; a disconnected host renders its workers `unverifiable` (never `exited`) and triggers no automatic stop/retry/release — reconnection restores liveness and the original Dispatch settles.
 - **Per-node launch preferences and the lead marker live in a workspace config file**: Orca tasks have no harness/metadata field (`task-create` only takes spec/title/display-name/deps/parent), so the viewer stores launch choices, one semantic lead Task per Run, max parallel, and layout in `.orca-dag.config.json` at the workspace root (`server/src/config.ts`, `GET/PUT /api/config`) — surviving browser switches and cleared localStorage. The frontend's `harness.ts` is a reactive store that hydrates from the server and migrates old localStorage values once. At Run time launch choices are snapshotted into the coordinator; durable worker history then prevents changing a Task's plan after its first Dispatch.
-- **Created tasks can't be edited**: `orca orchestration task-update` only changes `--status` / `--result` — **no interface to edit spec/title/deps**, and no single-task delete (`reset` clears everything, across all Runs). So "change a task" = **have the agent redraw the DAG in a fresh Run**.
+- **Created tasks can't be edited**: `orca orchestration task-update` only changes `--status` / `--result` — **no interface to edit spec/title/deps**, no single-task delete, and no reset either (`orca orchestration reset --tasks` wipes every Run at once, so the viewer deliberately never calls it). So "change a task" = **have the agent redraw the DAG in a fresh Run** — New Run is the only safe redraw path.

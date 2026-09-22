@@ -71,12 +71,17 @@ body {
   height: 100vh;
 }
 
-/* ---------- top bar (a taped paper header) ---------- */
+/* ---------- top bar (a taped paper header) ----------
+   Three regions: brand · flexible Run context · Run/Orca status. On desktop
+   they share one row (the middle region owns all spare width and centers the
+   Run picker in it); below 1024px the Run context drops to its own row, and
+   below 620px that Run row spans the full header — see the header media
+   queries at the end of this section. */
 .topbar {
   position: relative;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 18px;
   padding: 12px 22px;
   background: var(--paper);
   border-bottom: 2.5px dashed var(--line-strong);
@@ -105,11 +110,22 @@ body {
   display: flex;
   align-items: center;
   gap: 13px;
+  /* the brand may shrink (its tagline is the release valve) but never grow,
+     and never pushes the other regions off the row */
+  flex: 0 1 auto;
+  min-width: 0;
+}
+/* min-width: 0 lets the text column shrink inside the flex brand; without it
+   the long subtitle would force a page-level horizontal scrollbar */
+.topbar__brand-text {
+  min-width: 0;
 }
 /* the mascot: a whale doodled in the same crayon as the graph. The wobble is
-   the fine-grain filter (small drawing, small grain); it boils like every
-   other line, and still swims (transform) — the two animate different
-   properties, so they compose. */
+   the fine-grain filter (small drawing, small grain) — pinned to ONE seed now.
+   The idle loops it used to wear (whale-boil flipping #crayon-fine/-b/-c
+   ~2fps, whale-bob swimming on 5.5s) were continuous motion outside the
+   quiet budget: `.exec__pulse` is the only thing left that may run forever,
+   so the whale just sits at its rest tilt, texture intact. */
 .topbar__logo {
   width: 46px;
   height: 38px;
@@ -117,23 +133,11 @@ body {
   filter: url(#crayon-fine) drop-shadow(1px 1.5px 0 rgba(74, 71, 84, 0.18));
   transform: rotate(-6deg);
   transform-origin: 50% 70%;
-  animation: whale-boil 0.6s steps(1, end) infinite,
-    whale-bob 5.5s ease-in-out infinite;
 }
-@keyframes whale-boil {
-  0% { filter: url(#crayon-fine) drop-shadow(1px 1.5px 0 rgba(74, 71, 84, 0.18)); }
-  33% { filter: url(#crayon-fine-b) drop-shadow(1px 1.5px 0 rgba(74, 71, 84, 0.18)); }
-  66% { filter: url(#crayon-fine-c) drop-shadow(1px 1.5px 0 rgba(74, 71, 84, 0.18)); }
-}
-/* the whale idles in place — a slow swim, not a bounce */
-@keyframes whale-bob {
-  0%, 100% { transform: rotate(-6deg) translateY(0); }
-  30% { transform: rotate(-2deg) translateY(-3px); }
-  60% { transform: rotate(-9deg) translateY(1.5px); }
-}
+/* one-shot hover feedback only: the dive plays once per hover and drops out of
+   the effect stack when it lands */
 .topbar__brand:hover .topbar__logo {
-  animation: whale-boil 0.6s steps(1, end) infinite,
-    whale-dive 0.7s ease-in-out;
+  animation: whale-dive 0.7s ease-in-out;
 }
 @keyframes whale-dive {
   40% { transform: rotate(14deg) translateY(-7px) scale(1.12); }
@@ -183,14 +187,10 @@ body {
   stroke-width: 3.4;
   stroke-linecap: round;
 }
-/* the spout puffs in time with the swim */
+/* a static wisp: the puff scale/opacity loop (spout-puff, 5.5s infinite) went
+   with the whale's idle swim — the spout is drawn open, never animated */
 .orca__spout {
   transform-origin: 24px 12px;
-  animation: spout-puff 5.5s ease-in-out infinite;
-}
-@keyframes spout-puff {
-  0%, 18%, 62%, 100% { opacity: 0.4; transform: scale(0.82); }
-  30%, 46% { opacity: 1; transform: scale(1.06); }
 }
 .topbar__title {
   position: relative;
@@ -222,8 +222,24 @@ body {
   margin-top: 3px;
   font-size: 12.5px;
   color: var(--ink-soft);
+  /* first thing to give way when the Run context needs the row's width —
+     truncates instead of wrapping the header taller or overflowing */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.topbar__right {
+/* the flexible middle region: carries the Run picker, centered in whatever
+   width the brand and status clusters leave behind */
+.topbar__run {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  justify-content: center;
+}
+/* the Run/Orca status cluster hugs the right edge; its chips keep their
+   natural width (the middle region absorbs the squeeze instead) */
+.topbar__status {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -239,6 +255,8 @@ body {
   border: 2px solid var(--line-strong);
   background: var(--paper);
   color: var(--ink-soft);
+  /* a status pill reads as one stamp — its label never wraps mid-text */
+  white-space: nowrap;
   transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
 }
 .conn::before {
@@ -248,21 +266,10 @@ body {
   border-radius: 50%;
   background: currentColor;
 }
-/* healthy link: a slow heartbeat. Broken link: an anxious blink. */
-.conn--ok::before {
-  animation: conn-beat 2.6s ease-in-out infinite;
-}
-.conn--bad::before {
-  animation: conn-alarm 0.9s steps(1, end) infinite;
-}
-@keyframes conn-beat {
-  0%, 62%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(88, 171, 107, 0.45); }
-  70% { transform: scale(1.25); box-shadow: 0 0 0 5px rgba(88, 171, 107, 0); }
-}
-@keyframes conn-alarm {
-  0%, 55% { opacity: 1; }
-  56%, 100% { opacity: 0.25; }
-}
+/* healthy link: green stamp; broken link: an anxious red — colour + label say
+   it outright. The conn-beat heartbeat and conn-alarm blink (both infinite)
+   are gone: only `.exec__pulse` may run indefinitely, and a connection chip
+   is a status, so it reads the static way everything else does now. */
 .conn--ok {
   color: #58ab6b;
   border-color: #bfe4c7;
@@ -278,6 +285,63 @@ body {
   color: #b37f16;
   border-color: #eedeb4;
   background: #fdf4e1;
+}
+
+/* ---------- header regions across widths ----------
+   Three width bands, matching the approved header design:
+   - >1024px: one row — brand · flexible Run context · status.
+   - ≤1024px: two rows — brand and status share the top line, the Run
+     context drops to a second line at its natural width.
+   - ≤620px: phone — the Run row spans the full header, with the brand and
+     status stacked around it; the three regions no longer fit side by side.
+     (The tab order stays brand → Run → status at every width: only `order`
+     and wrapping change, never the DOM.) */
+@media (max-width: 1024px) {
+  .topbar {
+    flex-wrap: wrap;
+    row-gap: 10px;
+  }
+  .topbar__run {
+    order: 2;
+    flex: 0 1 auto;
+    justify-content: flex-start;
+  }
+  .topbar__status {
+    margin-left: auto;
+  }
+}
+@media (max-width: 620px) {
+  .topbar {
+    padding: 10px 14px;
+    row-gap: 8px;
+  }
+  .topbar__title {
+    font-size: 17px;
+  }
+  /* the tagline is a desktop luxury: on a phone it would wrap the brand row
+     taller than the rest of the header combined */
+  .topbar__subtitle {
+    display: none;
+  }
+  /* the full-width Run row: the picker drinks the whole line, so the Run
+     dropdown — the header's primary control — stays comfortably sized */
+  .topbar__run {
+    order: 1;
+    flex: 1 1 100%;
+  }
+  .runpick {
+    flex: 1;
+  }
+  .runpick .doodle-select {
+    flex: 1 1 140px;
+    max-width: none;
+  }
+  .topbar__status {
+    order: 2;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    row-gap: 6px;
+  }
 }
 
 /* ---------- layout (single full-width canvas) ---------- */
@@ -409,14 +473,9 @@ body {
 .legend__item:hover .legend__dot {
   transform: scale(1.35) rotate(12deg);
 }
-/* the "running" swatch keeps time with the nodes it stands for */
-.legend__item--live[data-status="dispatched"] .legend__dot {
-  animation: legend-throb 1.5s ease-in-out infinite;
-}
-@keyframes legend-throb {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.3) rotate(-8deg); }
-}
+/* the "running" swatch used to throb in time with the nodes it stands for; it
+   now holds still like everything else on the canvas — the swatch's own status
+   colour and the label carry the meaning */
 .legend__n {
   font-family: var(--font-display);
   font-weight: 400;
@@ -501,10 +560,8 @@ body {
     color-mix(in srgb, var(--butter) 45%, transparent) 3px 5px
   );
   background-size: 14px 100%;
-  animation: progress-crawl 1.1s linear infinite;
-}
-@keyframes progress-crawl {
-  to { background-position: 14px 0; }
+  /* the stripes used to crawl (progress-crawl, 1.1s infinite); the running
+     segment now just sits there striped — colour + width still say "running" */
 }
 .dag-progress__seg--fail {
   background: repeating-linear-gradient(
@@ -636,15 +693,9 @@ body {
   transform: rotate(-8deg);
   opacity: 0.8;
   transform-origin: 50% 85%;
-  animation: empty-in 0.6s cubic-bezier(0.2, 0.85, 0.3, 1) backwards,
-    doodle-sway 4.2s ease-in-out 0.6s infinite;
-}
-/* an idle crayon rocking on the blank page, waiting to be picked up */
-@keyframes doodle-sway {
-  0%, 100% { transform: rotate(-8deg) translateY(0); }
-  25% { transform: rotate(4deg) translateY(-4px); }
-  55% { transform: rotate(-14deg) translateY(0); }
-  78% { transform: rotate(-3deg) translateY(-2px); }
+  /* the entrance only — the idle rocking (doodle-sway) was a loop, so the
+     crayon sits still on the blank page once it has landed */
+  animation: empty-in 0.6s cubic-bezier(0.2, 0.85, 0.3, 1) backwards;
 }
 .dag-empty__title {
   font-family: var(--font-display);
@@ -665,12 +716,14 @@ body {
 }
 
 /* ---------- task node (a doodled sticker) ----------
-   Doodle mode: every outline is drawn twice (the classic sketch double-stroke),
-   wobbles hard, and BOILS — the three reseeded #crayon filters flip on a
-   steps(1) loop so every line redraws itself ~2fps, phase-staggered per node
-   via --i so the flicker never syncs across the graph. Each sticker also sits
-   at its own slight tilt (--tilt, set from paint order in TSX) — `rotate` is
-   the independent CSS property, so hover/entrance transforms compose with it. */
+   Doodle mode: every outline is drawn twice (the classic sketch double-stroke)
+   and wobbles hard — the waxy #crayon / #crayon-b filters stay pinned to one
+   seed each, so the texture is there but nothing flickers: the old steps(1)
+   boil loop (three reseeded filters flipping ~2fps, phase-staggered via --i)
+   is gone with the rest of the continuous canvas motion. Each sticker also
+   sits at its own slight tilt (--tilt, set from paint order in TSX) — `rotate`
+   is the independent CSS property, so hover/entrance transforms compose with
+   it. */
 .task-node {
   position: relative;
   width: 210px;
@@ -708,11 +761,9 @@ body {
      fill to the very edge without ever crossing the line */
   z-index: 2;
   transition: border-width 0.15s ease;
-  animation: crayon-boil 0.55s steps(1, end) infinite;
-  animation-delay: calc(var(--i, 0) * -0.13s);
 }
-/* second stroke: the lighter "went over it again" line, offset and reseeded,
-   boiling out of phase with the first so the two never move together */
+/* second stroke: the lighter "went over it again" line, offset and pinned to
+   its own reseeded filter so the two strokes never read as one */
 .task-node::after {
   content: "";
   position: absolute;
@@ -724,13 +775,6 @@ body {
   transform: rotate(0.5deg);
   pointer-events: none;
   z-index: 2;
-  animation: crayon-boil 0.55s steps(1, end) infinite;
-  animation-delay: calc(var(--i, 0) * -0.13s - 0.28s);
-}
-@keyframes crayon-boil {
-  0% { filter: url(#crayon); }
-  33% { filter: url(#crayon-b); }
-  66% { filter: url(#crayon-c); }
 }
 .task-node--selected {
   transform: translateY(-2px);
@@ -749,7 +793,6 @@ body {
   pointer-events: none;
   z-index: 3;
   filter: url(#crayon);
-  animation: crayon-boil 0.55s steps(1, end) infinite;
 }
 .task-node__lasso path {
   fill: none;
@@ -758,10 +801,15 @@ body {
   stroke-linecap: round;
   opacity: 0.85;
   stroke-dasharray: 100;
-  stroke-dashoffset: 100;
-  animation: lasso-draw 0.4s cubic-bezier(0.5, 0.05, 0.4, 1) forwards;
+  /* drawn end-state at rest + `backwards` fill: the circle lands complete and
+     the animation then leaves the effect stack instead of lingering finished */
+  stroke-dashoffset: 0;
+  animation: lasso-draw 0.4s cubic-bezier(0.5, 0.05, 0.4, 1) backwards;
 }
 @keyframes lasso-draw {
+  /* explicit `from`: the base offset is now the drawn state (0), so the
+     implicit start would animate nothing */
+  from { stroke-dashoffset: 100; }
   to { stroke-dashoffset: 0; }
 }
 .task-node__title {
@@ -815,7 +863,7 @@ body {
 }
 
 /* ---------- in-progress: crayon scribbles the box in ----------
-   While the task runs, an animated scrawl draws itself over the box
+   While the task runs, a scrawl sits over the box, fully drawn
    (see .task-node__scribble below). */
 .task-node__title,
 .task-node__row {
@@ -823,13 +871,13 @@ body {
   z-index: 1;
 }
 
-/* dispatched: one unbroken colouring pass, chopped into back-and-forth
-   zigzag legs chained end-to-end. Each leg starts drawing only after the
-   previous one lands (delay = leg index × per-leg duration, mirrored by
-   SCRIBBLE_DRAW in DagView.tsx); once every leg is down the pass holds,
-   then a fade wave erases the legs oldest-first and the svg remounts for
-   the next pass. Strokes stay translucent and vary in width, and a grain
-   filter chews their edges into wax tooth. */
+/* one unbroken colouring pass, chopped into back-and-forth zigzag legs
+   chained end-to-end — rendered ONCE, already complete. The legs used to draw
+   themselves in order (delay = leg index × per-leg duration), hold, then fade
+   in a wave oldest-first while DagView remounted the svg on a JS timer; that
+   whole cycle is gone, so the pass is simply there, deterministic per node id
+   and identical on every poll. Strokes stay translucent and vary in width,
+   and a grain filter chews their edges into wax tooth. */
 .task-node__scribble {
   position: absolute;
   /* clip at the inner edge of the border; the outline (z-index 2, 3.5px
@@ -849,55 +897,19 @@ body {
   stroke-linecap: round;
   stroke-linejoin: round;
   filter: url(#crayon-fill);
-  /* pathLength={100} normalizes each leg so the dash math is exact;
-     both pins the leg in place once drawn — it stays coloured in until
-     the whole pass fades and remounts — and holds the 0% frame (opacity 0)
-     during the delay, so the round cap's dot can't peek at the border
-     before its leg's turn */
+  /* pathLength={100} normalizes each leg so the dash math is exact, and
+     offset 0 pins the whole leg down: fully coloured in, forever */
   stroke-dasharray: 100;
-  stroke-dashoffset: 100;
-  /* two animations per leg: the draw-in, then the fade-out. The fade is
-     scheduled from mount (draw + hold + leg × step, mirroring SCRIBBLE_* in
-     DagView.tsx) so the wave erases oldest stroke first without any class
-     flip; listed second, it wins over scribble-leg's opacity once it starts */
-  animation:
-    scribble-leg 0.26s cubic-bezier(0.45, 0.05, 0.5, 1) both,
-    scribble-fade 0.3s ease-out forwards;
-  animation-delay:
-    calc(var(--leg, 0) * 0.26s),
-    calc((var(--legs, 12) * 0.26 + 0.9 + var(--leg, 0) * 0.05) * 1s);
-}
-@keyframes scribble-leg {
-  0% {
-    stroke-dashoffset: 100;
-    opacity: 0;
-  }
-  2% {
-    opacity: 1;
-  }
-  100% {
-    stroke-dashoffset: 0;
-    opacity: 1;
-  }
-}
-@keyframes scribble-fade {
-  to {
-    opacity: 0;
-  }
-}
-/* completed / failed — the same scrawl frozen at its final frame: every leg
-   already down, nothing moving */
-.task-node__scribble--final {
-  transition: none;
-}
-.task-node__scribble--final path {
-  animation: none;
   stroke-dashoffset: 0;
 }
+/* dispatched / completed / failed all share the ONE static pass above — the
+   old `--final` modifier (frozen final frame vs. animating pass) and the
+   scribble-leg / scribble-fade keyframes went away with the redraw cycle. */
 
 /* ---------- per-status character ----------------------------------------
-   Every state gets its own hand: waiting is faint, ready breathes, running
-   boils, done and failed are signed off by hand.
+   Every state gets its own hand: waiting is faint, ready wears a dashed ring,
+   running wears a solid ring, done and failed are signed off by hand. All of
+   it is still — colour, borders, labels and stamps carry the meaning now.
    ------------------------------------------------------------------------ */
 
 /* pending — pencilled in lightly, not yet committed to (but still legible
@@ -909,7 +921,9 @@ body {
   opacity: 1;
 }
 
-/* ready — a dashed ring breathing just outside the card: "pick me next" */
+/* ready — a dashed ring just outside the card: "pick me next". It used to
+   breathe (ready-breathe, 2.5s infinite); now it holds a fixed mid-bright
+   opacity so the ring still reads without ever animating. */
 .task-node__aura {
   position: absolute;
   inset: -7px;
@@ -918,37 +932,22 @@ body {
 }
 .task-node[data-status="ready"] .task-node__aura {
   border: 2.5px dashed color-mix(in srgb, var(--crayon) 75%, transparent);
-  animation: ready-breathe 2.5s ease-in-out infinite;
+  opacity: 0.6;
 }
-@keyframes ready-breathe {
-  0%, 100% { transform: scale(0.985); opacity: 0.25; }
-  50% { transform: scale(1.035); opacity: 0.75; }
-}
-
-/* dispatched — a ring pushed outward on every stroke, plus the outline itself
-   redrawing a few times a second (the classic hand-animation "boil") */
+/* dispatched — a solid ring parked just outside the card (it used to radiate
+   outward on a 1.9s loop). The ring, the inked scribble, the status dot and
+   the label do the talking; nothing pulses. */
 .task-node[data-status="dispatched"] .task-node__aura {
   inset: -6px;
   border: 3px solid color-mix(in srgb, var(--crayon) 60%, transparent);
-  animation: run-ring 1.9s cubic-bezier(0.2, 0.6, 0.4, 1) infinite;
+  opacity: 0.8;
+  transform: scale(1.04);
 }
-@keyframes run-ring {
-  0% { transform: scale(0.95); opacity: 0.8; }
-  100% { transform: scale(1.14); opacity: 0; }
-}
-/* a running node boils harder than the idle graph around it */
-.task-node[data-status="dispatched"]::before,
-.task-node[data-status="dispatched"]::after {
-  animation-duration: 0.32s;
-}
+/* a running node keeps the same pinned outline seed as the idle graph (the
+   old rule just sped its boil up), and its status dot sits at full size and
+   full opacity instead of throbbing — colour + label still say "running" */
 .task-node[data-status="dispatched"] .task-node__status .dot {
-  animation: dot-throb 1.15s ease-in-out infinite;
-}
-@keyframes dot-throb {
-  /* Use the independent property so a React Flow handle keeps the translate()
-     that centres it on the card boundary while the dot pulses. */
-  0%, 100% { scale: 0.82; opacity: 0.6; }
-  50% { scale: 1.25; opacity: 1; }
+  scale: 1.15;
 }
 
 /* completed / failed — a tick or a scribbled cross signed into the corner,
@@ -970,8 +969,12 @@ body {
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-dasharray: 90;
-  stroke-dashoffset: 90;
-  animation: stamp-draw 0.5s cubic-bezier(0.5, 0, 0.35, 1) forwards;
+  /* base = the DRAWN state, and the fill is `backwards` (not `forwards`):
+     the delay still hides the stroke, but once the draw lands the animation
+     drops out of effect entirely — so `document.getAnimations()` holds no
+     finished-but-filling leftovers on every completed node in the canvas */
+  stroke-dashoffset: 0;
+  animation: stamp-draw 0.5s cubic-bezier(0.5, 0, 0.35, 1) backwards;
 }
 .task-node__stamp--ok path {
   stroke: #4d9e62;
@@ -1029,8 +1032,6 @@ body {
   pointer-events: none;
   z-index: 3;
   opacity: 0.9;
-  animation: crayon-boil 0.7s steps(1, end) infinite;
-  animation-delay: calc(var(--i, 0) * -0.1s);
 }
 .task-node__lead-badge {
   position: absolute;
@@ -1068,14 +1069,10 @@ body {
   0% { transform: scale(1); opacity: 0.9; }
   100% { transform: scale(1.35); opacity: 0; }
 }
-/* ...and the outline is re-inked, pressed harder for a beat. Excluded for
-   running nodes so it can't stomp the boil loop (same specificity, and this
-   rule comes later in the file). */
-.task-node--pop:not([data-status="dispatched"])::before {
-  /* both: the press-harder flash AND the ever-running boil, so the outline
-     doesn't freeze mid-flick while the pop plays out */
-  animation: crayon-restate 0.55s ease-out,
-    crayon-boil 0.55s steps(1, end) infinite;
+/* ...and the outline is re-inked, pressed harder for a beat — a one-shot
+   flash, no boil loop for it to fight with any more */
+.task-node--pop::before {
+  animation: crayon-restate 0.55s ease-out;
 }
 @keyframes crayon-restate {
   0% { border-width: 3.5px; }
@@ -1121,28 +1118,16 @@ body {
   border: 1.5px solid var(--line-strong);
 }
 /* pencil edges — every dependency is a scrawled line, not a bezier. The
-   #pencil-edge filters are userSpaceOnUse (a zero-height horizontal bbox would
-   collapse an objectBoundingBox filter), and all three seeds flip on a steps()
-   loop so the whole web of lines boils like a pencil test. */
+   #pencil-edge filter is userSpaceOnUse (a zero-height horizontal bbox would
+   collapse an objectBoundingBox filter); it stays pinned to its base seed —
+   the steps() loop that flipped all three seeds (pencil-edge/-b/-c) like a
+   boiling pencil test is gone, so the web of lines holds still. */
 .react-flow__edge-path {
   stroke: #6f6757;
   stroke-width: 3.2;
   stroke-linecap: round;
   filter: url(#pencil-edge);
-  animation: edge-boil 0.6s steps(1, end) infinite;
   transition: stroke 0.4s ease, stroke-width 0.3s ease, opacity 0.3s ease;
-}
-/* neighbouring edges flick out of phase */
-.react-flow__edge:nth-child(2n) .react-flow__edge-path {
-  animation-delay: -0.2s;
-}
-.react-flow__edge:nth-child(3n) .react-flow__edge-path {
-  animation-delay: -0.4s;
-}
-@keyframes edge-boil {
-  0% { filter: url(#pencil-edge); }
-  33% { filter: url(#pencil-edge-b); }
-  66% { filter: url(#pencil-edge-c); }
 }
 .react-flow__edge.selected .react-flow__edge-path {
   stroke: var(--sky);
@@ -1157,12 +1142,12 @@ body {
 /* a satisfied dependency gets inked in green — and presses down once, hard, on
    the poll where its upstream node completed. (A dash-offset "draw" would need
    the path length, which varies per edge; a press-on flash reads the same and
-   works at any length.) */
+   works at any length.) The flash is one-shot: once the class sticks, the
+   stroke simply stays green. */
 .react-flow__edge.edge--done .react-flow__edge-path {
   stroke: #4f9e5d;
   stroke-width: 3.4;
-  animation: edge-ink 0.65s cubic-bezier(0.3, 0.9, 0.35, 1),
-    edge-boil 0.6s steps(1, end) infinite;
+  animation: edge-ink 0.65s cubic-bezier(0.3, 0.9, 0.35, 1);
 }
 @keyframes edge-ink {
   0% { stroke: #6f6757; stroke-width: 2.6; }
@@ -1175,13 +1160,14 @@ body {
   opacity: 1;
 }
 /* execution: an edge leaving a running node is first a faint dashed pencil
-   sketch, then a solid pencil stroke traces over it from source to target,
-   over and over. Both strokes wobble via the #pencil-edge filter — defined
-   with filterUnits="userSpaceOnUse" so a perfectly horizontal edge (zero-height
+   sketch, then a solid pencil stroke inked over it from source to target —
+   both strokes just sitting there now (the WAAPI trace that used to advance
+   the solid stroke on a measured, per-edge loop lives on in the CSS only as
+   plain styling). The wobble comes from the #pencil-edge filter — defined with
+   filterUnits="userSpaceOnUse" so a perfectly horizontal edge (zero-height
    bounding box) doesn't collapse the filter region to nothing. */
 .pencil-edge {
   filter: url(#pencil-edge);
-  animation: edge-boil 0.45s steps(1, end) infinite;
 }
 .pencil-edge__sketch {
   stroke: #8f8672;
@@ -1190,12 +1176,9 @@ body {
   stroke-dasharray: 7 9;
   opacity: 0.55;
 }
-/* the draw path's dash is driven by the Web Animations API
-   (element.animate) with the measured per-edge length baked into concrete
-   keyframes — so every edge draws at the same uniform speed no matter how
-   long it is, on the browser's animation timeline rather than a per-frame JS
-   loop. This CSS only styles how the pencil looks; the dasharray/offset/
-   opacity are all owned by the WAAPI animation. */
+/* the solid over-stroke: full length at rest. Dasharray/offset used to be
+   owned by an infinite WAAPI animation (draw → hold → fade, timed from the
+   measured path length); with that gone the stroke renders complete and static */
 .pencil-edge__draw {
   stroke: #4a4231;
   stroke-width: 3.8;
@@ -1257,39 +1240,28 @@ body {
   padding: 14px 16px 14px;
   box-shadow: var(--shadow-sticker);
   transform: rotate(-0.6deg);
-  /* pinned to the board, then nudged every few seconds until someone deals
-     with it — a blocked run shouldn't be easy to miss */
-  animation: gate-pin 0.5s cubic-bezier(0.2, 1.5, 0.4, 1) backwards,
-    gate-nudge 5s ease-in-out 1.4s infinite;
+  /* pinned to the board. The old pair here (gate-pin entrance + gate-nudge
+     "nudge until someone deals with it" every 5s) is down to the entrance
+     alone, which is declared once in the "gate note drops onto the canvas"
+     block below (gate-in) — same one-shot drop, nothing repeating after it. */
 }
 @keyframes gate-pin {
   0% { opacity: 0; transform: rotate(-7deg) translateY(-22px) scale(1.06); }
   60% { opacity: 1; transform: rotate(1.5deg) translateY(3px) scale(1); }
   100% { opacity: 1; transform: rotate(-0.6deg) translateY(0) scale(1); }
 }
-@keyframes gate-nudge {
-  0%, 88%, 100% { transform: rotate(-0.6deg); }
-  91% { transform: rotate(-2.4deg) translateX(-3px); }
-  94% { transform: rotate(1.6deg) translateX(3px); }
-  97% { transform: rotate(-1.2deg) translateX(-1px); }
-}
-.gate:hover {
-  animation-play-state: running, paused;
-}
-/* a soft lilac halo pulsing behind the card */
+/* a soft lilac halo resting behind the card — it used to pulse on a 2.4s
+   loop; now it is just an outline at a fixed opacity, still marking the note
+   as pending attention */
 .gate::after {
   content: "";
   position: absolute;
   inset: -5px;
   border-radius: inherit;
   border: 2.5px solid var(--lilac);
-  opacity: 0;
+  opacity: 0.5;
+  transform: scale(1.02);
   pointer-events: none;
-  animation: gate-halo 2.4s ease-out infinite;
-}
-@keyframes gate-halo {
-  0% { transform: scale(0.97); opacity: 0.55; }
-  70%, 100% { transform: scale(1.06); opacity: 0; }
 }
 .gate::before {
   content: "📍";
@@ -1315,7 +1287,6 @@ body {
   margin-left: 7px;
   border-radius: 50%;
   background: currentColor;
-  animation: dot-throb 1.3s ease-in-out infinite;
 }
 .gate__question {
   font-size: 14px;
@@ -2266,8 +2237,9 @@ body {
   background: var(--thread-state, transparent);
   pointer-events: none;
 }
-/* Live states breathe a dashed halo around the row — motion only where
-   work is actually live, echoing the DAG node auras. */
+/* Live states wear a dashed halo around the row — a static state edge (it
+   used to breathe on a 2.2s loop; a fixed opacity still says "live" here and
+   echoes the DAG node rings). */
 .chat-thread[data-state="running"]::after,
 .chat-thread[data-state="waiting"]::after,
 .chat-thread[data-state="run-active"]::after {
@@ -2277,11 +2249,7 @@ body {
   border: 1.5px dashed color-mix(in srgb, var(--thread-state, var(--butter)) 65%, transparent);
   border-radius: 7px;
   pointer-events: none;
-  animation: thread-live-breathe 2.2s ease-in-out infinite;
-}
-@keyframes thread-live-breathe {
-  0%, 100% { opacity: 0.2; }
-  50% { opacity: 0.85; }
+  opacity: 0.6;
 }
 .chat-thread__avatar--pair {
   font-size: 11.5px;
@@ -2320,10 +2288,10 @@ body {
    The same state palette as the runtime-summary pulse and STATUS_META, so
    list, conversation body and DAG canvas all tell one story: a crayon bar
    rides the row's left edge, and only live stages (running / waiting /
-   active run control) get motion — their dashes march downward like a
-   pencil filling in a line. The bar paints over the active row's purple
-   inset bar: an actively-selected stage shows its state colour first, the
-   lilac wash still marks the selection. */
+   active run control) get the dashed/striped variant — statically, since the
+   marching fill (thread-edge-march) was another continuous loop. The bar
+   paints over the active row's purple inset bar: an actively-selected stage
+   shows its state colour first, the lilac wash still marks the selection. */
 .chat-thread[data-state="run-active"] { --thread-state: var(--meadow); }
 .chat-thread[data-state="running"],
 .chat-thread[data-state="waiting"] { --thread-state: var(--butter); }
@@ -2346,7 +2314,8 @@ body {
 .chat-thread[data-state].chat-thread--active::before {
   opacity: 0.95;
 }
-/* the march itself: a dashed fill scrolled one period per step (seamless) */
+/* the march itself: a dashed fill, static — it used to scroll one period per
+   step on a 1.15s loop; the stripes just sit there now */
 .chat-thread[data-state="running"]::after,
 .chat-thread[data-state="waiting"]::after,
 .chat-thread[data-state="run-active"]::after {
@@ -2363,10 +2332,6 @@ body {
   );
   opacity: 0.95;
   pointer-events: none;
-  animation: thread-edge-march 1.15s linear infinite;
-}
-@keyframes thread-edge-march {
-  to { background-position-y: 9px; }
 }
 .chat-thread__copy,
 .chat-thread__topline {
@@ -2943,8 +2908,10 @@ body {
 }
 /* The pulse dot must agree with the status words beside it: a state-driven
    colour (palette mirrors STATUS_META in web/src/types.ts, so the DAG canvas
-   and the chat never disagree), and only genuinely live states pulse — a
-   "Completed" row keeps a settled dot, never a heartbeat. */
+   and the chat never disagree). Live states wear a STATIC halo ring — the
+   1.8s chat-check-pulse loop is gone with the rest of the continuous motion,
+   so a settled colour + halo say "running" and a plain dot says "done",
+   with nothing beating forever. */
 .chat-runtime-summary__pulse {
   width: 7px;
   height: 7px;
@@ -2978,12 +2945,8 @@ body {
 .chat-runtime-summary[data-state="run-active"] .chat-runtime-summary__pulse,
 .chat-runtime-summary[data-state="running"] .chat-runtime-summary__pulse,
 .chat-runtime-summary[data-state="waiting"] .chat-runtime-summary__pulse {
-  box-shadow: 0 0 0 0 var(--pulse-halo);
-  animation: chat-check-pulse 1.8s ease-out infinite;
-}
-@keyframes chat-check-pulse {
-  0% { box-shadow: 0 0 0 0 var(--pulse-halo); }
-  70%, 100% { box-shadow: 0 0 0 6px transparent; }
+  /* a held ring where the ripple used to travel: still marks "live", never moves */
+  box-shadow: 0 0 0 3px var(--pulse-halo);
 }
 .chat-runtime-summary strong {
   overflow: hidden;
@@ -3513,7 +3476,10 @@ body {
   0%, 100% { opacity: 0.35; transform: scale(0.85); }
   50% { opacity: 1; transform: scale(1.1); }
 }
-/* one bead per busy worker, each breathing out of phase — the pool at a glance */
+/* one bead per busy worker — the pool at a glance. The beads used to bob out
+   of phase on a 0.95s loop (a second heartbeat next to `.exec__pulse`); the
+   quiet budget allows exactly ONE indefinite animation in the app and this
+   isn't it, so the beads hold still and still count the busy workers. */
 .exec__beads {
   display: inline-flex;
   gap: 3px;
@@ -3524,11 +3490,6 @@ body {
   height: 9px;
   border-radius: 3px;
   background: var(--butter);
-  animation: bead-bob 0.95s ease-in-out infinite;
-}
-@keyframes bead-bob {
-  0%, 100% { transform: scaleY(0.5); opacity: 0.45; }
-  50% { transform: scaleY(1); opacity: 1; }
 }
 .btn--run {
   background: var(--meadow);
@@ -3537,19 +3498,12 @@ body {
   padding: 7px 18px;
   font-size: 13.5px;
 }
-/* work is sitting ready and nobody has pressed Run — tap the user on the
-   shoulder every few seconds, then get out of the way on hover */
+/* work is sitting ready and nobody has pressed Run — used to tap the user on
+   the shoulder every few seconds (run-attract, 4s infinite); it now just sits
+   a little proud of the page, a raised sticker that reads "press me" without
+   ever moving on its own */
 .btn--attract {
-  animation: run-attract 4s ease-in-out 1s infinite;
-}
-.btn--attract:hover {
-  animation: none;
-}
-@keyframes run-attract {
-  0%, 78%, 100% { transform: translate(0, 0) rotate(0); box-shadow: var(--shadow-sticker); }
-  82% { transform: translate(-1px, -3px) rotate(-2deg); box-shadow: 5px 6px 0 rgba(74, 71, 84, 0.2); }
-  87% { transform: translate(1px, -1px) rotate(1.6deg); }
-  92% { transform: translate(-1px, -2px) rotate(-1deg); }
+  box-shadow: 4px 5px 0 rgba(74, 71, 84, 0.18);
 }
 .btn--stop-run {
   background: var(--coral);
@@ -3743,12 +3697,12 @@ body {
 .react-flow__controls button:active {
   transform: scale(0.94);
 }
-/* the anchor dot on a running node's outgoing side glows with the stroke */
+/* the anchor dot on a running node's outgoing side takes the stroke's colour
+   (it used to throb on dot-throb's 1.15s loop) */
 .task-node[data-status="dispatched"] .react-flow__handle-right,
 .task-node[data-status="dispatched"] .react-flow__handle-bottom {
   border-color: var(--butter);
   background: var(--butter);
-  animation: dot-throb 1.15s ease-in-out infinite;
 }
 .react-flow__attribution {
   display: none;
@@ -3832,33 +3786,6 @@ body {
   }
 }
 
-/* ---------- confetti rain (every task completed) ---------- */
-.confetti {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-  pointer-events: none;
-  z-index: 4;
-}
-.confetti__bit {
-  position: absolute;
-  top: -16px;
-  border-radius: 2px;
-  border: 1px solid rgba(74, 71, 84, 0.2);
-  opacity: 0.95;
-  animation-name: confetti-fall;
-  animation-timing-function: cubic-bezier(0.3, 0.4, 0.6, 1);
-  animation-fill-mode: forwards;
-}
-@keyframes confetti-fall {
-  from {
-    transform: translateY(0) rotate(0deg);
-  }
-  to {
-    transform: translateY(105vh) rotate(var(--spin, 540deg));
-  }
-}
-
 /* ---------- a11y quality floor ---------- */
 :focus-visible {
   outline: 3px solid var(--sky);
@@ -3870,6 +3797,13 @@ body {
     transition: none !important;
     animation: none !important;
   }
+  /* Nothing hides a loop here any more: since the boil/scribble/trace/aura/
+     crawl/nudge/march/confetti/whale-swim/conn-beat/chat-pulse/bead-bob/
+     run-attract loops were deleted outright (CSS keyframes and the JS timers
+     + WAAPI calls that fed them) — leaving only `.exec__pulse`, which this
+     block stops too — reduced motion has no hidden JS or Web Animations
+     timeline to keep alive; this block only has to hand the one-shot reveals
+     their end states. */
   /* a few animations do real work — they reveal something rather than just
      decorate it. Without them running, hand the end state over directly. */
   .task-node__stamp path,
@@ -3888,39 +3822,34 @@ body {
   .exec__custom {
     width: 100px;
   }
-  /* purely kinetic flourishes have nothing to show when still */
-  .task-node__ripple,
-  .task-node[data-status="dispatched"] .task-node__aura,
-  .gate::after {
+  /* the ripple is a kinetic flourish with no still form worth keeping */
+  .task-node__ripple {
     display: none;
   }
-  /* the ready ring is a real signal, so keep it — just stop it breathing */
-  .task-node[data-status="ready"] .task-node__aura {
-    opacity: 0.5;
-  }
-  /* same deal for the live-thread halo: keep the dashed state edge, drop the
-     breathing */
-  .chat-thread[data-state="running"]::after,
-  .chat-thread[data-state="waiting"]::after,
-  .chat-thread[data-state="run-active"]::after {
-    animation: none;
-    opacity: 0.5;
-  }
+  /* the ready ring, the running ring, the gate halo and the live-thread
+     edge are all static state carriers now — they survive this block exactly
+     as they render, borders and colours intact */
 }
 
 /* --- Run picker (doodle-styled like everything else) --------------------- */
 /* Tasks are Run-scoped since Orca 1.4.160, so the topbar always names the Run
-   whose DAG is on screen. */
+   whose DAG is on screen. Lives in the header's flexible middle region, so it
+   must be able to shrink (the dropdown's value ellipsizes) and to wrap the
+   inline error note onto its own line instead of forcing the row wider. */
 .runpick {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
-/* the DoodleSelect sits inline in the topbar and mustn't grow past its label */
+/* the DoodleSelect sits inline in the topbar and mustn't grow past its label;
+   min-width: 0 is what lets it yield width when the header gets tight */
 .runpick .doodle-select {
   width: auto;
   max-width: 240px;
+  min-width: 0;
 }
 
 /* ---------- DoodleSelect (hand-drawn dropdown, no native <select>) ----------
@@ -4638,6 +4567,23 @@ body {
   margin: 0;
   font-size: 12px;
   color: var(--ink-faint);
+}
+/* Phone widths: the chip no longer sits at the viewport's right edge (the
+   status row wraps), so the chip-anchored panel would hang off one side of
+   the screen at 375px. Pin it to the viewport gutters instead; `top` stays
+   auto, which for a fixed box means "just below where it sits in flow" —
+   right under the chip — and the app body itself never scrolls. */
+@media (max-width: 620px) {
+  .runhealth__panel {
+    position: fixed;
+    /* top: auto is the point of this override — the base `calc(100% + 8px)`
+       would resolve 100% against the VIEWPORT once fixed (i.e. off-screen) */
+    top: auto;
+    bottom: auto;
+    left: 10px;
+    right: 10px;
+    width: auto;
+  }
 }
 
 /* ---------- Capability matrix (operations epic Phase 1) ----------

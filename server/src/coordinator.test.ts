@@ -980,6 +980,52 @@ describe("explicit stop", () => {
     assert.equal(coordinatorStatus().running, false);
     assert.notEqual(coordinatorStatus().lastStopReport, null);
   });
+
+  it("Run again safely resumes a viewer-stopped opencode stage without sending unsupported retry flags", async () => {
+    const { call } = await startApp();
+    const runId = "run_stop_resume";
+    await singleTaskState(runId);
+
+    const body = { runId, defaultHarness: "opencode", maxConcurrency: 1 };
+    const started = await call("POST", "/api/run", body);
+    assert.equal(started.status, 200);
+    await waitFor(() => (calls("dispatch").length === 1 ? true : null), "first tracking Dispatch");
+    await waitFor(() => (findAttempt("task_aaa")?.dispatchId ? true : null), "tracking Dispatch adoption");
+    const firstDispatch = attempt("task_aaa").dispatchId!;
+    assert.ok(firstDispatch);
+
+    const stopped = await call("POST", "/api/run-stop", {});
+    assert.equal(stopped.status, 200);
+    assert.equal(getState().tasks.task_aaa.status, "blocked", "Orca parks the interrupted Task");
+
+    const resumed = await call("POST", "/api/run", body);
+    assert.equal(resumed.status, 200);
+    await waitFor(() => (calls("dispatch").length === 2 ? true : null), "replacement tracking Dispatch");
+    const replacement = calls("dispatch")[1].argv;
+    assert.ok(!replacement.includes("--retry-of"), "legacy dispatch never receives worker-start-only flags");
+    assert.equal(coordinatorStatus().running, true, "the resumed Run remains active");
+    assert.notEqual(coordinatorStatus().phase, "completed");
+  });
+
+  it("Run again retries a stopped supervised stage with explicit Dispatch lineage", async () => {
+    const { call } = await startApp();
+    const runId = "run_stop_resume_supervised";
+    await singleTaskState(runId);
+
+    const body = { runId, defaultHarness: "claude", maxConcurrency: 1 };
+    assert.equal((await call("POST", "/api/run", body)).status, 200);
+    await waitFor(() => (calls("worker-start").length === 1 ? true : null), "first supervised Dispatch");
+    const firstDispatch = await dispatchIdOf("task_aaa");
+
+    assert.equal((await call("POST", "/api/run-stop", {})).status, 200);
+    assert.equal(getState().tasks.task_aaa.status, "blocked");
+
+    assert.equal((await call("POST", "/api/run", body)).status, 200);
+    await waitFor(() => (calls("worker-start").length === 2 ? true : null), "replacement supervised Dispatch");
+    const replacement = calls("worker-start")[1].argv;
+    const retryIndex = replacement.indexOf("--retry-of");
+    assert.equal(replacement[retryIndex + 1], firstDispatch);
+  });
 });
 
 describe("legacy (opencode) lane settlement", () => {

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { fetchRunHealth } from "../api";
 import type { RunHealthView, RunOwnershipState } from "../types";
+import { usePageVisible } from "../visibility";
 
 /**
  * Compact Run ownership/health indicator (operations epic O2, Phase 1).
@@ -14,7 +15,11 @@ import type { RunHealthView, RunOwnershipState } from "../types";
  *    renders them. A failed read shows as "unknown", never as a zero.
  *
  * Polls slower than the DAG (5s) because each health projection fans out to
- * five Orca reads; the server additionally shares a short cache.
+ * five Orca reads; the server additionally shares a short cache. Paused
+ * entirely while the tab is hidden — five fan-out reads per tick is exactly
+ * the work nobody needs from a background page — and the effect re-run on
+ * becoming visible delivers the single immediate refresh before the next
+ * interval tick.
  */
 
 const OWNERSHIP_META: Record<
@@ -63,9 +68,12 @@ export function RunHealthBadge({ runId }: { runId: string }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
 
+  const visible = usePageVisible();
   useEffect(() => {
-    if (!runId) {
-      setHealth(null);
+    // Paused while hidden: no health fan-out reads from a background page.
+    // The effect re-run on becoming visible is the one immediate refresh.
+    if (!runId || !visible) {
+      if (!runId) setHealth(null);
       return;
     }
     let alive = true;
@@ -85,7 +93,7 @@ export function RunHealthBadge({ runId }: { runId: string }) {
       alive = false;
       window.clearInterval(timer);
     };
-  }, [runId]);
+  }, [runId, visible]);
 
   // Close the popover when clicking anywhere else — the badge is a peek panel.
   useEffect(() => {

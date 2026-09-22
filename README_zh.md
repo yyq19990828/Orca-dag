@@ -66,7 +66,7 @@ viewer 是个普通进程，没有终端身份，所以写操作一律 `run_requ
 
 - **可执行文件**，按这个顺序：`ORCA_CLI_COMMAND`（精确的带引号 argv —— 不经过 shell 解析；管道、重定向、`$()` 直接拒绝，而不是悄悄不展开）→ 设了 `ORCA_DEV_REPO_ROOT` 就用 `orca-dev` → **Linux 上不在 Orca 终端里**时用 `orca-ide`（那儿的裸 `orca` 是 GNOME 读屏软件 `/usr/bin/orca`）→ 其余情况用 `orca`。所有 CLI 调用都走这一份 argv 规格（`shell: false`），cwd 是解析出的工作区目录。
 - **工作区**：`WORKSPACE_DIR`（默认当前目录）必须存在，并解析成**真实路径** —— symlink 和同一目录的不同写法会归一到同一个身份。它直接变成精确的 worktree 选择器 `path:<WORKSPACE_DIR>`，所以在目录 A 启动、设 `WORKSPACE_DIR=/abs/B` 的 viewer 会把 coordinator **和 worker 都放进 B**。显式设了 `ORCA_WORKTREE` 仍然以它为准。
-- **能不能执行**（`GET /api/readiness`）：跑 DAG 需要 **Orca ≥ 1.4.205** —— supervised Dispatch 契约从这个版本开始。**1.4.160–1.4.204 只读**：DAG、gate、状态照常渲染，但 Run/gate/reset 控件会禁用并给出升级提示（绕过 UI 直接调接口会得到 `503 execution_disabled`）。CLI 找不到时 readiness 会如实报告它尝试过的解析结果。
+- **能不能执行**（`GET /api/readiness`）：跑 DAG 需要 **Orca ≥ 1.4.205** —— supervised Dispatch 契约从这个版本开始。**1.4.160–1.4.204 只读**：DAG、gate、状态照常渲染，但 Run/gate 控件会禁用并给出升级提示（绕过 UI 直接调接口会得到 `503 execution_disabled`）。CLI 找不到时 readiness 会如实报告它尝试过的解析结果。
 
 ## 前置条件
 
@@ -200,7 +200,7 @@ viewer 是直通 Orca 的控制面 —— 启动 Run 会 fence 掉原本的 coor
 
 ## 就绪探测与只读模式
 
-`GET /api/readiness` 返回 `{ cli, workspace, worktree, version, executionEnabled, reason }`。执行类操作 —— 启动 Run、解决审批门、新建 Run、清空任务 —— 只在 **Orca ≥ 1.4.205** 上启用；1.4.160–1.4.204 上 UI 会禁用这些控件（Run 按钮显示 "View-only"、gate 按钮带原因置灰、顶栏徽标变黄），绕过 UI 的改动类请求会得到 `503 execution_disabled`。读操作（DAG、Run 列表、终端、配置）始终可用。
+`GET /api/readiness` 返回 `{ cli, workspace, worktree, version, executionEnabled, reason }`。执行类操作 —— 启动 Run、解决审批门、新建 Run —— 只在 **Orca ≥ 1.4.205** 上启用；1.4.160–1.4.204 上 UI 会禁用这些控件（Run 按钮显示 "View-only"、gate 按钮带原因置灰、顶栏徽标变黄），绕过 UI 的改动类请求会得到 `503 execution_disabled`。读操作（DAG、Run 列表、终端、配置）始终可用。
 
 ## HTTP 接口
 
@@ -233,7 +233,6 @@ viewer 是直通 Orca 的控制面 —— 启动 Run 会 fence 掉原本的 coor
 | `GET` | `/api/requests/:requestId?run=<id>` | 单条账本行加一次全新的只读 `request-show` 探测：`{ state: completed\|pending\|absent\|unknown, interpretation, outcome }` —— 绝不重放变更 |
 | `POST` | `/api/workers/:id/release` / `/retain` | 落定后显式释放终端 / 保留调试 |
 | `POST` | `/api/workers/:id/retry` | 重摆一个明确失败的尝试（同 harness/模型/effort/放置） |
-| `POST` | `/api/reset` | `{ confirmAllRuns: true }`：`orca orchestration reset --tasks` —— 清空**所有** Run 的任务 |
 | `GET` | `/api/models/:harness` | 该 harness 可选的模型（目前只有 opencode 能枚举） |
 | `GET` | `/api/environments` | 已保存的连接环境（`environment list`），每行带解析好的 `peer` 能力集，UI 据此隐藏远端不支持的控制 |
 | `GET` | `/api/environments/:envId/worktrees?repo=` | 一个环境上的精确工作区 —— 放置选择器用的完整 `id:<repoId>::<path>` 选择器 |
@@ -243,7 +242,7 @@ viewer 是直通 Orca 的控制面 —— 启动 Run 会 fence 掉原本的 coor
 | `PUT` | `/api/config` | 合并写入 viewer 配置 |
 | `GET` | `/api/health` | 健康检查（返回 workspace 目录） |
 
-驱动执行的改动类路由（`POST /api/runs`、`POST /api/run`、gate resolve、reset）在 readiness 判定运行时无法执行时会额外返回 `503 execution_disabled` —— 见[就绪探测与只读模式](#就绪探测与只读模式)。对已被另一个 viewer 协调的工作区启动 coordinator 会返回 `409 coordinator_conflict`。
+驱动执行的改动类路由（`POST /api/runs`、`POST /api/run`、gate resolve）在 readiness 判定运行时无法执行时会额外返回 `503 execution_disabled` —— 见[就绪探测与只读模式](#就绪探测与只读模式)。对已被另一个 viewer 协调的工作区启动 coordinator 会返回 `409 coordinator_conflict`。
 
 ## 代码结构
 
@@ -251,7 +250,7 @@ viewer 是直通 Orca 的控制面 —— 启动 Run 会 fence 掉原本的 coor
 skill/SKILL.md            薄项目工作流：PRD → 设计 → 任务 DAG → viewer；命令语法交给与运行时匹配的编排指南（skills get orchestration）
 server/src/
   index.ts               进程入口：子命令（--help / uninstall）、CLI+工作区解析、装 skill、回环监听
-  app.ts                 Express 应用（createApp）：readiness / dag / session / runs / run / run-stop / run-status / activity / inbox / messages / gates / workers / requests / environments / reset / models / config + 托管 SPA
+  app.ts                 Express 应用（createApp）：readiness / dag / session / runs / run / run-stop / run-status / activity / inbox / messages / gates / workers / requests / environments / models / config + 托管 SPA
   activity.ts            Run 作用域的可读事件解析器 + 有界 viewer Activity 日志
   requestLedger.ts       查看器发起的变更请求 id 的有界、原子账本（.orca-dag.requests.jsonl）——仅元数据，状态永远通过 request-show 实时读取
   security.ts            回环安全策略：每进程 mutation token、请求校验、自定义命令开关
@@ -294,4 +293,4 @@ scripts/
 - **opencode 走单独的路径**：`worker-start --agent opencode` 能打开 TUI 但注入的 preamble 落不进去，所以 coordinator 开一个裸 shell、铸一个跟踪用 dispatch，然后跑 `opencode run --auto "$(cat <preamble>)"`（**`--auto` 必须带** —— 默认权限策略会静默拒掉工具调用）。
 - **远程放置要么精确、要么不发生**：绑定到已保存环境的节点通过 `worker-start --on <environment>` 启动 —— `--on` 只出现在这一次调用上；之后所有的读取、消息、停止、释放都只按 **Dispatch ID** 寻址（进程、文件系统、transcript、停止与清理事实都归执行主机所有）。远程只有两种放置形态 —— 该环境上发现的精确已有工作区选择器，或带精确 repo 选择器与显式名称的新顶层 worktree；远程 `current`/`new-child` 在 HTTP 边界和适配器里各被拒绝一次，都发生在任何 Orca 调用之前。没有合成本地回退：未知环境或未证实的能力会让启动失败并留下原因记录。模型/effort 转发与结构化 transcript 读取以对端**通告**的能力为准；主机断连时其 worker 显示 `unverifiable`（绝不会是 `exited`），且不会自动停止/重试/释放 —— 重连后恢复存活状态，原 Dispatch 照常落定。
 - **每节点启动偏好和主阶段标记存 workspace 配置文件**：Orca 的 task 没有 harness/metadata 字段（`task-create` 只有 spec/title/display-name/deps/parent），所以 viewer 把启动选择、每个 Run 的一个语义主阶段、最多并行与布局存到 workspace 根的 `.orca-dag.config.json`（`server/src/config.ts`，`GET/PUT /api/config`），换浏览器 / 清 localStorage 都不丢；前端 `harness.ts` 是响应式 store，启动时从服务器加载并把旧的 localStorage 值一次性迁移上去。Run 时启动选择会被快照进 coordinator，之后由持久 worker 历史保证任务首个 Dispatch 后不能再更改启动方案。
-- **改不了已建任务**：`orca orchestration task-update` 只能改 `--status` / `--result`，**没有改 spec/标题/依赖的接口**，也没有删除单个任务的命令（`reset` 是整体清空，且波及所有 Run）。所以"修改任务"= **让 agent 开新 Run 重绘 DAG**。
+- **改不了已建任务**：`orca orchestration task-update` 只能改 `--status` / `--result`，**没有改 spec/标题/依赖的接口**，也没有删除单个任务的命令；viewer 也刻意不提供清空入口（`orca orchestration reset --tasks` 会一次性清空所有 Run，所以永远不会被调用）。所以"修改任务"= **让 agent 开新 Run 重绘 DAG** —— 新建 Run 是唯一安全的重绘路径。

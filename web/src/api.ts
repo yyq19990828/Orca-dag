@@ -333,14 +333,6 @@ export async function resolveGate(id: string, resolution: string, runId: string)
   await post(`/api/gates/${encodeURIComponent(id)}/resolve`, { resolution, runId });
 }
 
-/**
- * Clear tasks. `orca orchestration reset` has no `--run` scope: it wipes every
- * Run's tasks in the local orchestration database, so the caller must opt in.
- */
-export async function resetTasks(): Promise<void> {
-  await post("/api/reset", { confirmAllRuns: true });
-}
-
 /** Load the persisted viewer config (harness choices, concurrency, layout, Run). */
 export async function fetchConfig(): Promise<Partial<ViewerConfig>> {
   return get<Partial<ViewerConfig>>("/api/config");

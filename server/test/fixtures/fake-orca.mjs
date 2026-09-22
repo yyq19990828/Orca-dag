@@ -91,6 +91,7 @@ function landSupervised(taskId, runId) {
     status: "dispatched",
     workerState: "supervised",
     terminalState: "active",
+    retryOf: flag("--retry-of") ?? null,
     // The runtime always starts a worker on a terminal and reports its handle
     // in worker-list rows (`agentTerminalHandle`). A fresh start mints one; a
     // REUSE start takes over the given handle, so the new Dispatch's row
@@ -448,6 +449,10 @@ if (ns === "orchestration" && verb === "task-list") {
   else ok({ requestId, state: "absent", interpretation: "no recorded request", outcome: null });
 } else if (ns === "orchestration" && verb === "dispatch") {
   // Tracking dispatch (legacy lane): mints a real dispatch id, no worker.
+  // Runtime 1.4.206 does NOT accept --retry-of on this legacy command; only
+  // worker-start owns retry lineage. Keep the fake strict so the viewer cannot
+  // accidentally route supervised-only flags into opencode's workaround.
+  if (args.includes("--retry-of")) fail("invalid_argument", "Unknown flag --retry-of for command: orchestration dispatch");
   const taskId = flag("--task");
   const t = state.tasks?.[taskId];
   state.seq ??= {};
@@ -569,7 +574,17 @@ if (ns === "orchestration" && verb === "task-list") {
   }
   const d = state.dispatches?.[dispatchId];
   const alreadySettled = ["completed", "failed", "stopped"].includes(d?.status ?? "");
-  if (d && !alreadySettled) d.status = "stopped";
+  if (d && !alreadySettled) {
+    d.status = "stopped";
+    // The real runtime parks an interrupted Task instead of making it ready
+    // for an unqualified fresh Dispatch. Resuming must carry --retry-of.
+    const task = state.tasks?.[d.task_id];
+    if (task) {
+      task.status = "blocked";
+      delete task.dispatch_id;
+      delete task.assignee_handle;
+    }
+  }
   ok({
     dispatchId,
     state: "stopped",

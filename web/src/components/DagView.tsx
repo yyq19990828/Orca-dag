@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, type CSSProperties } from "react";
 import {
   Background,
   BackgroundVariant,
@@ -145,14 +145,11 @@ function scribbleLegs(seedId: string, w = 210, h = 72): ScribbleLeg[] {
   return legs;
 }
 
-/** scribble timing (seconds) — must mirror the path animation durations and
-    delay steps in styles.css (.task-node__scribble path): each leg draws for
-    SCRIBBLE_DRAW, the full pass holds SCRIBBLE_HOLD, then a fade wave erases
-    the legs oldest-first, SCRIBBLE_FADE each, SCRIBBLE_FADE_STEP apart */
-const SCRIBBLE_DRAW = 0.26;
-const SCRIBBLE_HOLD = 0.9;
-const SCRIBBLE_FADE = 0.3;
-const SCRIBBLE_FADE_STEP = 0.05;
+// No scribble timing lives here (and none in styles.css either): the pass is
+// rendered once, fully drawn, for dispatched/completed/failed alike. Seeded by
+// the node id it is identical on every poll — a static crayon texture, never a
+// loop — which is exactly what keeps `document.getAnimations()` empty inside
+// the canvas once the entrance settles.
 
 type TaskNodeData = {  label: string;
   status: TaskStatus;
@@ -177,23 +174,12 @@ function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
   const alive = data.status === "ready" || data.status === "dispatched";
   const updateNodeInternals = useUpdateNodeInternals();
   // one unbroken colouring pass, chopped into back-and-forth zigzag legs.
-  // The legs draw strictly one after another (leg N+1 starts when N lands),
-  // hold, then a fade wave erases them oldest-first, and the svg remounts.
+  // Deterministic in the node id, so it renders once and never redraws: there
+  // is deliberately NO cycle timer and no `key`-driven remount here — a
+  // dispatched task used to re-scrawl itself forever, which meant a timer
+  // incrementing a dispatched node and a permanent animation in the canvas.
   const legs = useMemo(() => scribbleLegs(id), [id]);
-  const [cycle, setCycle] = useState(0);
   const dispatched = data.status === "dispatched";
-  useEffect(() => {
-    if (!dispatched) return;
-    // the fade wave itself is scheduled in CSS; JS remounts the svg once the
-    // newest leg has finished fading. Re-arms on every cycle (dep below) so
-    // the scrawl loops for as long as the task runs.
-    const wave = (legs.length - 1) * SCRIBBLE_FADE_STEP + SCRIBBLE_FADE;
-    const cycleTimer = window.setTimeout(
-      () => setCycle((c) => c + 1),
-      (legs.length * SCRIBBLE_DRAW + SCRIBBLE_HOLD + wave) * 1000,
-    );
-    return () => window.clearTimeout(cycleTimer);
-  }, [dispatched, legs.length, cycle]);
   return (
     <div
       role="group"
@@ -244,21 +230,14 @@ function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
           </span>
         </>
       )}
-      {/* a real hand scrawl draws itself over and over while the task runs;
-          completed/failed nodes keep the same scrawl frozen at its final
-          frame — fully coloured in, no animation, still their own hand */}
+      {/* a real hand scrawl, coloured in and frozen: dispatched nodes show the
+          pass mid-run, completed/failed keep it at its final frame — fully
+          drawn, no animation, still their own hand */}
       {(dispatched || data.status === "completed" || data.status === "failed") && (
         <svg
-          key={cycle}
-          className={[
-            "task-node__scribble",
-            dispatched ? "" : "task-node__scribble--final",
-          ]
-            .filter(Boolean)
-            .join(" ")}
+          className="task-node__scribble"
           viewBox="0 0 210 72"
           preserveAspectRatio="none"
-          style={{ "--legs": legs.length } as CSSProperties}
           aria-hidden="true"
         >
           {legs.map((leg, i) => (
@@ -268,12 +247,12 @@ function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
               d={leg.d}
               strokeWidth={leg.width.toFixed(1)}
               strokeOpacity={leg.opacity.toFixed(3)}
-              style={{ "--leg": i } as CSSProperties}
             />
           ))}
         </svg>
       )}
-      {/* breathing dashed ring (ready) / radiating pulse (dispatched) */}
+      {/* static dashed ring (ready) / static solid ring (dispatched) — status
+          stays legible from the border alone, with nothing pulsing */}
       {alive && <div className="task-node__aura" aria-hidden="true" />}
       <Handle type="target" position={isTB ? Position.Top : Position.Left} />
       <div className="task-node__title">{data.label}</div>
@@ -342,45 +321,20 @@ function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
 const nodeTypes = { task: TaskNode };
 
 /**
- * Edge leaving a running node: a faint dashed pencil sketch that a solid
- * pencil stroke traces over, source → target, like a hand inking in the
- * dashes — over and over. Two stacked paths share one geometry; the wobble
+ * Edge leaving a running node: a faint dashed pencil sketch with a solid
+ * pencil stroke inked over it, source → target — the "hand went over the
+ * dashes" look, held still. Two stacked paths share one geometry; the wobble
  * lives in the #pencil-edge filter (userSpaceOnUse, with a 24000² region so
- * nothing clips, and scale 4.5, so it never truncates the advancing tip).
+ * nothing clips).
  *
- * Motion is FIXED-SPEED + UNIFORM: each edge is measured (getTotalLength) and
- * its draw time is length / EDGE_DRAW_SPEED, so every edge advances at the
- * same constant rate — no easing curves, and different-length edges simply
- * take different amounts of time.
- *
- * Driven by the Web Animations API (element.animate), NOT a hand-rolled
- * requestAnimationFrame loop. A rAF loop here has a structural weakness that
- * produced the "draws short, then restarts" / "fast start" failure: it pinned
- * its `start` timestamp to mount and read a `lenRef` that a SEPARATE effect
- * silently swapped whenever the path geometry changed, so any post-mount
- * geometry change (a node drag, a layout switch, or React Flow re-emitting
- * handle coords with sub-pixel drift) recomputed `t = (now-start) % cycle`
- * against a NEW length but the OLD `start` — stranding the trace mid-cycle.
- * WAAPI runs on the browser's animation timeline (immune to React re-render
- * storms: the 2s status polls, fitView viewport tweens, node drags). The node
- * reconciliation below preserves React Flow's `measured` state across polls;
- * without it React Flow briefly drops every handle, unmounts every edge, and
- * necessarily restarts all WAAPI animations together. Each surviving edge
- * is rebuilt only when its MEASURED length actually changes — sub-pixel drift
- * in the `path` string across polls is ignored, so every edge keeps its own
- * independent loop and a short edge looping fast never re-syncs the others.
- * Pure CSS can't express per-edge timing
- * here either (pathLength normalisation and var()/calc() inside @keyframes are
- * both unreliable in the target browser), so JS measures the length and hands
- * concrete numbers to WAAPI.
+ * The trace used to be driven by the Web Animations API (element.animate) with
+ * the measured per-edge length baked into keyframes, looping draw → hold →
+ * fade forever. Continuous canvas motion is now out of contract, so there is
+ * NO animation, NO measurement and NO ref here: the solid stroke simply renders
+ * at full length. The dashed sketch underneath still distinguishes "being
+ * worked on" from the idle/done dependency strokes, so the edge keeps its
+ * scheduling meaning without anything moving.
  */
-/** uniform pencil draw speed, px per ms (150 px/s) */
-const EDGE_DRAW_SPEED = 0.15;
-/** how long a finished line is held before it lifts, ms */
-const EDGE_HOLD_MS = 500;
-/** how long the finished line takes to fade before the next pass, ms */
-const EDGE_FADE_MS = 600;
-
 function PencilEdge(props: EdgeProps) {
   const [path] = getBezierPath({
     sourceX: props.sourceX,
@@ -390,76 +344,10 @@ function PencilEdge(props: EdgeProps) {
     targetY: props.targetY,
     targetPosition: props.targetPosition,
   });
-  const drawRef = useRef<SVGPathElement | null>(null);
-  // The live WAAPI Animation and the path length it was built from. Kept in
-  // refs (not derived from the effect's return) so a re-render that merely
-  // re-emits the same geometry does NOT tear the animation down.
-  const animRef = useRef<Animation | null>(null);
-  const lenRef = useRef(0);
-
-  // Build ONE animation per edge, then leave it running on its own timeline.
-  // Each edge is independent: its draw time is its own length / EDGE_DRAW_SPEED,
-  // so a short edge loops fast and a long edge loops slow — they never re-sync.
-  //
-  // React Flow can re-emit path geometry while nodes settle, and `path` can
-  // drift by sub-pixel floats even when the real geometry is unchanged. If we
-  // rebuilt on every path string, those harmless changes would restart the
-  // affected animation. Instead we rebuild ONLY when the measured length
-  // actually changed (by > 1px); sub-pixel drift is ignored, so each edge keeps
-  // playing its own loop. The effect deliberately returns NO cleanup —
-  // React's per-render cleanup would defeat the lenRef guard — so the previous
-  // Animation is cancelled manually only when we genuinely rebuild, and the
-  // separate effect below cancels it on unmount / type-flip away from `pencil`.
-  useLayoutEffect(() => {
-    const el = drawRef.current;
-    if (!el) return;
-    const L = el.getTotalLength();
-    if (!isFinite(L) || L <= 0) {
-      // degenerate geometry (e.g. source/target not yet positioned): hide the
-      // draw path; the next real geometry will rebuild the animation.
-      animRef.current?.cancel();
-      animRef.current = null;
-      el.style.opacity = "0";
-      lenRef.current = 0;
-      return;
-    }
-    const running = animRef.current && animRef.current.playState === "running";
-    if (running && Math.abs(L - lenRef.current) < 1) return; // unchanged → keep looping
-    // genuine length change (drag / layout switch / node count change) or no
-    // animation yet → (re)build from the source with a fresh timeline.
-    animRef.current?.cancel();
-    lenRef.current = L;
-    // dasharray: draw exactly one path-length, then gap one path-length, so a
-    // 0 dashoffset shows the whole line and an L dashoffset hides it entirely.
-    el.style.strokeDasharray = `${L} ${L}`;
-    el.style.opacity = ""; // WAAPI's keyframes own the opacity from here
-    const drawMs = L / EDGE_DRAW_SPEED; // longer edge ⇒ proportionally longer draw
-    const total = drawMs + EDGE_HOLD_MS + EDGE_FADE_MS;
-    animRef.current = el.animate(
-      [
-        // pen at the source, line hidden (offset = L), full ink
-        { strokeDashoffset: L, opacity: 0.95, offset: 0 },
-        // draw phase: offset falls linearly to 0 — the revealed length grows at
-        // a constant rate and lands exactly on the target at this keyframe
-        { strokeDashoffset: 0, opacity: 0.95, offset: drawMs / total },
-        // hold: finished line sits, still full ink
-        { strokeDashoffset: 0, opacity: 0.95, offset: (drawMs + EDGE_HOLD_MS) / total },
-        // fade: line lifts (opacity → 0) before the pass snaps back to the start
-        { strokeDashoffset: 0, opacity: 0, offset: 1 },
-      ],
-      { duration: total, easing: "linear", iterations: Infinity },
-    );
-  }, [path]);
-
-  // Cancel on unmount / when the edge type flips away from `pencil`. The layout
-  // effect above does NOT return a cleanup (it would tear the animation down on
-  // every path re-emit); this is the only place the Animation is freed.
-  useEffect(() => () => animRef.current?.cancel(), []);
-
   return (
     <g className="pencil-edge">
       <path className="pencil-edge__sketch" d={path} fill="none" />
-      <path ref={drawRef} className="pencil-edge__draw" d={path} fill="none" />
+      <path className="pencil-edge__draw" d={path} fill="none" />
     </g>
   );
 }
@@ -470,7 +358,7 @@ const edgeTypes = { pencil: PencilEdge, hierarchy: HierarchyEdge };
  * Parent → child OWNERSHIP edge (Phase 4) — a deliberately different visual
  * grammar from the dependency pencils above:
  *
- *   dependency  = hand-wobbling bezier, boiling pencil line, animated draw
+ *   dependency  = hand-wobbling bezier, pencil sketch under solid ink (still)
  *   ownership   = calm rounded bracket (smooth step), fine dotted graphite,
  *                 a small open ring resting on the child, no animation
  *
@@ -499,44 +387,10 @@ function HierarchyEdge(props: EdgeProps) {
   );
 }
 
-const CONFETTI_COLORS = ["#7bb7e0", "#f2a0a6", "#7fc98c", "#f0b94e", "#ea6b5e", "#b79fe0"];
-
-/** Paper-scrap rain, rendered once when every task reaches `completed`. */
-function Confetti() {
-  const bits = useMemo(
-    () =>
-      Array.from({ length: 48 }, (_, i) => ({
-        left: Math.random() * 100,
-        delay: Math.random() * 2.4,
-        duration: 2.6 + Math.random() * 1.8,
-        size: 7 + Math.random() * 6,
-        color: CONFETTI_COLORS[i % CONFETTI_COLORS.length],
-        spin: (Math.random() > 0.5 ? 1 : -1) * (360 + Math.random() * 540),
-      })),
-    [],
-  );
-  return (
-    <div className="confetti" aria-hidden="true">
-      {bits.map((b, i) => (
-        <span
-          key={i}
-          className="confetti__bit"
-          style={
-            {
-              left: `${b.left}%`,
-              width: b.size,
-              height: b.size * 0.7,
-              background: b.color,
-              animationDelay: `${b.delay}s`,
-              animationDuration: `${b.duration}s`,
-              "--spin": `${b.spin}deg`,
-            } as CSSProperties
-          }
-        />
-      ))}
-    </div>
-  );
-}
+// The all-tasks-done confetti rain used to live here. It was decorative
+// continuous motion (a 48-bit CSS fall, replaying whenever the DAG re-rendered
+// while everything stayed completed), so it is gone: a finished Run reads from
+// the green stamps, the inked edges and the progress strip instead.
 
 function Flow({
   dag,
@@ -573,8 +427,9 @@ function Flow({
   // id of the node under an active drag gesture (keep its live position)
   const draggingId = useRef<string | null>(null);
   // status seen on the previous poll, and the ids whose status just flipped —
-  // recomputed only when the DAG itself changes, so re-running the layout
-  // effect for a selection/layout change doesn't cut a celebration short.
+  // recomputed only when the DAG object itself changes (Stage 2 below), so a
+  // reconciliation re-run for a selection/config change never cuts a
+  // celebration short.
   const prevStatus = useRef<Map<string, TaskStatus>>(new Map());
   const popped = useRef<Set<string>>(new Set());
   const seenDag = useRef<DagResponse | null>(null);
@@ -582,42 +437,89 @@ function Flow({
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const handledFitNonce = useRef(fitNonce);
 
+  // --- Stage 1 · topology → positioned geometry ----------------------------
+  //
+  // The layout is derived ONLY from what the algorithms actually consume: the
+  // node id sequence (order seeds the force layout's circle and breaks dagre
+  // ties) and the dependency edges. It sits behind a string signature instead
+  // of `dag` identity because every 2s poll re-fetches the DAG and hands us
+  // fresh objects and arrays even when nothing changed — memoizing on those
+  // would re-solve (a 320-iteration Fruchterman–Reingold pass per poll) and
+  // keep yanking the graph out from under the cursor. Statuses, labels,
+  // selection, lead, harness picks, worker rows: none of them move a node, so
+  // none of them may re-rank one. Layout kind and reorgNonce are in the key so
+  // an algorithm switch or explicit Re-layout re-solves even with an unchanged
+  // shape.
+  const topologyKey = `${JSON.stringify(dag.nodes.map((n) => n.id))}|${JSON.stringify(
+    dag.edges.map((e) => [e.id, e.source, e.target]),
+  )}`;
+  const laid = useMemo(
+    () =>
+      applyLayout(
+        layout,
+        // Topology-only inputs — no decoration rides in, so the memoized
+        // result can never go stale on decoration churn. Dependency edges
+        // only: hierarchy links are NEVER layout input (see the
+        // reconciliation below), exactly as before. `data` is present only
+        // because React Flow's Node type requires it — the solvers read just
+        // ids and endpoints; Stage 4 replaces it wholesale.
+        dag.nodes.map((n) => ({ id: n.id, position: { x: 0, y: 0 }, data: {} })),
+        dag.edges.map((e) => ({ id: e.id, source: e.source, target: e.target })),
+      ),
+    // `topologyKey` fully covers the `dag.*` inputs above; keying on the
+    // string rather than the per-poll arrays is the whole point of the split.
+    [topologyKey, layout, reorgNonce],
+  );
+
   // Switching layout algorithm or asking for a re-org discards manual drags so
-  // the graph snaps fully to the fresh auto-layout. Declared before the layout
-  // effect so the ref is cleared before it recomputes.
+  // the graph snaps fully to the fresh auto-layout. Declared before the
+  // reconciliation effect so the ref is cleared before it re-merges positions.
   useEffect(() => {
     dragged.current.clear();
   }, [layout, reorgNonce]);
 
-  // Re-derive nodes/edges from the DAG whenever it, the selection, the layout,
-  // or a re-org changes. User-dragged nodes keep their position; everything
-  // else follows the chosen layout algorithm.
+  // --- Stage 2 · status-pop detection ---------------------------------------
+  //
+  // Keyed to the DAG object identity alone (guarded by `seenDag`): it must not
+  // re-arm when a reconciliation runs for selection/config/worker-row churn,
+  // and the flags must survive those re-merges until the next poll —
+  // recomputing here for a selection change would drop the flags mid-flight
+  // and cut a celebration short.
   useEffect(() => {
-    const dir: "LR" | "TB" = layout === "layered-tb" ? "TB" : "LR";
-    const statusById = new Map(dag.nodes.map((n) => [n.id, n.status]));
+    if (seenDag.current === dag) return;
+    const prev = prevStatus.current;
+    popped.current = new Set(
+      dag.nodes.filter((n) => prev.has(n.id) && prev.get(n.id) !== n.status).map((n) => n.id),
+    );
+    prevStatus.current = new Map(dag.nodes.map((n) => [n.id, n.status]));
+    seenDag.current = dag;
+  }, [dag]);
 
-    // What a stage ACTUALLY launched with, from two evidence layers (never the
-    // viewer config, which is only the plan and drifts the moment a harness is
-    // re-picked after dispatch):
-    //   1. Orca's fleet row (`launch.agent`, provider id fallback). CAVEAT,
-    //      verified against Orca 1.4.205 (2026-09-22): worker-list's
-    //      projection.launch is null even for supervised worker-start
-    //      launches — the durable facts live only in worker-show under
-    //      worker.startOptions.launch.effective, and list rows do not include
-    //      startOptions. This layer only earns its keep on builds whose list
-    //      projection carries launch facts; enriching it here would cost one
-    //      worker-show CLI call per row per 2s poll, deliberately not done.
-    //   2. This viewer coordinator's own attempt records — the working source
-    //      for viewer-driven runs, supervised AND legacy/tracking (opencode,
-    //      custom commands). Launches made outside the viewer session (manual
-    //      CLI, a previous process) have no attempt record and fall back to
-    //      the plan behind a "no launch record found" tooltip.
-    // worker-list is newest-first, so the first fleet row per Task is the
-    // latest attempt; for attempts, keep the latest startedAt per Task.
-    const actualHarness = new Map<string, string>();
+  // --- Stage 3 · actual-launch evidence --------------------------------------
+  //
+  // What a stage ACTUALLY launched with, from two evidence layers (never the
+  // viewer config, which is only the plan and drifts the moment a harness is
+  // re-picked after dispatch):
+  //   1. Orca's fleet row (`launch.agent`, provider id fallback). CAVEAT,
+  //      verified against Orca 1.4.205 (2026-09-22): worker-list's
+  //      projection.launch is null even for supervised worker-start
+  //      launches — the durable facts live only in worker-show under
+  //      worker.startOptions.launch.effective, and list rows do not include
+  //      startOptions. This layer only earns its keep on builds whose list
+  //      projection carries launch facts; enriching it here would cost one
+  //      worker-show CLI call per row per 2s poll, deliberately not done.
+  //   2. This viewer coordinator's own attempt records — the working source
+  //      for viewer-driven runs, supervised AND legacy/tracking (opencode,
+  //      custom commands). Launches made outside the viewer session (manual
+  //      CLI, a previous process) have no attempt record and fall back to
+  //      the plan behind a "no launch record found" tooltip.
+  // worker-list is newest-first, so the first fleet row per Task is the
+  // latest attempt; for attempts, keep the latest startedAt per Task.
+  const actualHarness = useMemo(() => {
+    const map = new Map<string, string>();
     for (const row of workerRows) {
       const agent = row.projection?.launch?.agent ?? row.projection?.provider?.id ?? null;
-      if (row.taskId && agent && !actualHarness.has(row.taskId)) actualHarness.set(row.taskId, agent);
+      if (row.taskId && agent && !map.has(row.taskId)) map.set(row.taskId, agent);
     }
     // Second evidence layer: the viewer coordinator's own attempt records
     // (see the caveat above for why the fleet layer alone cannot be trusted
@@ -629,46 +531,60 @@ function Flow({
     }
     for (const [taskId, attempt] of latestAttemptByTask) {
       const agent = attempt.effective?.agent ?? attempt.harness;
-      if (agent && !actualHarness.has(taskId)) actualHarness.set(taskId, agent);
+      if (agent && !map.has(taskId)) map.set(taskId, agent);
     }
+    return map;
+  }, [workerRows, attempts]);
 
-    if (seenDag.current !== dag) {
-      const prev = prevStatus.current;
-      popped.current = new Set(
-        dag.nodes.filter((n) => prev.has(n.id) && prev.get(n.id) !== n.status).map((n) => n.id),
-      );
-      prevStatus.current = statusById;
-      seenDag.current = dag;
-    }
+  // --- Stage 4 · reconciliation: decoration onto positioned geometry ---------
+  //
+  // Re-derives the SEMANTICS — status colouring, selection, lead ring, harness
+  // provenance, pop, edge classes, hierarchy links — and merges them onto the
+  // memoized positions from Stage 1. This effect is the only place decoration
+  // can change what the user sees, and it never re-runs the solver: `laid`
+  // changes identity only when topology, layout kind or reorgNonce change.
+  // `layout` and `reorgNonce` are listed directly because a Re-layout with an
+  // unchanged shape memo-hits `laid` yet must still re-merge (the drag-clear
+  // above has emptied `dragged`, and the stale merged positions must go).
+  useEffect(() => {
+    const dir: "LR" | "TB" = layout === "layered-tb" ? "TB" : "LR";
+    const statusById = new Map(dag.nodes.map((n) => [n.id, n.status]));
+    const nodeById = new Map(dag.nodes.map((n) => [n.id, n]));
 
-    const rawNodes: Node<TaskNodeData>[] = dag.nodes.map((n, i) => ({
-      id: n.id,
-      type: "task",
-      position: { x: 0, y: 0 },
-      data: {
-        label: n.label,
-        status: n.status,
-        selected: n.id === selectedId,
-        lead: n.id === leadTaskId,
-        // A launched stage shows what Orca/the coordinator recorded; stages
-        // with no launch evidence at all fall back to the planned (config)
-        // harness, and the tooltip says which is which.
-        harness: actualHarness.get(n.id) ?? effectiveHarness(n.id),
-        harnessActual: actualHarness.has(n.id),
-        dir,
-        index: i,
-        // deterministic pseudo-random tilt from the paint order: stickers
-        // slapped on paper, stable across polls (no RNG, no jumping)
-        tilt: (((i * 37) % 5) - 2) * 0.8,
-        pop: popped.current.has(n.id),
-      },
-    }));
-    const rawEdges: Edge[] = dag.edges.map((e) => {
+    // `laid.nodes` is the same id sequence as `dag.nodes` (Stage 1 is keyed to
+    // exactly that topology), so index i is the paint order — the same `--i`
+    // entrance stagger and deterministic tilt as before.
+    const decoratedNodes: Node<TaskNodeData>[] = laid.nodes.map((n, i) => {
+      const dagNode = nodeById.get(n.id);
+      return {
+        ...n,
+        type: "task",
+        data: {
+          label: dagNode?.label ?? n.id,
+          status: dagNode?.status ?? "pending",
+          selected: n.id === selectedId,
+          lead: n.id === leadTaskId,
+          // A launched stage shows what Orca/the coordinator recorded; stages
+          // with no launch evidence at all fall back to the planned (config)
+          // harness, and the tooltip says which is which.
+          harness: actualHarness.get(n.id) ?? effectiveHarness(n.id),
+          harnessActual: actualHarness.has(n.id),
+          dir,
+          index: i,
+          // deterministic pseudo-random tilt from the paint order: stickers
+          // slapped on paper, stable across polls (no RNG, no jumping)
+          tilt: (((i * 37) % 5) - 2) * 0.8,
+          pop: popped.current.has(n.id),
+        },
+      };
+    });
+    // an edge carries the state of the dependency it represents: satisfied
+    // (inked green), being worked on (pencil-traced), or not yet reached —
+    // decorated here, onto the layout's own edge list, never inside it.
+    const decoratedEdges: Edge[] = laid.edges.map((e) => {
       const from = statusById.get(e.source);
       const running = from === "dispatched";
       const done = from === "completed";
-      // an edge carries the state of the dependency it represents: satisfied
-      // (inked green), being worked on (pencil-traced), or not yet reached
       return {
         id: e.id,
         source: e.source,
@@ -678,10 +594,9 @@ function Flow({
         className: running ? "edge--run" : done ? "edge--done" : "edge--idle",
       };
     });
-    const laid = applyLayout(layout, rawNodes, rawEdges);
 
     // Ownership links (Phase 4) are rendered as edges but are NEVER layout
-    // input: `applyLayout` above ranked only the dependency arrows, so a
+    // input: the Stage 1 solver ranked only the dependency arrows, so a
     // parent whose child is ready does not drag it into an earlier rank, and
     // every layout algorithm (LR/TB/force) behaves exactly as before. Merged
     // BELOW the dependency edges (array order = paint order) so ownership
@@ -703,7 +618,7 @@ function Flow({
 
     setNodes((cur) => {
       const currentById = new Map(cur.map((n) => [n.id, n]));
-      return laid.nodes.map((n) => {
+      return decoratedNodes.map((n) => {
         const current = currentById.get(n.id);
         const keep =
           dragged.current.get(n.id) ??
@@ -712,10 +627,12 @@ function Flow({
         // `setNodes` receives brand-new user-node objects on every status poll.
         // In React Flow, a new object without `measured` means "re-initialize
         // this node": its cached handle bounds are cleared until ResizeObserver
-        // measures it again. During that gap every connected EdgeWrapper returns
-        // null, unmounting the custom edge and restarting its WAAPI animation.
-        // Carrying the library-owned dimensions tells React Flow this is the
-        // same measured node, so handles and edge DOM survive ordinary polls.
+        // measures it again, and during that gap every connected EdgeWrapper
+        // returns null — so edges and their handles unmount/remount on ordinary
+        // polls, which reads as flicker and used to restart the (now removed)
+        // per-edge WAAPI trace. Carrying the library-owned dimensions tells
+        // React Flow this is the same measured node, so handles, edge DOM and
+        // dragged positions survive ordinary polls.
         return {
           ...n,
           position: keep ?? n.position,
@@ -723,8 +640,8 @@ function Flow({
         };
       });
     });
-    setEdges([...hierarchyEdges, ...laid.edges]);
-  }, [dag, leadTaskId, selectedId, layout, reorgNonce, showHierarchy, workerRows, attempts, config, setNodes, setEdges]);
+    setEdges([...hierarchyEdges, ...decoratedEdges]);
+  }, [laid, dag, leadTaskId, selectedId, layout, reorgNonce, showHierarchy, actualHarness, config, setNodes, setEdges]);
 
   // Auto-fit when the node count changes, so live status polls don't yank the
   // viewport while the user is inspecting (or dragging).
@@ -778,8 +695,6 @@ function Flow({
     );
   }
 
-  const allDone = dag.nodes.length > 0 && dag.nodes.every((n) => n.status === "completed");
-
   return (
     <>
       <ReactFlow
@@ -796,6 +711,14 @@ function Flow({
         nodesConnectable={false}
         elementsSelectable
         minZoom={0.2}
+        /* Cull to the viewport: a dense, zoomed-out graph mounts only what is
+           actually on screen (and still mounts whatever becomes visible while
+           panning/zooming), which is what keeps a big DAG from building every
+           node, filter and stamp at once. Visibility is computed from React
+           Flow's own viewport transform, so dragged positions, edge
+           connectivity, hierarchy links and the node `role="group"`/aria-label
+           accessibility are untouched — only off-screen DOM is skipped. */
+        onlyRenderVisibleElements
         proOptions={{ hideAttribution: true }}
         onNodeClick={(_, n) => onSelect(n.id === selectedId ? null : n.id)}
         onPaneClick={() => onSelect(null)}
@@ -803,7 +726,6 @@ function Flow({
         <Background variant={BackgroundVariant.Lines} gap={30} color="rgba(96,132,178,0.085)" />
         <Controls showInteractive={false} />
       </ReactFlow>
-      {allDone && <Confetti />}
     </>
   );
 }

@@ -265,6 +265,14 @@ export interface StartOpts {
    * Remote `current`/`new-child` never reach Orca — the adapter refuses them.
    */
   placementByTask?: Record<string, PlacementSpec>;
+  /**
+   * Dispatches this viewer positively stopped earlier. A fresh POST /api/run
+   * is an explicit resume decision, but only these durable identities may
+   * turn a stopped `blocked` Task back into a retry. Fleet state is still the
+   * authority: recovery re-validates that the exact Dispatch is settled and
+   * that no newer active Dispatch exists before acting.
+   */
+  resumeStoppedDispatchIds?: string[];
   /** Inbox wait per loop iteration. Tests shrink this; production blocks ~3s. */
   tickWaitMs?: number;
   /**
@@ -407,6 +415,8 @@ interface State {
   unownedDispatches: string[];
   /** Last startup recovery summary (Phase 4); null when this instance never recovered. */
   recovery: RecoverySummary | null;
+  /** Stopped Dispatch lineage to consume when its re-queued Task is placed. */
+  retryOfByTask: Map<string, string>;
   /** Recent check receipts for the live Chat trace, oldest first. */
   checks: CoordinatorCheckReceipt[];
   checkSequence: number;
@@ -454,6 +464,7 @@ const state: State = {
   lastStopReport: null,
   unownedDispatches: [],
   recovery: null,
+  retryOfByTask: new Map(),
   checks: [],
   checkSequence: 0,
 };
@@ -481,6 +492,7 @@ export function resetCoordinatorForTests(): void {
   state.lastStopReport = null;
   state.unownedDispatches = [];
   state.recovery = null;
+  state.retryOfByTask = new Map();
   state.checks = [];
   state.checkSequence = 0;
 }
@@ -597,6 +609,7 @@ export async function startCoordinator(opts: StartOpts): Promise<void> {
   state.cleanupDebt = [];
   state.unownedDispatches = [];
   state.recovery = null;
+  state.retryOfByTask = new Map();
   state.checks = [];
   state.checkSequence = 0;
   state.startedAt = Date.now();
@@ -714,6 +727,29 @@ async function recoverState(opts: StartOpts): Promise<void> {
     unverifiable: [],
     leftDecided: 0,
   };
+
+  // A user clicking Run after Stop is an explicit retry decision, not an
+  // automatic retry. Orca parks an interrupted Task as `blocked` and keeps the
+  // stopped Dispatch in worker history. Cross-check the viewer's durable stop
+  // identities against that live fleet history before re-queuing anything:
+  // ordinary failures, gate-blocked Tasks, unverifiable rows, and Tasks with a
+  // newer active Dispatch are deliberately left untouched.
+  const stoppedByViewer = new Set(opts.resumeStoppedDispatchIds ?? []);
+  const activeTaskIds = new Set(
+    rows.filter((row) => row.dispatchStatus === "dispatched").map((row) => row.taskId),
+  );
+  for (const task of tasks) {
+    if (task.status !== "blocked" || activeTaskIds.has(task.id)) continue;
+    const stopped = rows.find(
+      (row) =>
+        row.taskId === task.id &&
+        stoppedByViewer.has(row.dispatchId) &&
+        projectionOutcome(row) === "failed",
+    );
+    if (!stopped) continue;
+    await taskUpdate(task.id, "ready", runId, state.coordinatorHandle!);
+    state.retryOfByTask.set(task.id, stopped.dispatchId);
+  }
 
   const freshAttempt = (task: OrcaTask, harness: string): Attempt => ({
     taskId: task.id,
@@ -1677,9 +1713,13 @@ async function reconcile(): Promise<void> {
   const reserved = batch.map((task) => {
     const attempt = reserveAttempt(task, opts.harnessByTask[task.id] || opts.defaultHarness);
     state.attempts.set(task.id, attempt);
-    return { task, attempt };
+    const retryOf = state.retryOfByTask.get(task.id) ?? null;
+    state.retryOfByTask.delete(task.id);
+    return { task, attempt, retryOf };
   });
-  await Promise.all(reserved.map(({ task, attempt }) => startOne(task, attempt, opts, runId)));
+  await Promise.all(
+    reserved.map(({ task, attempt, retryOf }) => startOne(task, attempt, opts, runId, retryOf)),
+  );
 }
 
 /**

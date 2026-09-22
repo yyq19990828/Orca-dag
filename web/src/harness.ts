@@ -39,8 +39,8 @@ let flags = { customCommandsAllowed: false };
 
 // Readiness probe (GET /api/readiness): null until the first fetch resolves.
 // Like the flags, this is server-owned state the UI only renders; execution
-// controls across the app (Run button, gate resolutions, Clear tasks) disable
-// themselves off `executionEnabled` so an old runtime reads as view-only
+// controls across the app (Run button, gate resolutions) disable themselves
+// off `executionEnabled` so an old runtime reads as view-only
 // instead of failing confusingly mid-DAG.
 let readiness: OrcaReadiness | null = null;
 

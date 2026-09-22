@@ -418,7 +418,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
   /**
    * Resolved CLI + runtime version + whether execution is enabled (Phase 2).
    * Read-only, token-free: the SPA calls it once at boot to decide whether the
-   * Run/gate/reset controls render at all. On an Orca between 1.4.160 and
+   * Run/gate controls render at all. On an Orca between 1.4.160 and
    * 1.4.204 this reports view-only with an upgrade pointer instead of letting
    * the user start a DAG that would fail mid-flight.
    */
@@ -643,6 +643,22 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       // main execution surface, and the first thing a too-old runtime would
       // fail confusingly (unknown worker-start flags). Refuse with the reason.
       await requireExecutionEnabled();
+      // `worker-stop` parks an interrupted Task as blocked. A later Run click
+      // is the user's explicit resume decision, but only Dispatches for which
+      // this viewer observed a definitive `stopped` receipt may be retried.
+      // The coordinator cross-checks these identities against live fleet state
+      // before changing a Task; this audit metadata is a selector, never the
+      // lifecycle authority by itself.
+      const resumeStoppedDispatchIds = (await requestLedger.list().catch(() => []))
+        .filter(
+          (record) =>
+            record.operation === "worker-stop" &&
+            record.runId === runId &&
+            record.settledLocally === true &&
+            record.note === "viewer-observed stop state: stopped" &&
+            record.dispatchId,
+        )
+        .map((record) => record.dispatchId!);
       await startCoordinator({
         runId,
         harnessByTask: harnessByTask ?? {},
@@ -654,6 +670,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         retainByTask: retainByTask ?? undefined,
         environmentByTask: environmentByTask ?? undefined,
         placementByTask: placementByTask ?? undefined,
+        resumeStoppedDispatchIds,
         onActivity: async (event) => {
           await recordActivity(
             createViewerActivity({
@@ -1527,33 +1544,10 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
     }),
   );
 
-  /**
-   * Clear orchestration tasks.
-   *
-   * `orchestration reset` has NO `--run` flag: it wipes the whole local
-   * orchestration database, every Run at once. That used to be "clear my graph"
-   * back when tasks were global; it is now a much bigger hammer, so the caller
-   * has to say so explicitly.
-   */
-  app.post(
-    "/api/reset",
-    requireToken(policy),
-    route(async (req, res) => {
-      if (req.body?.confirmAllRuns !== true) {
-        res.status(400).json({
-          error:
-            "orca orchestration reset clears tasks in ALL local Runs — it has no --run scope. " +
-            "Retry with confirmAllRuns: true to confirm.",
-          code: "confirm_required",
-        });
-        return;
-      }
-      // Wiping tasks is as mutating as it gets — gated like the rest.
-      await requireExecutionEnabled();
-      await runOrca(["orchestration", "reset", "--tasks"]);
-      res.json({ ok: true });
-    }),
-  );
+  // There is deliberately no reset route: `orca orchestration reset --tasks`
+  // has no --run flag and wipes every local Run at once, so the viewer never
+  // wires it up. Redrawing a graph means creating a fresh Run (POST /api/runs);
+  // a POST to the retired reset path falls through to the unknown-route 404.
 
   /** Viewer config (harness choices, concurrency, layout, last Run). */
   app.get(

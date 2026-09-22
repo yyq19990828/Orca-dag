@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchRunStatus, startRun, stopRun } from "../api";
+import { useEffect, useRef, useState } from "react";
+import { startRun, stopRun } from "../api";
 import { DoodleSelect } from "./DoodleSelect";
 import { useDecisionDialog } from "./DecisionDialog";
 import {
@@ -39,10 +39,12 @@ export function ExecControls({
   taskIds,
   readyCount = 0,
   startingRunId = null,
+  status = null,
   workerHistoryLoading = false,
   workerHistoryError = null,
   onRunStarting,
   onRunStartFinished,
+  onRunStopped,
 }: {
   /** Run to execute. Mutations are Run-scoped since Orca 1.4.160. */
   runId: string;
@@ -51,11 +53,24 @@ export function ExecControls({
   readyCount?: number;
   /** Local App signal raised before POST /api/run can report a bound runId. */
   startingRunId?: string | null;
+  /**
+   * The process-local /api/run-status snapshot, owned by App — the ONLY
+   * periodic caller of that endpoint. This panel used to poll it itself,
+   * which duplicated every 2s request and kept firing while the tab was
+   * hidden; it now renders whatever App's (visibility-gated) poll provides.
+   */
+  status?: RunStatus | null;
   /** Worker history is the durable launch-lock source; uncertainty fails closed. */
   workerHistoryLoading?: boolean;
   workerHistoryError?: string | null;
   onRunStarting?: (runId: string) => void;
   onRunStartFinished?: (runId: string, status: RunStatus | null) => void;
+  /**
+   * Raised once after an explicit Stop succeeds so App can run a one-off
+   * reconciliation pass. A second fetch here would re-create the second
+   * poller this component just lost — receipts flow up, state flows down.
+   */
+  onRunStopped?: () => void | Promise<void>;
 }) {
   const dialog = useDecisionDialog();
   const config = useConfig();
@@ -68,7 +83,6 @@ export function ExecControls({
   // "Custom…" selected but not yet typed — a UI-only state until run()
   const [forceCustom, setForceCustom] = useState(false);
   const [custom, setCustom] = useState(storedIsCustom ? config.defaultHarness : "");
-  const [status, setStatus] = useState<RunStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const taskIdsRef = useRef(taskIds);
@@ -80,20 +94,9 @@ export function ExecControls({
   }, [storedIsCustom, config.defaultHarness]);
 
   const defHarness = forceCustom || storedIsCustom ? CUSTOM : config.defaultHarness;
-
-  const poll = useCallback(async () => {
-    try {
-      setStatus(await fetchRunStatus());
-    } catch {
-      /* ignore transient */
-    }
-  }, []);
-
-  useEffect(() => {
-    poll();
-    const t = window.setInterval(poll, 2000);
-    return () => window.clearInterval(t);
-  }, [poll]);
+  // `status` is App state fed by its single visibility-gated /api/run-status
+  // poll (plus the start receipt and post-stop reconciliation callbacks) — no
+  // interval lives in this component.
 
   // The status endpoint is process-local and can describe another selected
   // Run. Only a matching runId grants this panel running/stop authority.
@@ -223,7 +226,6 @@ export function ExecControls({
         placementMap(taskIdsRef.current),
       );
       startedStatus = s;
-      setStatus(s);
     } catch (e) {
       setErr(String((e as Error).message ?? e));
     } finally {
@@ -238,7 +240,10 @@ export function ExecControls({
     setErr(null);
     try {
       await stopRun();
-      await poll();
+      // One-off reconciliation through App (which owns run-status), so the
+      // stop report and running flag settle immediately without this panel
+      // ever owning a fetch loop of its own.
+      await onRunStopped?.();
     } catch (e) {
       setErr(String((e as Error).message ?? e));
     } finally {
