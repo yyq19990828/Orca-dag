@@ -51,6 +51,30 @@ const COMMUNICATION_MIN_WIDTH = 380;
 const COMMUNICATION_MAX_WIDTH = 820;
 const CANVAS_MIN_WIDTH = 320;
 
+/** Structural equality via JSON — the poll guards' only concern is "would
+ *  rendering this change anything the user can see", and it always answers. */
+function sameJson(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * Whether this viewer tab can actually be seen. Orca's embedded browser
+ * disables background-tab timer throttling (IntensiveWakeUpThrottling is off
+ * in its launch flags), so a hidden tab keeps firing 2s polls at full speed
+ * and re-rasterizing feTurbulence regions nobody is watching — one of the
+ * heaviest costs this page has. Callers tear their intervals down while
+ * hidden and re-arm with an immediate refresh on return.
+ */
+function usePageVisible(): boolean {
+  const [visible, setVisible] = useState(() => document.visibilityState === "visible");
+  useEffect(() => {
+    const onChange = () => setVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", onChange);
+    return () => document.removeEventListener("visibilitychange", onChange);
+  }, []);
+  return visible;
+}
+
 /**
  * Hand-drawn wobble filters — the whole "drawn with a crayon" illusion.
  *  - #crayon(-b/-c): a coarse waxy waver for node outlines, fills and stamps
@@ -336,7 +360,11 @@ export default function App() {
         return;
       }
       dagAppliedSeq.current = seq;
-      setDag(next);
+      // A re-render of the React Flow canvas re-rasterizes every feTurbulence
+      // filter region (the crayon texture) — the most expensive thing this
+      // page does. Identical payloads must keep the SAME state object so
+      // React bails out and a no-op poll never repaints the canvas.
+      setDag((prev) => (sameJson(prev, next) ? prev : next));
       setConnError(null);
     } catch (e) {
       if (selectedRunRef.current === requestedRun && seq >= dagAppliedSeq.current) {
@@ -345,13 +373,21 @@ export default function App() {
     }
   }, [runId]);
 
+  // The whole page goes silent while hidden (Orca's embedded browser does
+  // NOT throttle background-tab timers — verified in its launch flags), so
+  // the 2s polls would otherwise burn a full core painting filters nobody
+  // can see. Visibility loss tears the intervals down; coming back tears
+  // them straight back up with an immediate refresh.
+  const pageVisible = usePageVisible();
+
   useEffect(() => {
+    if (!pageVisible) return;
     refresh();
     timer.current = window.setInterval(refresh, POLL_MS);
     return () => {
       if (timer.current) window.clearInterval(timer.current);
     };
-  }, [refresh]);
+  }, [refresh, pageVisible]);
 
   const refreshExecutionState = useCallback(async () => {
     const requestedRun = runId;
@@ -386,7 +422,10 @@ export default function App() {
         startedByRun.current.set(requestedRun, known);
         if (changed) setStartedRevision((n) => n + 1);
         setWorkerHistoryError(null);
-        setWorkerRows(workersResult.value);
+        // Keep the previous array object on no-op polls — WorkerPanel and
+        // the DAG canvas re-render per identity, and identical fleet rows
+        // must not repaint anything.
+        setWorkerRows((prev) => (sameJson(prev, workersResult.value) ? prev : workersResult.value));
       } else {
         setWorkerHistoryError(String((workersResult.reason as Error)?.message ?? workersResult.reason));
         // keep the last good rows visible alongside the error
@@ -397,11 +436,12 @@ export default function App() {
     // the latest response, then apply it below only when its runId matches.
     if (statusResult.status === "fulfilled" && seq >= statusAppliedSeq.current) {
       statusAppliedSeq.current = seq;
-      setRunStatus(statusResult.value);
+      setRunStatus((prev) => (sameJson(prev, statusResult.value) ? prev : statusResult.value));
     }
   }, [runId]);
 
   useEffect(() => {
+    if (!pageVisible) return;
     setWorkerHistoryLoading(Boolean(runId));
     setWorkerHistoryError(null);
     setWorkerRows([]); // a Run switch must not show the previous Run's workers
@@ -410,7 +450,7 @@ export default function App() {
     return () => {
       if (executionTimer.current) window.clearInterval(executionTimer.current);
     };
-  }, [refreshExecutionState, runId]);
+  }, [refreshExecutionState, runId, pageVisible]);
 
   // switching Run invalidates the current selection
   const pickRun = useCallback((id: string) => {

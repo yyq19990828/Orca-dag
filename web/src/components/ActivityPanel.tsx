@@ -91,10 +91,18 @@ export function ActivityPanel({
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
   const requestSeq = useRef(0);
+  // Identical snapshots must not reach App state: every apply re-renders the
+  // Chat panel and re-runs its timeline memoization. Compare by JSON — the
+  // projection only produces a new object when something actually changed,
+  // but SSE re-pushes the current snapshot on its own cadence too.
+  const lastSnapshotJson = useRef<string>("");
 
   const applySnapshot = useCallback(
     (next: ActivitySnapshot) => {
       if (next.runId !== runId) return;
+      const json = JSON.stringify(next);
+      if (json === lastSnapshotJson.current) return;
+      lastSnapshotJson.current = json;
       setSnapshot(next);
       onPendingCount(next.pendingCount);
       onSnapshot?.(next);
@@ -122,6 +130,9 @@ export function ActivityPanel({
   useEffect(() => {
     setSnapshot({ ...EMPTY, runId });
     onSnapshot?.({ ...EMPTY, runId });
+    // the fingerprint must not outlive the Run switch, or a quiet Run whose
+    // fresh snapshot matches the pre-switch bytes would be skipped as a no-op
+    lastSnapshotJson.current = "";
     setDrafts({});
     setTransport("connecting");
     onPendingCount(0);
@@ -129,13 +140,29 @@ export function ActivityPanel({
 
     let alive = true;
     let pollTimer: number | null = null;
-    const source = new EventSource(`/api/activity/stream?run=${encodeURIComponent(runId)}`);
+    // While the tab is hidden, SSE pushes and polls are dropped (a hidden
+    // tab cannot show them, and Orca's embedded browser never throttles the
+    // timers behind them). The first visible transition re-syncs.
+    let dirtyWhileHidden = false;
+    const onHide = () => {
+      if (document.visibilityState !== "visible" || !dirtyWhileHidden) return;
+      dirtyWhileHidden = false;
+      void refresh();
+    };
+    const markDirtyIfHidden = () => {
+      if (document.visibilityState === "visible") return false;
+      dirtyWhileHidden = true;
+      return true;
+    };
+    document.addEventListener("visibilitychange", onHide);
+
+    let source: EventSource | null = new EventSource(`/api/activity/stream?run=${encodeURIComponent(runId)}`);
     void refresh();
     source.onopen = () => {
       if (alive) setTransport("live");
     };
     source.onmessage = (message) => {
-      if (!alive) return;
+      if (!alive || markDirtyIfHidden()) return;
       try {
         applySnapshot(JSON.parse(message.data) as ActivitySnapshot);
         setTransport("live");
@@ -149,12 +176,15 @@ export function ActivityPanel({
       // gives the user a stable 2s path through proxies that buffer SSE.
       source.close();
       setTransport("polling");
-      void refresh();
-      pollTimer = window.setInterval(() => void refresh(), 2_000);
+      if (!markDirtyIfHidden()) void refresh();
+      pollTimer = window.setInterval(() => {
+        if (!markDirtyIfHidden()) void refresh();
+      }, 2_000);
     };
     return () => {
       alive = false;
-      source.close();
+      document.removeEventListener("visibilitychange", onHide);
+      source?.close();
       if (pollTimer !== null) window.clearInterval(pollTimer);
     };
   }, [applySnapshot, onPendingCount, onSnapshot, refresh, runId]);
