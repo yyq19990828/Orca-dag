@@ -8,8 +8,16 @@
  * at the HTTP boundary and again as the last gate before Orca runs — these
  * checks exist so the UI can explain a refusal before it happens, not so it
  * can become a second authority.
+ *
+ * Every user-visible string here goes through the shared translator with the
+ * plain (non-reactive) `t()`: this module is not a React component, and every
+ * caller is one that already subscribes to the language store via `useT()`,
+ * so a language switch re-renders the caller and re-runs these builders. The
+ * "kind · payload" shapes are structural — only the words are translated,
+ * and selectors/names/repos are echoed exactly as discovered.
  */
 
+import { t, type TranslationKey } from "./i18n";
 import type { DagEdge, LaneSeedPlacement, PlacementSpec, WorktreeLaneSpec } from "./types";
 
 /** Explicit worktree names (`--name`): a short single token, not a path. */
@@ -31,31 +39,36 @@ export function isCreationKind(
 
 /** Human one-liner for a placement (node panel summaries, lane labels). */
 export function placementLabel(p: PlacementSpec | null): string {
-  if (!p) return "Current workspace";
+  if (!p) return t("placement.label.current");
   switch (p.kind) {
     case "current":
-      return "Current workspace";
+      return t("placement.label.current");
     case "existing":
-      return `Existing workspace (${p.selector})`;
+      return t("placement.label.existing", { selector: p.selector });
     case "new-child":
-      return `New child worktree${p.name ? ` “${p.name}”` : " (derived name)"}`;
+      return p.name
+        ? t("placement.label.newChildNamed", { name: p.name })
+        : t("placement.label.newChildDerived");
     case "new-top-level":
-      return `New top-level worktree in ${p.repo}${p.name ? ` · “${p.name}”` : ""}`;
+      // The named variant is one template, not a suffix splice: languages may
+      // order the repo and the name differently.
+      return p.name
+        ? t("placement.label.newTopLevelNamed", { repo: p.repo, name: p.name })
+        : t("placement.label.newTopLevel", { repo: p.repo });
   }
 }
 
+/** kind -> key, explicit so a new kind fails tsc instead of falling through. */
+const PLACEMENT_KIND_KEY: Record<PlacementSpec["kind"], TranslationKey> = {
+  current: "placement.kind.current",
+  existing: "placement.kind.existing",
+  "new-child": "placement.kind.newChild",
+  "new-top-level": "placement.kind.newTopLevel",
+};
+
 /** Short mode label without the payload (mode pickers, badges). */
 export function placementKindLabel(kind: PlacementSpec["kind"]): string {
-  switch (kind) {
-    case "current":
-      return "Current";
-    case "existing":
-      return "Existing";
-    case "new-child":
-      return "New child";
-    case "new-top-level":
-      return "New top-level";
-  }
+  return t(PLACEMENT_KIND_KEY[kind]);
 }
 
 /**
@@ -68,19 +81,19 @@ export function creationFieldProblems(p: PlacementSpec): string[] {
   if (!isCreationKind(p)) return [];
   const problems: string[] = [];
   if (p.name !== undefined && !PLACEMENT_NAME_PATTERN.test(p.name)) {
-    problems.push("Name must be a short token: letters/digits, then . _ - allowed (max 64).");
+    problems.push(t("placementProblem.name"));
   }
   if (p.baseBranch !== undefined) {
     const b = p.baseBranch;
     if (!BASE_BRANCH_PATTERN.test(b) || b.includes("..") || b.endsWith("/") || b.endsWith(".")) {
-      problems.push("Base branch must look like a git ref (no leading dash, “..”, or trailing “/”/“.”).");
+      problems.push(t("placementProblem.baseBranch"));
     }
   }
   if (p.displayName !== undefined && p.displayName.length > DISPLAY_NAME_MAX) {
-    problems.push(`Display name is limited to ${DISPLAY_NAME_MAX} characters.`);
+    problems.push(t("placementProblem.displayName", { n: DISPLAY_NAME_MAX }));
   }
   if (p.comment !== undefined && p.comment.length > COMMENT_MAX) {
-    problems.push(`Comment is limited to ${COMMENT_MAX} characters.`);
+    problems.push(t("placementProblem.comment", { n: COMMENT_MAX }));
   }
   return problems;
 }
@@ -124,14 +137,14 @@ export function lanePlanProblems(
   for (const [taskId, laneId] of Object.entries(laneByTask)) {
     if (!laneId) continue;
     if (!worktreeLanes[laneId]) {
-      problems.push(`Task ${taskId} references lane ${laneId}, which no longer exists.`);
+      problems.push(t("laneProblem.missing", { task: taskId, lane: laneId }));
       continue;
     }
     if (placementByTask[taskId]) {
-      problems.push(`Task ${taskId} is in lane ${laneId} and also carries a direct placement — remove one.`);
+      problems.push(t("laneProblem.directPlacement", { task: taskId, lane: laneId }));
     }
     if (environmentByTask[taskId]) {
-      problems.push(`Task ${taskId} is in a local lane and also pinned to a saved environment — remove one.`);
+      problems.push(t("laneProblem.environment", { task: taskId }));
     }
     const list = members.get(laneId) ?? [];
     list.push(taskId);
@@ -172,17 +185,23 @@ export function lanePlanProblems(
         const aBeforeB = canReach(a, b);
         const bBeforeA = canReach(b, a);
         if (!aBeforeB && !bBeforeA) {
-          problems.push(
-            `Lane ${laneId}: ${a} and ${b} share a workspace but no dependency orders them — ` +
-              `add a dependency between them or move one out of the lane.`,
-          );
+          problems.push(t("laneProblem.unordered", { lane: laneId, a, b }));
         } else if (aBeforeB && bBeforeA) {
-          problems.push(`Lane ${laneId}: ${a} and ${b} depend on each other in a cycle.`);
+          problems.push(t("laneProblem.cycle", { lane: laneId, a, b }));
         }
       }
     }
   }
   return problems;
+}
+
+/**
+ * The prefix every lane-scoped problem starts with ("Lane <id>:"). Callers
+ * that show only ONE lane's problems filter the preflight list by it — going
+ * through this helper keeps the filter correct in every language.
+ */
+export function laneProblemPrefix(laneId: string): string {
+  return t("laneProblem.lanePrefix", { lane: laneId });
 }
 
 /** The lane seed of `spec`, summarized for pickers and chips. */

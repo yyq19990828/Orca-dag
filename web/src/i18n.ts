@@ -15,6 +15,14 @@ export type TranslationKey = keyof typeof en;
 export type Dict = Record<TranslationKey, string>;
 export type Params = Record<string, string | number>;
 
+/**
+ * The translator signature shared by `t` and `useT()`. Non-React modules
+ * (placement.ts label/error builders) take it as a parameter instead of
+ * importing the store, so the caller passes whatever it already has and the
+ * reactivity story stays with the component.
+ */
+export type Translator = (key: TranslationKey, params?: Params) => string;
+
 // Readonly at both levels: nothing may add a language or rewrite a key at
 // runtime (tests included — the parity guarantee lives in the type system).
 export const TRANSLATIONS: Readonly<Record<Lang, Readonly<Dict>>> = { en, zh };
@@ -57,7 +65,7 @@ export function useLang(): Lang {
 }
 
 /** Subscribe-and-return-the-translator hook — the one-line per-component wiring. */
-export function useT(): (key: TranslationKey, params?: Params) => string {
+export function useT(): Translator {
   useLang();
   return t;
 }

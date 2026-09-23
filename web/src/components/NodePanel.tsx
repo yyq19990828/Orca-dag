@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { fetchEnvironments, fetchModels, fetchWorkerDetail } from "../api";
 import { formatDateTime } from "../format";
-import { useT } from "../i18n";
-import { lanePlanProblems, laneLabel } from "../placement";
+import { useT, type Translator } from "../i18n";
+import { lanePlanProblems, laneLabel, laneProblemPrefix } from "../placement";
 import { workerWorkspaceLabel } from "../workerWorkspace";
 import {
   effectiveHarness,
@@ -48,12 +48,11 @@ const INHERIT = "__inherit__";
 const CUSTOM = "__custom__";
 const NEW_LANE = "__new_lane__";
 const KNOWN = HARNESSES as readonly string[];
-const CUSTOM_OFF_HINT = "Custom commands are disabled — start the viewer with ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1";
 
 /** Short seed summary for a lane picker row (never the raw placement JSON). */
-function laneSpecOf(laneId: string): string {
+function laneSpecOf(laneId: string, t: Translator): string {
   const spec = getLaneSpec(laneId);
-  return spec ? laneLabel(spec) : "(no seed — pick a placement below)";
+  return spec ? laneLabel(spec) : t("node.laneNoSeed");
 }
 
 interface WorkerReportResult {
@@ -102,6 +101,7 @@ function resultTime(value: string | undefined): string | null {
 }
 
 function ResultSummary({ raw }: { raw: string }) {
+  const t = useT();
   const report = parseWorkerReport(raw);
   if (!report) return <p className="node-panel__result-text">{raw}</p>;
 
@@ -112,30 +112,36 @@ function ResultSummary({ raw }: { raw: string }) {
     : [];
   const completedAt = resultTime(report.completedAt);
   return (
-    <section className="node-result" data-outcome={outcome} aria-label="Stage result summary">
+    <section className="node-result" data-outcome={outcome} aria-label={t("report.resultAria")}>
       <div className="node-result__head">
         <span className="node-result__outcome">{outcome.replaceAll("_", " ")}</span>
         {completedAt && <time dateTime={report.completedAt}>{completedAt}</time>}
       </div>
-      <strong>{report.subject?.trim() || "Worker report"}</strong>
+      <strong>{report.subject?.trim() || t("report.workerReport")}</strong>
       {body?.text && <p>{body.text}</p>}
       {files.length > 0 && (
         <div className="node-result__files">
-          <span>{files.length} file{files.length === 1 ? "" : "s"} modified</span>
+          <span>
+            {files.length === 1
+              ? t("report.filesModifiedOne", { n: files.length })
+              : t("report.filesModifiedMany", { n: files.length })}
+          </span>
           <ul>
             {files.map((file) => <li key={file}><code>{file}</code></li>)}
           </ul>
         </div>
       )}
-      {report.reportPath && <p className="node-result__report">Report: <code>{report.reportPath}</code></p>}
+      {report.reportPath && (
+        <p className="node-result__report">{t("report.reportLabel")} <code>{report.reportPath}</code></p>
+      )}
       <details className="node-result__details">
-        <summary>{body?.clipped ? "Full report and technical details" : "Technical details"}</summary>
+        <summary>{t(body?.clipped ? "report.fullDetails" : "report.details")}</summary>
         {body?.clipped && <p>{report.body}</p>}
         <dl>
-          {report.reportedBy && <><dt>Reported by</dt><dd><code>{report.reportedBy}</code></dd></>}
-          {!report.reportedBy && report.completedBy && <><dt>Completed by</dt><dd><code>{report.completedBy}</code></dd></>}
-          {report.messageId && <><dt>Message</dt><dd><code>{report.messageId}</code></dd></>}
-          {report.provenance && <><dt>Provenance</dt><dd>{report.provenance.replaceAll("_", " ")}</dd></>}
+          {report.reportedBy && <><dt>{t("report.reportedBy")}</dt><dd><code>{report.reportedBy}</code></dd></>}
+          {!report.reportedBy && report.completedBy && <><dt>{t("report.completedBy")}</dt><dd><code>{report.completedBy}</code></dd></>}
+          {report.messageId && <><dt>{t("report.message")}</dt><dd><code>{report.messageId}</code></dd></>}
+          {report.provenance && <><dt>{t("report.provenance")}</dt><dd>{report.provenance.replaceAll("_", " ")}</dd></>}
         </dl>
         <pre>{JSON.stringify(report, null, 2)}</pre>
       </details>
@@ -218,15 +224,15 @@ export function NodePanel({
     permanentlyLocked || fallbackPermanentLock || temporarilyLocked || coordinatorStarting || historyLocked;
   const permanentLock = permanentlyLocked || fallbackPermanentLock;
   const lockReason = permanentLock
-    ? "Launch settings locked after the first Dispatch. Safe retry preserves the original launch plan."
+    ? t("node.lockAfterDispatch")
     : temporarilyLocked
-      ? "Launch settings are frozen while this Run is executing. Stop the coordinator to edit Tasks that have not started."
+      ? t("exec.lockRunning")
       : coordinatorStarting
-        ? "Launch settings are frozen while this Run is starting. Wait for coordinator binding and recovery to finish before editing."
+        ? t("exec.lockStarting")
         : workerHistoryError
-          ? "Launch settings are locked while Dispatch history could not be verified. Wait for worker history to recover before editing."
+          ? t("exec.lockHistoryError")
           : workerHistoryLoading
-            ? "Launch settings are locked while Dispatch history is loading. Wait for worker history to finish before editing."
+            ? t("exec.lockHistoryLoading")
       : null;
   const stored = getNodeHarness(node.id);
   const [sel, setSel] = useState(stored === null ? INHERIT : KNOWN.includes(stored) ? stored : CUSTOM);
@@ -293,7 +299,7 @@ export function NodePanel({
     config.placementByTask,
     config.environmentByTask,
     edges,
-  ).filter((p) => laneId && p.startsWith(`Lane ${laneId}:`));
+  ).filter((p) => laneId && p.startsWith(laneProblemPrefix(laneId)));
 
   function pickEnvironment(v: string) {
     if (launchLocked) return;
@@ -387,7 +393,7 @@ export function NodePanel({
 
   return (
     <aside className="node-panel">
-      <button className="node-panel__close" onClick={onClose} aria-label="Close">
+      <button className="node-panel__close" onClick={onClose} aria-label={t("dialog.close")}>
         ✕
       </button>
 
@@ -401,7 +407,7 @@ export function NodePanel({
       </div>
 
       {onOpenOperations && (readiness?.pendingGateIds.length || failedStart || hasWorkerHistory) ? (
-        <nav className="node-panel__actions" aria-label="Stage operations">
+        <nav className="node-panel__actions" aria-label={t("node.operationsAria")}>
           {readiness?.pendingGateIds.map((gateId) => (
             <button
               key={gateId}
@@ -409,7 +415,7 @@ export function NodePanel({
               className="node-panel__action"
               onClick={() => onOpenOperations({ kind: "gate", id: gateId })}
             >
-              Review gate
+              {t("node.reviewGate")}
             </button>
           ))}
           {failedStart && (
@@ -418,7 +424,7 @@ export function NodePanel({
               className="node-panel__action"
               onClick={() => onOpenOperations({ kind: "recovery", id: node.id })}
             >
-              Review failed start
+              {t("node.reviewFailedStart")}
             </button>
           )}
           {hasWorkerHistory && (
@@ -427,7 +433,7 @@ export function NodePanel({
               className="node-panel__action"
               onClick={() => onOpenOperations({ kind: "worker", id: node.id })}
             >
-              View worker history
+              {t("node.viewWorkerHistory")}
             </button>
           )}
         </nav>
@@ -441,18 +447,20 @@ export function NodePanel({
         <div className="node-panel__field node-panel__scheduler">
           {parentLabel && (
             <p className="node-panel__relation">
-              <span aria-hidden="true">┄</span> Sub-stage of <strong>{parentLabel}</strong>
-              <span className="node-panel__hint"> ownership only — not a dependency</span>
+              <span aria-hidden="true">┄</span> {t("node.subStageOf")} <strong>{parentLabel}</strong>
+              <span className="node-panel__hint"> {t("node.subStageHint")}</span>
             </p>
           )}
           {childLabels.length > 0 && (
             <p className="node-panel__relation">
-              <span aria-hidden="true">┄</span> Parent of {childLabels.length}{" "}
-              {childLabels.length === 1 ? "sub-stage" : "sub-stages"}: {childLabels.join(", ")}
+              <span aria-hidden="true">┄</span>{" "}
+              {childLabels.length === 1
+                ? t("node.parentOfOne", { n: childLabels.length, list: childLabels.join(", ") })
+                : t("node.parentOfMany", { n: childLabels.length, list: childLabels.join(", ") })}
             </p>
           )}
           {readiness && readiness.reasons.length > 0 && (
-            <ul className="node-panel__readiness" aria-label="Why this stage is not running yet">
+            <ul className="node-panel__readiness" aria-label={t("node.readinessAria")}>
               {readiness.reasons.map((reason, i) => (
                 <li key={readiness.codes[i] ?? i} data-code={readiness.codes[i] ?? "unknown"}>
                   {reason}
@@ -461,7 +469,7 @@ export function NodePanel({
             </ul>
           )}
           {readiness && readiness.runnable && readiness.reasons.length === 0 && (
-            <p className="node-panel__relation node-panel__relation--ready">Ready — dispatchable now.</p>
+            <p className="node-panel__relation node-panel__relation--ready">{t("node.readyDispatchable")}</p>
           )}
         </div>
       )}
@@ -472,17 +480,17 @@ export function NodePanel({
             <div className="node-panel__lead-state">
               <span aria-hidden="true">★</span>
               <span>
-                <strong>Lead stage</strong>
-                <small>Semantic main-agent ownership for Run {runId}</small>
+                <strong>{t("node.leadStage")}</strong>
+                <small>{t("node.leadStageHint", { id: runId })}</small>
               </span>
             </div>
             <button
               type="button"
               className="node-panel__lead-clear"
               onClick={() => onLeadChange(null)}
-              aria-label={`Clear lead stage for ${node.label}`}
+              aria-label={t("node.clearLeadAria", { label: node.label })}
             >
-              Clear
+              {t("node.clear")}
             </button>
           </>
         ) : (
@@ -491,21 +499,21 @@ export function NodePanel({
             className="node-panel__lead-mark"
             onClick={() => onLeadChange(node.id)}
             aria-pressed="false"
-            title="Mark this Task as the semantic lead stage; this does not change Orca coordinator authority"
+            title={t("node.markLeadTitle")}
           >
-            <span aria-hidden="true">☆</span> Mark as lead stage
+            <span aria-hidden="true">☆</span> {t("node.markLead")}
           </button>
         )}
       </div>
 
       {workerHistoryLoading && (
         <div className="node-panel__history" role="status">
-          Checking Dispatch history…
+          {t("node.checkingHistory")}
         </div>
       )}
       {workerHistoryError && (
         <div className="node-panel__history node-panel__history--warn" role="status">
-          Could not verify Dispatch history; launch settings remain locked until verification recovers.
+          {t("node.historyUnverified")}
         </div>
       )}
 
@@ -516,17 +524,17 @@ export function NodePanel({
         </div>
       )}
 
-      <section className="node-panel__group" aria-label="Agent settings">
-        <h4 className="node-panel__group-title">Agent</h4>
+      <section className="node-panel__group" aria-label={t("node.agentGroupAria")}>
+        <h4 className="node-panel__group-title">{t("node.agentGroup")}</h4>
         <div className="node-panel__field">
-          <span className="node-panel__key">Harness (which agent runs this node)</span>
+          <span className="node-panel__key">{t("node.harnessKey")}</span>
           <DoodleSelect
             value={sel}
             onChange={pick}
             disabled={launchLocked}
-            title={launchLocked ? lockReason ?? "Launch settings are locked" : undefined}
+            title={launchLocked ? lockReason ?? t("node.launchLockedTitle") : undefined}
             options={[
-              { value: INHERIT, label: `Default (${getDefaultHarness()})` },
+              { value: INHERIT, label: t("node.defaultHarnessOption", { harness: getDefaultHarness() }) },
               ...HARNESSES.map((h) => ({ value: h, label: h })),
               // Same policy as the toolbar: no "Custom…" unless the server allows
               // it — but a stored custom value stays visible (and clearable via
@@ -535,7 +543,7 @@ export function NodePanel({
                 ? [
                     {
                       value: CUSTOM,
-                      label: customOk ? "Custom…" : "Custom (disabled)",
+                      label: customOk ? t("exec.custom") : t("exec.customDisabled"),
                       disabled: !customOk,
                       hint: customOk ? undefined : "ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1",
                     },
@@ -547,13 +555,13 @@ export function NodePanel({
             <input
               className="node-panel__custom"
               value={custom}
-              placeholder="command, e.g. aider"
+              placeholder={t("node.customPlaceholder")}
               onChange={(e) => pickCustom(e.target.value)}
               disabled={!customOk || launchLocked}
             />
           )}
           {sel === CUSTOM && !customOk && (
-            <span className="node-panel__hint">{CUSTOM_OFF_HINT}</span>
+            <span className="node-panel__hint">{t("exec.customOffHint")}</span>
           )}
         </div>
 
@@ -562,7 +570,8 @@ export function NodePanel({
         {picker !== "none" && peerModelEffort && (
           <div className="node-panel__field">
             <span className="node-panel__key">
-              Model ({effHarness}){model ? null : " · default"}
+              {t("node.modelKey", { harness: effHarness })}
+              {model ? null : t("node.modelDefaultSuffix")}
             </span>
             {picker === "select" ? (
               <DoodleSelect
@@ -573,7 +582,7 @@ export function NodePanel({
                 disabled={launchLocked}
                 loading={openCodeModels === null}
                 options={[
-                  { value: "", label: "(default model)" },
+                  { value: "", label: t("node.defaultModel") },
                   ...(openCodeModels ?? []).map((m) => ({ value: m, label: m })),
                 ]}
               />
@@ -581,7 +590,9 @@ export function NodePanel({
               <input
                 className="node-panel__custom"
                 value={model ?? ""}
-                placeholder={`model name, e.g. ${effHarness === "claude" ? "opus" : effHarness === "codex" ? "o3" : "<model>"}`}
+                placeholder={t("node.modelPlaceholder", {
+                  example: effHarness === "claude" ? "opus" : effHarness === "codex" ? "o3" : "<model>",
+                })}
                 onChange={(e) => setNodeModel(node.id, e.target.value.trim() || null)}
                 disabled={launchLocked}
               />
@@ -593,7 +604,7 @@ export function NodePanel({
             supported harnesses. Clearing the model clears stored effort. */}
         {model && EFFORT_SUPPORTED.has(effHarness) && peerModelEffort && (
           <div className="node-panel__field">
-            <span className="node-panel__key">Effort ({effHarness})</span>
+            <span className="node-panel__key">{t("node.effortKey", { harness: effHarness })}</span>
             <DoodleSelect
               value={getNodeEffort(node.id) ?? ""}
               onChange={(v) => {
@@ -601,26 +612,38 @@ export function NodePanel({
               }}
               disabled={launchLocked}
               options={[
-                { value: "", label: "(default effort)" },
+                { value: "", label: t("node.defaultEffort") },
                 ...EFFORT_LEVELS.map((e) => ({ value: e, label: e })),
               ]}
             />
-            <span className="node-panel__hint">Reasoning effort for the selected model.</span>
+            <span className="node-panel__hint">{t("node.effortHint")}</span>
           </div>
         )}
       </section>
 
-      <section className="node-panel__group" aria-label="Workspace settings">
-        <h4 className="node-panel__group-title">Workspace</h4>
+      <section className="node-panel__group" aria-label={t("node.workspaceGroupAria")}>
+        <h4 className="node-panel__group-title">{t("node.workspaceGroup")}</h4>
         {dispatchId && (
           <div className="node-panel__field node-panel__actual-worktree">
-            <span className="node-panel__key">Worktree used by this Dispatch</span>
+            <span className="node-panel__key">{t("node.actualWorktreeKey")}</span>
             {actualWorktree ? <code>{actualWorktree}</code> : (
-              <span>{worktreeLoading ? "Loading recorded worktree…" : worktreeError ? "Could not load worktree evidence." : "Worktree not reported by Orca."}</span>
+              <span>
+                {worktreeLoading
+                  ? t("node.worktreeLoading")
+                  : worktreeError
+                    ? t("node.worktreeError")
+                    : t("node.worktreeNotReported")}
+              </span>
             )}
-            {actualBranch && <span className="node-panel__hint">Branch: {actualBranch.replace(/^refs\/heads\//, "")}</span>}
+            {actualBranch && (
+              <span className="node-panel__hint">
+                {t("node.branchLabel", { branch: actualBranch.replace(/^refs\/heads\//, "") })}
+              </span>
+            )}
             {taskWorkers.length > 1 && (
-              <span className="node-panel__hint">Dispatch {dispatchId} · other attempts are in worker history.</span>
+              <span className="node-panel__hint">
+                {t("node.dispatchOtherAttempts", { id: dispatchId })}
+              </span>
             )}
           </div>
         )}
@@ -629,19 +652,15 @@ export function NodePanel({
             the zero-configuration default). List contents come only from
             `orca environment list`; nothing is ever invented client-side. */}
         <div className="node-panel__field">
-          <span className="node-panel__key">Environment (which server executes this node)</span>
+          <span className="node-panel__key">{t("node.environmentKey")}</span>
           <DoodleSelect
             value={envId ?? ""}
             onChange={pickEnvironment}
             disabled={launchLocked || Boolean(laneId)}
-            title={
-              laneId
-                ? "This task runs in a local workspace lane — remove it from the lane to pin a remote environment."
-                : undefined
-            }
+            title={laneId ? t("node.environmentLaneTitle") : undefined}
             loading={envs === null}
             options={[
-              { value: "", label: `Local (this server)` },
+              { value: "", label: t("node.environmentLocal") },
               ...(envs ?? []).map((e) => ({
                 value: e.id,
                 label: e.name === e.id ? e.id : `${e.name} (${e.id})`,
@@ -649,14 +668,10 @@ export function NodePanel({
             ]}
           />
           {envId && envs !== null && !selectedEnv && (
-            <span className="node-panel__hint">
-              Saved environment “{envId}” is no longer listed — re-discover it or switch back to Local.
-            </span>
+            <span className="node-panel__hint">{t("node.environmentMissing", { id: envId })}</span>
           )}
           {envId && selectedEnv && !selectedEnv.peer.modelEffort && (
-            <span className="node-panel__hint">
-              This peer does not advertise model/effort — those controls are hidden for this node.
-            </span>
+            <span className="node-panel__hint">{t("node.environmentNoModelEffort")}</span>
           )}
         </div>
 
@@ -666,19 +681,19 @@ export function NodePanel({
             no lane), and the ordering preflight explains — before any mutation
             — why an unordered set of tasks cannot share a lane. */}
         <div className="node-panel__field">
-          <span className="node-panel__key">Workspace lane (serial tasks sharing one workspace)</span>
+          <span className="node-panel__key">{t("node.laneKey")}</span>
           <DoodleSelect
             value={laneId ?? ""}
             onChange={pickLane}
             disabled={launchLocked}
             options={[
-              { value: "", label: "(no lane — per-task placement)" },
+              { value: "", label: t("node.laneNone") },
               ...allLaneIds().map((id) => ({
                 value: id,
-                label: `${id} · ${laneSpecOf(id)}`,
+                label: `${id} · ${laneSpecOf(id, t)}`,
                 hint: id,
               })),
-              { value: NEW_LANE, label: "＋ New lane…", disabled: launchLocked },
+              { value: NEW_LANE, label: t("node.newLane"), disabled: launchLocked },
             ]}
           />
           {laneId && laneSpec && (
@@ -686,7 +701,7 @@ export function NodePanel({
               <PlacementEditor
                 scope="lane"
                 envId={null}
-                title="Lane placement (shared by every task in the lane)"
+                title={t("node.lanePlacementTitle")}
                 value={laneSpec.placement}
                 onChange={(p) => {
                   if (launchLocked || !laneId || p === null || p.kind === "current") return;
@@ -696,8 +711,9 @@ export function NodePanel({
               />
               {laneMembers.length > 1 && (
                 <span className="node-panel__hint">
-                  Lane members (run one after another):{" "}
-                  {laneMembers.map((id) => labelsById[id] ?? id).join(" → ")}
+                  {t("node.laneMembers", {
+                    members: laneMembers.map((id) => labelsById[id] ?? id).join(" → "),
+                  })}
                 </span>
               )}
               {laneProblems.map((p) => (
@@ -710,17 +726,15 @@ export function NodePanel({
                   type="button"
                   className="node-panel__lane-remove"
                   onClick={() => pickLane("")}
-                  title="Remove this task from the lane (the lane itself stays if other tasks still use it)"
+                  title={t("node.laneRemoveTitle")}
                 >
-                  Remove from lane
+                  {t("node.removeFromLane")}
                 </button>
               )}
             </>
           )}
           {!laneId && (
-            <span className="node-panel__hint">
-              Tasks in one lane never run concurrently; different lanes may. Leave empty for per-task placement.
-            </span>
+            <span className="node-panel__hint">{t("node.laneHint")}</span>
           )}
         </div>
 
@@ -732,7 +746,7 @@ export function NodePanel({
             <PlacementEditor
               scope="local"
               envId={null}
-              title="Requested placement (local workspace)"
+              title={t("node.requestedPlacementLocal")}
               value={placement}
               onChange={pickPlacement}
               disabled={launchLocked}
@@ -744,15 +758,13 @@ export function NodePanel({
             <PlacementEditor
               scope="remote"
               envId={envId}
-              title={`Requested placement on ${selectedEnv?.name ?? envId}`}
+              title={t("node.requestedPlacementRemote", { env: selectedEnv?.name ?? envId })}
               value={placement}
               onChange={pickPlacement}
               disabled={launchLocked}
             />
             {placement === null && (
-              <span className="node-panel__hint">
-                Pick an exact workspace or a new top-level worktree — remote “current” is not a valid placement.
-              </span>
+              <span className="node-panel__hint">{t("node.remotePlacementHint")}</span>
             )}
           </div>
         )}
@@ -767,20 +779,21 @@ export function NodePanel({
           checked={getNodeRetain(node.id)}
           onChange={(e) => setNodeRetain(node.id, e.target.checked)}
         />
-        <span className="node-panel__key">Keep terminal for debugging after this node settles</span>
+        <span className="node-panel__key">{t("node.retainLabel")}</span>
       </label>
 
       {/* Orca tracks the running attempt as a Dispatch; task-list only carries
           these while the task is dispatched. */}
       {node.dispatchId && (
         <div className="node-panel__field">
-          <span className="node-panel__key">Current Dispatch (this attempt)</span>
+          <span className="node-panel__key">{t("node.currentDispatch")}</span>
           <div className="node-panel__id">
             <code>{node.dispatchId}</code>
           </div>
           {node.assigneeHandle && (
             <span className="node-panel__hint">
-              Worker terminal <code>{node.assigneeHandle}</code> · inspect output with{" "}
+              {t("node.workerTerminal")} <code>{node.assigneeHandle}</code>
+              {t("node.inspectOutputWith")}{" "}
               <code>orca orchestration worker-read --dispatch {node.dispatchId}</code>
             </span>
           )}
@@ -789,7 +802,7 @@ export function NodePanel({
 
       <div className="node-panel__field">
         <div className="node-panel__spec-head">
-          <span className="node-panel__key">Spec</span>
+          <span className="node-panel__key">{t("node.specKey")}</span>
           <button
             type="button"
             className="node-panel__spec-toggle"
@@ -797,7 +810,7 @@ export function NodePanel({
             aria-controls={`stage-spec-${node.id}`}
             onClick={() => setSpecExpanded((open) => !open)}
           >
-            {specExpanded ? "Collapse" : "Expand"}
+            {specExpanded ? t("node.collapse") : t("node.expand")}
           </button>
         </div>
         <p
@@ -807,14 +820,12 @@ export function NodePanel({
         >
           {node.spec}
         </p>
-        <span className="node-panel__hint">
-          To change the spec or deps, have your agent redraw the DAG in a fresh Run.
-        </span>
+        <span className="node-panel__hint">{t("node.specHint")}</span>
       </div>
 
       {node.result && (
         <div className="node-panel__field">
-          <span className="node-panel__key">Result</span>
+          <span className="node-panel__key">{t("node.resultKey")}</span>
           <ResultSummary raw={node.result} />
         </div>
       )}

@@ -6,6 +6,7 @@ import {
   fetchLocalWorkspaces,
 } from "../api";
 import { creationFieldProblems } from "../placement";
+import { useLang, useT } from "../i18n";
 import {
   SETUP_POLICIES,
   type CreationOptions,
@@ -78,6 +79,11 @@ export function PlacementEditor({
   // Discovery data. Remote scope keeps the environment-scoped fetches it
   // always used; local/lane share the local endpoints. Empty-on-failure
   // keeps the pickers empty with a hint — never filled with guesses.
+  const t = useT();
+  // The option labels are translated, so the memo below also keys on the
+  // language: t's identity is stable by design, so a switch must invalidate
+  // the memo through the language value itself.
+  const lang = useLang();
   const [worktrees, setWorktrees] = useState<OrcaWorktreeView[] | null>(null);
   const [repos, setRepos] = useState<OrcaRepoView[] | null>(null);
   useEffect(() => {
@@ -109,24 +115,26 @@ export function PlacementEditor({
   const modeOptions = useMemo(() => {
     const options: { value: string; label: string; disabled?: boolean; hint?: string }[] = [];
     if (scope === "local") {
-      options.push({ value: CURRENT, label: "Current workspace (default)" });
+      options.push({ value: CURRENT, label: t("placement.mode.current") });
     }
     options.push({
       value: EXISTING_MODE,
-      label: "Existing workspace…",
+      label: t("placement.mode.existing"),
       disabled: loading,
     });
     if (scope !== "remote") {
-      options.push({ value: NEW_CHILD, label: "New child worktree…", disabled: loading });
+      options.push({ value: NEW_CHILD, label: t("placement.mode.newChild"), disabled: loading });
     }
     options.push({
       value: NEW_TOP_LEVEL,
-      label: "New top-level worktree…",
+      label: t("placement.mode.newTopLevel"),
       disabled: loading || (repos !== null && repos.length === 0),
-      hint: repos !== null && repos.length === 0 ? "no repositories discovered" : undefined,
+      hint: repos !== null && repos.length === 0 ? t("placement.noRepos") : undefined,
     });
     return options;
-  }, [scope, loading, repos]);
+    // `lang` is deliberate in the deps: t's identity is stable by design, so a
+    // language switch must invalidate the memo through the language value.
+  }, [scope, loading, repos, lang, t]);
 
   function pickMode(v: string) {
     if (disabled) return;
@@ -196,31 +204,25 @@ export function PlacementEditor({
       )}
 
       {value?.kind === "current" && (
-        <span className="node-panel__hint">
-          Runs in the coordinator workspace. No creation fields apply, and setup never reruns.
-        </span>
+        <span className="node-panel__hint">{t("placement.hint.current")}</span>
       )}
 
       {value?.kind === "existing" && (
         <>
           <span className="node-panel__hint">
-            Exact workspace: <code>{value.selector}</code>
+            {t("placement.hint.exactWorkspace")} <code>{value.selector}</code>
           </span>
-          <span className="node-panel__hint">
-            Existing workspaces are reused as-is — no creation fields apply, and setup never reruns.
-          </span>
+          <span className="node-panel__hint">{t("placement.hint.existing")}</span>
         </>
       )}
 
       {value?.kind === "new-child" && (
-        <span className="node-panel__hint">
-          Orca creates a stacked child worktree anchored on the current workspace’s repo.
-        </span>
+        <span className="node-panel__hint">{t("placement.hint.newChild")}</span>
       )}
 
       {value?.kind === "new-top-level" && (
         <div className="placement__repo">
-          <span className="node-panel__key">Repository</span>
+          <span className="node-panel__key">{t("placement.field.repository")}</span>
           <DoodleSelect
             value={value.repo}
             onChange={pickRepo}
@@ -239,11 +241,15 @@ export function PlacementEditor({
         <div className="placement__creation">
           <div className="placement__row">
             <label className="placement__field">
-              <span>Name {nameRequired ? "(required)" : "(optional)"}</span>
+              <span>{t(nameRequired ? "placement.field.nameRequired" : "placement.field.nameOptional")}</span>
               <input
                 className="node-panel__custom"
                 value={creation.name ?? ""}
-                placeholder={nameRequired ? "worktree name" : "derived from the Run if empty"}
+                placeholder={t(
+                  nameRequired
+                    ? "placement.placeholder.nameRequired"
+                    : "placement.placeholder.nameDerived",
+                )}
                 onChange={(e) => {
                   const name = e.target.value.trim();
                   patchCreation(name ? { name } : { name: undefined });
@@ -253,7 +259,7 @@ export function PlacementEditor({
               />
             </label>
             <label className="placement__field">
-              <span>Setup hooks</span>
+              <span>{t("placement.field.setupHooks")}</span>
               <DoodleSelect
                 value={creation.setup}
                 onChange={(v) => patchCreation({ setup: v as SetupPolicy })}
@@ -261,18 +267,22 @@ export function PlacementEditor({
                 options={SETUP_POLICIES.map((p) => ({
                   value: p,
                   label:
-                    p === "run" ? "run (default)" : p === "skip" ? "skip" : "inherit (from base)",
+                    p === "run"
+                      ? t("placement.setup.run")
+                      : p === "skip"
+                        ? t("placement.setup.skip")
+                        : t("placement.setup.inherit"),
                 }))}
               />
             </label>
           </div>
           <div className="placement__row">
             <label className="placement__field">
-              <span>Base branch (optional)</span>
+              <span>{t("placement.field.baseBranch")}</span>
               <input
                 className="node-panel__custom"
                 value={creation.baseBranch ?? ""}
-                placeholder="e.g. main or feature/x"
+                placeholder={t("placement.placeholder.baseBranch")}
                 onChange={(e) => {
                   const baseBranch = e.target.value.trim();
                   patchCreation(baseBranch ? { baseBranch } : { baseBranch: undefined });
@@ -282,11 +292,11 @@ export function PlacementEditor({
               />
             </label>
             <label className="placement__field">
-              <span>Display name (optional)</span>
+              <span>{t("placement.field.displayName")}</span>
               <input
                 className="node-panel__custom"
                 value={creation.displayName ?? ""}
-                placeholder="shown in the Orca IDE"
+                placeholder={t("placement.placeholder.displayName")}
                 onChange={(e) => {
                   const displayName = e.target.value.trim();
                   patchCreation(displayName ? { displayName } : { displayName: undefined });
@@ -296,12 +306,12 @@ export function PlacementEditor({
             </label>
           </div>
           <label className="placement__field">
-            <span>Comment (optional)</span>
+            <span>{t("placement.field.comment")}</span>
             <textarea
               className="placement__comment"
               rows={2}
               value={creation.comment ?? ""}
-              placeholder="stored in Orca worktree metadata"
+              placeholder={t("placement.placeholder.comment")}
               onChange={(e) => {
                 const comment = e.target.value.trim();
                 patchCreation(comment ? { comment } : { comment: undefined });
@@ -314,7 +324,7 @@ export function PlacementEditor({
 
       {nameMissing && (
         <span className="node-panel__hint placement__warn">
-          A remote new worktree needs an explicit name — the coordinator would refuse to start without one.
+          {t("placement.hint.remoteNameMissing")}
         </span>
       )}
       {problems.map((p) => (

@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useState } from "react";
 import { fetchWorktreeLanes, openLaneChanges, removeLaneWorktree } from "../api";
+import { t, useT, type TranslationKey } from "../i18n";
 import { useDecisionDialog } from "./DecisionDialog";
 import { usePageVisible } from "../visibility";
 import type { WorktreeLaneRuntimeView, WorktreeLanesResponse } from "../types";
@@ -21,28 +22,25 @@ import type { WorktreeLaneRuntimeView, WorktreeLanesResponse } from "../types";
  * authorizes nothing destructive.
  */
 
-/** Short human explanation per lane state. Unknown states stay verbatim. */
-function stateHint(state: WorktreeLaneRuntimeView["state"]): string {
-  switch (state) {
-    case "planned":
-      return "The lane is configured but no worker has created or opened its workspace yet.";
-    case "creating":
-      return "A worker-start is creating the lane's worktree right now.";
-    case "active":
-      return "The lane's workspace is positively identified and a worker is using it.";
-    case "integration_required":
-      return "Work in this lane finished, but a downstream task in another lane waits on a human integration gate.";
-    case "settled":
-      return "Every task in the lane settled; the workspace is retained until you explicitly remove it.";
-    case "unverifiable":
-      return "The lane's workspace identity could not be positively recovered — nothing will be guessed or recreated.";
-    case "removal_blocked":
-      return "The worktree cannot be removed right now — check the warnings for the blocking evidence.";
-    case "removed":
-      return "The worktree was removed through Orca (`orca worktree rm`).";
-    default:
-      return "The runtime reported this state verbatim.";
-  }
+/** state -> key. A state the runtime adds later falls back to lane.state.other. */
+const LANE_STATE_KEY: Record<string, TranslationKey> = {
+  planned: "lane.state.planned",
+  creating: "lane.state.creating",
+  active: "lane.state.active",
+  integration_required: "lane.state.integration_required",
+  settled: "lane.state.settled",
+  unverifiable: "lane.state.unverifiable",
+  removal_blocked: "lane.state.removal_blocked",
+  removed: "lane.state.removed",
+};
+
+/**
+ * Short human explanation per lane state. The state TOKEN itself is always
+ * rendered verbatim (it is Orca's own word); only this hint is translated,
+ * and an unknown state says so rather than guessing.
+ */
+function stateHint(state: string): string {
+  return t(LANE_STATE_KEY[state] ?? "lane.state.other");
 }
 
 export const LanesPanel = memo(function LanesPanel({
@@ -59,6 +57,7 @@ export const LanesPanel = memo(function LanesPanel({
   disabledReason?: string | null;
 }) {
   const dialog = useDecisionDialog();
+  const t = useT();
   const [lanes, setLanes] = useState<WorktreeLaneRuntimeView[]>([]);
   const [loadedFor, setLoadedFor] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -112,9 +111,9 @@ export const LanesPanel = memo(function LanesPanel({
           const next = new Map(prev);
           next.set(
             laneId,
-            `Opened ${mode} through Orca${receipt.workspace ? ` in ${receipt.workspace}` : ""}${
-              receipt.note ? ` — ${receipt.note}` : ""
-            }`,
+            t(mode === "files" ? "lane.openedFiles" : "lane.openedDiff") +
+              (receipt.workspace ? t("lane.openedIn", { workspace: receipt.workspace }) : "") +
+              (receipt.note ? t("lane.openedNote", { note: receipt.note }) : ""),
           );
           return next;
         });
@@ -124,7 +123,8 @@ export const LanesPanel = memo(function LanesPanel({
         setBusyId(null);
       }
     },
-    [],
+    // t is a stable module function; the note snapshots the language of the click.
+    [t],
   );
 
   const remove = useCallback(
@@ -134,21 +134,19 @@ export const LanesPanel = memo(function LanesPanel({
       // compares the typed string before it acts.
       const token = lane.worktreeId ?? lane.path?.split("/").filter(Boolean).pop() ?? lane.laneId;
       const typed = await dialog.prompt({
-        title: "Remove this worktree?",
-        message:
-          `This runs \`orca worktree rm\` on the lane's workspace` +
-          (lane.path ? `:\n\n${lane.path}` : ".") +
-          `\n\nUncommitted work is lost and this cannot be undone. Type ` +
-          `${token} to confirm.`,
-        fieldLabel: `Type ${token}`,
+        title: t("lane.removeTitle"),
+        message: lane.path
+          ? t("lane.removeMessageWithPath", { path: lane.path, token })
+          : t("lane.removeMessageNoPath", { token }),
+        fieldLabel: t("lane.removeFieldLabel", { token }),
         placeholder: token,
-        confirmLabel: "Remove worktree",
+        confirmLabel: t("lane.removeConfirm"),
         tone: "danger",
         required: true,
       });
       if (typed !== token) {
         if (typed !== null) {
-          setErr("The confirmation text did not match — nothing was removed.");
+          setErr(t("lane.confirmMismatch"));
         }
         return;
       }
@@ -160,9 +158,11 @@ export const LanesPanel = memo(function LanesPanel({
           const next = new Map(prev);
           next.set(
             lane.laneId,
-            `Removal receipt: ${receipt.state ?? "unknown"}${
-              receipt.reason ? ` — ${receipt.reason}` : ""
-            }${receipt.requestId ? ` · request ${receipt.requestId.slice(0, 8)}…` : ""}`,
+            t("lane.receipt", { state: receipt.state ?? t("lane.receiptUnknownState") }) +
+              (receipt.reason ? t("lane.receiptReason", { reason: receipt.reason }) : "") +
+              (receipt.requestId
+                ? t("lane.receiptRequest", { id: receipt.requestId.slice(0, 8) })
+                : ""),
           );
           return next;
         });
@@ -172,7 +172,7 @@ export const LanesPanel = memo(function LanesPanel({
         setBusyId(null);
       }
     },
-    [dialog],
+    [dialog, t],
   );
 
   if (!runId || loadedFor !== runId) return null;
@@ -180,10 +180,10 @@ export const LanesPanel = memo(function LanesPanel({
   return (
     <div className="gates lanes" data-testid="lanes-panel">
       <div className="gate inbox__item">
-        <div className="gate__badge">Workspace lanes · shared serial workspaces</div>
+        <div className="gate__badge">{t("lane.badge")}</div>
         {err && <div className="exec__err inbox__err">⚠️ {err}</div>}
         {lanes.length === 0 && !err && (
-          <div className="inbox__body">No lanes are configured for this Run.</div>
+          <div className="inbox__body">{t("lane.none")}</div>
         )}
         {lanes.map((lane) => {
           const removable = lane.state === "settled";
@@ -197,37 +197,43 @@ export const LanesPanel = memo(function LanesPanel({
                 </span>
                 <code className="lanes__id">{lane.laneId}</code>
                 <span className="inbox__meta">
-                  {lane.taskIds.length} task{lane.taskIds.length === 1 ? "" : "s"}
-                  {lane.activeDispatchIds.length > 0
-                    ? ` · ${lane.activeDispatchIds.length} active dispatch${lane.activeDispatchIds.length === 1 ? "" : "es"}`
-                    : ""}
-                  {lane.source ? ` · via ${lane.source}` : ""}
+                  {lane.taskIds.length === 1
+                    ? t("lane.taskCountOne", { n: lane.taskIds.length })
+                    : t("lane.taskCountMany", { n: lane.taskIds.length })}
+                  {lane.activeDispatchIds.length === 1
+                    ? t("lane.activeDispatchOne", { n: lane.activeDispatchIds.length })
+                    : lane.activeDispatchIds.length > 1
+                      ? t("lane.activeDispatchMany", { n: lane.activeDispatchIds.length })
+                      : ""}
+                  {lane.source ? t("lane.via", { source: lane.source }) : ""}
                 </span>
               </div>
               <div className="lanes__facts">
                 <span>
-                  Selector:{" "}
-                  {lane.selector ? <code>{lane.selector}</code> : <i>unknown (no positive evidence yet)</i>}
+                  {t("lane.selectorLabel")}{" "}
+                  {lane.selector ? <code>{lane.selector}</code> : <i>{t("lane.selectorUnknown")}</i>}
                 </span>
                 {lane.worktreeId && (
                   <span>
-                    Worktree: <code>{lane.worktreeId}</code>
+                    {t("lane.worktreeLabel")} <code>{lane.worktreeId}</code>
                   </span>
                 )}
                 {lane.path && (
                   <span>
-                    Path: <code>{lane.path}</code>
+                    {t("lane.pathLabel")} <code>{lane.path}</code>
                   </span>
                 )}
-                {lane.branch && <span>Branch: {lane.branch.replace(/^refs\/heads\//, "")}</span>}
+                {lane.branch && (
+                  <span>{t("lane.branchLabel", { branch: lane.branch.replace(/^refs\/heads\//, "") })}</span>
+                )}
                 {lane.head && (
                   <span>
-                    Head: <code>{lane.head.slice(0, 12)}</code>
+                    {t("lane.headLabel")} <code>{lane.head.slice(0, 12)}</code>
                   </span>
                 )}
                 {lane.creationDispatchId && (
                   <span>
-                    Created by dispatch <code>{lane.creationDispatchId}</code>
+                    {t("lane.createdByDispatch")} <code>{lane.creationDispatchId}</code>
                   </span>
                 )}
               </div>
@@ -244,36 +250,36 @@ export const LanesPanel = memo(function LanesPanel({
                   disabled={!reviewable || disabled || busyId === lane.laneId}
                   title={
                     reviewable
-                      ? "Open the workspace's changed files through Orca"
-                      : "Needs a positively identified workspace"
+                      ? t("lane.openChangedFilesTitle")
+                      : t("lane.needsWorkspace")
                   }
                   onClick={() => void review(lane.laneId, "files")}
                 >
-                  Changed files
+                  {t("lane.changedFiles")}
                 </button>
                 <button
                   className="btn btn--gate"
                   disabled={!reviewable || disabled || busyId === lane.laneId}
                   title={
                     reviewable
-                      ? "Open the workspace's diff through Orca"
-                      : "Needs a positively identified workspace"
+                      ? t("lane.openDiffTitle")
+                      : t("lane.needsWorkspace")
                   }
                   onClick={() => void review(lane.laneId, "diff")}
                 >
-                  Diff
+                  {t("lane.diff")}
                 </button>
                 <button
                   className="btn btn--gate btn--danger"
                   disabled={!removable || disabled || busyId === lane.laneId}
                   title={
                     removable
-                      ? "Remove the worktree through orca worktree rm (asks for typed confirmation)"
-                      : `Removal needs settled ownership — this lane is ${lane.state}`
+                      ? t("lane.removeWorktreeTitle")
+                      : t("lane.removeNeedsSettled", { state: lane.state })
                   }
                   onClick={() => void remove(lane)}
                 >
-                  Remove worktree…
+                  {t("lane.removeWorktree")}
                 </button>
               </div>
               {disabled && disabledReason && <div className="exec__hint">🔒 {disabledReason}</div>}
