@@ -1,7 +1,7 @@
 import express from "express";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, extname, join } from "node:path";
+import { dirname, extname, isAbsolute, join, normalize } from "node:path";
 import {
   OrcaCliError,
   RESPONSE_LOST,
@@ -53,6 +53,7 @@ import {
   showWorktree,
   showWorkerDetail,
   stopWorkerReceipt,
+  taskUpdate,
   tasksToDag,
   type OrcaRun,
   type OrcaReadiness,
@@ -104,6 +105,8 @@ import {
   type ActivitySnapshot,
 } from "./activity";
 import { RequestLedger } from "./requestLedger";
+import { ProviderSessionStore } from "./providerSessions";
+import { LaunchHistory } from "./launchHistory";
 
 /**
  * The Express app, extracted from index.ts so it can be constructed and tested
@@ -176,7 +179,11 @@ function fail(res: express.Response, err: unknown): void {
               code === "inbox_item_not_found" ||
               code === "message_not_found" ||
               code === "retry_not_allowed" ||
-              code === "retry_target_not_found"
+              code === "retry_target_not_found" ||
+              code === "session_binding_mismatch" ||
+              code === "session_location_unverifiable" ||
+              code === "session_location_mismatch" ||
+              code === "resume_not_allowed"
             ? 409 // Phase 4 safe-retry refusals: the state forbids it, not the request shape
             : 500;
   // Orca hands back the exact unblocking command for some refusals — most
@@ -399,6 +406,20 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
   // ALWAYS re-read live from Orca (`request-show`); this ledger never
   // becomes a second lifecycle authority.
   const requestLedger = new RequestLedger(workspaceDir);
+  // This store is only a binding of identities. Orca's worker-list remains the
+  // authority for Dispatch scope and lifecycle; provider observations cannot
+  // settle a Task or grant coordinator authority.
+  const providerSessions = new ProviderSessionStore(workspaceDir);
+  const launchHistory = new LaunchHistory(workspaceDir);
+  // worker-list has no startOptions on Orca 1.4.207. Share the one-time
+  // worker-show read across overlapping 2s polls; failed/empty reads may be
+  // retried later if a remote peer reconnects. GET stays read-only: only the
+  // coordinator's successful launch path writes local history.
+  const launchLookups = new Map<string, {
+    at: number;
+    value: Promise<{ agent: string } | null>;
+    confirmed: boolean;
+  }>();
 
   // The status provider, resolved once: the live module singleton by default,
   // an injected snapshot under test (same pattern as `readiness` above).
@@ -1083,6 +1104,21 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         res.status(400).json({ error: "runId required", code: "run_required" });
         return;
       }
+      const resumeInput = req.body?.resumeBlocked;
+      let resumeBlocked: { dispatchId: string; allowUnknownProvider: boolean } | undefined;
+      if (resumeInput !== undefined) {
+        if (!resumeInput || typeof resumeInput !== "object" || Array.isArray(resumeInput) ||
+            Object.keys(resumeInput).some((key) => key !== "dispatchId" && key !== "allowUnknownProvider") ||
+            typeof resumeInput.allowUnknownProvider !== "boolean") {
+          throw new ValidationError("resumeBlocked requires an exact dispatchId and explicit provider decision");
+        }
+        const dispatchId = validateId(resumeInput.dispatchId, "dispatchId");
+        if (!dispatchId) throw new ValidationError("resumeBlocked.dispatchId is required");
+        resumeBlocked = { dispatchId, allowUnknownProvider: resumeInput.allowUnknownProvider };
+      }
+      if (resumeBlocked && liveCoordinatorStatus().running) {
+        throw new OrcaCliError("Stop the current viewer coordinator before retrying a blocked Stage.", "resume_not_allowed");
+      }
       // Strict validation happens here — before any Orca terminal exists — so a
       // bad harness or model string can never reach the CLI/shell boundary.
       const defaultHarness = req.body?.defaultHarness
@@ -1159,7 +1195,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       // The coordinator cross-checks these identities against live fleet state
       // before changing a Task; this audit metadata is a selector, never the
       // lifecycle authority by itself.
-      const resumeStoppedDispatchIds = (await requestLedger.list().catch(() => []))
+      const resumeStoppedDispatchIds = (resumeBlocked ? [] : await requestLedger.list().catch(() => []))
         .filter(
           (record) =>
             record.operation === "worker-stop" &&
@@ -1183,6 +1219,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         worktreeLanes: worktreeLanes ?? undefined,
         laneByTask: laneByTask ?? undefined,
         resumeStoppedDispatchIds,
+        resumeBlocked,
         onActivity: async (event) => {
           await recordActivity(
             createViewerActivity({
@@ -1249,6 +1286,217 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
   app.get("/api/run-status", (_req, res) => {
     res.json(coordinatorStatus());
   });
+
+  /**
+   * A provider session is a SECOND identity attached to an Orca Dispatch.
+   * Binding it never changes the Dispatch or Task. Resolve all scope fields
+   * from Orca's remote-inclusive accounting; a browser-supplied workspace or
+   * host would let one session be mistaken for work on another server.
+   */
+  const exactSessionScope = async (runId: string, taskId: string, dispatchId: string) => {
+    const [tasks, workers] = await Promise.all([
+      listTasks(runId),
+      listWorkers(runId, { includeRemote: true }),
+    ]);
+    const task = tasks.find((candidate) => candidate.id === taskId && candidate.run_id === runId);
+    const row = workers.find((candidate) =>
+      candidate.runId === runId &&
+      candidate.taskId === taskId &&
+      candidate.dispatchId === dispatchId
+    );
+    if (!task || !row) {
+      throw new OrcaCliError(
+        "The Run, Task and Dispatch binding was not found together in Orca's worker history.",
+        "session_binding_mismatch",
+      );
+    }
+    // Fleet snapshots in Orca 1.4.207 represent workspace as
+    // `{ kind, id }`, not an absolute path. Only accept a path directly or
+    // use the exact worker terminal's reported worktreePath below; passing the
+    // object to `isAbsolute` throws before a session can be bound.
+    let workspace = typeof row.projection?.workspace === "string"
+      ? row.projection.workspace
+      : null;
+    let host = row.projection?.host
+      ? `${row.projection.host.kind}:${row.projection.host.id}`
+      : null;
+    if (!workspace || !isAbsolute(workspace) || !host) {
+      // Older or legacy rows may not have a fleet projection. worker-show can
+      // still provide the exact terminal's execution location; a non-exact
+      // observation cannot establish a session's workspace after pane reuse.
+      const detail = await showWorkerDetail(dispatchId).catch(() => null);
+      if (detail?.runId === runId && detail.taskId === taskId && detail.observation?.exactWorker === true) {
+        if (!workspace || !isAbsolute(workspace)) workspace = detail.terminal?.worktreePath ?? null;
+        if (!host) {
+          const observedHost = detail.terminal?.executionHostId ?? null;
+          host = observedHost === "local" ? "local:local" : observedHost;
+        }
+      }
+    }
+    if (!workspace || !isAbsolute(workspace) || !host) {
+      throw new OrcaCliError(
+        "Orca has not reported the exact workspace and execution host for this Dispatch; session binding is held until that evidence is available.",
+        "session_location_unverifiable",
+      );
+    }
+    return { row, workspace: normalize(workspace), host };
+  };
+
+  /** Workspace-local bindings are listed without querying provider processes. */
+  app.get(
+    "/api/session-bindings",
+    route(async (req, res) => {
+      const runId = validateId(req.query.run, "run");
+      if (!runId) {
+        res.status(400).json({ error: "run query parameter required", code: "run_required" });
+        return;
+      }
+      res.json({ bindings: await providerSessions.list(runId) });
+    }),
+  );
+
+  /** Attach a known exact harness session to one already-recorded Dispatch. */
+  app.put(
+    "/api/session-bindings/:dispatchId",
+    requireToken(policy),
+    route(async (req, res) => {
+      const runId = validateId(req.body?.runId, "runId");
+      const taskId = validateId(req.body?.taskId, "taskId");
+      const dispatchId = validateId(req.params.dispatchId, "dispatch id");
+      const harness = validateText(req.body?.harness, "harness", 32);
+      const sessionId = validateText(req.body?.sessionId, "sessionId", 256);
+      if (!runId || !taskId || !dispatchId || !sessionId ||
+          (harness !== "claude" && harness !== "codex" && harness !== "opencode")) {
+        throw new ValidationError("runId, taskId, dispatchId, supported harness, and exact sessionId are required");
+      }
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(sessionId)) {
+        throw new ValidationError("sessionId must be one provider-issued token without whitespace");
+      }
+      const { row, workspace, host } = await exactSessionScope(runId, taskId, dispatchId);
+      const observedHarness = row.projection?.provider?.id ?? row.projection?.launch?.agent ?? null;
+      if (observedHarness && ["claude", "codex", "opencode"].includes(observedHarness) &&
+          observedHarness !== harness) {
+        throw new OrcaCliError("The selected harness disagrees with Orca's Dispatch record.", "session_binding_mismatch");
+      }
+      const proposed = {
+        runId, taskId, dispatchId, harness, sessionId, workspace, host, source: "manual",
+      } as const;
+      const existing = await providerSessions.get({ runId, taskId, dispatchId });
+      if (existing && (
+        existing.harness !== harness || existing.sessionId !== sessionId ||
+        existing.workspace !== workspace || existing.host !== host
+      )) {
+        throw new OrcaCliError(
+          "This Dispatch is already bound to another provider identity; a verified handoff is required before changing it.",
+          "session_binding_mismatch",
+        );
+      }
+      const binding = await providerSessions.bind(proposed);
+      res.json({ binding });
+    }),
+  );
+
+  /** Probe only a previously bound exact session, on demand. */
+  app.post(
+    "/api/session-bindings/:dispatchId/probe",
+    requireToken(policy),
+    route(async (req, res) => {
+      const runId = validateId(req.body?.runId, "runId");
+      const dispatchId = validateId(req.params.dispatchId, "dispatch id");
+      if (!runId || !dispatchId) throw new ValidationError("runId and dispatchId are required");
+      const binding = (await providerSessions.list(runId)).find((entry) => entry.dispatchId === dispatchId);
+      if (!binding) {
+        res.status(404).json({ error: "no session binding for this Dispatch", code: "session_binding_not_found" });
+        return;
+      }
+      const { workspace, host } = await exactSessionScope(runId, binding.taskId, dispatchId);
+      if (binding.workspace !== workspace || binding.host !== host) {
+        throw new OrcaCliError(
+          "The Dispatch execution location changed since its session was bound; probe refused.",
+          "session_location_mismatch",
+        );
+      }
+      res.json({ observation: await providerSessions.probe(binding) });
+    }),
+  );
+
+  /**
+   * An abandoned Dispatch cannot send worker_done after its capability was
+   * revoked. Let the operator record an independently reviewed result on the
+   * blocked Task, without inventing a successful Dispatch or replaying work.
+   * Re-read Orca's Task, fleet, gate and provider evidence at the mutation
+   * boundary: old viewer projections and a closed terminal are insufficient.
+   */
+  app.post(
+    "/api/workers/:dispatchId/resolve-blocked",
+    requireToken(policy),
+    route(async (req, res) => {
+      await requireExecutionEnabled();
+      const runId = validateId(req.body?.runId, "runId");
+      const dispatchId = validateId(req.params.dispatchId, "dispatchId");
+      const result = validateText(req.body?.result, "result", 2000);
+      if (!runId || !dispatchId || !result || result.trim().length < 8 ||
+          req.body?.acknowledgeUnknownProvider !== true) {
+        throw new ValidationError("runId, reviewed result, and explicit provider-risk acknowledgement are required");
+      }
+      const live = liveCoordinatorStatus();
+      if (live.running) {
+        throw new OrcaCliError("Stop the viewer coordinator before manually resolving a blocked Stage.", "resume_not_allowed");
+      }
+      const [tasks, rows, gates, bindings] = await Promise.all([
+        listTasks(runId),
+        listWorkers(runId, { includeRemote: true }),
+        listGates(runId),
+        providerSessions.list(runId),
+      ]);
+      const row = rows.find((item) => item.runId === runId && item.dispatchId === dispatchId);
+      const task = tasks.find((item) => item.id === row?.taskId && item.run_id === runId);
+      if (!row || !task || task.status !== "blocked" ||
+          row.dispatchStatus !== "failed" || row.projection?.liveness?.verdict !== "exited" ||
+          rows.some((item) => item.taskId === task.id && item.dispatchStatus === "dispatched") ||
+          gates.some((gate) => gate.taskId === task.id && gate.status === "pending")) {
+        throw new OrcaCliError("The selected Stage is not a settled, gate-free blocked Task.", "resume_not_allowed");
+      }
+      const detail = await showWorkerDetail(dispatchId);
+      const selectedAt = Date.parse(detail?.dispatch?.dispatchedAt ?? "");
+      const siblingDetails = await Promise.all(
+        rows.filter((item) => item.taskId === task.id && item.dispatchId !== dispatchId)
+          .map((item) => showWorkerDetail(item.dispatchId)),
+      );
+      if (detail?.runId !== runId || detail.taskId !== task.id ||
+          !Number.isFinite(selectedAt) || siblingDetails.some((sibling) =>
+            !sibling?.dispatch?.dispatchedAt ||
+            !Number.isFinite(Date.parse(sibling.dispatch.dispatchedAt)) ||
+            Date.parse(sibling.dispatch.dispatchedAt) >= selectedAt
+          )) {
+        throw new OrcaCliError("A newer or unverifiable Dispatch exists for this Stage.", "resume_not_allowed");
+      }
+      const binding = bindings.find((item) => item.dispatchId === dispatchId && item.taskId === task.id);
+      if (binding) {
+        const observation = await providerSessions.probe(binding);
+        if (observation.status === "active" || observation.status === "idle") {
+          throw new OrcaCliError("The exact provider session is still active or idle; resolve its work first.", "resume_not_allowed");
+        }
+      }
+      // The Task is the durable DAG status. The historical Dispatch remains
+      // failed in Orca's accounting; the activity entry names the human action.
+      await asCoordinator(runId, worktree, (from) =>
+        taskUpdate(task.id, "completed", runId, from, JSON.stringify(result.trim())),
+      );
+      await recordActivity(createViewerActivity({
+        runId,
+        kind: "recovery",
+        title: "Blocked Stage completed by operator",
+        summary: `Reviewed result recorded for ${task.id}; historical Dispatch ${dispatchId} remains failed.`,
+        taskId: task.id,
+        dispatchId,
+      })).catch(() => {
+        // Activity is explanatory history, not the task-update receipt. A
+        // journal write failure must not turn a completed Task into HTTP 500.
+      });
+      res.json({ taskId: task.id, dispatchId, status: "completed" });
+    }),
+  );
 
   /**
    * Run-scoped workspace-lane view (worktree-lanes epic). The coordinator's
@@ -1567,7 +1815,57 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         res.status(400).json({ error: "run query parameter required", code: "run_required" });
         return;
       }
-      res.json({ workers: await listWorkers(runId, { includeRemote: true }) });
+      const workers = await listWorkers(runId, { includeRemote: true });
+      // A damaged/unreadable viewer history file must not hide Orca's worker
+      // inventory. The API can still backfill supervised rows from Orca.
+      const saved = await launchHistory.list(runId).catch(() => new Map());
+      const enriched = workers.map((row) => {
+        const fleetAgent = row.projection?.launch?.agent ?? row.projection?.provider?.id ?? null;
+        const recorded = saved.get(row.dispatchId);
+        const scopedRecord = recorded?.taskId === row.taskId ? recorded : null;
+        return {
+          ...row,
+          launchEvidence: fleetAgent
+            ? { agent: fleetAgent, source: "fleet" as const }
+            : scopedRecord
+              ? { agent: scopedRecord.harness, source: scopedRecord.source }
+              : null,
+        };
+      });
+      const needsDetail = enriched.filter((row) =>
+        row.dispatchId && row.workerState !== "unsupervised" &&
+        row.launchEvidence?.source !== "fleet" &&
+        row.launchEvidence?.source !== "worker-show"
+      );
+      // A historical Run may contain many workers. Bound concurrent Orca
+      // processes, and never turn one unavailable detail into a missing fleet
+      // inventory. The badge stays unknown until positive evidence arrives.
+      for (let i = 0; i < needsDetail.length; i += 6) {
+        await Promise.all(needsDetail.slice(i, i + 6).map(async (row) => {
+          const key = `${runId}:${row.dispatchId}`;
+          let cached = launchLookups.get(key);
+          if (!cached || (!cached.confirmed && Date.now() - cached.at > 60_000)) {
+            const value = showWorkerDetail(row.dispatchId)
+              .then((detail) =>
+                detail?.runId === runId && detail.taskId === row.taskId && detail.launch?.agent
+                  ? { agent: detail.launch.agent }
+                  : null,
+              )
+              .catch(() => null);
+            cached = { at: Date.now(), value, confirmed: false };
+            const entry = cached;
+            void value.then((observed) => {
+              if (observed) entry.confirmed = true;
+            });
+            launchLookups.set(key, cached);
+            if (launchLookups.size > 2_000) launchLookups.clear();
+          }
+          const observed = await cached.value;
+          if (!observed) return;
+          row.launchEvidence = { agent: observed.agent, source: "worker-show" };
+        }));
+      }
+      res.json({ workers: enriched });
     }),
   );
 

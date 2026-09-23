@@ -882,6 +882,10 @@ export default function App() {
                       <RecoveryPanel
                         runId={runId}
                         status={runStatus}
+                        taskIds={visibleDag.nodes.map((node) => node.id)}
+                        blockedTaskIds={visibleDag.nodes.filter((node) => node.status === "blocked").map((node) => node.id)}
+                        onRunStarting={onRunStarting}
+                        onRunStartFinished={onRunStartFinished}
                         onRetried={refresh}
                         disabled={execOff}
                         disabledReason={readiness?.reason}

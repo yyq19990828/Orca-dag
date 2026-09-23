@@ -5,6 +5,7 @@ import { realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { openCodeSessionTitle } from "./providerSessions";
 // The audience allowlist is a security-boundary concept, so the adapter
 // consumes it from security.ts (which never imports this module — no cycle).
 import { KNOWN_HARNESSES, WORKTREE_AUDIENCE_PREFIX } from "./security";
@@ -1979,6 +1980,14 @@ export interface WorkerDetailView {
   dispatchId: string;
   runId: string | null;
   taskId: string | null;
+  /** Exact worker-start options, when Orca retained them for this Dispatch. */
+  launch: {
+    agent: string;
+    model: string | null;
+    effort: string | null;
+    /** Orca's resolved identity, never the relative `current` launch input. */
+    resolvedWorktreeId: string | null;
+  } | null;
   /** Durable accounting row — the same shape `worker-list` emits for this Dispatch. */
   fleet: OrcaWorkerRow | null;
   /** Dispatch record facts (attempt bookkeeping). */
@@ -2081,6 +2090,10 @@ export async function showWorkerDetail(dispatchId: string): Promise<WorkerDetail
   }
   const dispatch = asRecordOrNull(result.dispatch) ?? {};
   const worker = asRecordOrNull(result.worker) ?? {};
+  const startOptions = asRecordOrNull(worker.startOptions);
+  const launchOptions = asRecordOrNull(startOptions?.launch);
+  const effectiveLaunch = asRecordOrNull(launchOptions?.effective);
+  const launchAgent = stringOrNull(effectiveLaunch?.agent) ?? stringOrNull(startOptions?.agent);
   const terminal = asRecordOrNull(result.terminal);
   const observationRaw = asRecordOrNull(result.observation);
   const fleet = asRecordOrNull(result.projection);
@@ -2120,6 +2133,14 @@ export async function showWorkerDetail(dispatchId: string): Promise<WorkerDetail
     dispatchId,
     runId: stringOrNull(fleet?.runId) ?? stringOrNull(dispatch.runId),
     taskId: stringOrNull(fleet?.taskId) ?? stringOrNull(dispatch.task_id),
+    launch: launchAgent
+      ? {
+          agent: launchAgent,
+          model: stringOrNull(effectiveLaunch?.model),
+          effort: stringOrNull(effectiveLaunch?.effort),
+          resolvedWorktreeId: stringOrNull(startOptions?.resolvedWorktreeId),
+        }
+      : null,
     fleet: normalizedFleet,
     dispatch: {
       status: stringOrNull(dispatch.status),
@@ -4306,6 +4327,7 @@ async function startOpencodeWorker(opts: {
     opts.from,
   ]);
   const dispatchId = readDispatchId(tracking);
+  if (!dispatchId) throw new OrcaCliError("orca dispatch returned no dispatch ID (opencode)");
 
   // Fetch the preamble. After the tracking dispatch it embeds the real
   // dispatch_id and the worker handle (`--from <handle>`), which the worker
@@ -4334,10 +4356,14 @@ async function startOpencodeWorker(opts: {
   // #variant suffix, so no quote, space or shell operator can be inside.
   // `--auto` is the mandatory autonomous flag (see the docstring).
   const modelArg = opts.model ? ` -m "${opts.model}"` : "";
+  // A provider-issued session ID does not exist until `opencode run` starts.
+  // Its unique launch title lets the background API later correlate that ID
+  // with this exact Dispatch, including after this viewer has restarted.
+  const titleArg = ` --title "${openCodeSessionTitle(opts.runId, opts.taskId, dispatchId)}"`;
   // Replace the bare shell instead of leaving it behind after the one-shot
   // agent exits. Besides avoiding a stale terminal, this guarantees buffered
   // orchestration nudges can never fall through and execute as zsh commands.
-  const cmd = `exec opencode run --auto${modelArg} "$(cat ${preambleFile})"`;
+  const cmd = `exec opencode run --auto${modelArg}${titleArg} "$(cat ${preambleFile})"`;
   await runOrca(["terminal", "send", "--terminal", handle, "--text", cmd, "--enter"]);
 
   return { mode: "legacy", dispatchId, handle, receipt: null, replayed: false, adopted: false };

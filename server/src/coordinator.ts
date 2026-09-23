@@ -25,6 +25,7 @@ import {
   retainWorker,
   runNextAction,
   runOrca,
+  showWorkerDetail,
   showEnvironment,
   showRun,
   showWorktree,
@@ -44,6 +45,9 @@ import {
 } from "./orca";
 import type { MutationRequestMeta } from "./requestLedger";
 import type { LaneSeedPlacement, PlacementSpec, WorktreeLaneSpec } from "./config";
+import { ProviderSessionStore, discoverProviderSession } from "./providerSessions";
+import type { ProviderSessionBinding, ProviderSessionObservation, ProviderSessionStatus } from "./providerSessions";
+import { LaunchHistory } from "./launchHistory";
 
 /**
  * Self-driven coordinator (Phase 3: closed supervised-worker lifecycle).
@@ -418,6 +422,29 @@ interface Attempt {
    * "local by assumption".
    */
   host: { kind: string; id: string } | null;
+  /** Exact provider session binding, when recovery evidence supplied one. */
+  providerSession: RecoverySessionView | null;
+}
+
+/** A provider session observation pinned to one exact Run/Task/Dispatch. */
+export interface RecoverySessionView {
+  taskId: string;
+  dispatchId: string;
+  harness: string;
+  sessionId: string;
+  status: ProviderSessionStatus;
+  decision: "adopted" | "held" | "reconcile" | "retry_blocked";
+  detail: string | null;
+  observedAt: string | null;
+  source: string;
+  host: string | null;
+  workspace: string;
+}
+
+export interface RetryBlockedRecovery {
+  taskId: string;
+  dispatchId: string;
+  reason: string;
 }
 
 /** What startup recovery found and did (plan Phase 4 items 4-7), for the UI. */
@@ -434,6 +461,12 @@ export interface RecoverySummary {
   unverifiable: string[];
   /** Already-decided rows (released/retained) left as Orca holds them. */
   leftDecided: number;
+  /** Exact provider-session observations captured during this startup pass. */
+  providerSessions: RecoverySessionView[];
+  /** Viewer-stop resumes refused because detached provider work is not proven exited. */
+  retryBlocked: string[];
+  /** Human-readable reason for each blocked Dispatch id. */
+  retryBlockedDetails: RetryBlockedRecovery[];
 }
 
 /** A question/escalation waiting on a human, surfaced in the InboxPanel. */
@@ -530,6 +563,8 @@ export interface StartOpts {
    * that no newer active Dispatch exists before acting.
    */
   resumeStoppedDispatchIds?: string[];
+  /** One operator-selected historical Dispatch. Never inferred from abandon. */
+  resumeBlocked?: { dispatchId: string; allowUnknownProvider: boolean };
   /** Inbox wait per loop iteration. Tests shrink this; production blocks ~3s. */
   tickWaitMs?: number;
   /**
@@ -672,6 +707,14 @@ interface State {
   unownedDispatches: string[];
   /** Last startup recovery summary (Phase 4); null when this instance never recovered. */
   recovery: RecoverySummary | null;
+  /** Latest read-only provider session observations for this Run. */
+  recoverySessions: RecoverySessionView[];
+  /** Workspace-scoped durable mapping from Orca Dispatches to provider sessions. */
+  providerSessionStore: ProviderSessionStore | null;
+  /** Short-lived cache keeps provider CLI probes off every loop tick. */
+  providerSessionProbeCache: Map<string, { sessionId: string; checkedAt: number; observation: ProviderSessionObservation }>;
+  /** Failed identity discovery is retried later; never infer from a miss. */
+  providerSessionDiscoveryAt: Map<string, number>;
   /** Stopped Dispatch lineage to consume when its re-queued Task is placed. */
   retryOfByTask: Map<string, string>;
   /**
@@ -712,6 +755,8 @@ const START_RECEIPTS_MAX = 5;
 const CHECK_RECEIPTS_MAX = 60;
 /** Per-receipt message digest bound — Deliveries are small; this is generous. */
 const CHECK_MESSAGES_MAX = 20;
+/** Provider CLIs can be slow; an observation remains fresh for five loop ticks. */
+const PROVIDER_SESSION_PROBE_TTL_MS = 10_000;
 
 const state: State = {
   running: false,
@@ -735,6 +780,10 @@ const state: State = {
   lastStopReport: null,
   unownedDispatches: [],
   recovery: null,
+  recoverySessions: [],
+  providerSessionStore: null,
+  providerSessionProbeCache: new Map(),
+  providerSessionDiscoveryAt: new Map(),
   retryOfByTask: new Map(),
   lanes: new Map(),
   integrationParked: new Set(),
@@ -765,6 +814,10 @@ export function resetCoordinatorForTests(): void {
   state.lastStopReport = null;
   state.unownedDispatches = [];
   state.recovery = null;
+  state.recoverySessions = [];
+  state.providerSessionStore = null;
+  state.providerSessionProbeCache = new Map();
+  state.providerSessionDiscoveryAt = new Map();
   state.retryOfByTask = new Map();
   state.lanes = new Map();
   state.integrationParked = new Set();
@@ -802,6 +855,7 @@ export function coordinatorStatus() {
       agentTerminalHandle: a.agentTerminalHandle,
       /** Execution host the fleet last reported (Phase 6) — local or environment. */
       host: a.host,
+      providerSession: a.providerSession ? { ...a.providerSession } : null,
       requested: a.requested,
       effective: a.effective,
       reuseOf: a.reuseOf,
@@ -848,6 +902,7 @@ export function coordinatorStatus() {
     lastStopReport: state.lastStopReport,
     unownedDispatches: [...state.unownedDispatches],
     recovery: state.recovery,
+    recoverySessions: state.recoverySessions.map((session) => ({ ...session })),
     /** Workspace-lane projections (worktree-lanes epic): identity + lifecycle. */
     worktreeLanes: laneViews(),
     checks: state.checks.map((receipt) => ({
@@ -859,7 +914,10 @@ export function coordinatorStatus() {
 }
 
 /** Public read model consumed by HTTP and the activity normalizer. */
-export type CoordinatorStatus = ReturnType<typeof coordinatorStatus>;
+export type CoordinatorStatus = Omit<ReturnType<typeof coordinatorStatus>, "recoverySessions"> & {
+  /** Runtime always includes this; optional for consumers replaying older snapshots. */
+  recoverySessions?: RecoverySessionView[];
+};
 
 /**
  * Bind the Run and start the dispatch loop.
@@ -890,6 +948,10 @@ export async function startCoordinator(opts: StartOpts): Promise<void> {
   state.cleanupDebt = [];
   state.unownedDispatches = [];
   state.recovery = null;
+  state.recoverySessions = [];
+  state.providerSessionStore = new ProviderSessionStore(getOrcaRuntime().workspace.dir);
+  state.providerSessionProbeCache = new Map();
+  state.providerSessionDiscoveryAt = new Map();
   state.retryOfByTask = new Map();
   state.lanes = new Map();
   state.integrationParked = new Set();
@@ -1278,12 +1340,216 @@ async function createIntegrationGate(task: OrcaTask): Promise<void> {
  *    released automatically); already-decided rows (released/retained) are
  *    left exactly as Orca holds them.
  */
+function isProviderSessionStatus(value: unknown): value is ProviderSessionStatus {
+  return value === "active" || value === "idle" || value === "exited" ||
+    value === "unknown" || value === "unavailable";
+}
+
+function sessionView(
+  binding: ProviderSessionBinding,
+  observation: ProviderSessionObservation,
+  decision: RecoverySessionView["decision"],
+): RecoverySessionView {
+  return {
+    taskId: binding.taskId,
+    dispatchId: binding.dispatchId,
+    harness: binding.harness,
+    sessionId: binding.sessionId,
+    status: isProviderSessionStatus(observation.status) ? observation.status : "unknown",
+    decision,
+    detail: observation.detail ?? null,
+    observedAt: observation.observedAt ?? null,
+    source: binding.source,
+    host: binding.host ?? null,
+    workspace: binding.workspace,
+  };
+}
+
+/**
+ * Read a provider session only through its exact durable Run/Task/Dispatch
+ * binding. A missing binding is never reconstructed from terminal titles,
+ * process arguments, harness defaults, or a task's current launch choice.
+ */
+async function readProviderSession(
+  binding: ProviderSessionBinding,
+  force = false,
+): Promise<ProviderSessionObservation> {
+  const cached = state.providerSessionProbeCache.get(binding.dispatchId);
+  if (
+    !force && cached?.sessionId === binding.sessionId &&
+    Date.now() - cached.checkedAt < PROVIDER_SESSION_PROBE_TTL_MS
+  ) {
+    return cached.observation;
+  }
+  let result: ProviderSessionObservation;
+  try {
+    if (!state.providerSessionStore) throw new Error("provider session store is not initialized");
+    result = await state.providerSessionStore.probe(binding);
+  } catch (err) {
+    result = {
+      ...binding,
+      status: "unknown",
+      detail: `provider session could not be observed: ${String((err as Error)?.message ?? err)}`,
+      observedAt: new Date().toISOString(),
+    };
+  }
+  state.providerSessionProbeCache.set(binding.dispatchId, {
+    sessionId: binding.sessionId,
+    checkedAt: Date.now(),
+    observation: result,
+  });
+  return result;
+}
+
+async function listProviderSessions(runId: string): Promise<ProviderSessionBinding[]> {
+  try {
+    return (await state.providerSessionStore?.list(runId)) ?? [];
+  } catch {
+    // Evidence storage failure is not task failure. In particular, callers
+    // must keep an unsupervised Dispatch occupied instead of interpreting a
+    // missing journal row as proof its background process exited.
+    return [];
+  }
+}
+
+/**
+ * Link a provider-issued ID to a Dispatch only when Orca confirms the exact
+ * local terminal/workspace and the provider independently confirms a unique
+ * correlation. Failed lookups are ordinary during launch and are throttled;
+ * neither absence nor a closed terminal authorizes a new Dispatch.
+ */
+async function captureProviderSessions(
+  runId: string,
+  tasks: OrcaTask[],
+  rows: OrcaWorkerRow[],
+): Promise<void> {
+  const store = state.providerSessionStore;
+  if (!store) return;
+  const known = new Set((await listProviderSessions(runId)).map((binding) => binding.dispatchId));
+  const taskIds = new Set(tasks.map((task) => task.id));
+  for (const row of rows) {
+    if (row.runId !== runId || !taskIds.has(row.taskId) || known.has(row.dispatchId)) continue;
+    if (row.projection?.host?.kind !== "local" || row.projection.host.id !== "local") continue;
+    // Avoid a worker-show CLI call for every unrelated Dispatch. An older
+    // external row with no harness evidence stays eligible for manual binding.
+    const hint = row.projection.provider?.id ?? row.projection.launch?.agent ??
+      state.attempts.get(row.taskId)?.harness ?? state.opts?.harnessByTask?.[row.taskId] ?? null;
+    if (hint !== "claude" && hint !== "codex" && hint !== "opencode") continue;
+    if (Date.now() - (state.providerSessionDiscoveryAt.get(row.dispatchId) ?? 0) < 10_000) continue;
+    state.providerSessionDiscoveryAt.set(row.dispatchId, Date.now());
+    try {
+      const detail = await showWorkerDetail(row.dispatchId);
+      if (detail?.runId !== runId || detail.taskId !== row.taskId ||
+          detail.observation?.exactWorker !== true || !detail.terminal?.worktreePath) continue;
+      const reported = [
+        detail.terminal.agentIdentity,
+        row.projection.provider?.id,
+        row.projection.launch?.agent,
+      ].filter((value): value is "claude" | "codex" | "opencode" =>
+        value === "claude" || value === "codex" || value === "opencode");
+      if (new Set(reported).size > 1) continue;
+      const candidate = reported[0] ??
+        state.attempts.get(row.taskId)?.harness ?? state.opts?.harnessByTask?.[row.taskId] ?? null;
+      if (candidate !== "claude" && candidate !== "codex" && candidate !== "opencode") continue;
+      const sessionId = await discoverProviderSession({
+        runId,
+        taskId: row.taskId,
+        dispatchId: row.dispatchId,
+        harness: candidate,
+        workspace: detail.terminal.worktreePath,
+        host: "local:local",
+        workerHandle: detail.terminal.handle,
+      });
+      if (!sessionId) continue;
+      await store.bind({
+        runId, taskId: row.taskId, dispatchId: row.dispatchId,
+        harness: candidate, sessionId,
+        workspace: detail.terminal.worktreePath,
+        host: "local:local", source: "provider-evidence",
+      });
+      known.add(row.dispatchId);
+    } catch {
+      // Provider/Orca evidence can disappear between reads. A failed capture
+      // leaves the Dispatch unbound and the coordinator conservative.
+    }
+  }
+}
+
+/**
+ * Refresh the Run's visible provider evidence. Probe results are throttled by
+ * readProviderSession; the coordinator loop must not launch a provider CLI on
+ * every short Orca inbox wait. The Orca task/worker rows remain separate and
+ * authoritative for Stage settlement.
+ */
+async function refreshRecoverySessions(
+  runId: string,
+  tasks: OrcaTask[],
+  rows: OrcaWorkerRow[],
+  force = false,
+): Promise<RecoverySessionView[]> {
+  await captureProviderSessions(runId, tasks, rows);
+  const taskById = new Map(tasks.map((task) => [task.id, task]));
+  const rowByDispatch = new Map(rows.map((row) => [row.dispatchId, row]));
+  const stopIds = new Set(state.opts?.resumeStoppedDispatchIds ?? []);
+  const views: RecoverySessionView[] = [];
+  for (const binding of await listProviderSessions(runId)) {
+    if (binding.runId !== runId || binding.dispatchId.length === 0) continue;
+    const task = taskById.get(binding.taskId);
+    if (!task) continue;
+    const row = rowByDispatch.get(binding.dispatchId);
+    const isCurrentDispatch = task.dispatch_id === binding.dispatchId;
+    const isRequestedStop = stopIds.has(binding.dispatchId);
+    const isDispatched = task.status === "dispatched" && isCurrentDispatch;
+    // Historical bindings are omitted once the Task has moved to a newer
+    // Dispatch, unless this coordinator is explicitly reconciling that Stop.
+    if (!isCurrentDispatch && !isRequestedStop && row?.dispatchStatus !== "dispatched") continue;
+    const observation = force
+      ? await readProviderSession(binding, true)
+      : await readProviderSession(binding);
+    let decision: RecoverySessionView["decision"];
+    if (isDispatched) {
+      decision = observation.status === "active" ? "adopted" : "held";
+    } else if (
+      (isRequestedStop || task.status === "blocked") &&
+      (observation.status !== "exited" || row?.workerState !== "supervised")
+    ) {
+      decision = "retry_blocked";
+    } else {
+      decision = "reconcile";
+    }
+    const view = sessionView(binding, observation, decision);
+    views.push(view);
+    const attempt = state.attempts.get(binding.taskId);
+    if (attempt?.dispatchId === binding.dispatchId) attempt.providerSession = view;
+  }
+  state.recoverySessions = views;
+  if (state.recovery) {
+    state.recovery.providerSessions = views.map((view) => ({ ...view }));
+  }
+  return views;
+}
+
 async function recoverState(opts: StartOpts): Promise<void> {
   const runId = opts.runId;
   // --include-remote: a crashed viewer's remote Dispatches live on their
   // connected servers; a local-only listing would misread them as lost.
   const [tasks, rows] = await Promise.all([listTasks(runId), listWorkers(runId, { includeRemote: true })]);
+  await captureProviderSessions(runId, tasks, rows);
   const rowByDispatch = new Map(rows.map((r) => [r.dispatchId, r]));
+  const bindings = await listProviderSessions(runId);
+  const bindingByDispatch = new Map(
+    bindings
+      .filter((binding) => binding.runId === runId && binding.dispatchId.length > 0)
+      .map((binding) => [binding.dispatchId, binding]),
+  );
+  const observationByDispatch = new Map<string, ProviderSessionObservation>();
+  const observeBinding = async (binding: ProviderSessionBinding): Promise<ProviderSessionObservation> => {
+    const cached = observationByDispatch.get(binding.dispatchId);
+    if (cached) return cached;
+    const observation = await readProviderSession(binding);
+    observationByDispatch.set(binding.dispatchId, observation);
+    return observation;
+  };
 
   const summary: RecoverySummary = {
     at: Date.now(),
@@ -1291,6 +1557,9 @@ async function recoverState(opts: StartOpts): Promise<void> {
     settledAdopted: [],
     unverifiable: [],
     leftDecided: 0,
+    providerSessions: [],
+    retryBlocked: [],
+    retryBlockedDetails: [],
   };
 
   // A user clicking Run after Stop is an explicit retry decision, not an
@@ -1300,6 +1569,8 @@ async function recoverState(opts: StartOpts): Promise<void> {
   // ordinary failures, gate-blocked Tasks, unverifiable rows, and Tasks with a
   // newer active Dispatch are deliberately left untouched.
   const stoppedByViewer = new Set(opts.resumeStoppedDispatchIds ?? []);
+  const explicitResume = opts.resumeBlocked;
+  let selectedRequeued = false;
   const activeTaskIds = new Set(
     rows.filter((row) => row.dispatchStatus === "dispatched").map((row) => row.taskId),
   );
@@ -1308,18 +1579,106 @@ async function recoverState(opts: StartOpts): Promise<void> {
     const stopped = rows.find(
       (row) =>
         row.taskId === task.id &&
-        stoppedByViewer.has(row.dispatchId) &&
+        (stoppedByViewer.has(row.dispatchId) || explicitResume?.dispatchId === row.dispatchId) &&
         projectionOutcome(row) === "failed",
     );
     if (!stopped) continue;
+    const selectedByOperator = explicitResume?.dispatchId === stopped.dispatchId;
+    if (selectedByOperator) {
+      // A previously abandoned worker is absent from the viewer's stop ledger.
+      // The operator may select it directly, but fleet exit, exact historical
+      // launch and workspace identity must all be re-read before task-update.
+      if (stopped.projection?.liveness?.verdict !== "exited") {
+        throw new OrcaCliError("The selected Dispatch has no positive fleet exit evidence.", "resume_not_allowed");
+      }
+      const gates = await listGates(runId);
+      if (gates.some((gate) => gate.taskId === task.id && gate.status === "pending")) {
+        throw new OrcaCliError("The selected Stage still has an unresolved gate.", "resume_not_allowed");
+      }
+      const detail = await showWorkerDetail(stopped.dispatchId);
+      const launch = detail?.launch;
+      if (detail?.runId !== runId || detail.taskId !== task.id || !launch?.resolvedWorktreeId) {
+        throw new OrcaCliError("The selected Dispatch has no exact historical launch identity.", "resume_not_allowed");
+      }
+      const selectedAt = Date.parse(detail.dispatch?.dispatchedAt ?? "");
+      const siblingDetails = await Promise.all(
+        rows.filter((row) => row.taskId === task.id && row.dispatchId !== stopped.dispatchId)
+          .map((row) => showWorkerDetail(row.dispatchId)),
+      );
+      if (!Number.isFinite(selectedAt) || siblingDetails.some((sibling) =>
+        !sibling?.dispatch?.dispatchedAt ||
+        !Number.isFinite(Date.parse(sibling.dispatch.dispatchedAt)) ||
+        Date.parse(sibling.dispatch.dispatchedAt) >= selectedAt
+      )) {
+        throw new OrcaCliError("A newer or unverifiable Dispatch exists for this Stage.", "resume_not_allowed");
+      }
+      if (stopped.projection?.host?.kind !== "local") {
+        throw new OrcaCliError("Recovery of a remote Dispatch needs exact saved-environment replay.", "resume_not_allowed");
+      }
+      const selector = `id:${launch.resolvedWorktreeId}`;
+      if (!(await showWorktree(selector))) {
+        throw new OrcaCliError("The original worker workspace is no longer registered.", "resume_not_allowed");
+      }
+      // Current viewer defaults may have changed since the Dispatch. The
+      // historical worker-start receipt is authoritative for its retry.
+      opts.harnessByTask = { ...opts.harnessByTask, [task.id]: launch.agent };
+      opts.modelByTask = { ...opts.modelByTask };
+      opts.effortByTask = { ...opts.effortByTask };
+      opts.environmentByTask = { ...opts.environmentByTask };
+      if (launch.model) opts.modelByTask[task.id] = launch.model;
+      else delete opts.modelByTask[task.id];
+      if (launch.effort) opts.effortByTask[task.id] = launch.effort;
+      else delete opts.effortByTask[task.id];
+      delete opts.environmentByTask[task.id];
+      opts.placementByTask = { ...opts.placementByTask, [task.id]: { kind: "existing", selector } };
+      // buildLaneRuntimes already ran before recovery. Refuse a stale lane
+      // membership rather than diverging from that runtime plan mid-start.
+      if (opts.laneByTask?.[task.id]) {
+        throw new OrcaCliError("Remove this Stage from its configured lane before retrying the historical workspace.", "resume_not_allowed");
+      }
+    }
+    const binding = bindingByDispatch.get(stopped.dispatchId);
+    if (binding) {
+      const observation = await observeBinding(binding);
+      const operatorAcceptedUnknown = selectedByOperator && explicitResume?.allowUnknownProvider &&
+        (observation.status === "unknown" || observation.status === "unavailable");
+      if (observation.status !== "exited" && !operatorAcceptedUnknown) {
+        // worker-stop fences a tracking Dispatch but does not prove the
+        // provider's background process exited. Only a positive provider exit
+        // or an explicit decision about unknown status permits requeue.
+        summary.retryBlocked.push(stopped.dispatchId);
+        summary.retryBlockedDetails.push({
+          taskId: task.id,
+          dispatchId: stopped.dispatchId,
+          reason: `provider session is ${observation.status}; retry requires positive exit or an explicit decision about unknown status`,
+        });
+        continue;
+      }
+    } else if (!(selectedByOperator && explicitResume?.allowUnknownProvider)) {
+      // `worker-stop` fences/stops the Orca agent terminal but does not prove
+      // that a detached provider background task exited. This applies to
+      // supervised and legacy Dispatches alike; only an exact binding with a
+      // positive provider exit or an explicit operator decision can resume.
+      summary.retryBlocked.push(stopped.dispatchId);
+      summary.retryBlockedDetails.push({
+        taskId: task.id,
+        dispatchId: stopped.dispatchId,
+        reason: "no exact provider session binding; terminal stop does not prove detached background work exited",
+      });
+      continue;
+    }
     await taskUpdate(task.id, "ready", runId, state.coordinatorHandle!);
     state.retryOfByTask.set(task.id, stopped.dispatchId);
+    if (selectedByOperator) selectedRequeued = true;
+  }
+  if (explicitResume && !selectedRequeued) {
+    throw new OrcaCliError("The selected blocked Stage was not requeued; refresh its Dispatch and session evidence.", "resume_not_allowed");
   }
 
-  const freshAttempt = (task: OrcaTask, harness: string): Attempt => ({
+  const freshAttempt = (task: OrcaTask, harness: string, mode: StartedWorker["mode"] = "supervised"): Attempt => ({
     taskId: task.id,
     harness,
-    mode: "supervised",
+    mode,
     dispatchId: task.dispatch_id ?? null,
     handle: null,
     startedAt: Date.now(),
@@ -1350,6 +1709,7 @@ async function recoverState(opts: StartOpts): Promise<void> {
     agentTerminalHandle: null,
     fleetTerminalState: null,
     host: null,
+    providerSession: null,
   });
 
   /**
@@ -1384,10 +1744,23 @@ async function recoverState(opts: StartOpts): Promise<void> {
     const row = task.dispatch_id ? rowByDispatch.get(task.dispatch_id) ?? null : null;
     if (task.status === "dispatched") {
       if (!row || row.workerState !== "supervised") {
-        // No verifiable supervised worker behind this Dispatch (a crashed
-        // legacy lane, or a stale record). Surfacing + budget-count is all we
-        // do — the process behind it, if any, is beyond our authority.
-        summary.unverifiable.push(task.id);
+        // Legacy Dispatches do not gain Orca process ownership on adoption.
+        // If the user supplied an exact provider session binding, observe and
+        // adopt that session into a budget-counted attempt; otherwise leave it
+        // as an unowned Dispatch which still consumes a slot below.
+        const binding = task.dispatch_id ? bindingByDispatch.get(task.dispatch_id) : undefined;
+        if (binding) {
+          const observation = await observeBinding(binding);
+          const view = sessionView(binding, observation, observation.status === "active" ? "adopted" : "held");
+          const attempt = freshAttempt(task, binding.harness, "legacy");
+          attempt.providerSession = view;
+          if (row) seedFromRow(attempt, row);
+          state.attempts.set(task.id, attempt);
+          summary.activeAdopted.push(task.id);
+          summary.providerSessions.push(view);
+        } else {
+          summary.unverifiable.push(task.id);
+        }
         continue;
       }
       const outcome = projectionOutcome(row);
@@ -1398,11 +1771,25 @@ async function recoverState(opts: StartOpts): Promise<void> {
         settleAttempt(attempt, outcome, "task_status");
         seedInheritedTerminalState(attempt, row);
         seedFromRow(attempt, row);
+        const binding = bindingByDispatch.get(row.dispatchId);
+        if (binding) {
+          const observation = await observeBinding(binding);
+          const view = sessionView(binding, observation, "reconcile");
+          attempt.providerSession = view;
+          summary.providerSessions.push(view);
+        }
         state.attempts.set(task.id, attempt);
         summary.settledAdopted.push(task.id);
       } else {
         const attempt = freshAttempt(task, opts.harnessByTask[task.id] || opts.defaultHarness);
         seedFromRow(attempt, row);
+        const binding = bindingByDispatch.get(row.dispatchId);
+        if (binding) {
+          const observation = await observeBinding(binding);
+          const view = sessionView(binding, observation, "adopted");
+          attempt.providerSession = view;
+          summary.providerSessions.push(view);
+        }
         state.attempts.set(task.id, attempt);
         summary.activeAdopted.push(task.id);
       }
@@ -1429,6 +1816,24 @@ async function recoverState(opts: StartOpts): Promise<void> {
     }
   }
 
+  // Stopped or otherwise historical Dispatch bindings are still useful UI
+  // evidence even when their Task no longer points at that Dispatch. They do
+  // not occupy a slot unless the matching Task remains dispatched.
+  for (const binding of bindings) {
+    if (summary.providerSessions.some((session) => session.dispatchId === binding.dispatchId)) continue;
+    const task = tasks.find((candidate) => candidate.id === binding.taskId);
+    if (!task || (!stoppedByViewer.has(binding.dispatchId) && task.dispatch_id !== binding.dispatchId)) continue;
+    const observation = await observeBinding(binding);
+    const blocked = summary.retryBlocked.includes(binding.dispatchId);
+    summary.providerSessions.push(
+      sessionView(
+        binding,
+        observation,
+        blocked ? "retry_blocked" : task.status === "dispatched" ? "held" : "reconcile",
+      ),
+    );
+  }
+
   // Worktree lanes: adopt each lane's workspace identity from the same
   // authoritative rows the attempts were rebuilt from (plus, when no launch
   // echo survives, positive worktree discovery). Runs before the dispatch
@@ -1437,6 +1842,7 @@ async function recoverState(opts: StartOpts): Promise<void> {
   await recoverLaneIdentity(opts, rows);
 
   state.recovery = summary;
+  state.recoverySessions = summary.providerSessions.map((session) => ({ ...session }));
 }
 
 /**
@@ -1595,6 +2001,23 @@ export async function stopCoordinator(): Promise<StopReport> {
         result: "unknown",
         detail: String((err as Error).message ?? err),
       });
+    }
+  }
+
+  // Closing the viewer-created terminal is not a provider-process liveness
+  // signal: Claude/Codex/OpenCode may have detached work. Refresh exact stored
+  // bindings once for the stopped projection, without sending a wake message
+  // or inferring exit from the closed Orca pane.
+  if (runIdAtStop) {
+    try {
+      const [tasks, rows] = await Promise.all([
+        listTasks(runIdAtStop),
+        listWorkers(runIdAtStop, { includeRemote: true }),
+      ]);
+      await refreshRecoverySessions(runIdAtStop, tasks, rows, true);
+    } catch {
+      // Stop has already run; failed observation leaves the last known session
+      // status in place and never changes the stop receipt or retry authority.
     }
   }
 
@@ -2148,6 +2571,7 @@ function reserveAttempt(task: OrcaTask, harness: string): Attempt {
     agentTerminalHandle: null,
     fleetTerminalState: null,
     host: null,
+    providerSession: null,
   };
 }
 
@@ -2237,6 +2661,7 @@ async function reconcile(): Promise<void> {
   // them to the execution host.
   const workerRows = await listWorkers(runId, { includeRemote: true });
   const rowsByDispatch = new Map(workerRows.map((r) => [r.dispatchId, r]));
+  await refreshRecoverySessions(runId, tasks, workerRows);
 
   // Dispatched tasks we never started — pre-existing Dispatches from a crashed
   // viewer (Phase 4 adopts these; until then they must visibly block both the
@@ -2450,6 +2875,17 @@ async function decideTerminalOwnership(attempt: Attempt, opts: StartOpts, readyT
   }
 
   if (attempt.mode === "legacy") {
+    if (attempt.adopted && !attempt.handle) {
+      // Recovery knows the exact Orca Dispatch, but this process did not
+      // create or adopt its terminal handle. Releasing/closing by guess could
+      // terminate a still-running provider background session, so keep the
+      // ownership decision visible for a human.
+      attempt.terminalDecision = "release_unknown";
+      attempt.terminalDetail =
+        "recovered legacy Dispatch has no terminal owned by this coordinator; provider session status is observational only";
+      recordDebt(attempt, "release_unknown", attempt.terminalDetail);
+      return;
+    }
     // Legacy lane: the terminal was created by THIS viewer (a bare shell we
     // spawned), so closing it is the one proven action. The tracking Dispatch
     // is unsupervised — worker-release on it records `retained` with no
@@ -3152,6 +3588,27 @@ async function startOne(
         terminal: e.terminal,
         on: e.on,
       };
+    }
+    // The process-local Attempt vanishes on a viewer restart. Save the
+    // Dispatch-scoped launch identity while the successful start is still in
+    // hand; a Task's mutable harness preference cannot answer what ran here.
+    // For a reused terminal, only an Orca effective echo can name its agent.
+    // This is presentation evidence, never a reason to settle a Dispatch, so
+    // an unwritable history file must not turn a launched worker into a failure.
+    const launchedAgent = attempt.effective?.agent ?? (reuseTerminal ? null : attempt.harness);
+    if (started.dispatchId && launchedAgent) {
+      try {
+        await new LaunchHistory(getOrcaRuntime().workspace.dir).record({
+          runId,
+          taskId: task.id,
+          dispatchId: started.dispatchId,
+          harness: launchedAgent,
+          source: "viewer-launch",
+        });
+      } catch {
+        // Orca remains the lifecycle authority; worker-show can recover
+        // supervised launch identity even when this local write failed.
+      }
     }
     // Worktree lanes: this start may be the lane's CREATION event — capture
     // the workspace identity from positive evidence only, in honesty order:

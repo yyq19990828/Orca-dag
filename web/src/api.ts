@@ -9,6 +9,8 @@ import type {
   OrcaRun,
   OrcaWorktreeView,
   PlacementSpec,
+  ProviderSessionBindingView,
+  ProviderSessionObservationView,
   RequestDetailResponse,
   RequestLedgerRowView,
   RunHealthView,
@@ -199,6 +201,38 @@ export async function fetchWorkers(runId: string): Promise<WorkerRowView[]> {
   return workers ?? [];
 }
 
+/** Exact Run-scoped provider-session bindings; reading this does not probe them. */
+export async function fetchProviderSessionBindings(runId: string): Promise<ProviderSessionBindingView[]> {
+  const { bindings } = await get<{ bindings: ProviderSessionBindingView[] }>(
+    `/api/session-bindings?run=${encodeURIComponent(runId)}`,
+  );
+  return bindings ?? [];
+}
+
+/** Save a provider session ID against one exact Run/Task/Dispatch identity. */
+export async function saveProviderSessionBinding(
+  dispatchId: string,
+  binding: Pick<ProviderSessionBindingView, "runId" | "taskId" | "harness" | "sessionId">,
+): Promise<ProviderSessionBindingView> {
+  const { binding: saved } = await put<{ binding: ProviderSessionBindingView }>(
+    `/api/session-bindings/${encodeURIComponent(dispatchId)}`,
+    binding,
+  );
+  return saved;
+}
+
+/** Probe one explicitly bound provider session on operator request. */
+export async function probeProviderSession(
+  dispatchId: string,
+  runId: string,
+): Promise<ProviderSessionObservationView> {
+  const { observation } = await post<{ observation: ProviderSessionObservationView }>(
+    `/api/session-bindings/${encodeURIComponent(dispatchId)}/probe`,
+    { runId },
+  );
+  return observation;
+}
+
 /**
  * Run-scoped detail for ONE worker (Phase 2): the durable row plus
  * `worker-show` evidence — observation, agent-wait, terminal facts, launch
@@ -259,6 +293,7 @@ export async function startRun(
   placementByTask: Record<string, PlacementSpec> = {},
   worktreeLanes: Record<string, WorktreeLaneSpec> = {},
   laneByTask: Record<string, string> = {},
+  resumeBlocked?: { dispatchId: string; allowUnknownProvider: boolean },
 ): Promise<RunStatus> {
   return post(`/api/run`, {
     runId,
@@ -274,6 +309,20 @@ export async function startRun(
     // placement — avoids the 250ms config-write debounce racing the run).
     worktreeLanes,
     laneByTask,
+    resumeBlocked,
+  });
+}
+
+/** Record a reviewed result on a blocked Task whose Dispatch cannot report. */
+export async function resolveBlockedWorker(
+  dispatchId: string,
+  runId: string,
+  result: string,
+): Promise<void> {
+  await post(`/api/workers/${encodeURIComponent(dispatchId)}/resolve-blocked`, {
+    runId,
+    result,
+    acknowledgeUnknownProvider: true,
   });
 }
 

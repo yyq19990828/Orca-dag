@@ -981,7 +981,7 @@ describe("explicit stop", () => {
     assert.notEqual(coordinatorStatus().lastStopReport, null);
   });
 
-  it("Run again safely resumes a viewer-stopped opencode stage without sending unsupported retry flags", async () => {
+  it("Run again holds a viewer-stopped opencode stage without exact provider exit evidence", async () => {
     const { call } = await startApp();
     const runId = "run_stop_resume";
     await singleTaskState(runId);
@@ -1000,14 +1000,12 @@ describe("explicit stop", () => {
 
     const resumed = await call("POST", "/api/run", body);
     assert.equal(resumed.status, 200);
-    await waitFor(() => (calls("dispatch").length === 2 ? true : null), "replacement tracking Dispatch");
-    const replacement = calls("dispatch")[1].argv;
-    assert.ok(!replacement.includes("--retry-of"), "legacy dispatch never receives worker-start-only flags");
-    assert.equal(coordinatorStatus().running, true, "the resumed Run remains active");
-    assert.notEqual(coordinatorStatus().phase, "completed");
+    assert.equal(calls("dispatch").length, 1, "a terminal stop does not prove the provider process exited");
+    assert.equal(getState().tasks.task_aaa.status, "blocked");
+    assert.ok(coordinatorStatus().recovery?.retryBlocked.includes(firstDispatch));
   });
 
-  it("Run again retries a stopped supervised stage with explicit Dispatch lineage", async () => {
+  it("Run again holds a stopped supervised stage without exact provider exit evidence", async () => {
     const { call } = await startApp();
     const runId = "run_stop_resume_supervised";
     await singleTaskState(runId);
@@ -1021,10 +1019,9 @@ describe("explicit stop", () => {
     assert.equal(getState().tasks.task_aaa.status, "blocked");
 
     assert.equal((await call("POST", "/api/run", body)).status, 200);
-    await waitFor(() => (calls("worker-start").length === 2 ? true : null), "replacement supervised Dispatch");
-    const replacement = calls("worker-start")[1].argv;
-    const retryIndex = replacement.indexOf("--retry-of");
-    assert.equal(replacement[retryIndex + 1], firstDispatch);
+    assert.equal(calls("worker-start").length, 1, "a terminal stop does not prove detached work exited");
+    assert.equal(getState().tasks.task_aaa.status, "blocked");
+    assert.ok(coordinatorStatus().recovery?.retryBlocked.includes(firstDispatch));
   });
 });
 

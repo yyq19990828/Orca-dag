@@ -4288,6 +4288,23 @@ body {
 .inbox__reply {
   align-items: stretch;
 }
+.recovery__session-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.recovery__session-form .inbox__input {
+  flex: 1 1 240px;
+}
+.recovery__active-session-candidates > summary {
+  cursor: pointer;
+  font-family: var(--font-display);
+  font-size: 13px;
+  color: var(--sky-ink);
+}
+.recovery__active-session-candidates > summary::marker {
+  color: var(--sky);
+}
 .inbox__input {
   flex: 1;
   min-width: 0;

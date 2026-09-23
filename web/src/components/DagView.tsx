@@ -170,8 +170,10 @@ type TaskNodeData = {  label: string;
   /** Viewer-only semantic ownership; never changes DAG or Orca authority. */
   lead: boolean;
   harness: string;
-  /** True when `harness` is what Orca durably recorded as launched, not the plan. */
+  /** True when `harness` comes from Dispatch launch evidence, not the plan. */
   harnessActual: boolean;
+  /** A Task with no Dispatch can show its configured future harness. */
+  harnessPlanned: boolean;
   dir: "LR" | "TB";
   /** paint order on first draw — staggers the entrance so the DAG "grows" */
   index: number;
@@ -421,9 +423,9 @@ function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
           title={
             data.harnessActual
               ? "Harness recorded for this stage's actual launch"
-              : data.status === "pending" || data.status === "ready"
+              : data.harnessPlanned
                 ? "Planned harness — nothing launched here yet"
-                : "No launch record found — showing the planned harness"
+                : "Launch harness unavailable for this stage"
           }
         >
           {data.harness}
@@ -570,11 +572,9 @@ function Flow({
   reorgNonce: number;
   fitNonce: number;
   showHierarchy: boolean;
-  /** Durable fleet rows — the authority on what actually launched per Task. */
+  /** Run-scoped fleet rows enriched with durable Dispatch launch evidence. */
   workerRows: WorkerRowView[];
-  /** Viewer-coordinator attempt records — the only launch evidence for
-   *  legacy/tracking starts (opencode, custom commands), whose fleet rows
-   *  carry no launch facts at all. Scoped to the selected Run by the caller. */
+  /** Live attempts fill the gap before the new Dispatch reaches worker-list. */
   attempts: RunAttempt[];
 }) {
   const rf = useReactFlow();
@@ -655,43 +655,40 @@ function Flow({
 
   // --- Stage 3 · actual-launch evidence --------------------------------------
   //
-  // What a stage ACTUALLY launched with, from two evidence layers (never the
-  // viewer config, which is only the plan and drifts the moment a harness is
-  // re-picked after dispatch):
-  //   1. Orca's fleet row (`launch.agent`, provider id fallback). CAVEAT,
-  //      verified against Orca 1.4.205 (2026-09-22): worker-list's
-  //      projection.launch is null even for supervised worker-start
-  //      launches — the durable facts live only in worker-show under
-  //      worker.startOptions.launch.effective, and list rows do not include
-  //      startOptions. This layer only earns its keep on builds whose list
-  //      projection carries launch facts; enriching it here would cost one
-  //      worker-show CLI call per row per 2s poll, deliberately not done.
-  //   2. This viewer coordinator's own attempt records — the working source
-  //      for viewer-driven runs, supervised AND legacy/tracking (opencode,
-  //      custom commands). Launches made outside the viewer session (manual
-  //      CLI, a previous process) have no attempt record and fall back to
-  //      the plan behind a "no launch record found" tooltip.
-  // worker-list is newest-first, so the first fleet row per Task is the
-  // latest attempt; for attempts, keep the latest startedAt per Task.
-  const actualHarness = useMemo(() => {
-    const map = new Map<string, string>();
+  // A badge on a launched Stage describes its latest Dispatch, never today's
+  // mutable harness preference. The server enriches worker-list with its
+  // persisted launch record or a one-time worker-show observation. Until the
+  // row appears, the live Attempt supplies the same identity. Old legacy
+  // Dispatches without either kind of evidence show "unknown" honestly.
+  const harnessEvidence = useMemo(() => {
+    const actual = new Map<string, string>();
+    const launched = new Set<string>();
+    const latestRow = new Map<string, WorkerRowView>();
     for (const row of workerRows) {
-      const agent = row.projection?.launch?.agent ?? row.projection?.provider?.id ?? null;
-      if (row.taskId && agent && !map.has(row.taskId)) map.set(row.taskId, agent);
+      if (!row.taskId || latestRow.has(row.taskId)) continue;
+      latestRow.set(row.taskId, row);
+      launched.add(row.taskId);
+      const agent = row.launchEvidence?.agent ??
+        row.projection?.launch?.agent ?? row.projection?.provider?.id ?? null;
+      if (agent) actual.set(row.taskId, agent);
     }
-    // Second evidence layer: the viewer coordinator's own attempt records
-    // (see the caveat above for why the fleet layer alone cannot be trusted
-    // on 1.4.205). Keep the latest attempt per Task.
     const latestAttemptByTask = new Map<string, RunAttempt>();
     for (const attempt of attempts) {
       const prev = latestAttemptByTask.get(attempt.taskId);
       if (!prev || attempt.startedAt >= prev.startedAt) latestAttemptByTask.set(attempt.taskId, attempt);
     }
     for (const [taskId, attempt] of latestAttemptByTask) {
+      // Adopted attempts reconstruct `harness` from today's config. A reserved
+      // attempt has not yet created a Dispatch. Neither proves a launch.
+      if (attempt.adopted || !attempt.dispatchId) continue;
+      const row = latestRow.get(taskId);
+      // Never paste an older attempt's harness onto a newer Dispatch.
+      if (row && row.dispatchId !== attempt.dispatchId) continue;
+      launched.add(taskId);
       const agent = attempt.effective?.agent ?? attempt.harness;
-      if (agent && !map.has(taskId)) map.set(taskId, agent);
+      if (agent && !actual.has(taskId)) actual.set(taskId, agent);
     }
-    return map;
+    return { actual, launched };
   }, [workerRows, attempts]);
 
   // One compact, evidence-backed clue per card. Prefer the exact current
@@ -759,21 +756,26 @@ function Flow({
     // entrance stagger and deterministic tilt as before.
     const decoratedNodes: Node<TaskNodeData>[] = laid.nodes.map((n, i) => {
       const dagNode = nodeById.get(n.id);
+      const status = dagNode?.status ?? "pending";
+      const harnessPlanned = !harnessEvidence.launched.has(n.id) &&
+        (status === "pending" || status === "ready" || status === "blocked");
       return {
         ...n,
         type: "task",
         data: {
           label: dagNode?.label ?? n.id,
-          status: dagNode?.status ?? "pending",
+          status,
           summary: stageSummaries.get(n.id)?.text ?? "Stage context unavailable",
           summaryTitle: stageSummaries.get(n.id)?.title ?? "Stage context unavailable",
           selected: n.id === selectedId,
           lead: n.id === leadTaskId,
           // A launched stage shows what Orca/the coordinator recorded; stages
-          // with no launch evidence at all fall back to the planned (config)
-          // harness, and the tooltip says which is which.
-          harness: actualHarness.get(n.id) ?? effectiveHarness(n.id),
-          harnessActual: actualHarness.has(n.id),
+          // with no Dispatch show the planned harness. Unknown historical
+          // launches never borrow today's editable default.
+          harness: harnessEvidence.actual.get(n.id) ??
+            (harnessPlanned ? effectiveHarness(n.id) : "unknown"),
+          harnessActual: harnessEvidence.actual.has(n.id),
+          harnessPlanned,
           dir,
           index: i,
           // deterministic pseudo-random tilt from the paint order: stickers
@@ -846,7 +848,7 @@ function Flow({
       });
     });
     setEdges([...hierarchyEdges, ...decoratedEdges]);
-  }, [laid, dag, leadTaskId, selectedId, layout, reorgNonce, showHierarchy, actualHarness, stageSummaries, config, setNodes, setEdges]);
+  }, [laid, dag, leadTaskId, selectedId, layout, reorgNonce, showHierarchy, harnessEvidence, stageSummaries, config, setNodes, setEdges]);
 
   // Auto-fit when the node count changes, so live status polls don't yank the
   // viewport while the user is inspecting (or dragging).

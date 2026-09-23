@@ -11,3 +11,5 @@ server/.sessions/
 .orca-dag.config.json
 .orca-dag.activity.jsonl
 .orca-dag.requests.jsonl
+.orca-dag.sessions.json
+.orca-dag.launches.jsonl

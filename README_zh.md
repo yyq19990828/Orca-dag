@@ -189,6 +189,8 @@ npm run release 0.2.0  # 打 tag 并推送；CI 负责发 npm + 把各平台二�
 - **审批门与集成门**：审批操作放在 Activity 可展开的 Operational details 中，不再与其他卡片叠在画布上。跨 lane 集成门会注明来源与目标 lane，说明「上游完成 ≠ 已集成」，且只提供 `integrated` 一种决议；Workspace-lanes 面板从 lane 一侧展示同一道边界（`integration_required` 状态）。
 - **节点详情（只读 spec）**：点节点看 spec / 状态 / 结果。spec 默认是更小的一行预览，并提供可访问的 Expand 控件；结构化 worker 结果会解析为结果状态、简洁报告、修改文件列表和可选报告路径，完整 payload 收进默认折叠的技术详情；改 Task 或依赖仍需让 agent 重绘 DAG。
 - **Workers 面板**：Activity 的 Operational details 内按尝试展示 fleet 视图，包括存活状态、attention、执行主机、终端记账、请求值与实际生效值（模型/effort/**放置与工作区**）、Orca 字面 nextAction，以及带**来源徽标**（`auto / terminal / transcript`、截断/完整标记）的有界输出、只过滤**已加载行**的**搜索**（绝不会抓取更多转录）、本地**下载已加载行**导出，以及与 fleet 权威状态 visibly 区分的释放**归档事实**（归档存在只是证据，不等于结算）。每行还带证据门控的**停止 / 放弃 / 聚焦**操作：正面活跃才能停止，正面已退出或 Orca 指定放弃才能放弃，只有本地精确 `agentWait` 才能聚焦 —— 证据不足时连操作入口都不渲染。
+- **后台会话恢复**：Claude 的精确 worker 进程、Codex preamble 中的 Task/Dispatch ID，或 OpenCode 启动时的 Dispatch 专属标题能唯一对应会话时，Recovery 会自动绑定 provider 提供的 session ID；证据不足时仍可手动输入已知 ID。绑定保存在 `.orca-dag.sessions.json`，并与 Orca 记录的执行位置核对。provider 探测结果与 Orca Dispatch 状态分开显示；主机不可达、终端关闭或 Codex 返回 `notLoaded` 都不证明后台任务已经退出。未知的尝试继续占用并发额度，不会自动重新派工。绑定和探测本身也不会恢复已停止的 Dispatch。
+- **阻断 Stage 的处理**：Operational details 对已失败且 fleet 确认退出的 Dispatch，提供人工核对后完成 Task 或显式重试。人工完成保留旧 Dispatch 的失败记录；重试核对精确 provider session，并沿用旧 harness、模型和工作区。provider 状态未知时，操作员必须输入 Dispatch ID 才能重试，因为后台任务仍可能在运行。
 - **变更请求审计**：查看器发起的每个变更（worker-start / release / retain / stop）都携带持久的 `--retry-request` id，并在调用 CLI **之前**写入工作区 `.orca-dag.requests.jsonl` 账本（有界、仅元数据），即使响应丢失或查看器重启之后 id 仍可检视。Operational details 新增只读**审计面板**：每个已记录请求一行（操作、Task/Dispatch 关联、作用域），行内 **Inspect** 会发起一次全新的 `request-show` 探测，并逐字渲染 Orca 自身的状态与解释——`completed`（绿）、`pending`（琥珀）、`absent`（灰，明确标注"absent 绝不证明变更没有发生"）、探测失败则显示 `unknown`。审计面绝不重放变更。
 - **手绘蜡笔风**：🖍️ SVG feTurbulence 波动描边 + 米色速写本画布。
 
@@ -241,6 +243,10 @@ viewer 是直通 Orca 的控制面 —— 启动 Run 会 fence 掉原本的 coor
 | `POST` | `/api/gates/:id/resolve` | `{ resolution, runId }`：解决审批门 |
 | `GET` | `/api/workers?run=<id>` | 该 Run 完整、游标分页且包含远程记录的 worker 历史（存活状态、终端状态、projection），也是启动参数锁定的持久证据 |
 | `GET` | `/api/workers/:dispatchId?run=<id>` | 单个 worker 的持久行加 `worker-show` 证据（Dispatch/Worker 记录、PTY 事实、带 agent-wait 证据的精确 worker 观察）—— 通过比对接收里的 runId 实现 Run 划界；独立于协调者循环，viewer 重启后历史 worker 依然可查 |
+| `GET` | `/api/session-bindings?run=<id>` | 列出此工作区内该 Run 的精确 provider session 绑定，不探测 provider |
+| `PUT` | `/api/session-bindings/:dispatchId` | 重查精确 Orca worker 和执行位置后，绑定已知的 `{ runId, taskId, harness, sessionId }` |
+| `POST` | `/api/session-bindings/:dispatchId/probe` | `{ runId }`：按需探测该 Dispatch 已绑定的 provider session；结果仅为观察，不会结算 Task |
+| `POST` | `/api/workers/:dispatchId/resolve-blocked` | `{ runId, result, acknowledgeUnknownProvider: true }`：将人工核对结果记录到已退出 worker 对应的阻断 Task；旧 Dispatch 保持失败状态 |
 | `GET` | `/api/workers/:dispatchId/output` | 有界输出分页（`?source=auto\|terminal\|transcript&cursor=&limit=`，limit 钳制 1–200） |
 | `POST` | `/api/workers/:dispatchId/stop` | 停止一个正面确认的 Dispatch —— 行动前用全新 `worker-show` 重读、持久化请求 id、不波及其他 Dispatch；响应丢失返回 `502 response_lost` 与请求 id 供探测，绝不盲试 |
 | `POST` | `/api/workers/:dispatchId/abandon` | 证据门控的显式放弃（`worker-abandon`）—— 只用于正面已退出、或 Orca 字面指定放弃的「结果未知」尝试；Orca 能证明 worker 存活时以 `abandon_refused` 拒绝，且该操作不声称任何进程或文件系统动作 |

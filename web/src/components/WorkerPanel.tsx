@@ -18,6 +18,7 @@ import type {
   WorkerRowView,
   WorkerTerminalReceiptView,
 } from "../types";
+import { workerWorkspaceLabel } from "../workerWorkspace";
 
 /**
  * Durable worker operations (Phase 2): the panel renders the Run-scoped,
@@ -380,6 +381,7 @@ export const WorkerPanel = memo(function WorkerPanel({
         {filtered.map((row) => {
           const open = openDispatch === row.dispatchId;
           const projection = row.projection;
+          const detailWorkspace = workerWorkspaceLabel(detail?.fleet?.projection?.workspace);
           const liveness = projection?.liveness ?? null;
           const verdict = liveness?.verdict === "live" || liveness?.verdict === "exited" ? liveness.verdict : "unverifiable";
           const attempt = attempts.find(
@@ -402,6 +404,7 @@ export const WorkerPanel = memo(function WorkerPanel({
             projection?.provider?.id ??
             projection?.launch?.model ??
             projection?.launch?.agent ??
+            row.launchEvidence?.agent ??
             null;
           // Structured transcript reads are a peer capability (Phase 6):
           // offered for local workers always, for remote workers only when
@@ -481,7 +484,7 @@ export const WorkerPanel = memo(function WorkerPanel({
                     Provider/model:{" "}
                     <b>
                       {provider ??
-                        (attempt
+                        (attempt && !attempt.adopted
                           ? `${attempt.requested.agent}${attempt.requested.model ? ` · ${attempt.requested.model}` : ""} (requested)`
                           : "unknown")}
                     </b>
@@ -542,16 +545,18 @@ export const WorkerPanel = memo(function WorkerPanel({
                       {/* Requested vs effective launch preferences: requested
                           only exists when this viewer started the attempt;
                           effective comes only from the runtime echo. */}
-                      {(attempt || detail.fleet?.projection?.launch) && (
+                      {((attempt && !attempt.adopted) || detail.launch || detail.fleet?.projection?.launch) && (
                         <div className="inbox__body">
                           Launch —{" "}
-                          {attempt
+                          {attempt && !attempt.adopted
                             ? `requested ${attempt.requested.agent ?? "?"}${
                                 attempt.requested.model ? ` · ${attempt.requested.model}` : ""
                               }${attempt.requested.effort ? ` · effort ${attempt.requested.effort}` : ""}`
                             : "requested unknown (not started here)"}
                           {" → effective "}
-                          {detail.fleet?.projection?.launch
+                          {detail.launch
+                            ? [detail.launch.agent, detail.launch.model].filter(Boolean).join(" · ")
+                            : detail.fleet?.projection?.launch
                             ? [
                                 detail.fleet.projection.launch.agent ?? "unknown agent",
                                 detail.fleet.projection.launch.model ?? "unknown model",
@@ -579,7 +584,7 @@ export const WorkerPanel = memo(function WorkerPanel({
                         attempt?.requested.on ||
                         detail?.fleet?.projection?.launch?.worktree ||
                         detail?.fleet?.projection?.launch?.on ||
-                        detail?.fleet?.projection?.workspace) && (
+                        detailWorkspace) && (
                         <div className="inbox__body">
                           Workspace —{" "}
                           <b>
@@ -590,7 +595,7 @@ export const WorkerPanel = memo(function WorkerPanel({
                           {" → effective "}
                           <b>
                             {detail?.fleet?.projection?.launch?.worktree ??
-                              detail?.fleet?.projection?.workspace ??
+                              detailWorkspace ??
                               detail?.fleet?.projection?.launch?.on ??
                               "unknown (no receipt echo)"}
                           </b>

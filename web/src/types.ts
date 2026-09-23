@@ -186,11 +186,17 @@ export interface WorkerRowView {
   /** active | reclaimable | retained | release_pending | release_unknown | released */
   terminalState: string;
   resource?: { state: string; reason: string | null } | null;
+  /** Dispatch-scoped launch identity from Orca or the viewer's durable log. */
+  launchEvidence?: {
+    agent: string;
+    source: "fleet" | "worker-show" | "viewer-launch";
+  } | null;
   projection: {
     id?: string | null;
     role?: string | null;
     parent?: string | null;
-    workspace?: string | null;
+    /** Orca 1.4.207 reports { id, kind }; older runtimes used a string. */
+    workspace?: string | { id?: string | null; kind?: string | null } | null;
     outcome: string | null;
     liveness: { verdict: string; reason: string | null } | null;
     evidence?: {
@@ -271,6 +277,7 @@ export interface WorkerDetailView {
   dispatchId: string;
   runId: string | null;
   taskId: string | null;
+  launch?: { agent: string; model: string | null } | null;
   fleet: WorkerRowView | null;
   dispatch: {
     status: string | null;
@@ -430,6 +437,54 @@ export interface RecoverySummaryView {
   unverifiable: string[];
   /** Already-decided rows (released/retained) left exactly as Orca holds them. */
   leftDecided: number;
+  /** Exact provider-session observations captured during startup recovery. */
+  providerSessions?: RecoverySessionView[];
+  /** Dispatch IDs whose restart was blocked by provider-session evidence. */
+  retryBlocked?: string[];
+  /** Stage and reason details for blocked restart decisions. */
+  retryBlockedDetails?: RetryBlockedView[];
+}
+
+export interface RetryBlockedView {
+  taskId: string;
+  dispatchId: string;
+  reason: string;
+}
+
+/** A provider-session observation, kept separate from Orca's Dispatch state. */
+export interface ProviderSessionObservationView {
+  status: "active" | "idle" | "exited" | "unknown" | "unavailable";
+  detail: string | null;
+  observedAt: string | null;
+}
+
+/** Durable mapping from one exact Orca Dispatch to one provider session. */
+export interface ProviderSessionBindingView {
+  runId: string;
+  taskId: string;
+  dispatchId: string;
+  harness: string;
+  sessionId: string;
+  workspace: string;
+  host: string;
+  source: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Read-only provider-session evidence; it does not imply a new action. */
+export interface RecoverySessionView {
+  taskId: string;
+  dispatchId: string;
+  harness: string;
+  sessionId: string;
+  status: ProviderSessionObservationView["status"];
+  decision: "adopted" | "held" | "reconcile" | "retry_blocked";
+  detail: string | null;
+  observedAt: string | null;
+  source: string | null;
+  host: string | null;
+  workspace: string | null;
 }
 
 // --- Phase 5: mutation-request audit (read-only) -----------------------------
@@ -717,6 +772,8 @@ export interface RunStatus {
   unownedDispatches: string[];
   /** What startup recovery found and did — present after every coordinator start. */
   recovery: RecoverySummaryView | null;
+  /** Provider-session evidence captured during startup recovery. */
+  recoverySessions?: RecoverySessionView[];
   /** The configured worker-slot budget; null while no coordinator is running (unknown capacity). */
   maxConcurrency: number | null;
 }
