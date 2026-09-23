@@ -10,6 +10,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { useT } from "../i18n";
 
 type DialogTone = "default" | "danger";
 
@@ -52,6 +53,9 @@ const DecisionDialogContext = createContext<DecisionDialogApi | null>(null);
  * establish clipping and stacking contexts of their own.
  */
 export function DecisionDialogProvider({ children }: { children: ReactNode }) {
+  // Fallback button labels are translated here; callers may still override
+  // them per dialog (they pass their own localized copy).
+  const t = useT();
   const [active, setActive] = useState<DialogRequest | null>(null);
   const [input, setInput] = useState("");
   const queue = useRef<DialogRequest[]>([]);
@@ -201,7 +205,7 @@ export function DecisionDialogProvider({ children }: { children: ReactNode }) {
                     className="btn btn--ghost"
                     onClick={cancel}
                   >
-                    {active.cancelLabel ?? "Cancel"}
+                    {active.cancelLabel ?? t("dialog.cancel")}
                   </button>
                 )}
                 <button
@@ -210,7 +214,7 @@ export function DecisionDialogProvider({ children }: { children: ReactNode }) {
                   className={`btn ${active.tone === "danger" ? "btn--danger" : "btn--ok"}`}
                   disabled={active.kind === "prompt" && Boolean(active.required && !input.trim())}
                 >
-                  {active.confirmLabel ?? (active.kind === "alert" ? "Close" : "Continue")}
+                  {active.confirmLabel ?? t(active.kind === "alert" ? "dialog.close" : "dialog.continue")}
                 </button>
               </footer>
             </form>

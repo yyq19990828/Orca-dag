@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { startRun, stopRun } from "../api";
+import { useT, type TranslationKey } from "../i18n";
 import { DoodleSelect } from "./DoodleSelect";
 import { useDecisionDialog } from "./DecisionDialog";
 import {
@@ -24,8 +25,30 @@ import { laneMap, lanesSpecMap } from "../harness";
 const CUSTOM = "__custom__";
 const KNOWN = HARNESSES as readonly string[];
 
-/** Custom harness commands are a server-side policy (see /api/session). */
-const CUSTOM_OFF_HINT = "Custom commands are disabled — start the viewer with ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1";
+/**
+ * Short human label for the coordinator's §6.3 phase — a table of dictionary
+ * keys, not copy, so each language supplies its own wording. The `| undefined`
+ * value type keeps the raw-phase fallback in the renderer meaningful for a
+ * server that reports a phase this viewer does not know.
+ */
+const PHASE_KEY: Record<string, TranslationKey | undefined> = {
+  idle: "phase.idle",
+  binding: "phase.binding",
+  running: "phase.running",
+  awaiting_input: "phase.awaitingInput",
+  stopping: "phase.stopping",
+  completed: "phase.completed",
+  recovering: "phase.recovering",
+  error: "phase.error",
+};
+
+/**
+ * Custom harness commands are a server-side policy (see /api/session), so the
+ * refusal copy lives in the dictionary (it carries an env-var name that must
+ * survive translation verbatim). This const only names the key, keeping the
+ * run() preflight throw and the inline hint on the same string.
+ */
+const CUSTOM_OFF_HINT_KEY = "exec.customOffHint";
 
 /**
  * Execution controls. The coordinator is DAG-driven: click Run and it dispatches
@@ -79,6 +102,10 @@ export function ExecControls({
   onRunStopped?: () => void | Promise<void>;
 }) {
   const dialog = useDecisionDialog();
+  // Every user-visible string in this panel is translated — the settings
+  // summary, the phase label, the lock notices, the dialog copy and the stop
+  // report — so subscribe to the UI language here.
+  const t = useT();
   const config = useConfig();
   const { customCommandsAllowed: customOk } = useFlags();
   // Execution gate (Phase 2): the server probes the resolved Orca CLI once.
@@ -113,15 +140,16 @@ export function ExecControls({
   const starting = startingRunId === runId;
   const anotherRunStarting = Boolean(startingRunId && startingRunId !== runId);
   const phase = ownStatus?.phase ?? (starting ? "binding" : "idle");
+  const phaseKey = PHASE_KEY[phase];
   const historyLockReason = workerHistoryError
-    ? "Launch settings are locked while Dispatch history could not be verified. Wait for worker history to recover before editing."
+    ? t("exec.lockHistoryError")
     : workerHistoryLoading
-      ? "Launch settings are locked while Dispatch history is loading. Wait for worker history to finish before editing."
+      ? t("exec.lockHistoryLoading")
       : null;
   const launchLockReason = running
-    ? "Launch settings are frozen while this Run is executing. Stop the coordinator to edit Tasks that have not started."
+    ? t("exec.lockRunning")
     : starting
-      ? "Launch settings are frozen while this Run is starting. Wait for coordinator binding and recovery to finish before editing."
+      ? t("exec.lockStarting")
       : historyLockReason;
   const launchLocked = running || starting || Boolean(historyLockReason);
   const resolvedDefault = defHarness === CUSTOM ? custom.trim() : defHarness;
@@ -135,18 +163,6 @@ export function ExecControls({
   const stopReport = ownStatus?.lastStopReport ?? null;
   const stopUncertain = stopReport?.results.filter((r) => r.result === "unknown") ?? [];
 
-  /** Short human label for the coordinator's §6.3 phase. */
-  const PHASE_LABEL: Record<string, string> = {
-    idle: "Idle",
-    binding: "Binding…",
-    running: "Running",
-    awaiting_input: "Waiting for you",
-    stopping: "Stopping…",
-    completed: "Completed",
-    recovering: "Recovering",
-    error: "Error",
-  };
-
   function pickDefault(h: string) {
     if (launchLocked) return;
     if (h === CUSTOM) {
@@ -159,42 +175,38 @@ export function ExecControls({
 
   async function run() {
     if (!runId) {
-      setErr("Pick a Run first");
+      setErr(t("err.pickRunFirst"));
       return;
     }
     // Mirror the server's execution gate for a fast, clear error — the server
     // re-checks (503) regardless, so this is UX, not the real gate.
     if (execOff) {
-      setErr(readiness?.reason ?? "Execution is unavailable on this Orca runtime.");
+      setErr(readiness?.reason ?? t("err.executionUnavailable"));
       return;
     }
     if (forceCustom && !custom.trim()) {
-      setErr("Pick a default harness");
+      setErr(t("err.pickDefaultHarness"));
       return;
     }
     if (launchLocked) {
-      setErr(launchLockReason ?? "Launch settings are temporarily locked.");
+      setErr(launchLockReason ?? t("err.launchLocked"));
       return;
     }
     if (anotherRunStarting) {
-      setErr(`Run ${startingRunId} is already starting in this viewer.`);
+      setErr(t("err.runStarting", { id: String(startingRunId) }));
       return;
     }
     if (otherRunStatus) {
-      setErr(`Run ${otherRunStatus.runId} is already executing in this viewer. Pick that Run to stop it.`);
+      setErr(t("err.runExecuting", { id: String(otherRunStatus.runId) }));
       return;
     }
     // Binding is the only way to get mutation authority on a Run, and it fences
     // whoever held it — usually the agent terminal that drew this DAG.
     const ok = await dialog.confirm({
-      title: "Let Viewer coordinate this Run?",
-      message:
-        "Starting execution transfers coordinator authority to the Viewer. Any agent terminal " +
-        "currently coordinating this Run will be fenced, so its orchestration mutations will fail " +
-        "with consumer_fenced. It can take authority back with:\n\n" +
-        `orca orchestration run-use --id ${runId}`,
-      confirmLabel: "Start Run",
-      cancelLabel: "Not now",
+      title: t("dialog.confirmRunTitle"),
+      message: t("dialog.confirmRunMessage", { id: runId }),
+      confirmLabel: t("dialog.startRun"),
+      cancelLabel: t("dialog.notNow"),
     });
     if (!ok) return;
 
@@ -210,12 +222,12 @@ export function ExecControls({
       if (forceCustom) setDefaultHarness(custom.trim());
       const launchConfig = await refreshConfig();
       const launchDefault = launchConfig.defaultHarness;
-      if (!launchDefault) throw new Error("Pick a default harness");
+      if (!launchDefault) throw new Error(t("err.pickDefaultHarness"));
       if (!customOk) {
         const customs = [launchDefault, ...Object.values(harnessMap(taskIdsRef.current))].some(
           (h) => !KNOWN.includes(h),
         );
-        if (customs) throw new Error(CUSTOM_OFF_HINT);
+        if (customs) throw new Error(t(CUSTOM_OFF_HINT_KEY));
       }
       // Validate the refreshed placement plan before binding a terminal.
       const laneProblems = lanePlanProblems(
@@ -226,7 +238,7 @@ export function ExecControls({
         edges,
       );
       if (laneProblems.length > 0) {
-        throw new Error(`Placement plan needs a fix before this Run can start — ${laneProblems[0]}`);
+        throw new Error(t("err.placementFix", { detail: laneProblems[0] }));
       }
       // Raise the App-level lock only after config refresh and preflight.
       onRunStarting?.(runId);
@@ -278,18 +290,24 @@ export function ExecControls({
     <div className="exec">
       <details className="exec__settings">
         <summary
-          aria-label={`Execution settings: ${resolvedDefault || "no default harness"}, maximum ${config.maxConcurrency} parallel workers`}
-          title={launchLockReason ?? "Choose the fallback harness and maximum parallel workers"}
+          aria-label={t("exec.settingsAria", {
+            harness: resolvedDefault || t("exec.noDefaultHarness"),
+            n: config.maxConcurrency,
+          })}
+          title={launchLockReason ?? t("exec.settingsTitle")}
         >
           <span aria-hidden="true">⚙</span>
-          <span>Settings</span>
+          <span>{t("exec.settings")}</span>
           <span className="exec__settings-summary">
-            {resolvedDefault || "No harness"} · max {config.maxConcurrency}
+            {t("exec.summaryMax", {
+              harness: resolvedDefault || t("exec.noHarness"),
+              n: config.maxConcurrency,
+            })}
           </span>
         </summary>
-        <div className="exec__settings-panel" role="group" aria-label="Execution settings">
+        <div className="exec__settings-panel" role="group" aria-label={t("exec.groupAria")}>
           <div className="exec__field">
-            <span className="exec__label">Default harness</span>
+            <span className="exec__label">{t("exec.defaultHarness")}</span>
             <DoodleSelect
               size="sm"
               value={defHarness}
@@ -304,7 +322,7 @@ export function ExecControls({
                   ? [
                       {
                         value: CUSTOM,
-                        label: customOk ? "Custom…" : "Custom (disabled)",
+                        label: customOk ? t("exec.custom") : t("exec.customDisabled"),
                         disabled: !customOk,
                         hint: customOk ? undefined : "ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1",
                       },
@@ -316,19 +334,19 @@ export function ExecControls({
               <input
                 className="exec__custom"
                 value={custom}
-                placeholder="command"
-                aria-label="Custom default harness command"
+                placeholder={t("exec.commandPlaceholder")}
+                aria-label={t("exec.customCommandAria")}
                 onChange={(e) => {
                   if (!launchLocked) setCustom(e.target.value);
                 }}
                 disabled={launchLocked || !customOk}
               />
             )}
-            {defHarness === CUSTOM && !customOk && <span className="exec__hint">{CUSTOM_OFF_HINT}</span>}
+            {defHarness === CUSTOM && !customOk && <span className="exec__hint">{t(CUSTOM_OFF_HINT_KEY)}</span>}
           </div>
 
           <label className="exec__field">
-            <span className="exec__label">Max parallel</span>
+            <span className="exec__label">{t("exec.maxParallel")}</span>
             <input
               className="exec__num"
               type="number"
@@ -347,11 +365,13 @@ export function ExecControls({
       {running ? (
         <div className="exec__live">
           <button className="btn btn--stop-run" onClick={stop} disabled={busy}>
-            ⏹ Stop
+            {t("exec.stop")}
           </button>
           <span className="exec__running">
-            <span className="exec__pulse" /> {PHASE_LABEL[phase] ?? phase} · {ownStatus?.busy ?? 0} worker
-            {(ownStatus?.busy ?? 0) === 1 ? "" : "s"}
+            <span className="exec__pulse" /> {phaseKey ? t(phaseKey) : phase} ·{" "}
+            {(ownStatus?.busy ?? 0) === 1
+              ? t("exec.busyWorkersOne", { n: ownStatus?.busy ?? 0 })
+              : t("exec.busyWorkersMany", { n: ownStatus?.busy ?? 0 })}
             {/* one bead per in-flight Dispatch, breathing out of phase */}
             <span className="exec__beads" aria-hidden="true">
               {Array.from({ length: Math.min(ownStatus?.busy ?? 0, 8) }, (_, i) => (
@@ -360,12 +380,12 @@ export function ExecControls({
             </span>
             {/* settled workers that reached an explicit ownership decision */}
             {settled > 0 && (
-              <b className="exec__settled" title="Settled workers released/retained/closed">
-                ✓ {released}/{settled} settled
+              <b className="exec__settled" title={t("exec.settledTitle")}>
+                {t("exec.settledCount", { released, settled })}
               </b>
             )}
             {/* Orca circuit-breaks a task after 3 failed attempts — surface it early */}
-            {retrying > 0 && <b className="exec__retry">↻ {retrying} retrying</b>}
+            {retrying > 0 && <b className="exec__retry">{t("exec.retrying", { n: retrying })}</b>}
           </span>
         </div>
       ) : starting ? (
@@ -374,12 +394,12 @@ export function ExecControls({
             type="button"
             className="btn btn--stop-run"
             disabled
-            title="Stop becomes available after Orca binds this Run"
+            title={t("exec.stopPendingTitle")}
           >
-            ⏹ Stop
+            {t("exec.stop")}
           </button>
           <span className="exec__running">
-            <span className="exec__pulse" /> Binding and recovering…
+            <span className="exec__pulse" /> {t("exec.bindingRecovering")}
           </span>
         </div>
       ) : phase === "completed" ? (
@@ -388,19 +408,20 @@ export function ExecControls({
             className="btn btn--run"
             onClick={run}
             disabled={busy || launchLocked || anotherRunStarting || Boolean(otherRunStatus) || !runId || execOff}
-            title="Run again"
+            title={t("exec.runAgainTitle")}
           >
-            ▶ Run again
+            {t("exec.runAgain")}
           </button>
           <span
             className="exec__running exec__done"
-            title={ownStatus?.completedAt ? `Completed at ${new Date(ownStatus.completedAt).toLocaleTimeString()}` : undefined}
+            title={ownStatus?.completedAt ? t("exec.completedAt", { time: new Date(ownStatus.completedAt).toLocaleTimeString() }) : undefined}
           >
             <span className="exec__done-long">
-              ✓ Completed · {ownStatus?.attempts.length ?? 0} worker
-              {(ownStatus?.attempts.length ?? 0) === 1 ? "" : "s"} released
+              {(ownStatus?.attempts.length ?? 0) === 1
+                ? t("exec.completedReleasedOne", { n: ownStatus?.attempts.length ?? 0 })
+                : t("exec.completedReleasedMany", { n: ownStatus?.attempts.length ?? 0 })}
             </span>
-            <span className="exec__done-short">✓ Done</span>
+            <span className="exec__done-short">{t("exec.doneShort")}</span>
           </span>
         </div>
       ) : (
@@ -412,13 +433,13 @@ export function ExecControls({
           }
           title={
             execOff
-              ? readiness?.reason ?? "Execution is unavailable on this Orca runtime"
+              ? readiness?.reason ?? t("exec.execUnavailableTitle")
               : runId
-                ? "Bind this Run and execute in dependency order"
-                : "Pick a Run first"
+                ? t("exec.bindRunTitle")
+                : t("err.pickRunFirst")
           }
         >
-          {execOff ? "View-only" : "▶ Run with Orca"}
+          {execOff ? t("topbar.viewOnly") : t("exec.runWithOrca")}
         </button>
       )}
 
@@ -426,18 +447,21 @@ export function ExecControls({
       {stopReport && !running && (
         stopReport.clean ? (
           <span className="exec__notice exec__notice--ok" role="status">
-            ✓ Stop clean · {stopReport.results.length} action{stopReport.results.length === 1 ? "" : "s"}
+            {stopReport.results.length === 1
+              ? t("exec.stopCleanOne", { n: stopReport.results.length })
+              : t("exec.stopCleanMany", { n: stopReport.results.length })}
           </span>
         ) : (
           <details className="exec__stop-report exec__stop-report--warn">
             <summary role="status">
-              ⚠ Stop finished with {stopUncertain.length} uncertain · {stopReport.results.length} action
-              {stopReport.results.length === 1 ? "" : "s"}
+              {stopReport.results.length === 1
+                ? t("exec.stopUncertainOne", { uncertain: stopUncertain.length, n: stopReport.results.length })
+                : t("exec.stopUncertainMany", { uncertain: stopUncertain.length, n: stopReport.results.length })}
             </summary>
             <ul className="exec__stop-unknowns">
               {stopUncertain.map((r, i) => (
                 <li key={`${r.target}-${i}`}>
-                  <code>{r.target}</code> ({r.kind}) — {r.detail ?? "outcome unknown"}
+                  <code>{r.target}</code> ({r.kind}) — {r.detail ?? t("exec.outcomeUnknown")}
                 </li>
               ))}
             </ul>
@@ -451,12 +475,16 @@ export function ExecControls({
           {launchLockReason && <span className="exec__hint">🔒 {launchLockReason}</span>}
           {otherRunStatus && (
             <span className="exec__hint">
-              🔒 Run <code>{otherRunStatus.runId}</code> is executing; its Stop control appears when you select that Run.
+              🔒 {t("exec.runPrefix")}{" "}
+              <code>{otherRunStatus.runId}</code>{" "}
+              {t("exec.otherRunExecSuffix")}
             </span>
           )}
           {anotherRunStarting && !otherRunStatus && (
             <span className="exec__hint">
-              🔒 Run <code>{startingRunId}</code> is binding in this viewer; select it after startup to inspect or stop it.
+              🔒 {t("exec.runPrefix")}{" "}
+              <code>{startingRunId}</code>{" "}
+              {t("exec.otherRunStartingSuffix")}
             </span>
           )}
           {(err || ownStatus?.error) && (

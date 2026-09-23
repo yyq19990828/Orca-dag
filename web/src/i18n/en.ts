@@ -63,6 +63,87 @@ const en = {
   "layout.title.layered-lr": "Layered, left to right (Sugiyama / dagre)",
   "layout.title.layered-tb": "Layered, top to bottom (Sugiyama / dagre)",
   "layout.title.force": "Force-directed (Fruchterman–Reingold)",
+  // Coordinator phases (§6.3) — the label ExecControls shows while a Run is
+  // live. These are keys: PHASE_KEY in ExecControls.tsx maps phase -> key.
+  "phase.idle": "Idle",
+  "phase.binding": "Binding…",
+  "phase.running": "Running",
+  "phase.awaitingInput": "Waiting for you",
+  "phase.stopping": "Stopping…",
+  "phase.completed": "Completed",
+  "phase.recovering": "Recovering",
+  "phase.error": "Error",
+  // Execution panel (ExecControls): launch settings, live badges, stop report.
+  // Counts are interpolated; singular and plural are separate keys because zh
+  // has no plural form (same shape as topbar.doneOf).
+  "exec.lockHistoryError": "Launch settings are locked while Dispatch history could not be verified. Wait for worker history to recover before editing.",
+  "exec.lockHistoryLoading": "Launch settings are locked while Dispatch history is loading. Wait for worker history to finish before editing.",
+  "exec.lockRunning": "Launch settings are frozen while this Run is executing. Stop the coordinator to edit Tasks that have not started.",
+  "exec.lockStarting": "Launch settings are frozen while this Run is starting. Wait for coordinator binding and recovery to finish before editing.",
+  // The env-var name is a command token: it stays verbatim in every language.
+  "exec.customOffHint": "Custom commands are disabled — start the viewer with ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1",
+  "exec.settingsAria": "Execution settings: {harness}, maximum {n} parallel workers",
+  "exec.noDefaultHarness": "no default harness",
+  "exec.noHarness": "No harness",
+  "exec.settingsTitle": "Choose the fallback harness and maximum parallel workers",
+  "exec.settings": "Settings",
+  "exec.summaryMax": "{harness} · max {n}",
+  "exec.groupAria": "Execution settings",
+  "exec.defaultHarness": "Default harness",
+  "exec.custom": "Custom…",
+  "exec.customDisabled": "Custom (disabled)",
+  "exec.commandPlaceholder": "command",
+  "exec.customCommandAria": "Custom default harness command",
+  "exec.maxParallel": "Max parallel",
+  "exec.stop": "⏹ Stop",
+  "exec.stopPendingTitle": "Stop becomes available after Orca binds this Run",
+  "exec.bindingRecovering": "Binding and recovering…",
+  "exec.busyWorkersOne": "{n} worker",
+  "exec.busyWorkersMany": "{n} workers",
+  "exec.settledTitle": "Settled workers released/retained/closed",
+  "exec.settledCount": "✓ {released}/{settled} settled",
+  "exec.retrying": "↻ {n} retrying",
+  "exec.runAgain": "▶ Run again",
+  "exec.runAgainTitle": "Run again",
+  "exec.completedReleasedOne": "✓ Completed · {n} worker released",
+  "exec.completedReleasedMany": "✓ Completed · {n} workers released",
+  "exec.doneShort": "✓ Done",
+  "exec.completedAt": "Completed at {time}",
+  "exec.runWithOrca": "▶ Run with Orca",
+  "exec.bindRunTitle": "Bind this Run and execute in dependency order",
+  "exec.execUnavailableTitle": "Execution is unavailable on this Orca runtime",
+  "exec.outcomeUnknown": "outcome unknown",
+  "exec.stopCleanOne": "✓ Stop clean · {n} action",
+  "exec.stopCleanMany": "✓ Stop clean · {n} actions",
+  "exec.stopUncertainOne": "⚠ Stop finished with {uncertain} uncertain · {n} action",
+  "exec.stopUncertainMany": "⚠ Stop finished with {uncertain} uncertain · {n} actions",
+  // Lock notices wrap a <code> run id, so each sentence is a prefix + suffix
+  // pair (the id keeps its element; see empty.pickRunBody for the same shape).
+  "exec.runPrefix": "Run",
+  "exec.otherRunExecSuffix": "is executing; its Stop control appears when you select that Run.",
+  "exec.otherRunStartingSuffix": "is binding in this viewer; select it after startup to inspect or stop it.",
+  // Modal copy. The orca command and the consumer_fenced error code stay
+  // verbatim; only the prose around them is translated.
+  "dialog.confirmRunTitle": "Let Viewer coordinate this Run?",
+  "dialog.confirmRunMessage":
+    "Starting execution transfers coordinator authority to the Viewer. Any agent terminal " +
+    "currently coordinating this Run will be fenced, so its orchestration mutations will fail " +
+    "with consumer_fenced. It can take authority back with:\n\n" +
+    "orca orchestration run-use --id {id}",
+  "dialog.startRun": "Start Run",
+  "dialog.notNow": "Not now",
+  "dialog.cancel": "Cancel",
+  "dialog.close": "Close",
+  "dialog.continue": "Continue",
+  // This panel's own refusals. Server-supplied reasons (readiness.reason, fetch
+  // errors) stay in whatever language the server sent them in.
+  "err.pickRunFirst": "Pick a Run first",
+  "err.executionUnavailable": "Execution is unavailable on this Orca runtime.",
+  "err.pickDefaultHarness": "Pick a default harness",
+  "err.launchLocked": "Launch settings are temporarily locked.",
+  "err.runStarting": "Run {id} is already starting in this viewer.",
+  "err.runExecuting": "Run {id} is already executing in this viewer. Pick that Run to stop it.",
+  "err.placementFix": "Placement plan needs a fix before this Run can start — {detail}",
 } as const;
 export default en;
 export { en };

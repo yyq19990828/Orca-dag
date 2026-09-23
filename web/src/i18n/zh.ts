@@ -62,6 +62,83 @@ const zh: Dict = {
   "layout.title.layered-lr": "分层布局，从左到右（Sugiyama / dagre）",
   "layout.title.layered-tb": "分层布局，从上到下（Sugiyama / dagre）",
   "layout.title.force": "力导向布局（Fruchterman–Reingold）",
+  // 协调器阶段（§6.3）——ExecControls 在 Run 运行期间显示的阶段标签。
+  "phase.idle": "空闲",
+  "phase.binding": "绑定中…",
+  "phase.running": "运行中",
+  "phase.awaitingInput": "等待你操作",
+  "phase.stopping": "停止中…",
+  "phase.completed": "已完成",
+  "phase.recovering": "恢复中",
+  "phase.error": "错误",
+  // 执行面板（ExecControls）：启动设置、实时徽标、停止报告。计数用插值；
+  // 单复数拆成两个键，因为中文没有复数形态（与 topbar.doneOf 同形）。
+  "exec.lockHistoryError": "无法核实派发历史期间，启动设置会被锁定。请等待 worker 历史恢复后再编辑。",
+  "exec.lockHistoryLoading": "派发历史加载期间，启动设置会被锁定。请等待 worker 历史加载完成后再编辑。",
+  "exec.lockRunning": "本 Run 执行期间，启动设置会被冻结。请先停止协调器，再编辑尚未开始的任务。",
+  "exec.lockStarting": "本 Run 启动期间，启动设置会被冻结。请等待协调器完成绑定与恢复后再编辑。",
+  // 环境变量名是命令本身，任何语言都原样保留。
+  "exec.customOffHint": "自定义命令已禁用 —— 请以 ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1 启动查看器",
+  "exec.settingsAria": "执行设置：{harness}，最多 {n} 个并行 worker",
+  "exec.noDefaultHarness": "无默认 harness",
+  "exec.noHarness": "无 harness",
+  "exec.settingsTitle": "选择兜底 harness 与最大并行数",
+  "exec.settings": "设置",
+  "exec.summaryMax": "{harness} · 最多 {n}",
+  "exec.groupAria": "执行设置",
+  "exec.defaultHarness": "默认 harness",
+  "exec.custom": "自定义…",
+  "exec.customDisabled": "自定义（已禁用）",
+  "exec.commandPlaceholder": "命令",
+  "exec.customCommandAria": "自定义默认 harness 命令",
+  "exec.maxParallel": "最大并行数",
+  "exec.stop": "⏹ 停止",
+  "exec.stopPendingTitle": "Orca 绑定本 Run 后即可停止",
+  "exec.bindingRecovering": "绑定与恢复中…",
+  "exec.busyWorkersOne": "{n} 个 worker",
+  "exec.busyWorkersMany": "{n} 个 worker",
+  "exec.settledTitle": "已结算的 worker：已释放 / 已保留 / 已关闭",
+  "exec.settledCount": "✓ 已结算 {released}/{settled}",
+  "exec.retrying": "↻ {n} 个重试中",
+  "exec.runAgain": "▶ 再次运行",
+  "exec.runAgainTitle": "再次运行",
+  "exec.completedReleasedOne": "✓ 已完成 · 释放 {n} 个 worker",
+  "exec.completedReleasedMany": "✓ 已完成 · 释放 {n} 个 worker",
+  "exec.doneShort": "✓ 完成",
+  "exec.completedAt": "完成于 {time}",
+  "exec.runWithOrca": "▶ 用 Orca 运行",
+  "exec.bindRunTitle": "绑定本 Run 并按依赖顺序执行",
+  "exec.execUnavailableTitle": "当前 Orca 运行时无法执行",
+  "exec.outcomeUnknown": "结果未知",
+  "exec.stopCleanOne": "✓ 停止完成 · {n} 项操作",
+  "exec.stopCleanMany": "✓ 停止完成 · {n} 项操作",
+  "exec.stopUncertainOne": "⚠ 停止结束，{uncertain} 项结果未知 · {n} 项操作",
+  "exec.stopUncertainMany": "⚠ 停止结束，{uncertain} 项结果未知 · {n} 项操作",
+  // 锁定提示里嵌了 <code> 形式的 Run id，所以句子拆成前缀 + 后缀两个键
+  // （id 保留自己的元素，形状同 empty.pickRunBody）。
+  "exec.runPrefix": "Run",
+  "exec.otherRunExecSuffix": "正在执行；选中该 Run 后才会出现它的「停止」按钮。",
+  "exec.otherRunStartingSuffix": "正在本查看器中绑定；启动完成后选中它即可查看或停止。",
+  // 对话框文案。orca 命令与 consumer_fenced 错误码原样保留，只翻叙述。
+  "dialog.confirmRunTitle": "让查看器协调这个 Run？",
+  "dialog.confirmRunMessage":
+    "开始执行会把协调器权限移交给查看器。当前正在协调这个 Run 的任何 agent 终端都会被 fence，" +
+    "其编排变更会以 consumer_fenced 失败。它可以用以下命令取回权限：\n\n" +
+    "orca orchestration run-use --id {id}",
+  "dialog.startRun": "启动 Run",
+  "dialog.notNow": "暂不",
+  "dialog.cancel": "取消",
+  "dialog.close": "关闭",
+  "dialog.continue": "继续",
+  // 本组件自己的拒绝提示；服务端给出的原因（readiness.reason、请求错误）
+  // 保持服务端语言，不在此翻译。
+  "err.pickRunFirst": "请先选择 Run",
+  "err.executionUnavailable": "当前 Orca 运行时无法执行。",
+  "err.pickDefaultHarness": "请选择默认 harness",
+  "err.launchLocked": "启动设置暂时锁定。",
+  "err.runStarting": "Run {id} 正在本查看器中启动。",
+  "err.runExecuting": "Run {id} 正在本查看器中执行。请选中该 Run 以停止它。",
+  "err.placementFix": "启动本 Run 前需先修复放置计划 —— {detail}",
 };
 export default zh;
 export { zh };
