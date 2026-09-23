@@ -1,5 +1,6 @@
 import { memo, useState } from "react";
 import { resolveGate } from "../api";
+import { useT } from "../i18n";
 import type { Gate } from "../types";
 import { useDecisionDialog } from "./DecisionDialog";
 
@@ -39,6 +40,7 @@ export const GatePanel = memo(function GatePanel({
   disabled?: boolean;
   disabledReason?: string | null;
 }) {
+  const t = useT();
   const dialog = useDecisionDialog();
   const [busyId, setBusyId] = useState<string | null>(null);
   const pending = gates.filter((g) => g.status === "pending" || g.status === "open" || !g.resolution);
@@ -53,7 +55,7 @@ export const GatePanel = memo(function GatePanel({
       onResolved();
     } catch (err) {
       await dialog.alert({
-        title: "Gate resolution failed",
+        title: t("gate.resolveFailedTitle"),
         message: String((err as Error).message ?? err),
         tone: "danger",
       });
@@ -76,20 +78,16 @@ export const GatePanel = memo(function GatePanel({
           >
             <div className="gate__badge">
               {disabled
-                ? "Execution unavailable"
+                ? t("gate.executionUnavailable")
                 : integration
-                  ? "Integration checkpoint — human assertion required"
-                  : "Approval needed"}
+                  ? t("gate.integrationCheckpoint")
+                  : t("gate.approvalNeeded")}
             </div>
-            <div className="gate__question">{g.question || "Resolve this decision gate"}</div>
+            <div className="gate__question">{g.question || t("gate.resolveFallback")}</div>
             {integration && (
               <p className="gate__explain">
-                The dependencies of this task ran in separate workspace lanes. Dependency completion
-                alone is not evidence of a merge: branches from different workspaces must be
-                integrated by a person before this task may start. Resolving{" "}
-                <code>integrated</code> records YOUR assertion that the integration happened — the
-                viewer never merges, rebases, cherry-picks, commits, pushes, or deletes branches
-                itself.
+                {t("gate.integrationExplainBefore")} <code>integrated</code>{" "}
+                {t("gate.integrationExplainAfter")}
               </p>
             )}
             <div className="gate__actions">
@@ -98,7 +96,7 @@ export const GatePanel = memo(function GatePanel({
                   key={opt}
                   className={`btn btn--gate ${/reject|deny|no/i.test(opt) ? "btn--danger" : "btn--ok"}`}
                   disabled={disabled || busyId === g.id}
-                  title={disabled ? disabledReason ?? "Execution is unavailable" : undefined}
+                  title={disabled ? disabledReason ?? t("gate.executionIsUnavailable") : undefined}
                   onClick={() => resolve(g, opt)}
                 >
                   {opt}

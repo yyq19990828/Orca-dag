@@ -10,6 +10,7 @@ import {
   stopWorker,
 } from "../api";
 import { useDecisionDialog } from "./DecisionDialog";
+import { useT, type TranslationKey } from "../i18n";
 import type {
   RunStatus,
   WorkerControlReceiptView,
@@ -53,8 +54,12 @@ const TERMINAL_STATES = [
 /** Viewer-local post-settlement decisions that mean "nothing owed anymore". */
 const DECIDED = new Set(["released", "retained", "closed", "reused", "not_needed"]);
 
-/** The exact label the plan prescribes for a qualified capability-gap row. */
-const QUALIFIED_LABEL = "Agent working · terminal live · supervised liveness unavailable";
+/**
+ * The exact label the plan prescribes for a qualified capability-gap row, as a
+ * dictionary key: it is page copy, so each language supplies its own wording
+ * (chat.state.workingTerminalLive is the same sentence on the chat surface).
+ */
+const QUALIFIED_LABEL: TranslationKey = "worker.qualified";
 
 export const WorkerPanel = memo(function WorkerPanel({
   runId,
@@ -74,6 +79,7 @@ export const WorkerPanel = memo(function WorkerPanel({
   disabled?: boolean;
   disabledReason?: string | null;
 }) {
+  const t = useT();
   const [openDispatch, setOpenDispatch] = useState<string | null>(null);
   const [detail, setDetail] = useState<WorkerDetailView | null>(null);
   const [detailErr, setDetailErr] = useState<string | null>(null);
@@ -247,21 +253,26 @@ export const WorkerPanel = memo(function WorkerPanel({
       canFocus: Boolean(local && waitPositive && row.agentTerminalHandle),
       stopWhy: notSettled
         ? fleetLive
-          ? `positive live evidence${liveness?.fleetReason ? ` (${liveness.fleetReason})` : ""}`
-          : "no positive live evidence — the fleet verdict is not “live”"
-        : "this dispatch is already settled",
+          ? liveness?.fleetReason
+            ? t("worker.evidenceLiveReason", { reason: liveness.fleetReason })
+            : t("worker.evidenceLive")
+          : t("worker.evidenceNoLive")
+        : t("worker.evidenceSettled"),
       abandonWhy: hasPrescribed
-        ? "Orca prescribes a next action (outcome unknown)"
+        ? t("worker.evidencePrescribed")
         : fleetExited
-          ? `positive exit evidence${liveness?.fleetReason ? ` (${liveness.fleetReason})` : ""}`
-          : "no positive exit evidence and no Orca-prescribed action",
+          ? liveness?.fleetReason
+            ? t("worker.evidenceExitReason", { reason: liveness.fleetReason })
+            : t("worker.evidenceExit")
+          : t("worker.evidenceNoExit"),
       focusWhy: !local
-        ? "focus is local-only — this worker is not on this server"
+        ? t("worker.evidenceRemote")
         : !waitPositive
-          ? "no positive agent-wait observation (unknown or none detected)"
+          ? t("worker.evidenceNoWait")
           : row.agentTerminalHandle
-            ? `agent-wait: ${wait?.kind ?? "observed"}${wait?.detail ? ` — ${wait.detail}` : ""}`
-            : "no worker terminal handle reported",
+            ? t("worker.evidenceWait", { kind: wait?.kind ?? t("worker.evidenceObserved") }) +
+              (wait?.detail ? t("worker.evidenceWaitDetail", { detail: wait.detail }) : "")
+            : t("worker.evidenceNoHandle"),
     };
   }
 
@@ -279,27 +290,25 @@ export const WorkerPanel = memo(function WorkerPanel({
     why: string,
   ) {
     const dispatchId = row.dispatchId;
-    const titles: Record<typeof action, string> = {
-      stop: "Stop this worker?",
-      abandon: "Abandon this dispatch?",
-      focus: "Focus this worker's terminal?",
+    const titleKey: Record<typeof action, TranslationKey> = {
+      stop: "worker.stopDialogTitle",
+      abandon: "worker.abandonDialogTitle",
+      focus: "worker.focusDialogTitle",
     };
-    const messages: Record<typeof action, string> = {
-      stop:
-        `worker-stop on ${dispatchId}.\n\nEvidence: ${why}.\n\n` +
-        "The dispatch is stopped through Orca; the task stays in the Run and can be retried safely.",
-      abandon:
-        `worker abandon on ${dispatchId}.\n\nEvidence: ${why}.\n\n` +
-        "Abandoning closes a positively-exited (or runtime-prescribed outcome-unknown) attempt " +
-        "without touching anything live.",
-      focus:
-        `Focus the local terminal for ${dispatchId}.\n\nEvidence: ${why}.\n\n` +
-        "Orca brings the worker terminal to the front — nothing about the dispatch changes.",
+    const messageKey: Record<typeof action, TranslationKey> = {
+      stop: "worker.stopMessage",
+      abandon: "worker.abandonMessage",
+      focus: "worker.focusMessage",
     };
     const ok = await dialog.confirm({
-      title: titles[action],
-      message: messages[action],
-      confirmLabel: action === "stop" ? "Stop worker" : action === "abandon" ? "Abandon" : "Focus terminal",
+      title: t(titleKey[action]),
+      message: t(messageKey[action], { id: dispatchId, why }),
+      confirmLabel:
+        action === "stop"
+          ? t("worker.stopConfirm")
+          : action === "abandon"
+            ? t("worker.abandonConfirm")
+            : t("worker.focusConfirm"),
       tone: action === "abandon" ? "danger" : "default",
     });
     if (!ok) return;
@@ -343,19 +352,19 @@ export const WorkerPanel = memo(function WorkerPanel({
   return (
     <div className="gates inbox workers" data-testid="worker-panel">
       <div className="gate inbox__item">
-        <div className="gate__badge">Workers · durable fleet view</div>
+        <div className="gate__badge">{t("worker.badge")}</div>
         {rows.length > 0 && (
           <div className="workers__filters">
             <select
               className="workers__source"
               value={terminalFilter}
               onChange={(e) => setTerminalFilter(e.target.value)}
-              aria-label="Filter by terminal state"
+              aria-label={t("worker.filterStateAria")}
             >
-              <option value="all">state: all</option>
+              <option value="all">{t("worker.filterStateAll")}</option>
               {TERMINAL_STATES.map((state) => (
                 <option key={state} value={state}>
-                  state: {state}
+                  {t("worker.filterState", { state })}
                 </option>
               ))}
             </select>
@@ -363,18 +372,20 @@ export const WorkerPanel = memo(function WorkerPanel({
               className="workers__source"
               value={attentionFilter}
               onChange={(e) => setAttentionFilter(e.target.value)}
-              aria-label="Filter by attention"
+              aria-label={t("worker.filterAttentionAria")}
             >
-              <option value="all">attention: all</option>
-              <option value="needs_action">attention: needs action</option>
+              <option value="all">{t("worker.filterAttentionAll")}</option>
+              <option value="needs_action">{t("worker.filterAttentionNeedsAction")}</option>
               {[...attentionCategories].map((category) => (
                 <option key={category} value={category}>
-                  attention: {category}
+                  {t("worker.filterAttention", { category })}
                 </option>
               ))}
             </select>
             <span className="inbox__meta">
-              {filtered.length} of {rows.length} worker{rows.length === 1 ? "" : "s"}
+              {rows.length === 1
+                ? t("worker.countOne", { filtered: filtered.length, total: rows.length })
+                : t("worker.countMany", { filtered: filtered.length, total: rows.length })}
             </span>
           </div>
         )}
@@ -395,10 +406,10 @@ export const WorkerPanel = memo(function WorkerPanel({
           const host = projection?.host ?? null;
           const hostLabel =
             host == null
-              ? "unknown"
+              ? t("worker.unknown")
               : host.kind === "local"
-                ? "local (this server)"
-                : `environment ${host.id}`;
+                ? t("worker.hostLocal")
+                : t("worker.hostEnvironment", { id: host.id });
           const provider =
             projection?.provider?.model ??
             projection?.provider?.id ??
@@ -414,7 +425,7 @@ export const WorkerPanel = memo(function WorkerPanel({
             !projection?.provider?.model && !projection?.launch?.model &&
             attempt && !attempt.adopted ? attempt.requested.model : null;
           const providerLabel = requestedModel
-            ? `${provider ?? attempt?.requested.agent ?? "unknown"} · ${requestedModel} (requested)`
+            ? `${provider ?? attempt?.requested.agent ?? t("worker.unknown")} · ${requestedModel}${t("worker.requestedSuffix")}`
             : provider;
           // Structured transcript reads are a peer capability (Phase 6):
           // offered for local workers always, for remote workers only when
@@ -448,7 +459,7 @@ export const WorkerPanel = memo(function WorkerPanel({
                 </span>
                 <code className="workers__task">{row.taskId}</code>
                 <span className="inbox__meta">
-                  <code className="workers__dispatch">{row.dispatchId || "no dispatch"}</code>
+                  <code className="workers__dispatch">{row.dispatchId || t("worker.noDispatch")}</code>
                   {projection?.outcome ? ` · ${projection.outcome}` : ""}
                   {row.workerState === "unsupervised" ? " · unsupervised" : ""}
                   {` · ${hostLabel}`}
@@ -465,91 +476,115 @@ export const WorkerPanel = memo(function WorkerPanel({
                   {/* --- Liveness: both evidence layers, never merged away --- */}
                   {detail?.liveness.qualifiedWorking ? (
                     <div className="inbox__body workers__qualified" data-testid="qualified-working">
-                      <b>{QUALIFIED_LABEL}</b>
+                      <b>{t(QUALIFIED_LABEL)}</b>
                       <span className="inbox__meta">
-                        {" "}— fleet: unverifiable ({detail.liveness.fleetReason}); exact observation:{" "}
-                        {detail.liveness.observationStatus ?? "unknown"}. Both layers shown; the fleet
-                        verdict is not overridden.
+                        {t("worker.qualifiedFleet", {
+                          reason: detail.liveness.fleetReason ?? t("worker.unknown"),
+                        })}{" "}
+                        {detail.liveness.observationStatus ?? t("worker.unknown")}
+                        {t("worker.qualifiedTail")}
                       </span>
                     </div>
                   ) : (
                     <div className="inbox__body">
-                      Liveness: <b>{verdict}</b>
+                      {t("worker.liveness")} <b>{verdict}</b>
                       {liveness?.reason ? ` — ${liveness.reason}` : ""}
                       {detail?.liveness.observationStatus
-                        ? ` · observed: ${detail.liveness.observationStatus}${
-                            detail.observation?.exactWorker === false ? " (not exact-worker — not merged)" : ""
-                          }`
+                        ? t("worker.observed", { status: detail.liveness.observationStatus }) +
+                          (detail.observation?.exactWorker === false
+                            ? t("worker.notExactWorker")
+                            : "")
                         : ""}
                     </div>
                   )}
                   <div className="inbox__body">
-                    Host: <b>{hostLabel}</b>
-                    {projection?.launch?.on ? ` · placed via --on ${projection.launch.on}` : ""}
+                    {t("worker.host")} <b>{hostLabel}</b>
+                    {projection?.launch?.on ? t("worker.placedVia", { on: projection.launch.on }) : ""}
                     {host?.kind != null && host.kind !== "local" && verdict === "unverifiable"
-                      ? " · contact lost is NOT exit — the Dispatch is preserved"
+                      ? t("worker.contactLost")
                       : ""}
                   </div>
                   <div className="inbox__body">
-                    Provider/model:{" "}
+                    {t("worker.providerModel")}{" "}
                     <b>
                       {providerLabel ??
                         (attempt && !attempt.adopted
-                          ? `${attempt.requested.agent}${attempt.requested.model ? ` · ${attempt.requested.model}` : ""} (requested)`
-                          : "unknown")}
+                          ? `${attempt.requested.agent}${
+                              attempt.requested.model
+                                ? t("worker.launchRequestedModel", { model: attempt.requested.model })
+                                : ""
+                            }${t("worker.requestedSuffix")}`
+                          : t("worker.unknown"))}
                     </b>
                   </div>
                   <div className="inbox__body">
-                    Terminal: <code>{row.agentTerminalHandle ?? "unknown"}</code> · Orca:{" "}
-                    <code>{row.terminalState}</code>
-                    {attempt ? ` · viewer: ${attempt.terminalDecision}` : " · viewer: n/a (not coordinated here)"}
+                    {t("worker.terminal")} <code>{row.agentTerminalHandle ?? t("worker.unknown")}</code>
+                    {t("worker.orcaState")} <code>{row.terminalState}</code>
+                    {attempt
+                      ? t("worker.viewerDecision", { decision: attempt.terminalDecision })
+                      : t("worker.viewerNotCoordinated")}
                   </div>
                   {attempt?.terminalArchive && (
                     <div className="inbox__body">
-                      Release archive: <code>{attempt.terminalArchive}</code>
-                      <span className="inbox__meta">
-                        {" "}— archive evidence is not settlement; Orca's terminal state above stays authoritative
-                      </span>
+                      {t("worker.releaseArchive")} <code>{attempt.terminalArchive}</code>
+                      <span className="inbox__meta">{t("worker.archiveNote")}</span>
                     </div>
                   )}
                   {projection?.attention && projection.attention.categories.length > 0 && (
                     <div className="inbox__body">
-                      Attention: {projection.attention.categories.join(", ")}
-                      {projection.attention.requiresAction ? " · needs action" : ""}
+                      {t("worker.attention")} {projection.attention.categories.join(", ")}
+                      {projection.attention.requiresAction ? t("worker.needsAction") : ""}
                     </div>
                   )}
                   {projection?.stage && projection.stage.activity !== "unknown" && (
-                    <div className="inbox__body">Agent stage: {projection.stage.activity}</div>
+                    <div className="inbox__body">
+                      {t("worker.agentStage", { activity: projection.stage.activity })}
+                    </div>
                   )}
 
                   {/* --- worker-show evidence (fetched on expand) --- */}
-                  {detailLoading && <div className="inbox__body">Loading worker evidence…</div>}
+                  {detailLoading && <div className="inbox__body">{t("worker.loadingEvidence")}</div>}
                   {detailErr && <div className="exec__err inbox__err">⚠️ {detailErr}</div>}
                   {detail && (
                     <>
                       {detail.observation && (
                         <div className="inbox__body">
-                          Observation: <b>{detail.observation.status ?? "unknown"}</b>
+                          {t("worker.observation")}{" "}
+                          <b>{detail.observation.status ?? t("worker.unknown")}</b>
                           {detail.observation.exactWorker === true
-                            ? " · exact worker"
+                            ? t("worker.exactWorker")
                             : detail.observation.exactWorker === false
-                              ? " · not provably this worker"
+                              ? t("worker.notThisWorker")
                               : ""}
                           {detail.observation.agentWait === undefined
-                            ? " · agent-wait: unknown (this host never looked)"
+                            ? t("worker.agentWaitUnknown")
                             : detail.observation.agentWait === null
-                              ? " · agent-wait: none detected"
-                              : ` · agent-wait: waiting on a human prompt${
-                                  detail.observation.agentWait.kind ? ` (${detail.observation.agentWait.kind})` : ""
-                                }${detail.observation.agentWait.detail ? ` — ${detail.observation.agentWait.detail}` : ""}`}
+                              ? t("worker.agentWaitNone")
+                              : t("worker.agentWaitWaiting") +
+                                (detail.observation.agentWait.kind
+                                  ? t("worker.agentWaitKind", {
+                                      kind: detail.observation.agentWait.kind,
+                                    })
+                                  : "") +
+                                (detail.observation.agentWait.detail
+                                  ? t("worker.agentWaitDetail", {
+                                      detail: detail.observation.agentWait.detail,
+                                    })
+                                  : "")}
                         </div>
                       )}
                       {detail.worker && (detail.worker.state || detail.worker.stage) && (
                         <div className="inbox__body">
-                          Worker record: {detail.worker.state ?? "unknown"}
-                          {detail.worker.stage ? ` · stage ${detail.worker.stage}` : ""}
-                          {detail.dispatch?.status ? ` · dispatch ${detail.dispatch.status}` : ""}
-                          {detail.dispatch?.failureCount ? ` · failures ${detail.dispatch.failureCount}` : ""}
+                          {t("worker.record")} {detail.worker.state ?? t("worker.unknown")}
+                          {detail.worker.stage
+                            ? t("worker.recordStage", { stage: detail.worker.stage })
+                            : ""}
+                          {detail.dispatch?.status
+                            ? t("worker.recordDispatch", { status: detail.dispatch.status })
+                            : ""}
+                          {detail.dispatch?.failureCount
+                            ? t("worker.recordFailures", { n: detail.dispatch.failureCount })
+                            : ""}
                         </div>
                       )}
                       {/* Requested vs effective launch preferences: requested
@@ -557,33 +592,44 @@ export const WorkerPanel = memo(function WorkerPanel({
                           effective comes only from the runtime echo. */}
                       {((attempt && !attempt.adopted) || detail.launch || detail.fleet?.projection?.launch) && (
                         <div className="inbox__body">
-                          Launch —{" "}
+                          {t("worker.launch")}{" "}
                           {attempt && !attempt.adopted
-                            ? `requested ${attempt.requested.agent ?? "?"}${
-                                attempt.requested.model ? ` · ${attempt.requested.model}` : ""
-                              }${attempt.requested.effort ? ` · effort ${attempt.requested.effort}` : ""}`
-                            : "requested unknown (not started here)"}
-                          {" → effective "}
+                            ? t("worker.launchRequested", { agent: attempt.requested.agent ?? "?" }) +
+                              (attempt.requested.model
+                                ? t("worker.launchRequestedModel", { model: attempt.requested.model })
+                                : "") +
+                              (attempt.requested.effort
+                                ? t("worker.launchRequestedEffort", {
+                                    effort: attempt.requested.effort,
+                                  })
+                                : "")
+                            : t("worker.launchRequestedUnknown")}
+                          {t("worker.launchEffective")}
                           {detail.launch
                             ? [detail.launch.agent, detail.launch.model].filter(Boolean).join(" · ")
                             : detail.fleet?.projection?.launch
                             ? [
-                                detail.fleet.projection.launch.agent ?? "unknown agent",
-                                detail.fleet.projection.launch.model ?? "unknown model",
+                                detail.fleet.projection.launch.agent ?? t("worker.unknownAgent"),
+                                detail.fleet.projection.launch.model ?? t("worker.unknownModel"),
                                 ...(detail.fleet.projection.launch.effort
-                                  ? [`effort ${detail.fleet.projection.launch.effort}`]
+                                  ? [
+                                      t("worker.effortTag", {
+                                        effort: detail.fleet.projection.launch.effort,
+                                      }),
+                                    ]
                                   : []),
                               ].join(", ")
                             : detail.fleet?.projection?.provider
                               ? [detail.fleet.projection.provider.id, detail.fleet.projection.provider.model]
                                   .filter(Boolean)
-                                  .join(" · ") || "unknown"
-                              : "unknown (no receipt echo)"}
+                                  .join(" · ") || t("worker.unknown")
+                              : t("worker.unknownNoEcho")}
                         </div>
                       )}
                       {detail.fleet?.projection?.nextAction && detail.fleet.projection.nextAction.argv.length > 0 && (
                         <div className="inbox__body">
-                          Orca prescribes: <code>{detail.fleet.projection.nextAction.argv.join(" ")}</code>
+                          {t("worker.prescribes")}{" "}
+                          <code>{detail.fleet.projection.nextAction.argv.join(" ")}</code>
                         </div>
                       )}
                       {/* Requested vs effective WORKSPACE facts (Phase 7):
@@ -596,24 +642,24 @@ export const WorkerPanel = memo(function WorkerPanel({
                         detail?.fleet?.projection?.launch?.on ||
                         detailWorkspace) && (
                         <div className="inbox__body">
-                          Workspace —{" "}
+                          {t("worker.workspace")}{" "}
                           <b>
                             {attempt?.requested.worktree ??
                               attempt?.requested.on ??
-                              "unknown (not started here)"}
+                              t("worker.workspaceNotStarted")}
                           </b>
-                          {" → effective "}
+                          {t("worker.launchEffective")}
                           <b>
                             {detail?.fleet?.projection?.launch?.worktree ??
                               detailWorkspace ??
                               detail?.fleet?.projection?.launch?.on ??
-                              "unknown (no receipt echo)"}
+                              t("worker.unknownNoEcho")}
                           </b>
                         </div>
                       )}
                       {/* Raw receipts live ONLY in this collapsed diagnostic section. */}
                       <details className="workers__raw">
-                        <summary>Diagnostic receipt</summary>
+                        <summary>{t("worker.diagnosticReceipt")}</summary>
                         <pre className="workers__rawpre">
                           {JSON.stringify(
                             {
@@ -650,15 +696,15 @@ export const WorkerPanel = memo(function WorkerPanel({
                               </span>
                               {output.clipped && (
                                 <span className="workers__flag" data-flag="clipped">
-                                  clipped by runtime
+                                  {t("worker.clipped")}
                                 </span>
                               )}
                               <span className="workers__flag" data-flag={output.contentComplete ? "complete" : "more"}>
-                                {output.contentComplete ? "complete" : "more available"}
+                                {output.contentComplete ? t("worker.outputComplete") : t("worker.outputMore")}
                               </span>
                               {output.sourceChanged && (
                                 <span className="workers__flag" data-flag="changed">
-                                  source changed
+                                  {t("worker.sourceChanged")}
                                 </span>
                               )}
                             </div>
@@ -667,26 +713,31 @@ export const WorkerPanel = memo(function WorkerPanel({
                               type="search"
                               value={outputFilter}
                               onChange={(e) => setOutputFilter(e.target.value)}
-                              placeholder="Filter loaded rows… (never fetches more)"
-                              aria-label="Filter loaded output rows"
+                              placeholder={t("worker.filterPlaceholder")}
+                              aria-label={t("worker.filterOutputAria")}
                             />
                             <pre className="workers__output" data-testid="output-pre">
-                              {visible.length > 0 ? visible.join("\n") : "(no loaded rows match)"}
+                              {visible.length > 0 ? visible.join("\n") : t("worker.noMatch")}
                               {!q && !output.contentComplete && "\n…"}
-                              {!q && output.clipped ? "\n[clipped by the runtime]" : ""}
+                              {!q && output.clipped ? `\n${t("worker.clippedMark")}` : ""}
                             </pre>
                             <div className="inbox__meta">
                               {q
-                                ? `${visible.length} of ${output.lines.length} loaded rows match — search covers loaded rows only`
-                                : `${output.lines.length} loaded row${output.lines.length === 1 ? "" : "s"}`}
+                                ? t("worker.matchCount", {
+                                    visible: visible.length,
+                                    total: output.lines.length,
+                                  })
+                                : output.lines.length === 1
+                                  ? t("worker.loadedRowsOne", { n: output.lines.length })
+                                  : t("worker.loadedRowsMany", { n: output.lines.length })}
                               {" · "}
                               <button
                                 type="button"
                                 className="workers__download"
                                 onClick={() => downloadLoaded(output)}
-                                title="Save the rows already read to a local file — nothing more is fetched"
+                                title={t("worker.downloadTitle")}
                               >
-                                Download loaded rows
+                                {t("worker.download")}
                               </button>
                             </div>
                           </>
@@ -703,39 +754,36 @@ export const WorkerPanel = memo(function WorkerPanel({
 
                   {decision && decision.dispatchId === row.dispatchId && (
                     <div className="inbox__body workers__decision" data-testid="decision-receipt">
-                      Terminal decision receipt: <b>{decision.receipt.state}</b>
+                      {t("worker.decisionReceipt")} <b>{decision.receipt.state}</b>
                       {decision.receipt.requestId && (
                         <>
-                          {" "}· request <code>{decision.receipt.requestId.slice(0, 8)}…</code>
+                          {t("worker.requestLabel")}
+                          <code>{decision.receipt.requestId.slice(0, 8)}…</code>
                         </>
                       )}
-                      {" · archive: "}
+                      {t("worker.archiveLabel")}
                       {decision.receipt.archive ? (
                         <code>{archiveSummary(decision.receipt.archive)}</code>
                       ) : (
-                        "none reported"
+                        t("worker.noneReported")
                       )}
-                      <div className="inbox__meta">
-                        Archive presence is evidence, not settlement — the fleet state above stays
-                        authoritative. The request id is recorded in the audit ledger.
-                      </div>
+                      <div className="inbox__meta">{t("worker.decisionNote")}</div>
                     </div>
                   )}
 
                   {control && control.dispatchId === row.dispatchId && (
                     <div className="inbox__body workers__decision" data-testid="control-receipt">
-                      {control.action} receipt: <b>{control.receipt.state ?? "unknown"}</b>
+                      {t("worker.controlReceipt", { action: control.action })}{" "}
+                      <b>{control.receipt.state ?? t("worker.unknown")}</b>
                       {control.receipt.reason ? ` — ${control.receipt.reason}` : ""}
                       {control.receipt.requestId && (
                         <>
-                          {" "}· request <code>{control.receipt.requestId.slice(0, 8)}…</code>
+                          {t("worker.requestLabel")}
+                          <code>{control.receipt.requestId.slice(0, 8)}…</code>
                         </>
                       )}
                       {control.receipt.detail && <div className="inbox__meta">{control.receipt.detail}</div>}
-                      <div className="inbox__meta">
-                        Orca's verdict verbatim — an ambiguous outcome stays auditable in the request
-                        ledger and is never retried with a new request id.
-                      </div>
+                      <div className="inbox__meta">{t("worker.controlNote")}</div>
                     </div>
                   )}
 
@@ -745,7 +793,7 @@ export const WorkerPanel = memo(function WorkerPanel({
                         className="btn btn--gate"
                         onClick={() => row.dispatchId && void loadOutput(row.dispatchId, undefined, "auto")}
                       >
-                        Read output
+                        {t("worker.readOutput")}
                       </button>
                     )}
                     {output?.dispatchId === row.dispatchId && output.cursor && (
@@ -755,7 +803,7 @@ export const WorkerPanel = memo(function WorkerPanel({
                           row.dispatchId && void loadOutput(row.dispatchId, output.cursor ?? undefined, source)
                         }
                       >
-                        Load more
+                        {t("worker.loadMore")}
                       </button>
                     )}
                     {output?.dispatchId === row.dispatchId && (
@@ -767,8 +815,10 @@ export const WorkerPanel = memo(function WorkerPanel({
                           if (row.dispatchId) void loadOutput(row.dispatchId, undefined, e.target.value);
                         }}
                       >
-                        <option value="auto">source: auto</option>
-                        {canTranscript && <option value="transcript">source: transcript</option>}
+                        <option value="auto">{t("worker.sourceAuto")}</option>
+                        {canTranscript && (
+                          <option value="transcript">{t("worker.sourceTranscript")}</option>
+                        )}
                       </select>
                     )}
                     {decisionOwed && row.dispatchId && (
@@ -777,17 +827,17 @@ export const WorkerPanel = memo(function WorkerPanel({
                           className="btn btn--gate btn--ok"
                           disabled={disabled || busyId === row.dispatchId}
                           onClick={() => void decide(row.dispatchId, "release")}
-                          title="worker-release — the default post-settlement decision"
+                          title={t("worker.releaseTitle")}
                         >
-                          Release
+                          {t("worker.release")}
                         </button>
                         <button
                           className="btn btn--gate"
                           disabled={disabled || busyId === row.dispatchId}
                           onClick={() => void decide(row.dispatchId, "retain")}
-                          title="worker-retain — keep this terminal alive for inspection"
+                          title={t("worker.retainTitle")}
                         >
-                          Retain for debugging
+                          {t("worker.retain")}
                         </button>
                       </>
                     )}
@@ -801,36 +851,36 @@ export const WorkerPanel = memo(function WorkerPanel({
                           disabled={!evidence.canFocus || disabled || busyId === row.dispatchId}
                           title={
                             evidence.canFocus
-                              ? `Focus — evidence: ${evidence.focusWhy}`
-                              : `Focus unavailable — ${evidence.focusWhy}`
+                              ? t("worker.focusEvidenceTitle", { why: evidence.focusWhy })
+                              : t("worker.focusUnavailableTitle", { why: evidence.focusWhy })
                           }
                           onClick={() => row.dispatchId && void intervene(row, "focus", evidence.focusWhy)}
                         >
-                          ◎ Focus
+                          {t("worker.focusButton")}
                         </button>
                         <button
                           className="btn btn--gate btn--danger workers__ctl"
                           disabled={!evidence.canStop || disabled || busyId === row.dispatchId}
                           title={
                             evidence.canStop
-                              ? `Stop — evidence: ${evidence.stopWhy}`
-                              : `Stop unavailable — ${evidence.stopWhy}`
+                              ? t("worker.stopEvidenceTitle", { why: evidence.stopWhy })
+                              : t("worker.stopUnavailableTitle", { why: evidence.stopWhy })
                           }
                           onClick={() => row.dispatchId && void intervene(row, "stop", evidence.stopWhy)}
                         >
-                          ⏹ Stop worker
+                          {t("worker.stopButton")}
                         </button>
                         <button
                           className="btn btn--gate workers__ctl"
                           disabled={!evidence.canAbandon || disabled || busyId === row.dispatchId}
                           title={
                             evidence.canAbandon
-                              ? `Abandon — evidence: ${evidence.abandonWhy}`
-                              : `Abandon unavailable — ${evidence.abandonWhy}`
+                              ? t("worker.abandonEvidenceTitle", { why: evidence.abandonWhy })
+                              : t("worker.abandonUnavailableTitle", { why: evidence.abandonWhy })
                           }
                           onClick={() => row.dispatchId && void intervene(row, "abandon", evidence.abandonWhy)}
                         >
-                          Abandon
+                          {t("worker.abandonButton")}
                         </button>
                       </>
                     )}
@@ -841,7 +891,7 @@ export const WorkerPanel = memo(function WorkerPanel({
           );
         })}
         {rows.length > 0 && filtered.length === 0 && (
-          <div className="inbox__body">No workers match the current filters.</div>
+          <div className="inbox__body">{t("worker.noRows")}</div>
         )}
         {(rowsError || err) && (
           <div className="exec__err inbox__err">⚠️ {rowsError ?? ""}{rowsError && err ? " · " : ""}{err ?? ""}</div>

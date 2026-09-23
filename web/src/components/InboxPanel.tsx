@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { releaseWorker, replyToMessage, retainWorker } from "../api";
 import { timeAgo } from "../format";
-import { useLang } from "../i18n";
+import { useT, type TranslationKey } from "../i18n";
 import type { CleanupDebtItem, PendingInboxItem } from "../types";
 
 /**
@@ -17,13 +17,18 @@ import type { CleanupDebtItem, PendingInboxItem } from "../types";
  * the loop is down.
  */
 
-const DEBT_LABEL: Record<CleanupDebtItem["kind"], string> = {
-  release_unknown: "Release unverified",
-  release_pending: "Release pending",
-  close_failed: "Terminal close refused",
-  coordinator_close_failed: "Coordinator close refused",
-  stop_unknown: "Stop outcome unknown",
-  reclaimable: "Reclaimable worker left",
+/**
+ * Debt kinds → dictionary keys. The value type is `| undefined` so an unknown
+ * kind from a newer server falls back to the raw token instead of throwing,
+ * and a typo in a key name fails `tsc` instead of rendering blank.
+ */
+const DEBT_LABEL: Record<CleanupDebtItem["kind"], TranslationKey | undefined> = {
+  release_unknown: "inbox.debt.releaseUnknown",
+  release_pending: "inbox.debt.releasePending",
+  close_failed: "inbox.debt.closeFailed",
+  coordinator_close_failed: "inbox.debt.coordinatorCloseFailed",
+  stop_unknown: "inbox.debt.stopUnknown",
+  reclaimable: "inbox.debt.reclaimable",
 };
 
 export function InboxPanel({
@@ -44,8 +49,9 @@ export function InboxPanel({
   disabledReason?: string | null;
 }) {
   // timeAgo() reads the language non-reactively (format.ts owns the wording),
-  // so the panel subscribes to re-render its rows on a language switch.
-  useLang();
+  // so the panel subscribes through useT() and re-renders its rows on a
+  // language switch.
+  const t = useT();
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -91,18 +97,18 @@ export function InboxPanel({
       {pending.map((item) => (
         <div key={item.messageId} className={`gate inbox__item inbox__item--${item.kind}`}>
           <div className="gate__badge">
-            {item.kind === "question" ? "Worker question" : "Worker escalation"}
+            {item.kind === "question" ? t("inbox.workerQuestion") : t("inbox.workerEscalation")}
             <span className="inbox__meta">
               {timeAgo(item.createdAt)}
               {item.taskId ? ` · ${item.taskId}` : ""}
             </span>
           </div>
-          <div className="gate__question">{item.subject || "(no subject)"}</div>
+          <div className="gate__question">{item.subject || t("inbox.noSubject")}</div>
           {item.body && <div className="inbox__body">{item.body}</div>}
           <div className="gate__actions inbox__reply">
             <input
               className="inbox__input"
-              placeholder={disabled ? "Execution unavailable" : "Type a reply…"}
+              placeholder={disabled ? t("inbox.executionUnavailable") : t("inbox.replyPlaceholder")}
               value={drafts[item.messageId] ?? ""}
               disabled={disabled || busy(item.messageId)}
               onChange={(e) => setDrafts((d) => ({ ...d, [item.messageId]: e.target.value }))}
@@ -113,10 +119,12 @@ export function InboxPanel({
             <button
               className="btn btn--gate btn--ok"
               disabled={disabled || busy(item.messageId) || !(drafts[item.messageId] ?? "").trim()}
-              title={disabled ? disabledReason ?? "Execution is unavailable" : "Reply and acknowledge"}
+              title={
+                disabled ? disabledReason ?? t("inbox.executionIsUnavailable") : t("inbox.replyTitle")
+              }
               onClick={() => void reply(item)}
             >
-              {busy(item.messageId) ? "…" : "Reply"}
+              {busy(item.messageId) ? "…" : t("inbox.reply")}
             </button>
           </div>
         </div>
@@ -124,9 +132,11 @@ export function InboxPanel({
 
       {cleanupDebt.map((item) => (
         <div key={item.key} className={`gate inbox__item inbox__debt inbox__debt--${item.kind}`}>
-          <div className="gate__badge">{DEBT_LABEL[item.kind] ?? item.kind}</div>
+          <div className="gate__badge">
+            {DEBT_LABEL[item.kind] ? t(DEBT_LABEL[item.kind]!) : item.kind}
+          </div>
           <div className="gate__question">
-            {item.dispatchId ?? item.handle ?? "unknown target"}
+            {item.dispatchId ?? item.handle ?? t("inbox.unknownTarget")}
           </div>
           {item.detail && <div className="inbox__body">{item.detail}</div>}
           {item.dispatchId && (
@@ -134,18 +144,18 @@ export function InboxPanel({
               <button
                 className="btn btn--gate btn--ok"
                 disabled={disabled || busy(item.key)}
-                title="Release the worker terminal now (worker-release)"
+                title={t("inbox.releaseTitle")}
                 onClick={() => void resolveDebt(item, "release")}
               >
-                Release
+                {t("inbox.release")}
               </button>
               <button
                 className="btn btn--gate"
                 disabled={disabled || busy(item.key)}
-                title="Keep the terminal live for debugging (worker-retain)"
+                title={t("inbox.retainTitle")}
                 onClick={() => void resolveDebt(item, "retain")}
               >
-                Retain
+                {t("inbox.retain")}
               </button>
             </div>
           )}

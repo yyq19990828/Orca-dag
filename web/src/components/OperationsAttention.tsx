@@ -1,4 +1,5 @@
 import { memo, useMemo, useState } from "react";
+import { t, useLang, useT } from "../i18n";
 import type { DagResponse, Gate, RunAttempt, RunStatus, WorkerRowView } from "../types";
 import "./operations-attention.css";
 
@@ -101,10 +102,12 @@ function makeItems({ runId, dag, status, workers }: ActionableOperationSnapshots
       kind: "gate",
       id: gate.id,
       tone: "gate",
-      eyebrow: "Decision",
-      title: gate.question || "Resolve this decision gate",
-      detail: gate.taskId ? `Task ${gate.taskId}` : `Gate ${gate.id}`,
-      action: "Review gate",
+      eyebrow: t("attention.decision"),
+      title: gate.question || t("gate.resolveFallback"),
+      detail: gate.taskId
+        ? t("attention.taskDetail", { id: gate.taskId })
+        : t("attention.gateDetail", { id: gate.id }),
+      action: t("attention.reviewGate"),
     });
   }
 
@@ -117,12 +120,12 @@ function makeItems({ runId, dag, status, workers }: ActionableOperationSnapshots
       kind: "recovery",
       id: attempt.taskId,
       tone: "recovery",
-      eyebrow: "Worker start failed",
+      eyebrow: t("attention.startFailed"),
       title: attempt.startReceipt?.failedStage
-        ? `Failed at ${attempt.startReceipt.failedStage}`
-        : `Retry ${attempt.taskId}`,
-      detail: attempt.terminalDetail || "Orca recorded a failed worker-start receipt.",
-      action: "Review retry",
+        ? t("attention.failedAt", { stage: attempt.startReceipt.failedStage })
+        : t("attention.retryTask", { id: attempt.taskId }),
+      detail: attempt.terminalDetail || t("attention.startFailedDetail"),
+      action: t("attention.reviewRetry"),
     });
   }
 
@@ -140,14 +143,18 @@ function makeItems({ runId, dag, status, workers }: ActionableOperationSnapshots
       kind: "worker",
       id: dispatchKey,
       tone: "worker",
-      eyebrow: decisionOwed ? "Terminal decision owed" : "Worker needs attention",
+      eyebrow: decisionOwed ? t("attention.decisionOwed") : t("attention.workerNeedsAttention"),
       title: row.taskId,
       detail: decisionOwed
         ? row.terminalState === "release_pending"
-          ? "Orca reports a terminal decision is still pending."
-          : `The settled worker terminal is marked “${attempt?.terminalDecision ?? "pending"}”.`
-        : `Orca flagged ${attention?.categories.join(", ") || "this worker"} for review.`,
-      action: "Review worker",
+          ? t("attention.decisionPending")
+          : t("attention.decisionMarked", {
+              state: attempt?.terminalDecision ?? t("attention.pending"),
+            })
+        : t("attention.flagged", {
+            categories: attention?.categories.join(", ") || t("attention.thisWorker"),
+          }),
+      action: t("attention.reviewWorker"),
     });
   }
 
@@ -189,9 +196,14 @@ export const OperationsAttention = memo(function OperationsAttention({
   workers,
   onFocus,
 }: OperationsAttentionProps) {
+  const t = useT();
+  // makeItems() builds translated labels with the non-reactive `t` (t's
+  // identity is stable by design), so `lang` is what has to invalidate this
+  // memo — a memo keyed only on data would keep the pre-switch wording.
+  const lang = useLang();
   const [expanded, setExpanded] = useState(false);
   const snapshots = { runId, dag, status, workers };
-  const items = useMemo(() => makeItems(snapshots), [dag, runId, status, workers]);
+  const items = useMemo(() => makeItems(snapshots), [dag, lang, runId, status, workers]);
   const count = countActionableOperations(snapshots);
   const visibleItems = expanded ? items : items.slice(0, 4);
   const hiddenCount = items.length - visibleItems.length;
@@ -202,22 +214,28 @@ export const OperationsAttention = memo(function OperationsAttention({
     <section className="ops-attention" aria-labelledby="ops-attention-title">
       <header className="ops-attention__header">
         <div className="ops-attention__heading">
-          <h2 id="ops-attention-title">Needs attention</h2>
+          <h2 id="ops-attention-title">{t("attention.title")}</h2>
           <p>
             {count === null
               ? items.length > 0
-                ? `At least ${items.length} actionable ${items.length === 1 ? "item" : "items"}; other Run data is still loading.`
-                : "Actionable total is unknown until this Run’s data is available."
+                ? items.length === 1
+                  ? t("attention.atLeastOne", { n: items.length })
+                  : t("attention.atLeastMany", { n: items.length })
+                : t("attention.unknownTotal")
               : count === 0
-                ? "No actionable items right now."
-                : `${count} actionable ${count === 1 ? "item" : "items"}.`}
+                ? t("attention.none")
+                : count === 1
+                  ? t("attention.countOne", { n: count })
+                  : t("attention.countMany", { n: count })}
           </p>
         </div>
         <span
           className={`ops-attention__count${count === 0 ? " ops-attention__count--clear" : ""}`}
           aria-label={count === null
-            ? items.length > 0 ? `At least ${items.length} actionable items` : "Actionable item count unknown"
-            : `${count} actionable items`}
+            ? items.length > 0
+              ? t("attention.atLeastAria", { n: items.length })
+              : t("attention.unknownAria")
+            : t("attention.countAria", { n: count })}
         >
           {count === null ? items.length > 0 ? `${items.length}+` : "—" : count}
         </span>
@@ -253,18 +271,18 @@ export const OperationsAttention = memo(function OperationsAttention({
                 aria-expanded={expanded}
                 onClick={() => setExpanded((value) => !value)}
               >
-                {expanded ? "Show fewer" : `Show ${hiddenCount} more`}
+                {expanded ? t("attention.showFewer") : t("attention.showMore", { n: hiddenCount })}
               </button>
             </li>
           )}
         </ul>
       ) : count === null ? (
         <div className="ops-attention__empty ops-attention__empty--unknown" role="status">
-          No operation is confirmed yet; waiting for the Run snapshots.
+          {t("attention.emptyUnknown")}
         </div>
       ) : (
         <div className="ops-attention__empty">
-          <span aria-hidden="true">✓</span> The current snapshots show no pending decisions or verified start failures.
+          <span aria-hidden="true">✓</span> {t("attention.emptyClean")}
         </div>
       )}
     </section>

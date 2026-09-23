@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { fetchRunHealth } from "../api";
+import { t, useT, type TranslationKey } from "../i18n";
 import type { RunHealthView, RunOwnershipState } from "../types";
 import { usePageVisible } from "../visibility";
 
@@ -24,46 +25,56 @@ import { usePageVisible } from "../visibility";
 
 const OWNERSHIP_META: Record<
   RunOwnershipState,
-  { label: string; tone: "ok" | "warn" | "bad" | "muted"; brief: string }
+  { label: TranslationKey; tone: "ok" | "warn" | "bad" | "muted"; brief: TranslationKey }
 > = {
   viewer_coordinator: {
-    label: "Viewer-owned",
+    label: "health.ownership.viewer.label",
     tone: "ok",
-    brief: "This viewer's live coordinator owns the Run.",
+    brief: "health.ownership.viewer.brief",
   },
   viewer_coordinator_other_run: {
-    label: "Viewer bound · Run mismatch",
+    label: "health.ownership.otherRun.label",
     tone: "warn",
-    brief: "The viewer's coordinator terminal is bound here but the loop reports another Run.",
+    brief: "health.ownership.otherRun.brief",
   },
   external_coordinator: {
-    label: "External coordinator",
+    label: "health.ownership.external.label",
     tone: "warn",
-    brief: "Another terminal is bound as coordinator; starting here would fence it.",
+    brief: "health.ownership.external.brief",
   },
   unbound: {
-    label: "No coordinator",
+    label: "health.ownership.unbound.label",
     tone: "muted",
-    brief: "No coordinator terminal is bound to this Run.",
+    brief: "health.ownership.unbound.brief",
   },
   unverifiable: {
-    label: "Ownership unknown",
+    label: "health.ownership.unverifiable.label",
     tone: "bad",
-    brief: "The Run record could not be read, so ownership cannot be verified.",
+    brief: "health.ownership.unverifiable.brief",
   },
 };
 
 const POLL_MS = 5_000;
 
 function formatCounts(health: RunHealthView): string {
-  // A failed read renders as "—" (unknown), never as a reassuring zero.
+  // A failed read renders as "—" (unknown), never as a reassuring zero. The
+  // non-reactive `t` is fine here: the badge subscribes through useT().
   const c = health.counts;
   const n = (v: number | null): string => (v === null ? "—" : String(v));
-  const gates = c.pendingGates === null ? n(c.gates) : `${n(c.gates)} (${c.pendingGates} pending)`;
-  return `Tasks ${n(c.tasks)} · Messages ${n(c.messages)} · Workers ${n(c.workers)} · Gates ${gates}`;
+  const gates =
+    c.pendingGates === null
+      ? n(c.gates)
+      : t("health.gatesPending", { gates: n(c.gates), pending: c.pendingGates });
+  return t("health.counts", {
+    tasks: n(c.tasks),
+    messages: n(c.messages),
+    workers: n(c.workers),
+    gates,
+  });
 }
 
 export function RunHealthBadge({ runId }: { runId: string }) {
+  const t = useT();
   const [health, setHealth] = useState<RunHealthView | null>(null);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -118,24 +129,26 @@ export function RunHealthBadge({ runId }: { runId: string }) {
         className={`runhealth__chip runhealth__chip--${meta.tone}`}
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        title={`${meta.brief}\n${health.ownershipDetail}`}
+        title={`${t(meta.brief)}\n${health.ownershipDetail}`}
       >
-        {meta.label}
+        {t(meta.label)}
         {warningCount > 0 && <b className="runhealth__flag">{warningCount}</b>}
         {warningCount === 0 && infoCount > 0 && <span className="runhealth__info-dot">i</span>}
       </button>
       {open && (
-        <div className="runhealth__panel" role="region" aria-label="Run ownership and health">
+        <div className="runhealth__panel" role="region" aria-label={t("health.panelAria")}>
           <div className="runhealth__row">
-            <span className="runhealth__key">Ownership</span>
+            <span className="runhealth__key">{t("health.ownershipKey")}</span>
             <span className="runhealth__val">
-              {meta.label}
+              {t(meta.label)}
               {health.coordinatorHandle ? ` · ${health.coordinatorHandle}` : ""}
-              {health.consumerGeneration !== null ? ` · generation ${health.consumerGeneration}` : ""}
+              {health.consumerGeneration !== null
+                ? t("health.generation", { n: health.consumerGeneration })
+                : ""}
             </span>
           </div>
           <div className="runhealth__row">
-            <span className="runhealth__key">Evidence</span>
+            <span className="runhealth__key">{t("health.evidenceKey")}</span>
             <span className="runhealth__val">{formatCounts(health)}</span>
           </div>
           <p className="runhealth__detail">{health.ownershipDetail}</p>
@@ -149,7 +162,7 @@ export function RunHealthBadge({ runId }: { runId: string }) {
             </ul>
           ) : (
             <p className="runhealth__clean">
-              {health.evidenceComplete ? "No warnings — the reads that back this view all succeeded." : "No warnings, but some reads failed."}
+              {health.evidenceComplete ? t("health.clean") : t("health.cleanPartial")}
             </p>
           )}
         </div>

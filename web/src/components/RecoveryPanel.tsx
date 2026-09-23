@@ -12,6 +12,7 @@ import {
   effortMap, environmentMap, getMaxConcurrency, harnessMap, laneMap,
   lanesSpecMap, modelMap, placementMap, retainMap, useConfig,
 } from "../harness";
+import { useLang, useT } from "../i18n";
 import { useDecisionDialog } from "./DecisionDialog";
 import type {
   ProviderSessionBindingView,
@@ -60,6 +61,10 @@ export const RecoveryPanel = memo(function RecoveryPanel({
 }) {
   const dialog = useDecisionDialog();
   const config = useConfig();
+  // The row memos below build translated fallbacks with the non-reactive `t`,
+  // so `lang` rides in their dependency lists.
+  const t = useT();
+  const lang = useLang();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
@@ -164,10 +169,15 @@ export const RecoveryPanel = memo(function RecoveryPanel({
     const recovered = recoverySessions.find((item) => item.dispatchId === dispatchId);
     return {
       dispatchId,
-      taskId: detail?.taskId ?? worker?.taskId ?? attempt?.taskId ?? recovered?.taskId ?? "unknown Stage",
-      reason: detail?.reason ?? "The exact provider session has not been confirmed exited, so requeue remains blocked.",
+      taskId:
+        detail?.taskId ??
+        worker?.taskId ??
+        attempt?.taskId ??
+        recovered?.taskId ??
+        t("recovery.unknownStage"),
+      reason: detail?.reason ?? t("recovery.requeueBlocked"),
     };
-  }), [retryBlockedIds, retryBlockedDetails, workerRows, attempts, recoverySessions]);
+  }), [lang, retryBlockedIds, retryBlockedDetails, workerRows, attempts, recoverySessions]);
   const blockedHistory = useMemo(() => {
     const blocked = new Set(blockedTaskIds);
     return workerRows.filter((row) =>
@@ -183,7 +193,8 @@ export const RecoveryPanel = memo(function RecoveryPanel({
       if (worker.dispatchStatus !== "dispatched" || bindingsByDispatch.has(worker.dispatchId)) continue;
       const attempt = attempts.find((item) => item.dispatchId === worker.dispatchId);
       const recovered = recoverySessions.find((item) => item.dispatchId === worker.dispatchId);
-      const harness = worker.projection?.launch?.agent ?? attempt?.harness ?? recovered?.harness ?? "unknown";
+      const harness =
+        worker.projection?.launch?.agent ?? attempt?.harness ?? recovered?.harness ?? t("recovery.unknown");
       if (harness === "claude" || harness === "codex" || harness === "opencode") {
         candidates.set(worker.dispatchId, { dispatchId: worker.dispatchId, taskId: worker.taskId, harness });
       }
@@ -193,13 +204,14 @@ export const RecoveryPanel = memo(function RecoveryPanel({
       const worker = workersByDispatch.get(attempt.dispatchId);
       if (worker && worker.dispatchStatus !== "dispatched") continue;
       const recovered = recoverySessions.find((item) => item.dispatchId === attempt.dispatchId);
-      const harness = worker?.projection?.launch?.agent ?? attempt.harness ?? recovered?.harness ?? "unknown";
+      const harness =
+        worker?.projection?.launch?.agent ?? attempt.harness ?? recovered?.harness ?? t("recovery.unknown");
       if (harness === "claude" || harness === "codex" || harness === "opencode") {
         candidates.set(attempt.dispatchId, { dispatchId: attempt.dispatchId, taskId: attempt.taskId, harness });
       }
     }
     return [...candidates.values()];
-  }, [workerRows, sessionBindings, attempts, recoverySessions]);
+  }, [lang, workerRows, sessionBindings, attempts, recoverySessions]);
   const unownedDispatchIds = useMemo(() => new Set(
     (scopedStatus?.unownedDispatches ?? [])
       .map((entry) => entry.match(/\(([^()]*)\)$/)?.[1])
@@ -260,19 +272,29 @@ export const RecoveryPanel = memo(function RecoveryPanel({
       const recovered = recoveryByDispatch.get(dispatchId);
       const worker = workersByDispatch.get(dispatchId);
       const binding = bindingsByDispatch.get(dispatchId);
-      const taskId = binding?.taskId ?? recovered?.taskId ?? worker?.taskId ?? attempt?.taskId ?? "unknown task";
-      const harness = binding?.harness ?? recovered?.harness ?? attempt?.harness ?? worker?.projection?.launch?.agent ?? "unknown";
+      const taskId =
+        binding?.taskId ??
+        recovered?.taskId ??
+        worker?.taskId ??
+        attempt?.taskId ??
+        t("recovery.unknownTask");
+      const harness =
+        binding?.harness ??
+        recovered?.harness ??
+        attempt?.harness ??
+        worker?.projection?.launch?.agent ??
+        t("recovery.unknown");
       const dispatchStatus = worker?.dispatchStatus ?? (
         attempt?.settled
           ? `settled${attempt.outcome ? ` (${attempt.outcome})` : ""}`
           : attempt
-            ? "tracked by coordinator"
-            : "unknown"
+            ? t("recovery.trackedByCoordinator")
+            : t("recovery.unknown")
       );
       const dispatchLiveness = worker?.projection?.liveness?.verdict ?? attempt?.liveness ?? null;
       return { dispatchId, taskId, harness, dispatchStatus, dispatchLiveness, attempt, recovered, worker, binding };
     }).sort((a, b) => a.taskId.localeCompare(b.taskId) || a.dispatchId.localeCompare(b.dispatchId));
-  }, [attempts, recoverySessions, workerRows, sessionBindings, retryBlockedIds, recoveryCandidateIds, unownedDispatchIds, activeSessionCandidateIds, showActiveSessionCandidates]);
+  }, [lang, attempts, recoverySessions, workerRows, sessionBindings, retryBlockedIds, recoveryCandidateIds, unownedDispatchIds, activeSessionCandidateIds, showActiveSessionCandidates]);
 
   const recoverySessionRows = sessionRows.filter((row) => !activeSessionCandidateIds.has(row.dispatchId));
   const expandedActiveSessionRows = showActiveSessionCandidates
@@ -315,19 +337,19 @@ export const RecoveryPanel = memo(function RecoveryPanel({
   async function resolveBlocked(row: WorkerRowView) {
     if (disabled || busyId || status?.running) return;
     const result = await dialog.prompt({
-      title: "Record reviewed Stage result",
-      message: `Stage ${row.taskId} was left blocked after Dispatch ${row.dispatchId} failed. Review the worker output first. This marks the Task completed while its historical Dispatch stays failed.`,
-      fieldLabel: "Result and evidence",
-      placeholder: "Describe the verified outcome and where you checked it",
+      title: t("recovery.recordTitle"),
+      message: t("recovery.recordMessage", { taskId: row.taskId, dispatchId: row.dispatchId }),
+      fieldLabel: t("recovery.recordFieldLabel"),
+      placeholder: t("recovery.recordPlaceholder"),
       required: true,
-      confirmLabel: "Continue",
+      confirmLabel: t("dialog.continue"),
     });
     if (!result || result.trim().length < 8) return;
     const confirmed = await dialog.prompt({
-      title: "Confirm manual completion",
-      message: "The provider session may be unknown even though Orca reports the worker exited. The Viewer will briefly bind this Run to update its Task, fencing another coordinator if one owns it. Enter the exact Task ID to confirm that you reviewed the result and accept this decision.",
-      fieldLabel: "Task ID",
-      confirmLabel: "Mark completed",
+      title: t("recovery.confirmTitle"),
+      message: t("recovery.confirmMessage"),
+      fieldLabel: t("recovery.confirmFieldLabel"),
+      confirmLabel: t("recovery.confirmLabel"),
       tone: "danger",
     });
     if (confirmed?.trim() !== row.taskId) return;
@@ -359,14 +381,20 @@ export const RecoveryPanel = memo(function RecoveryPanel({
       }
     }
     if (sessionStatus === "active" || sessionStatus === "idle") {
-      setErr("The exact provider session is still active or idle. Finish or stop that work before retrying.");
+      setErr(t("recovery.sessionActiveError"));
       return;
     }
     const decision = await dialog.prompt({
-      title: "Retry blocked Stage",
-      message: `Orca reports Dispatch ${row.dispatchId} exited, but the provider session is ${sessionStatus ?? "unbound"}. A detached task might still run. This starts the Run, retries this Stage in its original workspace and model, and may also dispatch other ready Stages.${row.launchEvidence?.agent === "codex" ? " If Orca still omits --dispatch-capability, Codex worker_done may be rejected again." : ""} Enter the exact Dispatch ID to accept that risk.`,
-      fieldLabel: "Dispatch ID",
-      confirmLabel: "Retry Stage",
+      title: t("recovery.retryBlockedTitle"),
+      message:
+        t("recovery.retryBlockedMessage", {
+          dispatchId: row.dispatchId,
+          session: sessionStatus ?? t("recovery.unbound"),
+        }) +
+        (row.launchEvidence?.agent === "codex" ? t("recovery.retryBlockedCodexHint") : "") +
+        t("recovery.retryBlockedTail"),
+      fieldLabel: t("recovery.retryBlockedFieldLabel"),
+      confirmLabel: t("recovery.retryBlockedConfirm"),
       tone: "danger",
     });
     if (decision?.trim() !== row.dispatchId) return;
@@ -436,12 +464,12 @@ export const RecoveryPanel = memo(function RecoveryPanel({
 
   function providerStatusLabel(status: ProviderSessionObservationView["status"] | null | undefined) {
     switch (status) {
-      case "active": return "Active";
-      case "idle": return "Idle";
-      case "exited": return "Exited";
-      case "unavailable": return "Unavailable";
-      case "unknown": return "Unknown";
-      default: return "Not probed";
+      case "active": return t("recovery.status.active");
+      case "idle": return t("recovery.status.idle");
+      case "exited": return t("recovery.status.exited");
+      case "unavailable": return t("recovery.status.unavailable");
+      case "unknown": return t("recovery.status.unknown");
+      default: return t("recovery.status.notProbed");
     }
   }
 
@@ -466,29 +494,43 @@ export const RecoveryPanel = memo(function RecoveryPanel({
       workerWorkspaceLabel(row.worker?.projection?.workspace);
     return (
       <div key={row.dispatchId} className="gate inbox__item inbox__debt" data-operation-kind="session-recovery">
-        <div className="gate__badge">{row.harness} provider session</div>
+        <div className="gate__badge">{t("recovery.sessionBadge", { harness: row.harness })}</div>
         <div className="gate__question">
           <code>{row.taskId}</code> · Dispatch <code>{row.dispatchId}</code>
         </div>
         <div className="inbox__body">
-          <div><strong>Orca Dispatch:</strong> {row.dispatchStatus}</div>
-          <div><strong>Orca liveness:</strong> {row.dispatchLiveness ?? "unknown"}</div>
-          <div><strong>Provider session:</strong> {providerStatusLabel(status)}{startupMatchesSession && !observation ? " (coordinator snapshot)" : ""}</div>
+          <div><strong>{t("recovery.orcaDispatch")}</strong> {row.dispatchStatus}</div>
+          <div><strong>{t("recovery.orcaLiveness")}</strong> {row.dispatchLiveness ?? t("recovery.unknown")}</div>
+          <div>
+            <strong>{t("recovery.providerSession")}</strong> {providerStatusLabel(status)}
+            {startupMatchesSession && !observation ? t("recovery.coordinatorSnapshot") : ""}
+          </div>
           {detail && <div>{detail}</div>}
-          {observedAt && <div>Observed at {new Date(observedAt).toLocaleString()}</div>}
+          {observedAt && (
+            <div>{t("recovery.observedAt", { time: new Date(observedAt).toLocaleString() })}</div>
+          )}
           {(host || workspace) && (
             <div>
-              Identity context: {host ?? "host unknown"}
-              {workspace ? ` · ${workspace}` : ""}
+              {t("recovery.identityContext", { host: host ?? t("recovery.hostUnknown") })}
+              {workspace ? t("recovery.identityWorkspace", { workspace }) : ""}
             </div>
           )}
-          {startup && <div>Recovery decision: {startup.decision}{startup.source ? ` · evidence: ${startup.source}` : ""}</div>}
+          {startup && (
+            <div>
+              {t("recovery.decision", { decision: startup.decision })}
+              {startup.source ? t("recovery.decisionEvidence", { source: startup.source }) : ""}
+            </div>
+          )}
         </div>
         <div className="inbox__reply recovery__session-form">
           <input
             className="inbox__input"
-            aria-label={`Provider session ID for Dispatch ${row.dispatchId}`}
-            placeholder={supportedHarness ? `Exact ${row.harness} session ID` : "Session binding unsupported for this harness"}
+            aria-label={t("recovery.sessionIdAria", { id: row.dispatchId })}
+            placeholder={
+              supportedHarness
+                ? t("recovery.sessionPlaceholder", { harness: row.harness })
+                : t("recovery.sessionUnsupported")
+            }
             value={sessionDrafts[row.dispatchId] ?? sessionId}
             readOnly={Boolean(binding) || !supportedHarness}
             onChange={(event) => setSessionDrafts((current) => ({ ...current, [row.dispatchId]: event.target.value }))}
@@ -496,18 +538,28 @@ export const RecoveryPanel = memo(function RecoveryPanel({
           <button
             className="btn btn--gate btn--ok"
             disabled={Boolean(binding) || !supportedHarness || sessionBusyId !== null || probeBusyId === row.dispatchId || !draftSessionId}
-            title={!supportedHarness ? "Session probing currently supports Claude, Codex and OpenCode." : undefined}
+            title={!supportedHarness ? t("recovery.probeUnsupportedTitle") : undefined}
             onClick={() => void saveSession(row)}
           >
-            {sessionBusyId === row.dispatchId ? "Saving…" : binding ? "Already bound" : "Bind session"}
+            {sessionBusyId === row.dispatchId
+              ? t("recovery.saving")
+              : binding
+                ? t("recovery.alreadyBound")
+                : t("recovery.bindSession")}
           </button>
           <button
             className="btn btn--gate"
             disabled={probeBusyId !== null || sessionBusyId !== null || !bindingMatchesDraft}
-            title={!binding ? "Save an exact session ID binding before probing" : !bindingMatchesDraft ? "Save the changed ID before probing this session" : "Read provider status for this exact session ID"}
+            title={
+              !binding
+                ? t("recovery.probeNeedBindingTitle")
+                : !bindingMatchesDraft
+                  ? t("recovery.probeChangedTitle")
+                  : t("recovery.probeTitle")
+            }
             onClick={() => void probeSession(row.dispatchId)}
           >
-            {probeBusyId === row.dispatchId ? "Probing…" : "Probe status"}
+            {probeBusyId === row.dispatchId ? t("recovery.probing") : t("recovery.probeStatus")}
           </button>
         </div>
       </div>
@@ -520,15 +572,17 @@ export const RecoveryPanel = memo(function RecoveryPanel({
     <div className="gates inbox recovery" data-testid="recovery-panel">
       {recovery && recovery.activeAdopted.length > 0 && (
         <div className="gate inbox__item">
-          <div className="gate__badge">Restart recovery</div>
+          <div className="gate__badge">{t("recovery.restartBadge")}</div>
           <div className="gate__question">
-            Adopted {recovery.activeAdopted.length} running Dispatch
-            {recovery.activeAdopted.length === 1 ? "" : "es"} from before the restart
+            {recovery.activeAdopted.length === 1
+              ? t("recovery.adoptedOne", { n: recovery.activeAdopted.length })
+              : t("recovery.adoptedMany", { n: recovery.activeAdopted.length })}
           </div>
           <div className="inbox__body">
             {recovery.activeAdopted.map((id) => (
               <div key={id}>
-                <code>{id}</code> — counted against concurrency, never double-placed
+                <code>{id}</code>
+                {t("recovery.adoptedNote")}
               </div>
             ))}
           </div>
@@ -537,15 +591,17 @@ export const RecoveryPanel = memo(function RecoveryPanel({
 
       {recovery && recovery.settledAdopted.length > 0 && (
         <div className="gate inbox__item">
-          <div className="gate__badge">Restart recovery</div>
+          <div className="gate__badge">{t("recovery.restartBadge")}</div>
           <div className="gate__question">
-            {recovery.settledAdopted.length} settled Dispatch
-            {recovery.settledAdopted.length === 1 ? "" : "es"} awaiting cleanup
+            {recovery.settledAdopted.length === 1
+              ? t("recovery.settledOne", { n: recovery.settledAdopted.length })
+              : t("recovery.settledMany", { n: recovery.settledAdopted.length })}
           </div>
           <div className="inbox__body">
             {recovery.settledAdopted.map((id) => (
               <div key={id}>
-                <code>{id}</code> — released (or surfaced as debt) from Orca's own records
+                <code>{id}</code>
+                {t("recovery.settledNote")}
               </div>
             ))}
           </div>
@@ -554,12 +610,17 @@ export const RecoveryPanel = memo(function RecoveryPanel({
 
       {recovery && recovery.unverifiable.length > 0 && (
         <div className="gate inbox__item inbox__debt">
-          <div className="gate__badge">Unverifiable Dispatch</div>
-          <div className="gate__question">{recovery.unverifiable.length} Dispatch{recovery.unverifiable.length === 1 ? "" : "es"} without verifiable state</div>
+          <div className="gate__badge">{t("recovery.unverifiableBadge")}</div>
+          <div className="gate__question">
+            {recovery.unverifiable.length === 1
+              ? t("recovery.unverifiableOne", { n: recovery.unverifiable.length })
+              : t("recovery.unverifiableMany", { n: recovery.unverifiable.length })}
+          </div>
           <div className="inbox__body">
             {recovery.unverifiable.map((id) => (
               <div key={id}>
-                <code>{id}</code> — left untouched: missing/unverifiable status is never acted on
+                <code>{id}</code>
+                {t("recovery.unverifiableNote")}
               </div>
             ))}
           </div>
@@ -568,9 +629,11 @@ export const RecoveryPanel = memo(function RecoveryPanel({
 
       {retryBlockedRows.length > 0 && (
         <div className="gate inbox__item inbox__debt" data-operation-kind="session-recovery-blocked">
-          <div className="gate__badge">Stage resume blocked</div>
+          <div className="gate__badge">{t("recovery.resumeBlockedBadge")}</div>
           <div className="gate__question">
-            {retryBlockedRows.length} stopped Stage{retryBlockedRows.length === 1 ? " is" : "s are"} held from requeue until its exact provider session is confirmed exited
+            {retryBlockedRows.length === 1
+              ? t("recovery.resumeBlockedOne", { n: retryBlockedRows.length })
+              : t("recovery.resumeBlockedMany", { n: retryBlockedRows.length })}
           </div>
           <div className="inbox__body">
             {retryBlockedRows.map((entry) => (
@@ -585,27 +648,35 @@ export const RecoveryPanel = memo(function RecoveryPanel({
 
       {blockedHistory.length > 0 && (
         <div className="gate inbox__item inbox__debt" data-operation-kind="blocked-stage-resolution">
-          <div className="gate__badge">Blocked Stage recovery</div>
-          <div className="gate__question">Review an exited worker before resolving or retrying its Stage</div>
-          <div className="inbox__body">
-            Abandon settles the Dispatch only; it does not change a blocked Task. A reviewed result can complete the Task without rerunning work. Retry reuses the historical model and workspace. Both actions recheck Orca state.
-          </div>
+          <div className="gate__badge">{t("recovery.blockedBadge")}</div>
+          <div className="gate__question">{t("recovery.blockedQuestion")}</div>
+          <div className="inbox__body">{t("recovery.blockedBody")}</div>
           {blockedHistory.map((row) => {
             const exited = row.projection?.liveness?.verdict === "exited";
             const unavailable = disabled || Boolean(busyId) || Boolean(status?.running) || !exited;
             return (
               <div key={row.dispatchId} className="inbox__body">
                 <strong>Stage <code>{row.taskId}</code></strong> · Dispatch <code>{row.dispatchId}</code>
-                <div>Fleet liveness: {row.projection?.liveness?.verdict ?? "unknown"}</div>
+                <div>
+                  {t("recovery.fleetLiveness", {
+                    verdict: row.projection?.liveness?.verdict ?? t("recovery.unknown"),
+                  })}
+                </div>
                 {row.launchEvidence?.agent === "codex" && (
-                  <div>Review Codex output before retrying: a preamble without <code>--dispatch-capability</code> can reject <code>worker_done</code> again.</div>
+                  <div>
+                    {t("recovery.codexHintBefore")}
+                    <code>--dispatch-capability</code>
+                    {t("recovery.codexHintMid")}
+                    <code>worker_done</code>
+                    {t("recovery.codexHintAfter")}
+                  </div>
                 )}
                 <div className="gate__actions">
                   <button className="btn btn--gate" disabled={unavailable} onClick={() => void resolveBlocked(row)}>
-                    {busyId === row.dispatchId ? "Working…" : "Record reviewed completion"}
+                    {busyId === row.dispatchId ? t("recovery.working") : t("recovery.recordCompletion")}
                   </button>
                   <button className="btn btn--gate" disabled={unavailable} onClick={() => void resumeBlocked(row)}>
-                    Retry original launch
+                    {t("recovery.retryOriginal")}
                   </button>
                 </div>
               </div>
@@ -622,13 +693,13 @@ export const RecoveryPanel = memo(function RecoveryPanel({
           onToggle={(event) => setShowActiveSessionCandidates(event.currentTarget.open)}
         >
           <summary>
-            Bind active session · {optionalActiveSessionCandidates.length} eligible Dispatch{optionalActiveSessionCandidates.length === 1 ? "" : "es"}
+            {optionalActiveSessionCandidates.length === 1
+              ? t("recovery.bindActiveOne", { n: optionalActiveSessionCandidates.length })
+              : t("recovery.bindActiveMany", { n: optionalActiveSessionCandidates.length })}
           </summary>
           {showActiveSessionCandidates && (
             <>
-              <div className="inbox__body">
-                Exact sessions are bound automatically when the provider exposes a unique Dispatch match. If discovery has not succeeded, enter a known session ID here before stopping the coordinator.
-              </div>
+              <div className="inbox__body">{t("recovery.bindActiveBody")}</div>
               {expandedActiveSessionRows.map(renderSessionRow)}
               {sessionActionError && <div className="exec__err inbox__err">⚠️ {sessionActionError}</div>}
             </>
@@ -637,16 +708,14 @@ export const RecoveryPanel = memo(function RecoveryPanel({
       )}
 
       {(recoverySessionRows.length > 0 || sessionLoadError !== null) && (
-        <section className="recovery__sessions" aria-label="Provider session recovery">
+        <section className="recovery__sessions" aria-label={t("recovery.sessionsBadge")}>
           <div className="gate inbox__item">
-            <div className="gate__badge">Provider session recovery</div>
-            <div className="gate__question">Provider sessions stay separate from Orca Dispatch lifecycle</div>
-            <div className="inbox__body">
-              A session ID binds one provider session to one exact Run, Task, harness, and Dispatch. Existing bindings are immutable; changing one needs a verified handoff path. Probes run only when requested. An Orca message being queued confirms enqueue only; it does not confirm delivery or that the provider read it.
-            </div>
+            <div className="gate__badge">{t("recovery.sessionsBadge")}</div>
+            <div className="gate__question">{t("recovery.sessionsQuestion")}</div>
+            <div className="inbox__body">{t("recovery.sessionsBody")}</div>
             <div className="gate__actions">
               <button className="btn btn--gate" disabled={sessionLoading} onClick={() => void loadSessionRecovery()}>
-                {sessionLoading ? "Refreshing…" : "Refresh bindings and Dispatch state"}
+                {sessionLoading ? t("recovery.refreshing") : t("recovery.refreshBindings")}
               </button>
             </div>
             {sessionLoadError && <div className="exec__err inbox__err">⚠️ {sessionLoadError}</div>}
@@ -659,13 +728,15 @@ export const RecoveryPanel = memo(function RecoveryPanel({
 
       {pendingStarts.map((a) => (
         <div key={`pending-${a.taskId}`} className="gate inbox__item">
-          <div className="gate__badge">Start outcome pending</div>
+          <div className="gate__badge">{t("recovery.startPendingBadge")}</div>
           <div className="gate__question">
-            <code>{a.taskId}</code> — worker-start response lost, resolving idempotently
+            <code>{a.taskId}</code>
+            {t("recovery.startPendingQuestion")}
           </div>
           <div className="inbox__body">
-            Durable request id <code>{a.startRequestId}</code>: the coordinator asks Orca whether the
-            start landed and replays the SAME id — never a second Dispatch.
+            {t("recovery.startPendingBodyBefore")}
+            <code>{a.startRequestId}</code>
+            {t("recovery.startPendingBodyAfter")}
           </div>
         </div>
       ))}
@@ -678,15 +749,23 @@ export const RecoveryPanel = memo(function RecoveryPanel({
           data-operation-id={a.taskId}
           tabIndex={-1}
         >
-          <div className="gate__badge">Start failed{a.startReceipt?.failedStage ? ` at ${a.startReceipt.failedStage}` : ""}</div>
+          <div className="gate__badge">
+            {t("recovery.startFailed")}
+            {a.startReceipt?.failedStage
+              ? t("recovery.startFailedAt", { stage: a.startReceipt.failedStage })
+              : ""}
+          </div>
           <div className="gate__question">
             <code>{a.taskId}</code>
-            {a.startReceipt?.requestId ? ` · request ${a.startReceipt.requestId.slice(0, 8)}…` : ""}
+            {a.startReceipt?.requestId
+              ? t("recovery.requestSuffix", { id: a.startReceipt.requestId.slice(0, 8) })
+              : ""}
           </div>
           {a.terminalDetail && <div className="inbox__body">{a.terminalDetail}</div>}
           {a.startReceipt && a.startReceipt.recoveryCommands.length > 0 && (
             <div className="inbox__body">
-              Prescribed: {a.startReceipt.recoveryCommands.map((c) => <code key={c}>{c}</code>)}
+              {t("recovery.prescribedLabel")}{" "}
+              {a.startReceipt.recoveryCommands.map((c) => <code key={c}>{c}</code>)}
             </div>
           )}
           <div className="gate__actions">
@@ -695,12 +774,12 @@ export const RecoveryPanel = memo(function RecoveryPanel({
               disabled={disabled || busy(a.taskId) || !status?.running}
               title={
                 !status?.running
-                  ? "Start the coordinator first — the retry needs its bound terminal"
-                  : "Re-place this attempt with the same harness/model/placement (worker-start --retry-of)"
+                  ? t("recovery.retryNeedCoordinator")
+                  : t("recovery.retryTitle")
               }
               onClick={() => void retry(a)}
             >
-              {busy(a.taskId) ? "…" : "Retry"}
+              {busy(a.taskId) ? "…" : t("recovery.retry")}
             </button>
           </div>
         </div>
@@ -708,7 +787,7 @@ export const RecoveryPanel = memo(function RecoveryPanel({
 
       {prescribed.map((a) => (
         <div key={`next-${a.taskId}`} className="gate inbox__item">
-          <div className="gate__badge">Orca prescribes</div>
+          <div className="gate__badge">{t("recovery.prescribesBadge")}</div>
           <div className="gate__question">
             <code>{a.taskId}</code> — {a.nextAction!.kind}
           </div>

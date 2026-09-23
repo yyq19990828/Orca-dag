@@ -1,3 +1,4 @@
+import { useT } from "../i18n";
 import { STATUS_META, type DagNode, type DagResponse, type RunStatus } from "../types";
 
 /**
@@ -43,6 +44,7 @@ export function SchedulerPanel({
   runId: string;
   onSelectTask: (id: string) => void;
 }) {
+  const t = useT();
   const nodesById = new Map(dag.nodes.map((n) => [n.id, n]));
   const readyWave = dag.readyWave ?? { taskIds: [], freeSlots: null };
   const readiness = dag.readiness ?? {};
@@ -73,30 +75,36 @@ export function SchedulerPanel({
   const nothingWaiting = readyNodes.length === 0 && waitingNodes.length === 0;
 
   return (
-    <aside className="scheduler-panel" aria-label="Scheduler and ready queue">
+    <aside className="scheduler-panel" aria-label={t("scheduler.aria")}>
       <header className="scheduler-panel__head">
-        <span className="scheduler-panel__title">Scheduler</span>
-        <span className="scheduler-panel__wave" title="Tasks whose dependencies are met and no gate is pending. Listed in id order — no scheduling precedence is implied.">
-          Wave · {readyNodes.length} ready
+        <span className="scheduler-panel__title">{t("scheduler.title")}</span>
+        <span className="scheduler-panel__wave" title={t("scheduler.waveTitle")}>
+          {t("scheduler.waveReady", { n: readyNodes.length })}
         </span>
       </header>
 
       <p className="scheduler-panel__capacity" aria-live="polite">
         {capacityKnown && max !== null ? (
           <>
-            Workers <b>{busy}/{max}</b>
+            {t("scheduler.workers")} <b>{busy}/{max}</b>
             {readyWave.freeSlots !== null && (
-              <> · {readyWave.freeSlots === 0 ? "no free slot — ready tasks queue" : `${readyWave.freeSlots} free slot${readyWave.freeSlots === 1 ? "" : "s"}`}</>
+              <>
+                {readyWave.freeSlots === 0
+                  ? t("scheduler.noFreeSlot")
+                  : readyWave.freeSlots === 1
+                    ? t("scheduler.freeSlotOne", { n: readyWave.freeSlots })
+                    : t("scheduler.freeSlotMany", { n: readyWave.freeSlots })}
+              </>
             )}
           </>
         ) : (
-          "Viewer coordinator not running this Run — worker capacity unknown"
+          t("scheduler.capacityUnknown")
         )}
       </p>
 
       {readyNodes.length > 0 && (
         <section className="scheduler-panel__section">
-          <h4 className="scheduler-panel__key">Ready queue</h4>
+          <h4 className="scheduler-panel__key">{t("scheduler.readyQueue")}</h4>
           <ul className="scheduler-panel__queue">
             {readyNodes.map((n) => (
               <li key={n.id}>
@@ -106,8 +114,8 @@ export function SchedulerPanel({
                   onClick={() => onSelectTask(n.id)}
                   title={
                     queuedNodes.includes(n)
-                      ? "Ready, waiting for a free worker slot"
-                      : "Ready — dispatchable now"
+                      ? t("scheduler.chipQueuedTitle")
+                      : t("scheduler.chipReadyTitle")
                   }
                 >
                   <span className="dot" style={{ background: STATUS_META.ready.color }} />
@@ -116,13 +124,13 @@ export function SchedulerPanel({
               </li>
             ))}
           </ul>
-          <p className="scheduler-panel__hint">Id order — equally ready tasks are equally dispatchable.</p>
+          <p className="scheduler-panel__hint">{t("scheduler.idOrderHint")}</p>
         </section>
       )}
 
       {waitingNodes.length > 0 && (
         <section className="scheduler-panel__section">
-          <h4 className="scheduler-panel__key">Waiting ({waitingNodes.length})</h4>
+          <h4 className="scheduler-panel__key">{t("scheduler.waiting", { n: waitingNodes.length })}</h4>
           <ul className="scheduler-panel__waiting">
             {waitingNodes.slice(0, 7).map(({ node, reasons }) => (
               <WaitingRow
@@ -135,7 +143,7 @@ export function SchedulerPanel({
           </ul>
           {waitingNodes.length > 7 && (
             <p className="scheduler-panel__hint">
-              +{waitingNodes.length - 7} more — select a node on the graph for its full reasons.
+              {t("scheduler.moreWaiting", { n: waitingNodes.length - 7 })}
             </p>
           )}
         </section>
@@ -143,7 +151,7 @@ export function SchedulerPanel({
 
       {nothingWaiting && dag.nodes.length > 0 && (
         <p className="scheduler-panel__hint scheduler-panel__hint--alone">
-          Nothing waiting — every task has run or is running.
+          {t("scheduler.nothingWaiting")}
         </p>
       )}
     </aside>
