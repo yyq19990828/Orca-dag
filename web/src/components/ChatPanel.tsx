@@ -1,7 +1,7 @@
 import { Fragment, memo, useEffect, useMemo, useState } from "react";
 import { fetchAudiencePreview, replyToMessage, sendGroupMessage, sendTaskMessage } from "../api";
 import { formatClock, formatDateTime, isUrgent, priorityLabel } from "../format";
-import { useLang } from "../i18n";
+import { t, useLang, useT } from "../i18n";
 import { useDecisionDialog } from "./DecisionDialog";
 import { DoodleSelect, type DoodleOption } from "./DoodleSelect";
 import type {
@@ -85,47 +85,49 @@ function isAgentProgressSignal(event: ActivityEvent): boolean {
 function compactSignal(value: string | null | undefined): string | null {
   const normalized = value?.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
   if (!normalized) return null;
-  if (normalized === "input accepted") return "Prompt accepted, agent is working";
+  if (normalized === "input accepted") return t("chat.signal.promptAccepted");
   return normalized.charAt(0).toUpperCase() + normalized.slice(1);
 }
 
 function eventHeading(event: ActivityEvent): string {
   switch (event.kind) {
-    case "dispatch_started": return event.taskId ? "Assigned this stage" : "Run started";
+    case "dispatch_started": return event.taskId ? t("chat.heading.assignedStage") : t("chat.heading.runStarted");
     case "worker_done":
-      return event.severity === "success" ? "Completed" : event.severity === "error" ? "Reported failure" : "Reported outcome";
-    case "question": return "Question";
-    case "escalation": return "Needs attention";
-    case "reply": return "Reply";
-    case "heartbeat": return "Working";
+      return event.severity === "success"
+        ? t("chat.heading.completed")
+        : event.severity === "error" ? t("chat.heading.reportedFailure") : t("chat.heading.reportedOutcome");
+    case "question": return t("chat.heading.question");
+    case "escalation": return t("chat.heading.needsAttention");
+    case "reply": return t("chat.heading.reply");
+    case "heartbeat": return t("chat.heading.working");
     default: return event.title;
   }
 }
 
 function eventActor(event: ActivityEvent): string {
-  if (event.direction === "coordinator_to_agent") return "Coordinator";
+  if (event.direction === "coordinator_to_agent") return t("chat.actor.coordinator");
   const runtime = [event.actor.harness, event.actor.model].filter(Boolean).join(" · ");
   if (runtime) return runtime;
-  return event.actor.role === "lead" ? "Lead agent" : "Agent";
+  return event.actor.role === "lead" ? t("chat.actor.lead") : t("chat.actor.agent");
 }
 
 function stageState(task: DagNode, presence: StagePresence | null, waiting: boolean): string {
-  if (waiting) return "Waiting for reply";
+  if (waiting) return t("chat.state.waitingReply");
   if (task.status === "dispatched" && presence?.liveness === "unverifiable") {
     // Phase 2: for the documented fleet capability gaps, an exact worker-show
     // observation proving the terminal live replaces the misleading generic
     // label with the qualified working state — the fleet verdict itself stays
     // unverifiable (both evidence layers remain visible in Worker Operations).
-    if (presence.qualifiedWorking) return "Agent working · terminal live · supervised liveness unavailable";
-    return "Connection unknown";
+    if (presence.qualifiedWorking) return t("chat.state.workingTerminalLive");
+    return t("chat.state.connectionUnknown");
   }
-  if (task.status === "dispatched") return "Running";
+  if (task.status === "dispatched") return t("chat.state.running");
   return {
-    pending: "Pending",
-    ready: "Ready",
-    completed: "Completed",
-    failed: "Failed",
-    blocked: "Blocked",
+    pending: t("chat.state.pending"),
+    ready: t("chat.state.ready"),
+    completed: t("chat.state.completed"),
+    failed: t("chat.state.failed"),
+    blocked: t("chat.state.blocked"),
   }[task.status] ?? task.status;
 }
 
@@ -170,33 +172,38 @@ function initialsOf(label: string): string {
 
 function briefSummary(spec: string): string {
   const normalized = spec.replace(/\s+/g, " ").trim();
-  if (!normalized) return "The coordinator assigned this stage without an additional brief.";
+  if (!normalized) return t("chat.brief.empty");
   const sentence = normalized.match(/^.*?[.!?](?:\s|$)/)?.[0]?.trim() ?? normalized;
   return sentence.length > 220 ? `${sentence.slice(0, 217).trimEnd()}...` : sentence;
 }
 
 function checkTitle(receipt: CoordinatorCheckReceipt): string {
-  if (receipt.error) return "Check failed";
+  if (receipt.error) return t("chat.check.failed");
   if (receipt.messageCount > 0) {
     const types = receipt.messageTypes.map((type) => compactSignal(type) ?? type).join(", ");
-    const action = receipt.source === "external_inferred" ? "Coordinator checked" : "Inbox check received";
-    return `${action} ${receipt.messageCount} ${receipt.messageCount === 1 ? "message" : "messages"}${types ? ` · ${types}` : ""}`;
+    const action = receipt.source === "external_inferred"
+      ? t("chat.check.externalAction")
+      : t("chat.check.inboxAction");
+    const count = receipt.messageCount === 1
+      ? t("chat.check.countOne", { n: receipt.messageCount })
+      : t("chat.check.countMany", { n: receipt.messageCount });
+    return `${action} ${count}${types ? t("chat.check.typesSuffix", { types }) : ""}`;
   }
-  return receipt.timedOut ? "No new inbox messages" : "Inbox checked";
+  return receipt.timedOut ? t("chat.check.noneTimedOut") : t("chat.check.inboxChecked");
 }
 
 function checkAgentLine(agent: CoordinatorCheckAgentSummary | null): string {
-  if (!agent) return "No active agent snapshot in this pass";
+  if (!agent) return t("chat.check.noAgents");
   const activity = compactSignal(agent.detail) ?? compactSignal(agent.activity);
   const signals = agent.attention.map((attention) => ({
-    input: "Waiting for coordinator reply",
-    unverifiable: "Connection not yet verified",
-    root_completion: "Completion received",
+    input: t("chat.check.attentionInput"),
+    unverifiable: t("chat.check.attentionUnverifiable"),
+    root_completion: t("chat.check.attentionCompletion"),
   })[attention] ?? compactSignal(attention) ?? attention);
   const liveness = {
-    live: "Live",
-    unverifiable: "Connection unknown",
-    exited: "Agent exited",
+    live: t("chat.check.livenessLive"),
+    unverifiable: t("chat.state.connectionUnknown"),
+    exited: t("chat.check.livenessExited"),
   }[agent.liveness];
   return [activity, ...signals, agent.outcome ? compactSignal(agent.outcome) : null, liveness]
     .filter(Boolean)
@@ -205,7 +212,7 @@ function checkAgentLine(agent: CoordinatorCheckAgentSummary | null): string {
 }
 
 function checkFleetLine(agents: CoordinatorCheckAgentSummary[]): string {
-  if (agents.length === 0) return "No active agent snapshot in this pass";
+  if (agents.length === 0) return t("chat.check.noAgents");
   const live = agents.filter((agent) => agent.liveness === "live").length;
   const waiting = agents.filter((agent) => agent.attention.includes("input")).length;
   const unknown = agents.filter((agent) => agent.attention.includes("unverifiable")).length;
@@ -215,11 +222,13 @@ function checkFleetLine(agents: CoordinatorCheckAgentSummary[]): string {
   ).length;
   const activities = [...new Set(agents.map((agent) => compactSignal(agent.detail) ?? compactSignal(agent.activity)).filter(Boolean))];
   return [
-    `${agents.length} ${agents.length === 1 ? "agent" : "agents"} · ${live} live`,
-    waiting > 0 ? `${waiting} waiting for reply` : null,
-    unknown > 0 ? `${unknown} connection unknown` : null,
-    completed > 0 ? `${completed} completion received` : null,
-    otherAttention > 0 ? `${otherAttention} need review` : null,
+    `${agents.length === 1
+      ? t("chat.check.fleetAgentOne", { n: agents.length })
+      : t("chat.check.fleetAgentMany", { n: agents.length })} · ${t("chat.check.fleetLive", { n: live })}`,
+    waiting > 0 ? t("chat.check.fleetWaiting", { n: waiting }) : null,
+    unknown > 0 ? t("chat.check.fleetUnknown", { n: unknown }) : null,
+    completed > 0 ? t("chat.check.fleetCompletion", { n: completed }) : null,
+    otherAttention > 0 ? t("chat.check.fleetReview", { n: otherAttention }) : null,
     activities.length > 0 ? activities.slice(0, 2).join(", ") : null,
   ].filter(Boolean).join(" · ");
 }
@@ -295,36 +304,39 @@ function buildTimeline(
 function checkGroupTitle(receipts: CoordinatorCheckReceipt[]): string {
   const latest = receipts.at(-1)!;
   if (receipts.length === 1) return checkTitle(latest);
-  if (latest.messageCount === 0) return `Inbox checked ${receipts.length} times · no new messages`;
-  return `${checkTitle(latest)} · observed ${receipts.length} times`;
+  if (latest.messageCount === 0) return t("chat.check.repeatQuiet", { n: receipts.length });
+  return t("chat.check.repeat", { title: checkTitle(latest), n: receipts.length });
 }
 
 function checkSourceLabel(receipt: CoordinatorCheckReceipt): string {
   return receipt.source === "external_inferred"
-    ? "External coordinator activity reconstructed from Orca records"
-    : "Viewer coordinator inbox check";
+    ? t("chat.check.sourceExternal")
+    : t("chat.check.sourceViewer");
 }
 
 function checkInboxResult(receipt: CoordinatorCheckReceipt): string {
-  if (receipt.error) return `Failed: ${receipt.error}`;
+  if (receipt.error) return t("chat.check.resultFailed", { error: receipt.error });
   if (receipt.messageCount === 0) {
-    return receipt.timedOut ? "No message arrived before the wait ended" : "No new messages";
+    return receipt.timedOut ? t("chat.check.resultNoArrival") : t("chat.check.resultNoNew");
   }
   const types = receipt.messageTypes
     .map((type) => compactSignal(type) ?? type)
     .filter((type, index, values) => values.indexOf(type) === index);
-  return `${receipt.messageCount} ${receipt.messageCount === 1 ? "message" : "messages"}${types.length > 0 ? `: ${types.join(", ")}` : ""}`;
+  const count = receipt.messageCount === 1
+    ? t("chat.check.countOne", { n: receipt.messageCount })
+    : t("chat.check.countMany", { n: receipt.messageCount });
+  return `${count}${types.length > 0 ? t("chat.check.resultTypes", { types: types.join(", ") }) : ""}`;
 }
 
 function checkDurationLabel(receipt: CoordinatorCheckReceipt): string {
-  if (receipt.source === "external_inferred") return "Not exposed by Orca";
+  if (receipt.source === "external_inferred") return t("chat.check.notExposed");
   if (receipt.durationMs < 1_000) return `${receipt.durationMs} ms`;
   return `${(receipt.durationMs / 1_000).toFixed(1)} s`;
 }
 
 function checkDeliveryLabel(receipt: CoordinatorCheckReceipt): string {
-  if (receipt.source === "external_inferred") return "Not exposed by Orca";
-  return receipt.deliveryId ?? "No delivery";
+  if (receipt.source === "external_inferred") return t("chat.check.notExposed");
+  return receipt.deliveryId ?? t("chat.check.noDelivery");
 }
 
 /**
@@ -357,8 +369,11 @@ export const ChatPanel = memo(function ChatPanel({
   // Priority chips and message timestamps come from the shared formatters in
   // format.ts, which read the language non-reactively (no hooks there by
   // design) — so this memo()'d panel subscribes itself and re-renders its
-  // whole timeline when the UI language changes.
-  useLang();
+  // whole timeline when the UI language changes. `lang` also feeds the memos
+  // below: they build translated fallbacks (a thread's "Run control" label),
+  // and a memo keyed only on data would keep the pre-switch wording.
+  const t = useT();
+  const lang = useLang();
   const conversations = useMemo(() => {
     const grouped = new Map<string, ActivityEvent[]>();
     const taskMap = new Map(tasks.map((task) => [task.id, task]));
@@ -390,7 +405,9 @@ export const ChatPanel = memo(function ChatPanel({
         return {
           id,
           taskId,
-          label: taskId ? workerEvent?.actor.label || task?.label || `Stage ${taskId}` : "Run control",
+          label: taskId
+            ? workerEvent?.actor.label || task?.label || t("chat.thread.stageFallback", { id: taskId })
+            : t("chat.thread.runControl"),
           subtitle: [harness, model, effort].filter(Boolean).join(" · ") || null,
           isLead: Boolean(taskId && taskId === leadTaskId),
           task,
@@ -411,7 +428,7 @@ export const ChatPanel = memo(function ChatPanel({
         if (aIsSystem !== bIsSystem) return aIsSystem ? -1 : 1;
         return b.latestAt.localeCompare(a.latestAt);
       });
-  }, [leadTaskId, snapshot.events, snapshot.presence, tasks]);
+  }, [lang, leadTaskId, snapshot.events, snapshot.presence, tasks]);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Quiet Runs can accumulate hundreds of checks in one digest. Keep their
@@ -493,9 +510,11 @@ export const ChatPanel = memo(function ChatPanel({
       (preview?.audiences ?? []).map((option) => ({
         value: option.address,
         label: option.label,
-        hint: `${option.estimatedRecipients.length} estimated recipient${option.estimatedRecipients.length === 1 ? "" : "s"}`,
+        hint: option.estimatedRecipients.length === 1
+          ? t("chat.group.recipientsOne", { n: option.estimatedRecipients.length })
+          : t("chat.group.recipientsMany", { n: option.estimatedRecipients.length }),
       })),
-    [preview],
+    [lang, preview],
   );
 
   // Keep the selection inside the offered set; default to the broadest group.
@@ -514,13 +533,12 @@ export const ChatPanel = memo(function ChatPanel({
     // multi-recipient by construction; the copy states the enqueue-only
     // guarantee and the estimate caveat verbatim.
     const confirmed = await dialog.confirm({
-      title: "Send group message?",
-      message:
-        `This enqueues the message for an estimated ${estimated} recipient${estimated === 1 ? "" : "s"} (${audience}). ` +
-        "Orca durably enqueues group mail: the receipt proves enqueue only — it never proves that any worker has read or will act on it. " +
-        "The recipient count is an estimate from current Run workers, not a confirmed delivery list.",
-      confirmLabel: `Send to ${audience}`,
-      cancelLabel: "Cancel",
+      title: t("chat.confirm.title"),
+      message: estimated === 1
+        ? t("chat.confirm.messageOne", { n: estimated, audience })
+        : t("chat.confirm.messageMany", { n: estimated, audience }),
+      confirmLabel: t("chat.group.sendTo", { audience }),
+      cancelLabel: t("dialog.cancel"),
     });
     if (!confirmed) return;
     setGroupBusy(true);
@@ -550,7 +568,10 @@ export const ChatPanel = memo(function ChatPanel({
   // handful of messages. A failed history read leaves inboxWindow null and
   // renders no claim at all (absence is unknown, not incomplete).
   const historyWarning = snapshot.inboxWindow?.saturated
-    ? `The global Orca inbox window is full (${snapshot.inboxWindow.observed} of ${snapshot.inboxWindow.limit} rows), so older messages for this Run may be missing.`
+    ? t("chat.history.warning", {
+        observed: snapshot.inboxWindow.observed,
+        limit: snapshot.inboxWindow.limit,
+      })
     : null;
   const contextById = new Map((selected?.events ?? []).map((event) => [event.id, event]));
   const replyTarget = selected?.pending.at(-1) ?? null;
@@ -574,7 +595,7 @@ export const ChatPanel = memo(function ChatPanel({
       progressEvent?.summary ??
       compactSignal(selected.presence?.detail) ??
       compactSignal(selected.presence?.activity) ??
-      "No recent agent update"
+      t("chat.summary.noUpdate")
     : null;
   const activeDispatch =
     coordinatorActive && selected?.task?.status === "dispatched" && selected.task.dispatchId
@@ -588,7 +609,7 @@ export const ChatPanel = memo(function ChatPanel({
     : coordinatorActive ? "run-active" : "run-stopped";
   const summaryLabel = selected?.task
     ? stageState(selected.task, selected.presence, selected.pending.length > 0)
-    : coordinatorActive ? "Run control active" : "Run control stopped";
+    : coordinatorActive ? t("chat.summary.runActive") : t("chat.summary.runStopped");
   const hasRecordedAssignment = Boolean(
     selected?.events.some(
       (event) => event.kind === "dispatch_started" && event.direction === "coordinator_to_agent",
@@ -614,13 +635,13 @@ export const ChatPanel = memo(function ChatPanel({
     const detail = receiptDetail(receipt);
     const important = Boolean(receipt.error || receipt.messageCount > 0 || agent?.attention.length);
     const detailsLabel = group.receipts.length > 1
-      ? `${group.receipts.length} checks`
-      : "1 check";
+      ? t("chat.check.detailsMany", { n: group.receipts.length })
+      : t("chat.check.detailsOne");
     return (
       <div className="chat-checkpoint-group" key={checkKey}>
         <div
           className={`chat-checkpoint chat-checkpoint--digest${important ? " chat-checkpoint--important" : ""}${receipt.error ? " chat-checkpoint--error" : ""}`}
-          aria-label="Coordinator checks"
+          aria-label={t("chat.check.listAria")}
         >
           <span className="chat-checkpoint__rail" aria-hidden="true">
             {visibleCount === 0 && <span className="chat-checkpoint__dot" />}
@@ -644,7 +665,7 @@ export const ChatPanel = memo(function ChatPanel({
               })}
             >
               <span className="chat-checkpoint__chevron" aria-hidden="true">›</span>
-              {visibleCount > 0 ? `Hide ${detailsLabel}` : `Expand ${detailsLabel}`}
+              {visibleCount > 0 ? t("chat.check.hide", { label: detailsLabel }) : t("chat.check.expand", { label: detailsLabel })}
             </button>
           </div>
         </div>
@@ -658,7 +679,7 @@ export const ChatPanel = memo(function ChatPanel({
                     [checkKey]: Math.min(group.receipts.length, (current[checkKey] ?? 5) + 5),
                   }))}
                 >
-                  Show {Math.min(5, firstVisible)} older checks ({firstVisible} remaining)
+                  {t("chat.check.showOlder", { n: Math.min(5, firstVisible), remaining: firstVisible })}
                 </button>
               )}
               {group.receipts.slice(firstVisible).map((item, index) => {
@@ -668,39 +689,41 @@ export const ChatPanel = memo(function ChatPanel({
                 const itemIso = new Date(item.checkedAt).toISOString();
                 const itemDetail = receiptDetail(item);
                 return (
-                  <article className={`chat-checkpoint chat-checkpoint--entry${item.error ? " chat-checkpoint--error" : ""}`} key={`${item.checkedAt}:${item.sequence}`} aria-label="Coordinator check">
+                  <article className={`chat-checkpoint chat-checkpoint--entry${item.error ? " chat-checkpoint--error" : ""}`} key={`${item.checkedAt}:${item.sequence}`} aria-label={t("chat.check.entryAria")}>
                     <span className="chat-checkpoint__rail" aria-hidden="true">
                       <span className="chat-checkpoint__dot" />
                     </span>
                     <div className="chat-checkpoint__copy chat-checkpoint__receipt">
                       <header>
-                        <span>{group.receipts.length > 1 ? `Check ${firstVisible + index + 1} of ${group.receipts.length}` : "Check record"}</span>
+                        <span>{group.receipts.length > 1
+                          ? t("chat.check.recordOf", { index: firstVisible + index + 1, total: group.receipts.length })
+                          : t("chat.check.record")}</span>
                         <time dateTime={itemIso}>{formatDateTime(itemIso)}</time>
                       </header>
                       {itemDetail && <span className="chat-checkpoint__summary" title={itemDetail}>{itemDetail}</span>}
                       <details className="chat-checkpoint__receipt-details">
-                        <summary>Check evidence</summary>
+                        <summary>{t("chat.check.evidence")}</summary>
                         <dl className="chat-checkpoint__facts">
                           <div>
-                            <dt>Source</dt>
+                            <dt>{t("chat.check.fieldSource")}</dt>
                             <dd>{checkSourceLabel(item)}</dd>
                           </div>
                           <div>
-                            <dt>Inbox result</dt>
+                            <dt>{t("chat.check.fieldInboxResult")}</dt>
                             <dd>{checkInboxResult(item)}</dd>
                           </div>
                           <div>
-                            <dt>Wait duration</dt>
+                            <dt>{t("chat.check.fieldWait")}</dt>
                             <dd>{checkDurationLabel(item)}</dd>
                           </div>
                           <div>
-                            <dt>Delivery</dt>
+                            <dt>{t("chat.check.fieldDelivery")}</dt>
                             <dd title={checkDeliveryLabel(item)}>{checkDeliveryLabel(item)}</dd>
                           </div>
                           {item.replayed && (
                             <div>
-                              <dt>Replay</dt>
-                              <dd>Previously observed delivery</dd>
+                              <dt>{t("chat.check.fieldReplay")}</dt>
+                              <dd>{t("chat.check.replayValue")}</dd>
                             </div>
                           )}
                         </dl>
@@ -709,7 +732,9 @@ export const ChatPanel = memo(function ChatPanel({
                         {(item.messages?.length ?? 0) > 0 && (
                           <details className="chat-checkpoint__messages">
                             <summary>
-                              <span>{item.messages!.length === 1 ? "1 message" : `${item.messages!.length} messages`}</span>
+                              <span>{item.messages!.length === 1
+                                ? t("chat.check.countOne", { n: item.messages!.length })
+                                : t("chat.check.countMany", { n: item.messages!.length })}</span>
                               <span className="chat-checkpoint__chevron" aria-hidden="true">›</span>
                             </summary>
                             <ul>
@@ -721,7 +746,7 @@ export const ChatPanel = memo(function ChatPanel({
                                       {compactSignal(message.type) ?? message.type}
                                     </span>
                                     <span className="chat-checkpoint__message-subject" title={message.subject}>
-                                      {message.subject || "(no subject)"}
+                                      {message.subject || t("chat.check.noSubject")}
                                     </span>
                                     <time dateTime={iso}>{formatClock(iso)}</time>
                                   </li>
@@ -732,12 +757,12 @@ export const ChatPanel = memo(function ChatPanel({
                         )}
                         {item.evidence && (
                           <p className="chat-checkpoint__evidence">
-                            <strong>Why this check appears</strong>
+                            <strong>{t("chat.check.whyShown")}</strong>
                             <span>{item.evidence}</span>
                           </p>
                         )}
                         <div className="chat-checkpoint__agents">
-                          <strong>Agent snapshot</strong>
+                          <strong>{t("chat.check.agents")}</strong>
                           {relevantAgents.length > 0 ? relevantAgents.map((candidate) => {
                             const stage = tasks.find((task) => task.id === candidate.taskId);
                             const agentName = candidate.agent === "unknown agent" ? null : candidate.agent;
@@ -745,12 +770,12 @@ export const ChatPanel = memo(function ChatPanel({
                             return (
                               <div className="chat-checkpoint__agent" key={`${item.sequence}:${candidate.taskId}`}>
                                 <span>{stage?.label ?? candidate.taskId}</span>
-                                <small>{runtime || "Runtime not recorded"}</small>
+                                <small>{runtime || t("chat.check.runtimeNotRecorded")}</small>
                                 <p>{checkAgentLine(candidate)}</p>
                               </div>
                             );
                           }) : (
-                            <p className="chat-checkpoint__empty">No agent state was attached to this check.</p>
+                            <p className="chat-checkpoint__empty">{t("chat.check.noAgentState")}</p>
                           )}
                         </div>
                       </details>
@@ -783,7 +808,7 @@ export const ChatPanel = memo(function ChatPanel({
   }
 
   if (!runId) {
-    return <div className="chat__empty">Pick a Run to open its conversations.</div>;
+    return <div className="chat__empty">{t("chat.empty.pickRun")}</div>;
   }
 
   if (conversations.length === 0) {
@@ -791,20 +816,20 @@ export const ChatPanel = memo(function ChatPanel({
       <div className="chat__empty">
         {historyWarning && (
           <div className="chat-history-warning" role="status">
-            <strong>History may be incomplete.</strong>
+            <strong>{t("chat.history.incomplete")}</strong>
             <span>{historyWarning}</span>
           </div>
         )}
-        Conversations appear here when the coordinator dispatches work or an agent sends an update.
+        {t("chat.empty.noConversations")}
       </div>
     );
   }
 
   return (
-    <section className="chat" aria-label="Coordinator conversations">
-      <nav className="chat__threads" aria-label="Conversations">
+    <section className="chat" aria-label={t("chat.aria.section")}>
+      <nav className="chat__threads" aria-label={t("chat.aria.threadList")}>
         <div className="chat__threads-title">
-          <span>Conversations</span>
+          <span>{t("chat.threads.title")}</span>
           <span>{conversations.length}</span>
         </div>
         <div className="chat__thread-list">
@@ -824,7 +849,7 @@ export const ChatPanel = memo(function ChatPanel({
             return (
               <Fragment key={conversation.id}>
                 {index > 0 && conversations[index - 1]?.id === COORDINATOR_THREAD && (
-                  <div className="chat-thread__section">Agent conversations</div>
+                  <div className="chat-thread__section">{t("chat.threads.agentsSection")}</div>
                 )}
                 <button
                   type="button"
@@ -846,13 +871,13 @@ export const ChatPanel = memo(function ChatPanel({
                   <span className="chat-thread__copy">
                     <span className="chat-thread__topline">
                       <strong>{conversation.label}</strong>
-                      {isSystem && <span className="chat-thread__system-label">System</span>}
+                      {isSystem && <span className="chat-thread__system-label">{t("chat.thread.system")}</span>}
                       {conversation.unread && (
                         <span
                           className="chat-thread__unread"
                           role="img"
-                          aria-label="Has unread messages"
-                          title="Has unread messages"
+                          aria-label={t("chat.thread.unreadAria")}
+                          title={t("chat.thread.unreadAria")}
                         />
                       )}
                       <time dateTime={conversation.latestAt}>{formatClock(conversation.latestAt)}</time>
@@ -862,16 +887,16 @@ export const ChatPanel = memo(function ChatPanel({
                         ? messageBody(latest)
                         : compactSignal(conversation.presence?.detail) ??
                           compactSignal(conversation.presence?.activity) ??
-                          (conversation.task ? "Coordinator assigned the stage brief" : "No messages")}
+                          (conversation.task ? t("chat.thread.previewAssigned") : t("chat.thread.noMessages"))}
                     </span>
                   </span>
                   {conversation.urgent && (
-                    <span className="chat-thread__urgent" aria-label="Contains high-priority or urgent messages" title="Contains high-priority or urgent messages">
+                    <span className="chat-thread__urgent" aria-label={t("chat.thread.urgentAria")} title={t("chat.thread.urgentAria")}>
                       !
                     </span>
                   )}
                   {conversation.pending.length > 0 && (
-                    <span className="chat-thread__badge" aria-label={`${conversation.pending.length} replies needed`}>
+                    <span className="chat-thread__badge" aria-label={t("chat.thread.repliesNeeded", { n: conversation.pending.length })}>
                       {conversation.pending.length}
                     </span>
                   )}
@@ -889,14 +914,14 @@ export const ChatPanel = memo(function ChatPanel({
               <div>
                 <div className="chat__conversation-title">
                   <strong>{selected.label}</strong>
-                  {selected.isLead && <span>★ Lead stage</span>}
-                  {!selected.taskId && <span className="chat__conversation-system">System</span>}
+                  {selected.isLead && <span>{t("chat.leadStage")}</span>}
+                  {!selected.taskId && <span className="chat__conversation-system">{t("chat.thread.system")}</span>}
                 </div>
-                <p>{selected.subtitle || (selected.taskId ? selected.taskId : "Scheduling, inbox checks, and system events")}</p>
+                <p>{selected.subtitle || (selected.taskId ? selected.taskId : t("chat.systemSubtitle"))}</p>
               </div>
               {selected.taskId && (
                 <button type="button" onClick={() => onSelectTask(selected.taskId!)}>
-                  Open stage
+                  {t("chat.openStage")}
                 </button>
               )}
             </header>
@@ -906,22 +931,22 @@ export const ChatPanel = memo(function ChatPanel({
                 <div className="chat-history-warning" role="status">
                   <strong aria-hidden="true">⚠</strong>
                   <span>
-                    <strong>History may be incomplete.</strong> {historyWarning}
+                    <strong>{t("chat.history.incomplete")}</strong> {historyWarning}
                   </span>
                 </div>
               )}
               {selected.task && !hasRecordedAssignment && (
                 <article className="chat-message chat-message--outgoing chat-message--brief">
                   <div className="chat-message__meta">
-                    <strong>Coordinator</strong>
+                    <strong>{t("chat.actor.coordinator")}</strong>
                     <time dateTime={selected.task.createdAt}>{formatDateTime(selected.task.createdAt)}</time>
                   </div>
-                  <h3>Assigned this stage</h3>
-                  <small>Recovered from Task history</small>
+                  <h3>{t("chat.heading.assignedStage")}</h3>
+                  <small>{t("chat.brief.recovered")}</small>
                   <p>{briefSummary(selected.task.spec)}</p>
                   {selected.task.spec.trim() && selected.task.spec.trim() !== briefSummary(selected.task.spec) && (
                     <details className="chat-message__details">
-                      <summary>Full task brief</summary>
+                      <summary>{t("chat.brief.full")}</summary>
                       <p>{selected.task.spec}</p>
                     </details>
                   )}
@@ -954,20 +979,20 @@ export const ChatPanel = memo(function ChatPanel({
                           this viewer's own record, superseded by the
                           authoritative Orca message once it lands. */}
                       {event.technical.provenance === "viewer_journal" && (
-                        <span className="chat-message__provenance" title="Recorded locally by this viewer; the authoritative Orca message supersedes it">
-                          Viewer journal
+                        <span className="chat-message__provenance" title={t("chat.message.provenanceTitle")}>
+                          {t("chat.message.provenance")}
                         </span>
                       )}
                       {event.audience && (
                         <span
                           className="chat-message__audience"
-                          title="Group audience — every live Dispatch Orca routes this group to in this Run"
+                          title={t("chat.message.audienceTitle")}
                         >
-                          To {event.audience}
+                          {t("chat.message.audienceTo", { audience: event.audience })}
                         </span>
                       )}
                       {priorityChip && (
-                        <span className="chat-message__priority" title={`Orca priority: ${event.priority}`}>
+                        <span className="chat-message__priority" title={t("priority.orcaTitle", { priority: event.priority ?? "" })}>
                           {priorityChip}
                         </span>
                       )}
@@ -977,9 +1002,9 @@ export const ChatPanel = memo(function ChatPanel({
                       {event.read === false && (
                         <span
                           className="chat-message__read"
-                          title="Orca's durable inbox marker says the recipient terminal has not consumed this message. It tracks the Orca inbox — not whether you have read it here."
+                          title={t("chat.message.unreadTitle")}
                         >
-                          Unread
+                          {t("chat.message.unread")}
                         </span>
                       )}
                       <time dateTime={event.createdAt}>{formatDateTime(event.createdAt)}</time>
@@ -987,8 +1012,8 @@ export const ChatPanel = memo(function ChatPanel({
                     {(() => {
                       const parent = replyContextOf(event, contextById);
                       return parent ? (
-                        <div className="chat-message__reply-context" title={`In reply to ${parent.title}`}>
-                          <span aria-hidden="true">↩</span> Re: {parent.title} — {parent.summary}
+                        <div className="chat-message__reply-context" title={t("chat.message.replyContextTitle", { title: parent.title })}>
+                          <span aria-hidden="true">↩</span> {t("chat.message.replyContext", { title: parent.title, summary: parent.summary })}
                         </div>
                       ) : null;
                     })()}
@@ -997,16 +1022,16 @@ export const ChatPanel = memo(function ChatPanel({
                     {event.audience && (
                       <small
                         className="chat-message__enqueue"
-                        title="Orca durably enqueued this message for the group. A send receipt never proves that any worker read or acted on it."
+                        title={t("chat.message.enqueuedTitle")}
                       >
-                        Enqueued — delivery to each recipient is not proven
+                        {t("chat.message.enqueued")}
                       </small>
                     )}
-                    {event.groupedCount > 1 && <small>{event.groupedCount} similar updates grouped</small>}
-                    {event.actionable?.kind === "reply" && <span className="chat-message__waiting">Waiting for reply</span>}
+                    {event.groupedCount > 1 && <small>{t("chat.message.grouped", { n: event.groupedCount })}</small>}
+                    {event.actionable?.kind === "reply" && <span className="chat-message__waiting">{t("chat.state.waitingReply")}</span>}
                     {event.detail?.trim() && event.detail.trim() !== event.summary.trim() && (
                       <details className="chat-message__details">
-                        <summary>{event.kind === "dispatch_started" ? "Full task brief" : "Full report"}</summary>
+                        <summary>{event.kind === "dispatch_started" ? t("chat.brief.full") : t("chat.report.full")}</summary>
                         <p>{event.detail}</p>
                       </details>
                     )}
@@ -1017,18 +1042,20 @@ export const ChatPanel = memo(function ChatPanel({
               <section
                 className="chat-runtime-summary"
                 data-state={summaryState}
-                aria-label="Run status summary"
+                aria-label={t("chat.summary.aria")}
               >
                 <span className="chat-runtime-summary__pulse" aria-hidden="true" />
                 <strong title={summaryLabel}>{summaryLabel}</strong>
                 <span className="chat-runtime-summary__detail">
                   {selected.task
                     ? presenceSummary
-                    : coordinatorActive ? "Scheduling stages and checking the Run inbox" : "Run-level activity only"}
+                    : coordinatorActive ? t("chat.summary.scheduling") : t("chat.summary.runLevelOnly")}
                 </span>
                 <span className="chat-runtime-summary__meta">
-                  {lastCheck ? `Last check ${formatClock(new Date(lastCheck.checkedAt).toISOString())}` : "No checks yet"}
-                  {selectedChecks.length > 0 && ` · ${selectedChecks.length} total`}
+                  {lastCheck
+                    ? t("chat.summary.lastCheck", { time: formatClock(new Date(lastCheck.checkedAt).toISOString()) })
+                    : t("chat.summary.noChecks")}
+                  {selectedChecks.length > 0 && t("chat.summary.totalChecks", { n: selectedChecks.length })}
                 </span>
               </section>
             </div>
@@ -1040,33 +1067,33 @@ export const ChatPanel = memo(function ChatPanel({
                 <div className="chat__group-composer">
                   <div className="chat__group-controls">
                     <label className="chat__group-field">
-                      <span>Audience</span>
+                      <span>{t("chat.group.audience")}</span>
                       <DoodleSelect
                         value={audience}
                         onChange={setAudience}
                         options={audienceOptions}
                         size="sm"
-                        placeholder={preview ? "Select audience" : "Audiences unavailable"}
+                        placeholder={preview ? t("chat.group.selectAudience") : t("chat.group.audiencesUnavailable")}
                         loading={!preview && !previewFailed}
-                        emptyText={previewFailed ? "Audience discovery failed" : "No discovered audiences"}
-                        title="Allowlisted Run groups and exact discovered worktree addresses only — recipients are never typed"
+                        emptyText={previewFailed ? t("chat.group.discoveryFailed") : t("chat.group.noneDiscovered")}
+                        title={t("chat.group.audienceTitle")}
                       />
                     </label>
                     <label className="chat__group-field">
-                      <span>Type</span>
+                      <span>{t("chat.group.type")}</span>
                       <DoodleSelect
                         value={groupType}
                         onChange={(value) => setGroupType(value === "question" ? "question" : "status")}
                         options={[
-                          { value: "status", label: "Status note" },
-                          { value: "question", label: "Question" },
+                          { value: "status", label: t("chat.group.typeStatus") },
+                          { value: "question", label: t("chat.group.typeQuestion") },
                         ]}
                         size="sm"
-                        title="Lifecycle signals (worker_done, heartbeat) can never be sent to a group"
+                        title={t("chat.group.typeTitle")}
                       />
                     </label>
                     <label className="chat__group-field">
-                      <span>Priority</span>
+                      <span>{t("chat.group.priority")}</span>
                       <DoodleSelect
                         value={groupPriority}
                         onChange={(value) =>
@@ -1078,7 +1105,9 @@ export const ChatPanel = memo(function ChatPanel({
                         }
                         options={GROUP_PRIORITIES.map((priority) => ({
                           value: priority,
-                          label: priority.charAt(0).toUpperCase() + priority.slice(1),
+                          // Same mapping the priority chips use, so the dropdown
+                          // and a sent bubble can never disagree about a level.
+                          label: priorityLabel({ priority }),
                         }))}
                         size="sm"
                       />
@@ -1086,22 +1115,24 @@ export const ChatPanel = memo(function ChatPanel({
                   </div>
                   {selectedAudience && (
                     <p className="chat__group-estimate">
-                      <strong>Estimated recipients ({selectedAudience.estimatedRecipients.length}):</strong>{" "}
+                      <strong>{t("chat.group.estimated", { n: selectedAudience.estimatedRecipients.length })}</strong>{" "}
                       {selectedAudience.estimatedRecipients.length === 0
-                        ? "none observed yet — the estimate can miss workers Orca has not accounted for"
+                        ? t("chat.group.estimatedNone")
                         : selectedAudience.estimatedRecipients
                             .slice(0, 6)
                             .map((candidate) => tasks.find((task) => task.id === candidate.taskId)?.label ?? candidate.taskId)
-                            .join(", ") + (selectedAudience.estimatedRecipients.length > 6 ? `, +${selectedAudience.estimatedRecipients.length - 6} more` : "")}
-                      {" — an estimate from current Run workers, not a confirmed delivery list."}
+                            .join(", ") + (selectedAudience.estimatedRecipients.length > 6
+                              ? t("chat.group.estimatedMore", { n: selectedAudience.estimatedRecipients.length - 6 })
+                              : "")}
+                      {t("chat.group.estimatedTail")}
                     </p>
                   )}
                   <input
                     className="chat__group-subject"
                     value={groupSubject}
                     disabled={groupBusy}
-                    placeholder="Subject (optional)"
-                    aria-label="Group message subject"
+                    placeholder={t("chat.group.subjectPlaceholder")}
+                    aria-label={t("chat.group.subjectAria")}
                     onChange={(event) => setGroupSubject(event.target.value)}
                   />
                   <div className="chat__compose-row">
@@ -1109,8 +1140,8 @@ export const ChatPanel = memo(function ChatPanel({
                       rows={2}
                       value={groupDraft}
                       disabled={groupBusy}
-                      placeholder={`Message ${audience || "the group"}…`}
-                      aria-label={`Send a Run-level group message to ${audience || "the selected audience"}`}
+                      placeholder={t("chat.group.messagePlaceholder", { audience: audience || t("chat.group.theGroup") })}
+                      aria-label={t("chat.group.sendAria", { audience: audience || t("chat.group.selectedAudience") })}
                       onChange={(event) => setGroupDraft(event.target.value)}
                       onKeyDown={(event) => {
                         if ((event.metaKey || event.ctrlKey) && event.key === "Enter") void sendGroup();
@@ -1120,16 +1151,13 @@ export const ChatPanel = memo(function ChatPanel({
                       type="button"
                       className="btn btn--ok"
                       disabled={groupBusy || !groupDraft.trim() || !audience}
-                      title={`Send to ${audience || "an audience"} — asks for confirmation first (Ctrl or Command + Enter)`}
+                      title={t("chat.group.sendTitle", { audience: audience || t("chat.group.anAudience") })}
                       onClick={() => void sendGroup()}
                     >
-                      {groupBusy ? "Sending…" : audience ? `Send to ${audience}` : "Send"}
+                      {groupBusy ? t("chat.compose.sending") : audience ? t("chat.group.sendTo", { audience }) : t("chat.compose.send")}
                     </button>
                   </div>
-                  <p className="chat__group-note">
-                    Group mail is durably enqueued by Orca for this Run's live Dispatches; the receipt proves enqueue
-                    only — never that a worker read it. Lifecycle signals (worker_done, heartbeat) cannot target groups.
-                  </p>
+                  <p className="chat__group-note">{t("chat.group.note")}</p>
                 </div>
               )}
               {replyTarget || activeDispatch ? (
@@ -1140,12 +1168,14 @@ export const ChatPanel = memo(function ChatPanel({
                     disabled={disabled || busy}
                     placeholder={
                       disabled
-                        ? "Execution unavailable"
+                        ? t("chat.compose.executionUnavailable")
                         : replyTarget
-                          ? `Reply to ${selected.label}`
-                          : `Send guidance to ${selected.label}`
+                          ? t("chat.compose.replyTo", { label: selected.label })
+                          : t("chat.compose.guidanceTo", { label: selected.label })
                     }
-                    aria-label={replyTarget ? `Reply to ${selected.label}` : `Send guidance to ${selected.label}`}
+                    aria-label={replyTarget
+                      ? t("chat.compose.replyTo", { label: selected.label })
+                      : t("chat.compose.guidanceTo", { label: selected.label })}
                     onChange={(event) => setDraft(event.target.value)}
                     onKeyDown={(event) => {
                       if ((event.metaKey || event.ctrlKey) && event.key === "Enter") void sendMessage();
@@ -1157,21 +1187,21 @@ export const ChatPanel = memo(function ChatPanel({
                     disabled={disabled || busy || !draft.trim()}
                     title={
                       disabled
-                        ? disabledReason ?? "Execution is unavailable"
-                        : `${replyTarget ? "Send reply" : "Send guidance"} (Ctrl or Command + Enter)`
+                        ? disabledReason ?? t("chat.compose.executionIsUnavailable")
+                        : replyTarget ? t("chat.compose.sendReplyTitle") : t("chat.compose.sendGuidanceTitle")
                     }
                     onClick={() => void sendMessage()}
                   >
-                    {busy ? "Sending…" : "Send"}
+                    {busy ? t("chat.compose.sending") : t("chat.compose.send")}
                   </button>
                 </div>
               ) : (
                 <p className="chat__composer-idle">
                   {selected.task
                     ? selected.task.status === "dispatched" && !coordinatorActive
-                      ? "Start this Run's coordinator to send guidance to its active Dispatch."
-                      : "This stage has no active Dispatch. Its conversation is read-only."
-                    : "Select an active stage to send coordinator guidance."}
+                      ? t("chat.compose.idleStartCoordinator")
+                      : t("chat.compose.idleNoDispatch")
+                    : t("chat.compose.idlePickStage")}
                 </p>
               )}
             </footer>

@@ -8,9 +8,25 @@ import {
 } from "../api";
 import type { ActivityEvent, ActivitySnapshot } from "../types";
 import { formatTimestamp, isUrgent, priorityLabel } from "../format";
-import { useLang } from "../i18n";
+import { t, useT, type TranslationKey } from "../i18n";
 
 type ActivityFilter = "all" | "coordinator" | "agents" | "needs_reply";
+type ActivityTransport = "connecting" | "live" | "polling";
+
+/** Filter tab -> dictionary key, so the tab list stays data. */
+const FILTER_KEY: Record<ActivityFilter, TranslationKey> = {
+  all: "activity.filter.all",
+  coordinator: "activity.filter.coordinator",
+  agents: "activity.filter.agents",
+  needs_reply: "activity.filter.needsReply",
+};
+
+/** Transport state -> dictionary key (SSE live vs. the polling fallback). */
+const TRANSPORT_KEY: Record<ActivityTransport, TranslationKey> = {
+  connecting: "activity.transport.connecting",
+  live: "activity.transport.live",
+  polling: "activity.transport.polling",
+};
 
 const EMPTY: ActivitySnapshot = {
   runId: "",
@@ -48,13 +64,13 @@ function provenanceLabel(event: ActivityEvent): { text: string; title: string } 
   switch (event.technical.provenance) {
     case "viewer_journal":
       return {
-        text: "Viewer journal",
-        title: "Recorded locally by this viewer; the authoritative Orca record supersedes it",
+        text: t("activity.provenance.viewerJournal"),
+        title: t("activity.provenance.viewerJournalTitle"),
       };
     case "coordinator":
       return {
-        text: "Coordinator projection",
-        title: "Derived from this viewer coordinator's own accounting, not an Orca message row",
+        text: t("activity.provenance.coordinator"),
+        title: t("activity.provenance.coordinatorTitle"),
       };
     default:
       // `orca_message` is the authoritative default and needs no label;
@@ -88,10 +104,10 @@ export const ActivityPanel = memo(function ActivityPanel({
   // Timestamps and priority chips come from format.ts, whose language access
   // is intentionally non-reactive — this subscription is what re-renders the
   // memo()'d panel when the UI language changes.
-  useLang();
+  const t = useT();
   const [snapshot, setSnapshot] = useState<ActivitySnapshot>(EMPTY);
   const [filter, setFilter] = useState<ActivityFilter>("all");
-  const [transport, setTransport] = useState<"connecting" | "live" | "polling">("connecting");
+  const [transport, setTransport] = useState<ActivityTransport>("connecting");
   const [error, setError] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -172,7 +188,7 @@ export const ActivityPanel = memo(function ActivityPanel({
         applySnapshot(JSON.parse(message.data) as ActivitySnapshot);
         setTransport("live");
       } catch {
-        setError("Activity stream returned an unreadable update.");
+        setError(t("activity.streamError"));
       }
     };
     source.onerror = () => {
@@ -233,19 +249,19 @@ export const ActivityPanel = memo(function ActivityPanel({
   }
 
   if (!runId) {
-    return <div className="activity__empty">Pick a Run to see its activity.</div>;
+    return <div className="activity__empty">{t("activity.empty.pickRun")}</div>;
   }
 
   return (
-    <section className="activity" aria-label="Run activity">
+    <section className="activity" aria-label={t("activity.aria.section")}>
       <div className="activity__tools">
-        <div className="activity__filters" role="group" aria-label="Filter activity">
+        <div className="activity__filters" role="group" aria-label={t("activity.aria.filters")}>
           {([
-            ["all", "All"],
-            ["coordinator", "Coordinator"],
-            ["agents", "Agents"],
-            ["needs_reply", "Needs reply"],
-          ] as const).map(([value, label]) => (
+            "all",
+            "coordinator",
+            "agents",
+            "needs_reply",
+          ] as const).map((value) => (
             <button
               key={value}
               type="button"
@@ -253,7 +269,7 @@ export const ActivityPanel = memo(function ActivityPanel({
               aria-pressed={filter === value}
               onClick={() => setFilter(value)}
             >
-              {label}
+              {t(FILTER_KEY[value])}
               {value === "needs_reply" && snapshot.pendingCount > 0 ? (
                 <span className="activity__count">{snapshot.pendingCount}</span>
               ) : null}
@@ -261,20 +277,22 @@ export const ActivityPanel = memo(function ActivityPanel({
           ))}
         </div>
         <span className={`activity__transport activity__transport--${transport}`}>
-          <span aria-hidden="true" /> {transport === "live" ? "Live" : transport === "polling" ? "Polling" : "Connecting"}
+          <span aria-hidden="true" /> {t(TRANSPORT_KEY[transport])}
         </span>
       </div>
 
       {snapshot.truncated && (
-        <div className="activity__notice">Showing the latest 500 orchestration messages.</div>
+        <div className="activity__notice">{t("activity.truncated")}</div>
       )}
       {snapshot.inboxWindow?.saturated && (
         // Saturation is global-window evidence, so the warning fires even when
         // this Run shows only a handful of messages — few rows here do not
         // mean the Run's history was always this short.
         <div className="activity__notice activity__notice--warning" role="status">
-          ⚠ History may be incomplete: the global Orca inbox window is full ({snapshot.inboxWindow.observed} of{" "}
-          {snapshot.inboxWindow.limit} rows), so older messages for this Run may be missing.
+          {t("activity.historyWarning", {
+            observed: snapshot.inboxWindow.observed,
+            limit: snapshot.inboxWindow.limit,
+          })}
         </div>
       )}
       {error && <div className="activity__error" role="status">⚠ {error}</div>}
@@ -282,7 +300,7 @@ export const ActivityPanel = memo(function ActivityPanel({
       <div className="activity__timeline" aria-live="polite">
         {visible.length === 0 ? (
           <div className="activity__empty">
-            {filter === "needs_reply" ? "No worker is waiting for a reply." : "No activity has been recorded for this Run yet."}
+            {filter === "needs_reply" ? t("activity.empty.needsReply") : t("activity.empty.none")}
           </div>
         ) : (
           visible.map((event) => (
@@ -296,7 +314,7 @@ export const ActivityPanel = memo(function ActivityPanel({
               <div className="activity-event__content">
                 <div className="activity-event__meta">
                   <span className="activity-event__actor">{event.actor.label}</span>
-                  {event.actor.role === "lead" && <span className="activity-event__lead">★ Lead</span>}
+                  {event.actor.role === "lead" && <span className="activity-event__lead">{t("activity.lead")}</span>}
                   {(() => {
                     const provenance = provenanceLabel(event);
                     return provenance ? (
@@ -306,13 +324,13 @@ export const ActivityPanel = memo(function ActivityPanel({
                     ) : null;
                   })()}
                   {isUrgent(event) && (
-                    <span className="activity-event__flag activity-event__flag--urgent" title={`Orca priority: ${event.priority}`}>
+                    <span className="activity-event__flag activity-event__flag--urgent" title={t("priority.orcaTitle", { priority: event.priority ?? "" })}>
                       {priorityLabel(event)}
                     </span>
                   )}
                   {event.read === false && (
-                    <span className="activity-event__flag activity-event__flag--unread" title="Durable unread marker in the Orca inbox">
-                      Unread
+                    <span className="activity-event__flag activity-event__flag--unread" title={t("activity.unreadTitle")}>
+                      {t("activity.unread")}
                     </span>
                   )}
                   {event.actor.harness && (
@@ -324,11 +342,11 @@ export const ActivityPanel = memo(function ActivityPanel({
                 {event.threadId && (
                   // Reply relationships render only from Orca's own thread_id;
                   // without it no linkage is claimed.
-                  <p className="activity-event__thread">↩ Part of thread {event.threadId}</p>
+                  <p className="activity-event__thread">{t("activity.thread", { id: event.threadId })}</p>
                 )}
                 <p>{event.summary}</p>
                 {event.groupedCount > 1 && (
-                  <span className="activity-event__grouped">{event.groupedCount} similar heartbeats grouped</span>
+                  <span className="activity-event__grouped">{t("activity.grouped", { n: event.groupedCount })}</span>
                 )}
                 {event.taskId && (
                   <button
@@ -336,7 +354,7 @@ export const ActivityPanel = memo(function ActivityPanel({
                     className="activity-event__task"
                     onClick={() => onSelectTask(event.taskId!)}
                   >
-                    Open stage · {event.taskId}
+                    {t("activity.openStage", { id: event.taskId })}
                   </button>
                 )}
 
@@ -344,7 +362,7 @@ export const ActivityPanel = memo(function ActivityPanel({
                   <div className="activity-event__reply">
                     <textarea
                       rows={2}
-                      placeholder={disabled ? "Execution unavailable" : "Reply to this worker…"}
+                      placeholder={disabled ? t("activity.reply.unavailable") : t("activity.reply.placeholder")}
                       value={drafts[event.id] ?? ""}
                       disabled={disabled || busyId === event.id}
                       onChange={(e) => setDrafts((current) => ({ ...current, [event.id]: e.target.value }))}
@@ -353,27 +371,27 @@ export const ActivityPanel = memo(function ActivityPanel({
                       type="button"
                       className="btn btn--ok"
                       disabled={disabled || busyId === event.id || !(drafts[event.id] ?? "").trim()}
-                      title={disabled ? disabledReason ?? "Execution is unavailable" : "Reply and acknowledge"}
+                      title={disabled ? disabledReason ?? t("activity.reply.unavailableTitle") : t("activity.reply.title")}
                       onClick={() => void runAction(event, "reply")}
                     >
-                      {busyId === event.id ? "Sending…" : "Reply"}
+                      {busyId === event.id ? t("activity.sending") : t("activity.reply.button")}
                     </button>
                   </div>
                 )}
 
                 {event.actionable?.kind === "release" && (
                   <div className="activity-event__actions">
-                    <button type="button" className="btn btn--ok" disabled={disabled || Boolean(busyId)} onClick={() => void runAction(event, "release")}>Release</button>
-                    <button type="button" className="btn" disabled={disabled || Boolean(busyId)} onClick={() => void runAction(event, "retain")}>Retain</button>
+                    <button type="button" className="btn btn--ok" disabled={disabled || Boolean(busyId)} onClick={() => void runAction(event, "release")}>{t("activity.release")}</button>
+                    <button type="button" className="btn" disabled={disabled || Boolean(busyId)} onClick={() => void runAction(event, "retain")}>{t("activity.retain")}</button>
                   </div>
                 )}
                 {event.actionable?.kind === "retry" && (
-                  <button type="button" className="btn" disabled={disabled || Boolean(busyId)} onClick={() => void runAction(event, "retry")}>Retry safely</button>
+                  <button type="button" className="btn" disabled={disabled || Boolean(busyId)} onClick={() => void runAction(event, "retry")}>{t("activity.retry")}</button>
                 )}
 
                 {Boolean(event.detail || event.technical.messageId || event.dispatchId || event.technical.argv || event.technical.payload) && (
                   <details className="activity-event__details">
-                    <summary>Technical details</summary>
+                    <summary>{t("activity.details")}</summary>
                     {event.detail && <p>{event.detail}</p>}
                     <pre>{technicalJson(event)}</pre>
                   </details>

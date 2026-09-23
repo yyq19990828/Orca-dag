@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useState } from "react";
 import { fetchRequestDetail, fetchRequests } from "../api";
 import { formatTimestamp } from "../format";
+import { t, useT } from "../i18n";
 import { usePageVisible } from "../visibility";
 import type { RequestLedgerRowView, RequestReceiptView } from "../types";
 
@@ -33,19 +34,20 @@ function stateBucket(state: string): "completed" | "pending" | "absent" | "unkno
 function stateCaption(receipt: RequestReceiptView): string {
   switch (stateBucket(receipt.state)) {
     case "completed":
-      return "Orca recorded an outcome for this request.";
+      return t("audit.caption.completed");
     case "pending":
-      return "Orca recorded the request without a final outcome — it may still be in flight, or its response was lost.";
+      return t("audit.caption.pending");
     case "absent":
-      return "Orca holds no record under this id. Absence is NOT proof that the mutation did not happen.";
+      return t("audit.caption.absent");
     case "unknown":
-      return "Orca could not be asked right now — the outcome stays unresolved. Nothing is inferred.";
+      return t("audit.caption.unknown");
     default:
-      return "The runtime reported this state verbatim; no interpretation is added.";
+      return t("audit.caption.other");
   }
 }
 
 export const RequestAuditPanel = memo(function RequestAuditPanel({ runId, active = true }: { runId: string; active?: boolean }) {
+  const t = useT();
   const [rows, setRows] = useState<RequestLedgerRowView[]>([]);
   const [otherRunCount, setOtherRunCount] = useState(0);
   const [loadedFor, setLoadedFor] = useState<string | null>(null);
@@ -114,11 +116,9 @@ export const RequestAuditPanel = memo(function RequestAuditPanel({ runId, active
   return (
     <div className="gates inbox audit" data-testid="request-audit-panel">
       <div className="gate inbox__item">
-        <div className="gate__badge">Mutation requests · audit</div>
+        <div className="gate__badge">{t("audit.badge")}</div>
         <div className="inbox__meta audit__caption">
-          Viewer-originated request ids, kept so <code>request-show</code> stays reachable even
-          after a response loss or a viewer restart. Read-only — this surface never replays a
-          mutation.
+          {t("audit.captionBefore")}<code>request-show</code>{t("audit.captionAfter")}
         </div>
         {rows.map((row) => {
           const receipt = receipts.get(row.requestId);
@@ -131,7 +131,7 @@ export const RequestAuditPanel = memo(function RequestAuditPanel({ runId, active
                 className="audit__toggle"
                 onClick={() => void inspect(row)}
                 disabled={probing === row.requestId}
-                title="Ask Orca request-show for this id (read-only)"
+                title={t("audit.inspectTitle")}
               >
                 <span className="audit__op" data-op={row.operation}>
                   {row.operation}
@@ -139,17 +139,17 @@ export const RequestAuditPanel = memo(function RequestAuditPanel({ runId, active
                 {receipt && (
                   <span className="audit__state" data-state={bucket}>
                     {receipt.state}
-                    {receipt.probe === "failed" ? " (probe failed)" : ""}
+                    {receipt.probe === "failed" ? t("audit.probeFailed") : ""}
                   </span>
                 )}
                 <code>{shortId(row.requestId)}</code>
                 <span className="inbox__meta">
                   {row.taskId ? ` · ${row.taskId}` : ""}
                   {row.dispatchId ? ` · ${row.dispatchId}` : ""}
-                  {` · ${row.runId === null ? "scope unknown" : row.runId}`}
+                  {` · ${row.runId === null ? t("audit.scopeUnknown") : row.runId}`}
                   {` · ${formatTimestamp(row.updatedAt)}`}
                 </span>
-                <span className="audit__hint">{isOpen ? "▲" : "Inspect"}</span>
+                <span className="audit__hint">{isOpen ? "▲" : t("audit.inspect")}</span>
               </button>
               {row.note && <div className="inbox__body audit__note">{row.note}</div>}
               {isOpen && receipt && (
@@ -159,39 +159,40 @@ export const RequestAuditPanel = memo(function RequestAuditPanel({ runId, active
                   </div>
                   {receipt.interpretation && (
                     <div className="inbox__body">
-                      Orca says: <i>{receipt.interpretation}</i>
+                      {t("audit.orcaSays")} <i>{receipt.interpretation}</i>
                     </div>
                   )}
                   <div className="inbox__meta">
-                    Probed {formatTimestamp(receipt.probedAt)} ·{" "}
+                    {t("audit.probedAt", { time: formatTimestamp(receipt.probedAt) })}
                     {row.settledLocally === true
-                      ? "the viewer observed a definitive outcome during the call"
+                      ? t("audit.settledDefinitive")
                       : row.settledLocally === false
-                        ? "the viewer never learned the outcome during the call"
-                        : "the viewer recorded no outcome observation"}
-                    . The live probe above is what counts.
+                        ? t("audit.settledUnlearned")
+                        : t("audit.settledNone")}
+                    {t("audit.settledTail")}
                   </div>
                   {receipt.outcome != null && (
                     <details className="audit__outcome">
-                      <summary>Recorded outcome (diagnostic)</summary>
+                      <summary>{t("audit.outcome")}</summary>
                       <pre className="workers__rawpre">{JSON.stringify(receipt.outcome, null, 2)}</pre>
                     </details>
                   )}
                 </div>
               )}
               {isOpen && probing === row.requestId && (
-                <div className="inbox__body">Probing Orca…</div>
+                <div className="inbox__body">{t("audit.probing")}</div>
               )}
             </div>
           );
         })}
         {rows.length === 0 && err === null && (
-          <div className="inbox__body">No viewer-originated mutation requests recorded yet.</div>
+          <div className="inbox__body">{t("audit.empty")}</div>
         )}
         {otherRunCount > 0 && (
           <div className="inbox__meta">
-            {otherRunCount} recorded request{otherRunCount === 1 ? "" : "s"} belong
-            {otherRunCount === 1 ? "s" : ""} to other Runs and are not listed here.
+            {otherRunCount === 1
+              ? t("audit.otherRunsOne", { n: otherRunCount })
+              : t("audit.otherRunsMany", { n: otherRunCount })}
           </div>
         )}
         {err && <div className="exec__err inbox__err">⚠️ {err}</div>}
