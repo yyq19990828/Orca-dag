@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { fetchEnvironments, fetchModels, fetchWorkerDetail } from "../api";
 import { formatDateTime } from "../format";
+import { useT } from "../i18n";
 import { lanePlanProblems, laneLabel } from "../placement";
 import { workerWorkspaceLabel } from "../workerWorkspace";
 import {
@@ -202,6 +203,8 @@ export function NodePanel({
   workerRows,
   onClose,
 }: NodePanelProps) {
+  // Status copy is translated; STATUS_META keeps owning only the palette.
+  const t = useT();
   const meta = STATUS_META[node.status];
   useConfig(); // re-render when the default harness (or this node's) changes
   const { customCommandsAllowed: customOk } = useFlags(); // gates the "Custom…" option
@@ -390,7 +393,7 @@ export function NodePanel({
 
       <div className="node-panel__status" style={{ color: meta.ink }}>
         <span className="dot" style={{ background: meta.color }} />
-        {meta.label}
+        {t(`status.${node.status}`)}
       </div>
       <h3 className="node-panel__title">{node.label}</h3>
       <div className="node-panel__id">

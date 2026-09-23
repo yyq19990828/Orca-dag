@@ -8,6 +8,7 @@ import {
 } from "../api";
 import type { ActivityEvent, ActivitySnapshot } from "../types";
 import { formatTimestamp, isUrgent, priorityLabel } from "../format";
+import { useLang } from "../i18n";
 
 type ActivityFilter = "all" | "coordinator" | "agents" | "needs_reply";
 
@@ -84,6 +85,10 @@ export const ActivityPanel = memo(function ActivityPanel({
   disabled?: boolean;
   disabledReason?: string | null;
 }) {
+  // Timestamps and priority chips come from format.ts, whose language access
+  // is intentionally non-reactive — this subscription is what re-renders the
+  // memo()'d panel when the UI language changes.
+  useLang();
   const [snapshot, setSnapshot] = useState<ActivitySnapshot>(EMPTY);
   const [filter, setFilter] = useState<ActivityFilter>("all");
   const [transport, setTransport] = useState<"connecting" | "live" | "polling">("connecting");

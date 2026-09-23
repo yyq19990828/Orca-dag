@@ -1,4 +1,5 @@
 import type { ActivityEvent } from "./types";
+import { langLocale, t } from "./i18n";
 
 /**
  * Shared presentation helpers (Phase 7 integration).
@@ -7,7 +8,9 @@ import type { ActivityEvent } from "./types";
  * integration time five components carried near-identical copies. One module
  * now owns them so the LABELS can never drift between panels (e.g. Chat and
  * Activity disagreeing about what counts as "Urgent"). Pure functions only —
- * no React, no store access — so every panel can import them cheaply.
+ * no React hooks and no store access: the locale comes from the i18n module's
+ * non-reactive accessors (`langLocale()` / `t()`), and a language switch
+ * re-renders through the CALLING component's own useT()/useLang() subscription.
  *
  * Every formatter is total over garbage input: an unparseable date renders as
  * the raw string rather than "Invalid Date", because an absent/odd timestamp
@@ -15,7 +18,7 @@ import type { ActivityEvent } from "./types";
  */
 
 function format(date: Date, options: Intl.DateTimeFormatOptions): string {
-  return new Intl.DateTimeFormat(undefined, options).format(date);
+  return new Intl.DateTimeFormat(langLocale(), options).format(date);
 }
 
 function parse(iso: string): Date | null {
@@ -50,14 +53,20 @@ export function formatTimestamp(iso: string): string {
   });
 }
 
-/** Coarse relative age for inbox/cleanup rows ("42s ago", "7m ago", "3h ago"). */
+/**
+ * Coarse relative age for inbox/cleanup rows ("42s ago" / "42秒前"). Intl owns
+ * the wording, so the buckets stay numeric and the unit list never drifts
+ * between languages; `numeric: "always"` keeps every value a number instead of
+ * prose ("yesterday"), which is what these short rows want.
+ */
 export function timeAgo(iso: string): string {
   const date = parse(iso);
   if (!date) return iso;
   const s = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  return `${Math.floor(s / 3600)}h ago`;
+  const relative = new Intl.RelativeTimeFormat(langLocale(), { style: "narrow", numeric: "always" });
+  if (s < 60) return relative.format(-s, "second");
+  if (s < 3600) return relative.format(-Math.floor(s / 60), "minute");
+  return relative.format(-Math.floor(s / 3600), "hour");
 }
 
 /**
@@ -75,12 +84,14 @@ export function isUrgent(event: Pick<ActivityEvent, "priority">): boolean {
 /**
  * Human label for an Orca priority. "high"/"urgent" are the escalation
  * labels; low/normal exist so group-send metadata can render a chip without
- * each panel re-deriving its own wording.
+ * each panel re-deriving its own wording. The wording itself lives in i18n —
+ * this function stays the single mapping from Orca's raw priority string to a
+ * translated label, and is non-reactive on purpose (see the module header).
  */
 export function priorityLabel(event: Pick<ActivityEvent, "priority">): string {
   const normalized = event.priority?.trim().toLowerCase();
-  if (normalized === "urgent") return "Urgent";
-  if (normalized === "low") return "Low priority";
-  if (normalized === "normal") return "Normal priority";
-  return "High priority";
+  if (normalized === "urgent") return t("priority.urgent");
+  if (normalized === "low") return t("priority.low");
+  if (normalized === "normal") return t("priority.normal");
+  return t("priority.high");
 }

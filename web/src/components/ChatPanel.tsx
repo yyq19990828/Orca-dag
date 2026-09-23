@@ -1,6 +1,7 @@
 import { Fragment, memo, useEffect, useMemo, useState } from "react";
 import { fetchAudiencePreview, replyToMessage, sendGroupMessage, sendTaskMessage } from "../api";
 import { formatClock, formatDateTime, isUrgent, priorityLabel } from "../format";
+import { useLang } from "../i18n";
 import { useDecisionDialog } from "./DecisionDialog";
 import { DoodleSelect, type DoodleOption } from "./DoodleSelect";
 import type {
@@ -353,6 +354,11 @@ export const ChatPanel = memo(function ChatPanel({
   disabled?: boolean;
   disabledReason?: string | null;
 }) {
+  // Priority chips and message timestamps come from the shared formatters in
+  // format.ts, which read the language non-reactively (no hooks there by
+  // design) — so this memo()'d panel subscribes itself and re-renders its
+  // whole timeline when the UI language changes.
+  useLang();
   const conversations = useMemo(() => {
     const grouped = new Map<string, ActivityEvent[]>();
     const taskMap = new Map(tasks.map((task) => [task.id, task]));

@@ -12,6 +12,7 @@ import { WorkerPanel } from "./components/WorkerPanel";
 import { RunPicker } from "./components/RunPicker";
 import { RunHealthBadge } from "./components/RunHealthBadge";
 import { LangToggle } from "./components/LangToggle";
+import { useT } from "./i18n";
 import { CapabilityPanel } from "./components/CapabilityPanel";
 import { fetchDag, fetchRunStatus, fetchWorkers } from "./api";
 import { initConfig, setLayout, setLeadTask, setRunId, useConfig, useReadiness } from "./harness";
@@ -214,6 +215,10 @@ export default function App() {
   const [activitySnapshot, setActivitySnapshot] = useState<ActivitySnapshot>(EMPTY_ACTIVITY);
   const [connError, setConnError] = useState<string | null>(null);
   const config = useConfig();
+  // The View menu's status legend and layout buttons are translated copy, so
+  // this component subscribes to the UI language (useT) like every other
+  // translated surface; the palette itself stays in STATUS_META.
+  const t = useT();
   const runId = config.runId;
   // Execution gate (Phase 2): when the server's readiness probe says this
   // Orca runtime can't execute (missing, or 1.4.160–1.4.204 view-only), the
@@ -711,7 +716,7 @@ export default function App() {
                         data-status={s}
                       >
                         <span className="legend__dot" style={{ background: STATUS_META[s].color }} />
-                        {STATUS_META[s].label}
+                        {t(`status.${s}`)}
                         {/* keyed by value so the badge re-pops each time it changes */}
                         {counts[s] ? (
                           <b className="legend__n" key={counts[s]}>
@@ -751,10 +756,10 @@ export default function App() {
                           key={l.kind}
                           className={layout === l.kind ? "active" : ""}
                           aria-pressed={layout === l.kind}
-                          title={l.title}
+                          title={t(`layout.title.${l.kind}`)}
                           onClick={() => pickLayout(l.kind)}
                         >
-                          <span aria-hidden="true">{l.icon}</span> {l.label}
+                          <span aria-hidden="true">{l.icon}</span> {t(`layout.label.${l.kind}`)}
                         </button>
                       ))}
                     </div>

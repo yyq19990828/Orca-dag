@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { releaseWorker, replyToMessage, retainWorker } from "../api";
 import { timeAgo } from "../format";
+import { useLang } from "../i18n";
 import type { CleanupDebtItem, PendingInboxItem } from "../types";
 
 /**
@@ -42,6 +43,9 @@ export function InboxPanel({
   disabled?: boolean;
   disabledReason?: string | null;
 }) {
+  // timeAgo() reads the language non-reactively (format.ts owns the wording),
+  // so the panel subscribes to re-render its rows on a language switch.
+  useLang();
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);

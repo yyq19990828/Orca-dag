@@ -22,6 +22,7 @@ import "@xyflow/react/dist/style.css";
 import "../stage-card.css";
 import { applyLayout } from "../layout";
 import { effectiveHarness, useConfig } from "../harness";
+import { useT } from "../i18n";
 import {
   STATUS_META,
   type DagNode,
@@ -338,7 +339,11 @@ function summarizeStage(
 }
 
 function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
+  // Status copy is translated (canvas nodes are the most-read surface in the
+  // app), so subscribe here; STATUS_META keeps owning only the palette.
+  const t = useT();
   const meta = STATUS_META[data.status];
+  const statusLabel = t(`status.${data.status}`);
   const isTB = data.dir === "TB";
   const alive = data.status === "ready" || data.status === "dispatched";
   const updateNodeInternals = useUpdateNodeInternals();
@@ -366,7 +371,7 @@ function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
           ? "Lead stage — semantic main-agent ownership; Orca coordinator authority is shown separately"
           : undefined
       }
-      aria-label={`${data.label}. ${meta.label}. ${data.summary}. Harness ${data.harness}${
+      aria-label={`${data.label}. ${statusLabel}. ${data.summary}. Harness ${data.harness}${
         data.harnessActual ? " (actual launch)" : " (planned or fallback)"
       }.${data.plannedSettings ? ` Planned settings: ${data.plannedSettingsTitle}.` : ""}${
         data.lead ? " Lead stage: semantic main-agent ownership." : ""
@@ -430,7 +435,7 @@ function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
       <div className="task-node__row">
         <div className="task-node__status" style={{ color: meta.ink }}>
           <span className="dot" style={{ background: meta.color }} />
-          {meta.label}
+          {statusLabel}
         </div>
         <span
           className="task-node__harness"

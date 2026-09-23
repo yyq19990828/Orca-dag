@@ -14,6 +14,16 @@ const en = {
   "status.completed": "Done",
   "status.failed": "Failed",
   "status.blocked": "Blocked",
+  "priority.urgent": "Urgent",
+  "priority.low": "Low priority",
+  "priority.normal": "Normal priority",
+  "priority.high": "High priority",
+  "layout.label.layered-lr": "Horiz.",
+  "layout.label.layered-tb": "Vert.",
+  "layout.label.force": "Force",
+  "layout.title.layered-lr": "Layered, left to right (Sugiyama / dagre)",
+  "layout.title.layered-tb": "Layered, top to bottom (Sugiyama / dagre)",
+  "layout.title.force": "Force-directed (Fruchterman–Reingold)",
 } as const;
 export default en;
 export { en };

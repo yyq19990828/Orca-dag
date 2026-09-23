@@ -9,10 +9,16 @@ export type TaskStatus =
 /** Canvas layout algorithms the viewer can arrange the DAG with. */
 export type LayoutKind = "layered-lr" | "layered-tb" | "force";
 
-export const LAYOUTS: { kind: LayoutKind; label: string; icon: string; title: string }[] = [
-  { kind: "layered-lr", label: "Horiz.", icon: "⇄", title: "Layered, left to right (Sugiyama / dagre)" },
-  { kind: "layered-tb", label: "Vert.", icon: "⇅", title: "Layered, top to bottom (Sugiyama / dagre)" },
-  { kind: "force", label: "Force", icon: "❋", title: "Force-directed (Fruchterman–Reingold)" },
+/**
+ * The layout buttons the View menu offers. Only the algorithm id and its glyph
+ * live here: the button caption and tooltip are user-facing wording and belong
+ * to i18n (`layout.label.<kind>` / `layout.title.<kind>`), so both languages
+ * stay in one place.
+ */
+export const LAYOUTS: { kind: LayoutKind; icon: string }[] = [
+  { kind: "layered-lr", icon: "⇄" },
+  { kind: "layered-tb", icon: "⇅" },
+  { kind: "force", icon: "❋" },
 ];
 
 export interface DagNode {
@@ -107,7 +113,6 @@ export interface OrcaRun {
 }
 
 export interface StatusMeta {
-  label: string;
   /** Crayon stroke color — node border, legend dot. */
   color: string;
   /** Soft crayon wash — node fill. */
@@ -117,14 +122,17 @@ export interface StatusMeta {
 }
 
 // A box of fresh crayons on paper. Each status gets a stroke, a soft wash fill,
-// and a darker ink for legible labels.
+// and a darker ink for legible labels. Display names are NOT part of this
+// table: the wording is owned by i18n (`t("status.<status>")`), so the canvas,
+// the legend and the panels can never disagree — in either language — and a
+// language switch re-renders every one of them through its own subscription.
 export const STATUS_META: Record<TaskStatus, StatusMeta> = {
-  pending: { label: "Pending", color: "#C6C1B4", bg: "#F3F1EA", ink: "#8A857A" },
-  ready: { label: "Ready", color: "#7BB7E0", bg: "#EAF4FB", ink: "#3E7BA6" },
-  dispatched: { label: "Running", color: "#F0B94E", bg: "#FDF4E1", ink: "#B37F16" },
-  completed: { label: "Done", color: "#7FC98C", bg: "#EBF7EE", ink: "#3E9A55" },
-  failed: { label: "Failed", color: "#EA6B5E", bg: "#FCECE9", ink: "#C23B2E" },
-  blocked: { label: "Blocked", color: "#B79FE0", bg: "#F2EDFB", ink: "#7B5CB8" },
+  pending: { color: "#C6C1B4", bg: "#F3F1EA", ink: "#8A857A" },
+  ready: { color: "#7BB7E0", bg: "#EAF4FB", ink: "#3E7BA6" },
+  dispatched: { color: "#F0B94E", bg: "#FDF4E1", ink: "#B37F16" },
+  completed: { color: "#7FC98C", bg: "#EBF7EE", ink: "#3E9A55" },
+  failed: { color: "#EA6B5E", bg: "#FCECE9", ink: "#C23B2E" },
+  blocked: { color: "#B79FE0", bg: "#F2EDFB", ink: "#7B5CB8" },
 };
 
 /**

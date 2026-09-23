@@ -15,6 +15,16 @@ const zh: Dict = {
   "status.completed": "已完成",
   "status.failed": "失败",
   "status.blocked": "受阻",
+  "priority.urgent": "紧急",
+  "priority.low": "低优先级",
+  "priority.normal": "普通优先级",
+  "priority.high": "高优先级",
+  "layout.label.layered-lr": "横向",
+  "layout.label.layered-tb": "纵向",
+  "layout.label.force": "力导",
+  "layout.title.layered-lr": "分层布局，从左到右（Sugiyama / dagre）",
+  "layout.title.layered-tb": "分层布局，从上到下（Sugiyama / dagre）",
+  "layout.title.force": "力导向布局（Fruchterman–Reingold）",
 };
 export default zh;
 export { zh };
