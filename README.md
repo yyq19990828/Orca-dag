@@ -195,6 +195,17 @@ An end-to-end pass, starting from nothing installed:
 - **Mutation-request audit**: every viewer-originated mutation (worker-start / release / retain / stop) runs under a durable `--retry-request` id that is persisted — bounded, metadata-only — in the workspace's `.orca-dag.requests.jsonl` ledger *before* the CLI call, so the id stays inspectable even after a lost response or a viewer restart. Operational details gains a read-only **audit panel**: one row per recorded request (operation, Task/Dispatch linkage, scope), and per-row **Inspect** runs a fresh `request-show` probe rendering Orca's own state and interpretation verbatim — `completed` (green), `pending` (amber), `absent` (gray, explicitly labeled "absence is NOT proof the mutation did not happen"), and `unknown` when the probe itself fails. The audit surface never replays a mutation.
 - **Hand-drawn crayon style**: 🖍️ SVG feTurbulence wobbled strokes on a cream sketchbook canvas.
 
+## Interface language
+
+The viewer UI ships in **English and Simplified Chinese**. The **中 / EN** toggle sits in the top bar, next to the Run health badge, and always shows the language you'd switch *to* — one click flips the whole UI.
+
+- **First visit** picks the language from the browser's locale: a `zh`-prefixed `navigator.language` opens in Simplified Chinese, anything else in English. From then on an explicit toggle is what decides.
+- **The choice persists per browser**, in one `localStorage` key (`orca-dag:lang`) — it survives reloads and viewer restarts, and nothing about it is written to the workspace.
+- **Status names, timestamps, relative ages and every panel follow the selection**: DAG nodes and their harness labels, the Run picker, Activity / Chat, Operational details, the node / lane / worker panels, gates and dialogs.
+- **Server error messages keep the wording the server sent (English) — deliberately.** Diagnostics (readiness reasons, API errors, Orca's own output) are reproduced verbatim, so anything you quote from the UI still matches the server logs; only the viewer's own copy is translated.
+
+The dictionaries live in `web/src/i18n/en.ts` / `zh.ts`, and `npm run typecheck` fails on any key present in one language only — the two can't drift.
+
 ## Security model
 
 The viewer is a control plane into Orca — starting a Run fences whoever was coordinating it, and dispatch spawns real worker terminals — so it is locked down by default:

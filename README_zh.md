@@ -194,6 +194,17 @@ npm run release 0.2.0  # 打 tag 并推送；CI 负责发 npm + 把各平台二�
 - **变更请求审计**：查看器发起的每个变更（worker-start / release / retain / stop）都携带持久的 `--retry-request` id，并在调用 CLI **之前**写入工作区 `.orca-dag.requests.jsonl` 账本（有界、仅元数据），即使响应丢失或查看器重启之后 id 仍可检视。Operational details 新增只读**审计面板**：每个已记录请求一行（操作、Task/Dispatch 关联、作用域），行内 **Inspect** 会发起一次全新的 `request-show` 探测，并逐字渲染 Orca 自身的状态与解释——`completed`（绿）、`pending`（琥珀）、`absent`（灰，明确标注"absent 绝不证明变更没有发生"）、探测失败则显示 `unknown`。审计面绝不重放变更。
 - **手绘蜡笔风**：🖍️ SVG feTurbulence 波动描边 + 米色速写本画布。
 
+## 界面语言
+
+查看器界面提供**英文与简体中文**两套。顶栏的 **中 / EN** 开关就在 Run 健康徽标旁，按钮始终显示「切过去之后」的语言 —— 点一下整个界面立即切换。
+
+- **首次访问**按浏览器语言环境自动选择：`navigator.language` 以 `zh` 开头就进简体中文，其余进英文；从此以后以显式切换为准。
+- **选择按浏览器持久化**，只占 `localStorage` 的一个键（`orca-dag:lang`）—— 刷新页面、重启查看器都不丢，也不会往工作区写任何东西。
+- **状态名、时间戳、相对时间与全部面板都跟随选择**：DAG 节点及其 harness 标签、Run 选择器、Activity / Chat、Operational details，以及节点 / lane / worker 面板、审批门与对话框。
+- **服务器错误消息保留服务器原文（英文）—— 这是有意的。** 诊断信息（readiness 原因、API 错误、Orca 自身输出）一律原样呈现，所以从界面里摘出的任何内容都能和服务端日志对上；翻译的只有查看器自己的文案。
+
+两份字典在 `web/src/i18n/en.ts` / `zh.ts`，`npm run typecheck` 会在任一侧多键或缺键时失败 —— 两者不会漂移。
+
 ## 安全模型
 
 viewer 是直通 Orca 的控制面 —— 启动 Run 会 fence 掉原本的 coordinator，dispatch 会拉起真实的 worker 终端 —— 所以它默认是锁死的：
