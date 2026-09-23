@@ -159,7 +159,9 @@ export async function runUninstall(opts: UninstallOptions): Promise<void> {
   // A process cannot delete the program it is running from, so the last step is
   // always the user's. Which command it is depends on how they got here.
   console.log("\nThe program itself is not removed by this command:");
-  console.log("  installed with npm i -g   →  npm rm -g orca-dag");
+  // The npm package is this fork's `orca-orchestration-launcher`; the command
+  // (bin) itself is still `orca-dag`, hence the binary hint below.
+  console.log("  installed with npm i -g   →  npm rm -g orca-orchestration-launcher");
   console.log("  run through npx           →  npx clear-npx-cache   (or just let the cache expire)");
   console.log("  downloaded binary         →  rm $(which orca-dag)");
 }

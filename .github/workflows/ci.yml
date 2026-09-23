@@ -48,7 +48,8 @@ jobs:
           npm pack ./dist-npm --pack-destination /tmp
           mkdir -p /tmp/smoke && cd /tmp/smoke
           npm init -y >/dev/null
-          npm install /tmp/orca-dag-*.tgz >/dev/null
+          # The tarball is named after the published package (`npm pack`), not the bin.
+          npm install /tmp/orca-orchestration-launcher-*.tgz >/dev/null
           NO_OPEN=1 PORT=8899 npx orca-dag &
           for i in $(seq 1 30); do
             curl -sf http://127.0.0.1:8899/api/health >/dev/null && break

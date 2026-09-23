@@ -11,7 +11,7 @@ on:
 
 jobs:
   npm:
-    name: Publish orca-dag to npm
+    name: Publish orca-orchestration-launcher to npm
     runs-on: ubuntu-latest
     permissions:
       contents: read

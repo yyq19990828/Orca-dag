@@ -7,7 +7,7 @@
 // the repo root is a private npm-workspaces root (`server` + `web` are both
 // private), so nothing here is publishable as-is. We assemble a third,
 // dependency-free tree instead — esbuild inlines express, so the tarball
-// is one file plus the SPA and `npx orca-dag` costs a single download.
+// is one file plus the SPA and `npx orca-orchestration-launcher` costs a single download.
 //
 // Layout (the "../../web/dist" fallback in server/src/index.ts is what dictates
 // where the bundle goes — keep dist/server/index.mjs at exactly that depth):
@@ -17,7 +17,7 @@
 //     bin/orca-dag.mjs      ← shebang shim, the `bin` entry
 //     dist/server/index.mjs ← esbuild bundle (__dirname/../../web/dist resolves inside the package)
 //     web/dist/**           ← vite output, served from disk (no base64 embedding needed)
-//     README.md, README_zh.md, LICENSE, skill/SKILL.md
+//     README.md, README_zh.md, LICENSE, skill/SKILL.md, docs/tutorials/**
 //
 // Unlike `build-binary.mjs` this needs no Bun: the server only touches express
 // and node: builtins, so a plain Node bundle runs everywhere `npx` does.
@@ -78,8 +78,11 @@ cpSync(webDist, join(out, "web", "dist"), { recursive: true });
 for (const f of ["README.md", "README_zh.md", "LICENSE"]) {
   if (existsSync(join(root, f))) cpSync(join(root, f), join(out, f));
 }
-// Ship the skill too, so `npx skills add orca-dag` (npm source) and a plain
-// `npm i -g orca-dag` both put SKILL.md on disk next to the viewer.
+mkdirSync(join(out, "docs"), { recursive: true });
+cpSync(join(root, "docs", "tutorials"), join(out, "docs", "tutorials"), { recursive: true });
+// Ship the skill too, so `npx skills add orca-orchestration-launcher` (npm
+// source) and a plain `npm i -g orca-orchestration-launcher` both put SKILL.md
+// on disk next to the viewer.
 mkdirSync(join(out, "skill"), { recursive: true });
 cpSync(join(root, "skill", "SKILL.md"), join(out, "skill", "SKILL.md"));
 
@@ -87,18 +90,20 @@ writeFileSync(
   join(out, "package.json"),
   JSON.stringify(
     {
-      name: "orca-dag",
+      // Published under this fork's own name — upstream owns `orca-dag` on npm.
+      // The `bin` entry stays `orca-dag`: the global command name is unchanged.
+      name: "orca-orchestration-launcher",
       version,
       description: rootPkg.description,
       type: "module",
       bin: { "orca-dag": "bin/orca-dag.mjs" },
-      files: ["bin", "dist", "web", "skill", "README.md", "README_zh.md", "LICENSE"],
+      files: ["bin", "dist", "web", "skill", "docs/tutorials", "README.md", "README_zh.md", "LICENSE"],
       engines: { node: ">=20" },
       keywords: ["orca", "orchestration", "dag", "agents", "coordinator", "react-flow"],
       license: "MIT",
-      repository: { type: "git", url: "git+https://github.com/ZinkLu/Orca-Orchestration.git" },
-      homepage: "https://github.com/ZinkLu/Orca-Orchestration#readme",
-      bugs: { url: "https://github.com/ZinkLu/Orca-Orchestration/issues" },
+      repository: { type: "git", url: "git+https://github.com/yyq19990828/Orca-dag.git" },
+      homepage: "https://github.com/yyq19990828/Orca-dag#readme",
+      bugs: { url: "https://github.com/yyq19990828/Orca-dag/issues" },
       // No dependencies on purpose — express is inlined by esbuild.
     },
     null,

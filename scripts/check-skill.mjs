@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Validate skill/SKILL.md so a bad edit can't silently break distribution.
 //
-// `npx skills add ZinkLu/Orca-Orchestration --skill orca-dag` is the install
+// `npx skills add yyq19990828/Orca-dag --skill orca-dag` is the install
 // path for the skill half of this project. The skills CLI discovers the skill
 // by walking the repo for SKILL.md and reads its *frontmatter* for the name and
 // the description the agent matches against — a dropped `---` fence or a
@@ -85,4 +85,4 @@ if (errors.length) {
   process.exit(1);
 }
 
-console.log(`✅ skill/SKILL.md ok — installable as \`npx skills add ZinkLu/Orca-Orchestration --skill ${name}\``);
+console.log(`✅ skill/SKILL.md ok — installable as \`npx skills add yyq19990828/Orca-dag --skill ${name}\``);

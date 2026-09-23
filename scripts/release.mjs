@@ -5,8 +5,8 @@
 //
 // That is the whole publishing procedure. The tag is the version of record:
 // pushing `v0.2.0` triggers .github/workflows/release.yml, which publishes the
-// `orca-dag` npm package and attaches a binary for every platform to a GitHub
-// release. Nothing in the repo needs a version bump commit.
+// `orca-orchestration-launcher` npm package and attaches a binary for every
+// platform to a GitHub release. Nothing in the repo needs a version bump commit.
 //
 // The checks below exist because the tag is irreversible in practice — once
 // `npm publish` runs, that version number is burned even if you unpublish.
@@ -73,6 +73,6 @@ execFileSync("git", ["push", "origin", tag], { cwd: root, stdio: "inherit" });
 
 const remote = git("remote", "get-url", "origin").replace(/\.git$/, "");
 console.log(`\n✅ Pushed ${tag}. CI is now publishing:`);
-console.log(`   npm      → https://www.npmjs.com/package/orca-dag/v/${version}`);
+console.log(`   npm      → https://www.npmjs.com/package/orca-orchestration-launcher/v/${version}`);
 console.log(`   binaries → ${remote}/releases/tag/${tag}`);
 console.log(`   progress → ${remote}/actions`);

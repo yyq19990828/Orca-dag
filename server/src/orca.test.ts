@@ -813,7 +813,7 @@ describe("CLI spawning through the resolved spec (fake orca)", () => {
     await assert.rejects(ensureCoordinatorTerminal(), (err: unknown) => {
       assert.ok(err instanceof OrcaCliError);
       assert.equal(err.code, "coordinator_conflict");
-      assert.match(err.message, /orca-dag uninstall/);
+      assert.match(err.message, /orca-orchestration-launcher uninstall/);
       return true;
     });
     assert.equal(readLog().length, 1); // list only — never silently reused or closed

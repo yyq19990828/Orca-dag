@@ -3,7 +3,7 @@
 // Why the viewer does this at all: the project has two halves that are useless
 // apart — the skill teaches your agent to *build* the DAG, the viewer *runs* it
 // — and making people install them separately is one step too many. So
-// `npx orca-dag` installs the skill on startup and then serves the UI. One
+// `npx orca-orchestration-launcher` installs the skill on startup and then serves the UI. One
 // command, everything works.
 //
 // It is deliberately dumb and idempotent: write the file, don't touch anything

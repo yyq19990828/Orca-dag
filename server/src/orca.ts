@@ -1010,7 +1010,7 @@ export function coordinatorTerminalCommand(
   // old `exec sleep infinity` parked the pane forever, so a crashed or killed
   // viewer left its coordinator terminal behind — still connected, holding
   // the workspace's coordinator slot and (once bound) fencing the Run —
-  // until a manual `npx orca-dag uninstall`. The watcher is deliberately
+  // until a manual `npx orca-orchestration-launcher uninstall`. The watcher is deliberately
   // plain POSIX (sh + `kill -0` + `sleep`; no GNU `tail --pid`, no procfs)
   // so the same command works wherever Orca does. `kill -0` never signals:
   // it is the documented existence probe, so the loop is a silent 2-second
@@ -1104,7 +1104,7 @@ export async function ensureCoordinatorTerminal(
     throw new OrcaCliError(
       `An unscoped "orca-dag coordinator" terminal from an older orca-dag is still connected ` +
         `(${legacy.terminal.handle}). It predates workspace scoping, so this viewer can't tell whether ` +
-        `it belongs to this workspace. Close it (or run \`npx orca-dag uninstall\` to clean up leftover ` +
+        `it belongs to this workspace. Close it (or run \`npx orca-orchestration-launcher uninstall\` to clean up leftover ` +
         `coordinators) and start again.`,
       "coordinator_conflict",
     );

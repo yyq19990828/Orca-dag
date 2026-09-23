@@ -2,10 +2,12 @@
 
 English | [简体中文](README_zh.md)
 
+> Forked from [ZinkLu/Orca-Orchestration](https://github.com/ZinkLu/Orca-Orchestration) and extended into its own feature line — per-node model/effort overrides, workspace lanes, integration gates, session recovery, mutation audit, bilingual UI — published independently as the [`orca-orchestration-launcher`](https://www.npmjs.com/package/orca-orchestration-launcher) npm package.
+
 Split "planning by chatting with an agent" from "visualizing + executing" into two independent modules:
 
 1. **skill** (`skill/SKILL.md`): teaches **your own agent** (Claude Code / kimi / …) the project workflow — PRD → technical design → decompose into an **Orca orchestration task DAG**. It is deliberately thin about commands: it resolves the right Orca CLI, loads the **runtime-matched orchestration guide** (`orca skills get orchestration`), and delegates command syntax and lifecycle rules to that guide — installed instructions can't drift from your installed runtime. The planning "brain" stays in your agent — **no embedded Claude Agent SDK**.
-2. **viewer** (`server/` + `web/`, shipped as the `orca-dag` npm package and a standalone binary): connects to Orca's orchestration state and **visualizes the DAG live**; each node **picks its own harness** (claude / kimi / opencode / grok …) and optionally a **model**; click **"▶ Run with Orca"** and the viewer's built-in **self-driven coordinator** dispatches ready tasks **in parallel** along the dependencies to autonomous workers spun up on demand, until the whole graph is done.
+2. **viewer** (`server/` + `web/`, shipped as the `orca-orchestration-launcher` npm package and a standalone binary): connects to Orca's orchestration state and **visualizes the DAG live**; each node **picks its own harness** (claude / kimi / opencode / grok …) and optionally a **model**; click **"▶ Run with Orca"** and the viewer's built-in **self-driven coordinator** dispatches ready tasks **in parallel** along the dependencies to autonomous workers spun up on demand, until the whole graph is done.
 
 > Core flow: **agent builds the graph → pick a Run and per-node harnesses in the viewer → Run → the DAG executes in dependency-parallel**. To change a task or a dependency, have the agent redraw the DAG — Orca has no interface for editing a single task.
 >
@@ -18,7 +20,7 @@ Split "planning by chatting with an agent" from "visualizing + executing" into t
 ## How it works
 
 ```
-   your agent (loads the orca-dag skill)          orca-dag viewer (npx orca-dag)  
+   your agent (loads the orca-dag skill)          orca-dag viewer (npx orca-orchestration-launcher)
  ┌───────────────────────────────┐             ┌──────────────────────────────┐
  │  chat → decompose → build DAG │             │  poll task-list → draw DAG   │
  │  Bash: orca orchestration     │             │  pick harness per node       │
@@ -33,7 +35,7 @@ Split "planning by chatting with an agent" from "visualizing + executing" into t
 ```
 
 1. You chat in **your own agent**. It loads the `orca-dag` skill, opens a **Run** with `orca orchestration run-create`, then builds the tasks and dependencies into that Run via `task-create --deps …`.
-2. Open the viewer (`npx orca-dag`). Pick the Run in the top bar; it polls `orca orchestration task-list --run <id> --json` every 2 seconds, lays out with **dagre**, renders with **React Flow**, and recolors statuses live.
+2. Open the viewer (`npx orca-orchestration-launcher`). Pick the Run in the top bar; it polls `orca orchestration task-list --run <id> --json` every 2 seconds, lays out with **dagre**, renders with **React Flow**, and recolors statuses live.
 3. In the viewer, pick a harness per node (or rely on a default fallback), set "Max parallel", and click **"▶ Run with Orca"**.
 4. The viewer's **coordinator loop** takes over: it binds one of its own Orca terminals as the Run's coordinator (gaining mutation authority), then on each tick finds every `ready` task and calls `orca orchestration worker-start --task <id> --agent <harness>` **in parallel** — **Orca itself** creates the worker terminal, waits for readiness, injects the dispatch, and returns a **Dispatch** (one attempt). The worker finishes with `worker_done --outcome` → Orca **automatically** marks the task and dispatch completed/failed → dependents flip to `ready` → repeat until the graph is done. Settled workers get their output archived, then the terminal is **released** by default, **reused** only for an immediate compatible follow-up (`worker-start --terminal`), or **retained** on explicit request.
 5. To change the plan: go back to the agent conversation and have it redraw the DAG.
@@ -77,7 +79,7 @@ All of this is resolved **once at startup** and then never changes for the life 
 - **The project is an Orca-managed worktree**: adding workers / executing requires the current directory to be a registered repo/worktree (else `orca terminal create` fails with `selector_not_found`). Register with `orca repo add <path>` or `orca worktree …`.
 - **An agent that can run the skill** (graph-building side): Claude Code, or anything that can read `SKILL.md` and run Bash.
 - **The viewer side depends only on the `orca` CLI** — no `claude`, no `ANTHROPIC_API_KEY`.
-- **Node.js ≥ 20** to run `npx orca-dag` — or none at all if you use a release binary. **Bun** only if you want to build a binary yourself.
+- **Node.js ≥ 20** to run `npx orca-orchestration-launcher` — or none at all if you use a release binary. **Bun** only if you want to build a binary yourself.
 
 ## Install
 
@@ -85,16 +87,16 @@ One command, both halves:
 
 ```bash
 cd ~/any/orca-managed/project
-npx orca-dag
+npx orca-orchestration-launcher
 ```
 
 That installs the `orca-dag` **skill** into every coding agent on your machine (Claude Code, Codex, Cursor, OpenCode, Gemini CLI, Droid, and the shared `~/.agents/skills` directory — whichever of them exist), then starts the **viewer** on <http://localhost:8787> with the current directory as the workspace. It re-runs safely: the skill is only rewritten when it actually changed, and a skill directory you symlinked yourself is left untouched.
 
 Then just chat your requirement to the agent. It builds the DAG into Orca per `SKILL.md` and tells you to open the viewer.
 
-Needs only **Node.js ≥ 20** — the package is a ~500 KB dependency-free bundle, and `bunx orca-dag` works too. Keep it around with `npm i -g orca-dag`.
+Needs only **Node.js ≥ 20** — the package is a ~500 KB dependency-free bundle, and `bunx orca-orchestration-launcher` works too. Keep it around with `npm i -g orca-orchestration-launcher`.
 
-No Node on the machine? Grab a standalone binary from the [releases page](https://github.com/ZinkLu/Orca-Orchestration/releases) — same behaviour, bundles its own runtime, needs only the `orca` CLI on PATH:
+No Node on the machine? Grab a standalone binary from the [releases page](https://github.com/yyq19990828/Orca-dag/releases) — same behaviour, bundles its own runtime, needs only the `orca` CLI on PATH:
 
 ```bash
 tar xzf orca-dag-darwin-arm64.tar.gz && sudo mv orca-dag /usr/local/bin/ && orca-dag
@@ -102,12 +104,12 @@ tar xzf orca-dag-darwin-arm64.tar.gz && sudo mv orca-dag /usr/local/bin/ && orca
 
 Switches: `PORT` (default 8787), `NO_OPEN=1` (don't open the browser), `--no-skill` / `ORCA_DAG_NO_SKILL=1` (don't touch the agent skill directories), `WORKSPACE_DIR` (use another workspace instead of the current directory — must exist, becomes the exact `path:` worktree), `ORCA_WORKTREE` (explicit Orca worktree selector, overriding the `path:` default), `ORCA_CLI_COMMAND` (exact Orca CLI to run, as quoted argv with no shell — see [CLI/workspace resolution](#which-orca-binary-which-workspace-whether-it-can-execute)), `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1` (allow arbitrary custom harness commands — see [Security](#security-model)).
 
-Want the skill *without* the viewer, or managed by the standard tooling? `npx skills add ZinkLu/Orca-Orchestration --skill orca-dag --global` — the [open agent skills CLI](https://github.com/vercel-labs/skills), the same one `orca skills install` shells out to.
+Want the skill *without* the viewer, or managed by the standard tooling? `npx skills add yyq19990828/Orca-dag --skill orca-dag --global` — the [open agent skills CLI](https://github.com/vercel-labs/skills), the same one `orca skills install` shells out to.
 
 ## Uninstall
 
 ```bash
-npx orca-dag uninstall            # add --dry-run first if you want to see the list
+npx orca-orchestration-launcher uninstall   # add --dry-run first if you want to see the list
 ```
 
 Removes the skill from every agent directory it was installed into and closes any `orca-dag coordinator` terminal a crashed viewer left bound to a Run, reporting the workspace (directory + hash) each terminal was coordinating before closing it (that cleanup matters — a stale coordinator keeps your own agent fenced out). A skill directory you symlinked yourself is unlinked, never followed, so your checkout is safe.
@@ -142,7 +144,8 @@ An end-to-end pass, starting from nothing installed:
 2. **Start the viewer** from that same directory and leave it running:
 
    ```bash
-   npx orca-dag           # installs the skill into your agents, serves :8787, opens the browser
+   npx orca-orchestration-launcher
+                          # installs the skill into your agents, serves :8787, opens the browser
    ```
 
 3. **Plan in your agent.** In Claude Code (or any agent that just got the skill), describe what you want and ask for a DAG:
@@ -160,6 +163,12 @@ An end-to-end pass, starting from nothing installed:
 7. **Resolve gates when they pop.** If the plan includes approval gates, approve/reject buttons float over the DAG at the right moment.
 
 8. **Change the plan?** Go back to the agent conversation. It reclaims the Run with `orca orchestration run-use --id <run>` (or just opens a fresh Run and redraws), and the viewer follows along. Then hit Run again.
+
+## Tutorials
+
+- [Plan and run a DAG](docs/tutorials/orchestration.md) — Run/Task/Dispatch design, a worked graph, CLI parameters, and the coordinator loop.
+- [Stage behavior in isolated worktrees](docs/tutorials/worktree-isolation.md) — placement and creation parameters, Git staging boundaries, lanes, integration gates, and cleanup.
+- [Operate the viewer](docs/tutorials/viewer-operations.md) — startup and launch settings, API shape, monitoring, recovery, and persistent state.
 
 ## What the viewer can do
 
@@ -318,7 +327,7 @@ web/src/
   types.ts / api.ts
 scripts/
   build-binary.mjs        vite build → embed assets + skill → bun --compile → dist/orca-dag
-  build-npm.mjs           vite build → esbuild the server → dist-npm/ (the publishable `orca-dag` package)
+  build-npm.mjs           vite build → esbuild the server → dist-npm/ (the publishable `orca-orchestration-launcher` package)
   build-all-binaries.sh   every Bun target + archives + checksums (what the release workflow runs)
   check-skill.mjs         guards SKILL.md's frontmatter (which the skills CLI installs by) + rejects hard-coded CLI guidance that bypasses the runtime guide
   release.mjs             `npm run release <version>`: checks, tags, pushes — CI does the rest

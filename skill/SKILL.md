@@ -63,7 +63,7 @@ One Run holds one DAG — Orca only treats a Run as a namespace, so this is a co
 ## After the DAG is built: open the viewer and let it execute
 Once the graph is right, ask the user to open the viewer and **tell them the Run id**:
 ```bash
-npx orca-dag    # run in the current project directory; serves http://localhost:8787 and opens the browser
+npx orca-orchestration-launcher    # run in the current project directory; serves http://localhost:8787 and opens the browser
 ```
 (If it's already running — likely, since that command also installed this skill — they just reselect the Run.) The user picks your Run in the top bar, chooses a harness (and optionally model/effort and a workspace placement) per node, and clicks **"▶ Run with Orca"**: the viewer's coordinator uses Orca's supervised-worker primitives to execute the whole graph in dependency-parallel order and resolve approval gates as they pop.
 
