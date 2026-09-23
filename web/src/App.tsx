@@ -545,20 +545,30 @@ export default function App() {
   const leadTaskId = runId ? config.leadTaskByRun[runId] ?? null : null;
   // One string drives both the conn pill's tooltip and its accessible name:
   // the pill is focusable (role="status"), so a keyboard user tabbing to it
-  // hears the same detail a mouse user sees on hover.
+  // hears the same detail a mouse user sees on hover. The readiness `reason`
+  // is the server's own wording and stays English, like other server strings.
   const connDetail =
     connError ??
     (execOff
-      ? readiness?.reason ?? "Execution unavailable — view-only"
+      ? readiness?.reason ?? t("topbar.connDetailViewOnly")
       : readiness
-        ? `Connected to Orca ${readiness.version ?? ""} · ${readiness.cli} (execution enabled)`
-        : "Connected to Orca");
+        ? t("topbar.connDetailReady", { version: readiness.version ?? "", cli: readiness.cli })
+        : t("topbar.connDetailConnected"));
 
   // the toolbar's bottom edge doubles as a crayon progress strip
   const total = visibleDag.nodes.length || 1;
   const pctDone = ((counts.completed ?? 0) / total) * 100;
   const pctFail = ((counts.failed ?? 0) / total) * 100;
   const pctRun = ((counts.dispatched ?? 0) / total) * 100;
+  // Progress copy assembles from two keys: the failure clause is its own
+  // suffix fragment (separator included) so it only appears when there is
+  // something to report, and each language keeps its own punctuation.
+  const completedCount = counts.completed ?? 0;
+  const failedCount = counts.failed ?? 0;
+  const stageCount = visibleDag.nodes.length;
+  const progressAria = t("topbar.progressAria", { done: completedCount, total: stageCount });
+  const progressGroupAria =
+    failedCount > 0 ? progressAria + t("topbar.progressFailedAria", { n: failedCount }) : progressAria;
 
   // The top bar deliberately offers no way to wipe tasks: `orca orchestration
   // reset` has no --run flag and deletes every local Run's tasks at once, so
@@ -601,7 +611,7 @@ export default function App() {
             </g>
           </svg>
           <div className="topbar__brand-text">
-            <div className="topbar__title">Orca DAG Viewer</div>
+            <div className="topbar__title">{t("topbar.title")}</div>
           </div>
         </div>
         {/* RunPicker keeps the selected objective in the main line; creation,
@@ -610,27 +620,23 @@ export default function App() {
           <RunPicker runId={runId} onPick={pickRun} autoPick={hydrated} />
         </div>
         {runId && (
-          <div
-            className="topbar__progress"
-            role="group"
-            aria-label={`Run progress: ${counts.completed ?? 0} of ${visibleDag.nodes.length} stages complete${(counts.failed ?? 0) > 0 ? `, ${counts.failed} failed` : ""}`}
-          >
+          <div className="topbar__progress" role="group" aria-label={progressGroupAria}>
             <span
               className="topbar__progress-track"
               role="progressbar"
-              aria-label="Completed stages"
+              aria-label={t("topbar.completedStagesAria")}
               aria-valuemin={0}
-              aria-valuemax={visibleDag.nodes.length}
-              aria-valuenow={counts.completed ?? 0}
-              aria-valuetext={`${counts.completed ?? 0} of ${visibleDag.nodes.length} stages complete`}
+              aria-valuemax={stageCount}
+              aria-valuenow={completedCount}
+              aria-valuetext={progressAria}
             >
-              <i style={{ width: `${visibleDag.nodes.length ? ((counts.completed ?? 0) / visibleDag.nodes.length) * 100 : 0}%` }} />
+              <i style={{ width: `${stageCount ? (completedCount / stageCount) * 100 : 0}%` }} />
             </span>
             <span className="topbar__progress-label">
-              {visibleDag.nodes.length ? `${counts.completed ?? 0}/${visibleDag.nodes.length} done` : "No stages"}
+              {stageCount ? t("topbar.doneOf", { done: completedCount, total: stageCount }) : t("topbar.noStages")}
             </span>
-            {(counts.failed ?? 0) > 0 && (
-              <span className="topbar__progress-failed">⚠ {counts.failed} failed</span>
+            {failedCount > 0 && (
+              <span className="topbar__progress-failed">{t("topbar.failedCount", { n: failedCount })}</span>
             )}
           </div>
         )}
@@ -646,7 +652,7 @@ export default function App() {
             title={connDetail}
             aria-label={connDetail}
           >
-            {connError ? "Fetch failed" : execOff ? "View-only" : "Orca connected"}
+            {connError ? t("topbar.fetchFailed") : execOff ? t("topbar.viewOnly") : t("topbar.orcaConnected")}
           </div>
         </div>
         <ExecControls
@@ -678,7 +684,7 @@ export default function App() {
                   openCommunication();
                 }}
               >
-                Activity / Chat
+                {t("toolbar.activityChat")}
                 {activityPending > 0 && <span className="activity-badge">{activityPending}</span>}
               </button>
               <button
@@ -687,16 +693,16 @@ export default function App() {
                 aria-pressed={communicationOpen && communicationTab === "operations"}
                 aria-label={actionableCount === null
                   ? knownActionableCount > 0
-                    ? `Open Operations, at least ${knownActionableCount} actionable items`
-                    : "Open Operations, actionable count unknown"
-                  : `Open Operations, ${actionableCount} actionable items`}
+                    ? t("toolbar.openOperationsAtLeast", { n: knownActionableCount })
+                    : t("toolbar.openOperationsUnknown")
+                  : t("toolbar.openOperationsCount", { n: actionableCount })}
                 onClick={() => {
                   setOperationsSeen(true);
                   setCommunicationTab("operations");
                   openCommunication();
                 }}
               >
-                Operations
+                {t("toolbar.operations")}
                 {knownActionableCount > 0 && (
                   <span className="operations-badge">
                     {actionableCount === null ? `${knownActionableCount}+` : actionableCount}
@@ -704,11 +710,11 @@ export default function App() {
                 )}
               </button>
               <details className="view-menu">
-                <summary title="Status colors, graph relations, and layout options">
-                  <span aria-hidden="true">⌘</span> View
+                <summary title={t("toolbar.viewTitle")}>
+                  <span aria-hidden="true">⌘</span> {t("toolbar.view")}
                 </summary>
                 <div className="view-menu__panel">
-                  <div className="legend" role="group" aria-label="Stage status legend">
+                  <div className="legend" role="group" aria-label={t("toolbar.statusLegendAria")}>
                     {(Object.keys(STATUS_META) as TaskStatus[]).map((s) => (
                       <span
                         key={s}
@@ -729,28 +735,28 @@ export default function App() {
                   {/* Phase 4: the two relation grammars, named. The toggle hides
                       parent links (they are presentation-only, so hiding them
                       loses nothing the scheduler depends on). */}
-                  <div className="legend legend--relations" role="group" aria-label="Relation legend">
-                    <span className="legend__item legend__item--static" title="Dependency: work that must finish before the target stage may start">
+                  <div className="legend legend--relations" role="group" aria-label={t("toolbar.relationLegendAria")}>
+                    <span className="legend__item legend__item--static" title={t("toolbar.dependencyTitle")}>
                       <span aria-hidden="true" className="legend__glyph legend__glyph--dep">⇢</span>
-                      dependency
+                      {t("toolbar.dependency")}
                     </span>
-                    <span className="legend__item legend__item--static" title="Ownership: parent/child structure — never a dependency, never an order">
+                    <span className="legend__item legend__item--static" title={t("toolbar.parentTitle")}>
                       <span aria-hidden="true" className="legend__glyph legend__glyph--hier">┄</span>
-                      parent
+                      {t("toolbar.parent")}
                     </span>
                     <button
                       type="button"
                       className={`btn btn--ghost legend__toggle${showHierarchy ? "" : " legend__toggle--off"}`}
                       aria-pressed={showHierarchy}
-                      title="Show or hide parent/child links on the graph (they are never dependencies)"
+                      title={t("toolbar.hierarchyToggleTitle")}
                       onClick={() => setShowHierarchy((v) => !v)}
                     >
-                      {showHierarchy ? "Hide parent links" : "Show parent links"}
+                      {showHierarchy ? t("toolbar.hideParentLinks") : t("toolbar.showParentLinks")}
                     </button>
                   </div>
                   <div className="layout-ctl">
-                    <span className="exec__label">Layout</span>
-                    <div className="seg" role="group" aria-label="Layout algorithm">
+                    <span className="exec__label">{t("toolbar.layout")}</span>
+                    <div className="seg" role="group" aria-label={t("toolbar.layoutAria")}>
                       {LAYOUTS.map((l) => (
                         <button
                           key={l.kind}
@@ -765,10 +771,10 @@ export default function App() {
                     </div>
                     <button
                       className="btn btn--ghost"
-                      title="Re-run auto-layout (discards manual drags)"
+                      title={t("toolbar.relayoutTitle")}
                       onClick={() => setReorgNonce((n) => n + 1)}
                     >
-                      ↻ Re-layout
+                      {t("toolbar.relayout")}
                     </button>
                   </div>
                 </div>
@@ -776,7 +782,7 @@ export default function App() {
             </div>
             <div className="dag-toolbar__right">
               <span className="dag-toolbar__meta">
-                {visibleDag.nodes.length} tasks · {visibleDag.edges.length} deps
+                {t("toolbar.taskDepCount", { tasks: visibleDag.nodes.length, deps: visibleDag.edges.length })}
               </span>
             </div>
 
@@ -797,12 +803,12 @@ export default function App() {
             <aside
               ref={communicationRef}
               className={`communication-center${communicationOpen ? "" : " communication-center--closed"}${communicationResizing ? " communication-center--resizing" : ""}`}
-              aria-label="Run communication center"
+              aria-label={t("toolbar.communicationCenterAria")}
               aria-hidden={!communicationOpen}
               style={{ width: communicationWidth === null ? undefined : `${communicationWidth}px` }}
             >
                 <header className="communication-center__header">
-                  <div className="communication-center__tabs" role="tablist" aria-label="Communication view">
+                  <div className="communication-center__tabs" role="tablist" aria-label={t("toolbar.communicationViewAria")}>
                     <button
                       type="button"
                       role="tab"
@@ -810,7 +816,7 @@ export default function App() {
                       className={communicationTab === "activity" ? "active" : ""}
                       onClick={() => setCommunicationTab("activity")}
                     >
-                      Activity
+                      {t("toolbar.activity")}
                       {activityPending > 0 && <span className="activity-badge">{activityPending}</span>}
                     </button>
                     <button
@@ -823,7 +829,7 @@ export default function App() {
                         setCommunicationTab("operations");
                       }}
                     >
-                      Operations
+                      {t("toolbar.operations")}
                       {knownActionableCount > 0 && (
                         <span className="operations-badge">
                           {actionableCount === null ? `${knownActionableCount}+` : actionableCount}
@@ -837,14 +843,14 @@ export default function App() {
                       className={communicationTab === "chat" ? "active" : ""}
                       onClick={() => setCommunicationTab("chat")}
                     >
-                      Chat
+                      {t("toolbar.chat")}
                       {activityPending > 0 && <span className="activity-badge">{activityPending}</span>}
                     </button>
                   </div>
                   <button
                     type="button"
                     className="communication-center__close"
-                    aria-label="Close communication center"
+                    aria-label={t("toolbar.closeCommunicationAria")}
                     onClick={closeCommunication}
                   >
                     ✕
@@ -935,13 +941,13 @@ export default function App() {
                 <div
                   className="communication-center__resize"
                   role="separator"
-                  aria-label="Resize communication panel"
+                  aria-label={t("toolbar.resizeCommunicationAria")}
                   aria-orientation="vertical"
                   aria-valuemin={280}
                   aria-valuemax={COMMUNICATION_MAX_WIDTH}
                   aria-valuenow={communicationWidth ?? undefined}
                   tabIndex={0}
-                  title="Drag or use Left/Right arrow keys to resize"
+                  title={t("toolbar.resizeCommunicationTitle")}
                   onPointerDown={beginCommunicationResize}
                   onPointerMove={moveCommunicationResize}
                   onPointerUp={endCommunicationResize}
@@ -985,11 +991,11 @@ export default function App() {
 
               {!runId && (
                 <div className="empty-run">
-                  <p className="empty-run__title">Pick a Run first</p>
+                  <p className="empty-run__title">{t("empty.pickRunTitle")}</p>
                   <p className="empty-run__body">
-                    Since Orca 1.4.160 tasks belong to a Run — they are no longer global. Pick one with
-                    the Run dropdown in the header, or have your agent run{" "}
-                    <code>orca orchestration run-create</code> to start a new one.
+                    {t("empty.pickRunBody")}{" "}
+                    <code>orca orchestration run-create</code>{" "}
+                    {t("empty.pickRunBodyTail")}
                   </p>
                 </div>
               )}
