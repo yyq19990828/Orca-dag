@@ -16,12 +16,17 @@ import { fetchDag, fetchRunStatus, fetchWorkers } from "./api";
 import { initConfig, setLayout, setLeadTask, setRunId, useConfig, useReadiness } from "./harness";
 import { usePageVisible } from "./visibility";
 import { LanesPanel } from "./components/LanesPanel";
+import { OperationsAttention, countActionableOperations, countKnownActionableOperations } from "./components/OperationsAttention";
+import { focusOperation, type OperationFocus } from "./operation-navigation";
+import "./compact-header.css";
+import "./operations-nav.css";
 import {
   LAYOUTS,
   STATUS_META,
   type ActivitySnapshot,
   type DagResponse,
   type LayoutKind,
+  type RunAttempt,
   type RunStatus,
   type TaskStatus,
   type WorkerRowView,
@@ -47,6 +52,7 @@ const EMPTY_ACTIVITY: ActivitySnapshot = {
   inboxWindow: null,
   generatedAt: 0,
 };
+const EMPTY_ATTEMPTS: RunAttempt[] = [];
 const POLL_MS = 2000;
 const COMMUNICATION_MIN_WIDTH = 380;
 const COMMUNICATION_MAX_WIDTH = 820;
@@ -198,6 +204,8 @@ export default function App() {
   const [communicationWidth, setCommunicationWidth] = useState<number | null>(null);
   const [communicationResizing, setCommunicationResizing] = useState(false);
   const [communicationTab, setCommunicationTab] = useState<"activity" | "chat" | "operations">("activity");
+  const [operationsSeen, setOperationsSeen] = useState(false);
+  const [operationFocus, setOperationFocus] = useState<OperationFocus | null>(null);
   // Parent/child ownership links (Phase 4) are hideable: on dense graphs they
   // can reduce readability, and they carry no scheduling semantics to lose.
   const [showHierarchy, setShowHierarchy] = useState(true);
@@ -439,6 +447,7 @@ export default function App() {
     setRunId(id);
     setSelectedId(null);
     setStageOpen(false);
+    setOperationFocus(null);
     setActivityPending(0);
     setActivitySnapshot({ ...EMPTY_ACTIVITY, runId: id });
     // Do not leave the previous Run's graph visible during the new Run's
@@ -501,6 +510,26 @@ export default function App() {
     ? visibleDag.nodes.filter((n) => n.parentId === selected.id).map((n) => n.label)
     : [];
   const selectedReadiness = selected ? visibleDag.readiness[selected.id] ?? null : null;
+  const operationSnapshots = {
+    runId,
+    dag: visibleDag.runId === runId ? visibleDag : null,
+    status: runStatus?.runId === runId ? runStatus : null,
+    workers: workerHistoryLoading || workerHistoryError ? null : workerRows,
+  };
+  const actionableCount = countActionableOperations(operationSnapshots);
+  const knownActionableCount = countKnownActionableOperations(operationSnapshots);
+
+  function openOperation(target: OperationFocus) {
+    setOperationFocus(target);
+    setOperationsSeen(true);
+    setCommunicationTab("operations");
+    openCommunication();
+  }
+
+  useEffect(() => {
+    if (!communicationOpen || communicationTab !== "operations" || !operationFocus) return;
+    if (focusOperation(communicationRef.current, operationFocus)) setOperationFocus(null);
+  }, [communicationOpen, communicationTab, operationFocus, visibleDag, workerRows, runStatus]);
   const startedTaskIds = useMemo(
     () => new Set(runId ? startedByRun.current.get(runId) ?? [] : []),
     [runId, startedRevision],
@@ -533,13 +562,11 @@ export default function App() {
   return (
     <div className="app">
       <HandDrawnDefs />
-      {/* Header = three regions, laid out by CSS across three width bands
-          (single row on desktop; brand+status over the Run row below 1024px;
-          a full-width Run row below 620px — see the header media queries in
-          styles.css). The markup order brand → run → status is the tab order;
-          the two-row/phone arrangements are pure `order` + wrapping. */}
+      {/* The header is one Run line on desktop: brand → objective selector →
+          progress → health/connection → execution controls. Narrow layouts
+          wrap these same regions without changing their focus order. */}
       <header className="topbar">
-        <div className="topbar__brand">
+        <div className="topbar__brand topbar__brand--compact">
           {/* the mascot is drawn, not typeset — and it's an ORCA, not a whale:
               black body with the tall dorsal fin drawn into the outline, white
               belly, the signature white eye patch. Separate strokes like any
@@ -569,18 +596,40 @@ export default function App() {
           </svg>
           <div className="topbar__brand-text">
             <div className="topbar__title">Orca DAG Viewer</div>
-            <div className="topbar__subtitle">Chat with your agent to build the graph · pick harnesses, let Orca run it in parallel</div>
           </div>
         </div>
-        {/* The flexible middle region: the Run context (selector + New Run).
-            On desktop it centers in all spare width; below 1024px CSS drops
-            it to its own header row. */}
+        {/* RunPicker keeps the selected objective in the main line; creation,
+            exact-ID navigation, and older pages live in its Run options menu. */}
         <div className="topbar__run">
           <RunPicker runId={runId} onPick={pickRun} autoPick={hydrated} />
         </div>
-        {/* Run/Orca status cluster, pinned right on desktop. The conn pill is
-            focusable with a live-region role so its state is reachable and
-            announced without hovering. */}
+        {runId && (
+          <div
+            className="topbar__progress"
+            role="group"
+            aria-label={`Run progress: ${counts.completed ?? 0} of ${visibleDag.nodes.length} stages complete${(counts.failed ?? 0) > 0 ? `, ${counts.failed} failed` : ""}`}
+          >
+            <span
+              className="topbar__progress-track"
+              role="progressbar"
+              aria-label="Completed stages"
+              aria-valuemin={0}
+              aria-valuemax={visibleDag.nodes.length}
+              aria-valuenow={counts.completed ?? 0}
+              aria-valuetext={`${counts.completed ?? 0} of ${visibleDag.nodes.length} stages complete`}
+            >
+              <i style={{ width: `${visibleDag.nodes.length ? ((counts.completed ?? 0) / visibleDag.nodes.length) * 100 : 0}%` }} />
+            </span>
+            <span className="topbar__progress-label">
+              {visibleDag.nodes.length ? `${counts.completed ?? 0}/${visibleDag.nodes.length} done` : "No stages"}
+            </span>
+            {(counts.failed ?? 0) > 0 && (
+              <span className="topbar__progress-failed">⚠ {counts.failed} failed</span>
+            )}
+          </div>
+        )}
+        {/* The conn pill is focusable with a live-region role so its state is
+            reachable and announced without hovering. */}
         <div className="topbar__status">
           <RunHealthBadge runId={runId} />
           <div
@@ -593,6 +642,19 @@ export default function App() {
             {connError ? "Fetch failed" : execOff ? "View-only" : "Orca connected"}
           </div>
         </div>
+        <ExecControls
+          runId={runId}
+          taskIds={visibleDag.nodes.map((n) => n.id)}
+          edges={visibleDag.edges}
+          readyCount={counts.ready ?? 0}
+          startingRunId={startingRunId}
+          status={runStatus}
+          workerHistoryLoading={workerHistoryLoading}
+          workerHistoryError={workerHistoryError}
+          onRunStarting={onRunStarting}
+          onRunStartFinished={onRunStartFinished}
+          onRunStopped={onRunStopped}
+        />
         <span className="topbar__tape" aria-hidden="true" />
       </header>
 
@@ -603,93 +665,112 @@ export default function App() {
               <button
                 type="button"
                 className={`btn btn--activity${communicationOpen ? " active" : ""}`}
-                aria-pressed={communicationOpen}
-                onClick={openCommunication}
+                aria-pressed={communicationOpen && communicationTab !== "operations"}
+                onClick={() => {
+                  setCommunicationTab("activity");
+                  openCommunication();
+                }}
               >
                 Activity / Chat
                 {activityPending > 0 && <span className="activity-badge">{activityPending}</span>}
               </button>
-              <div className="legend">
-                {(Object.keys(STATUS_META) as TaskStatus[]).map((s) => (
-                  <span
-                    key={s}
-                    className={`legend__item${counts[s] ? " legend__item--live" : ""}`}
-                    data-status={s}
-                  >
-                    <span className="legend__dot" style={{ background: STATUS_META[s].color }} />
-                    {STATUS_META[s].label}
-                    {/* keyed by value so the badge re-pops each time it changes */}
-                    {counts[s] ? (
-                      <b className="legend__n" key={counts[s]}>
-                        {counts[s]}
-                      </b>
-                    ) : null}
+              <button
+                type="button"
+                className={`btn btn--operations${communicationOpen && communicationTab === "operations" ? " active" : ""}`}
+                aria-pressed={communicationOpen && communicationTab === "operations"}
+                aria-label={actionableCount === null
+                  ? knownActionableCount > 0
+                    ? `Open Operations, at least ${knownActionableCount} actionable items`
+                    : "Open Operations, actionable count unknown"
+                  : `Open Operations, ${actionableCount} actionable items`}
+                onClick={() => {
+                  setOperationsSeen(true);
+                  setCommunicationTab("operations");
+                  openCommunication();
+                }}
+              >
+                Operations
+                {knownActionableCount > 0 && (
+                  <span className="operations-badge">
+                    {actionableCount === null ? `${knownActionableCount}+` : actionableCount}
                   </span>
-                ))}
-              </div>
-              {/* Phase 4: the two relation grammars, named. The toggle hides
-                  parent links (they are presentation-only, so hiding them
-                  loses nothing the scheduler depends on). */}
-              <div className="legend legend--relations" role="group" aria-label="Relation legend">
-                <span className="legend__item legend__item--static" title="Dependency: work that must finish before the target stage may start">
-                  <span aria-hidden="true" className="legend__glyph legend__glyph--dep">⇢</span>
-                  dependency
-                </span>
-                <span className="legend__item legend__item--static" title="Ownership: parent/child structure — never a dependency, never an order">
-                  <span aria-hidden="true" className="legend__glyph legend__glyph--hier">┄</span>
-                  parent
-                </span>
-                <button
-                  type="button"
-                  className={`btn btn--ghost legend__toggle${showHierarchy ? "" : " legend__toggle--off"}`}
-                  aria-pressed={showHierarchy}
-                  title="Show or hide parent/child links on the graph (they are never dependencies)"
-                  onClick={() => setShowHierarchy((v) => !v)}
-                >
-                  {showHierarchy ? "Hide parent links" : "Show parent links"}
-                </button>
-              </div>
+                )}
+              </button>
+              <details className="view-menu">
+                <summary title="Status colors, graph relations, and layout options">
+                  <span aria-hidden="true">⌘</span> View
+                </summary>
+                <div className="view-menu__panel">
+                  <div className="legend" role="group" aria-label="Stage status legend">
+                    {(Object.keys(STATUS_META) as TaskStatus[]).map((s) => (
+                      <span
+                        key={s}
+                        className={`legend__item${counts[s] ? " legend__item--live" : ""}`}
+                        data-status={s}
+                      >
+                        <span className="legend__dot" style={{ background: STATUS_META[s].color }} />
+                        {STATUS_META[s].label}
+                        {/* keyed by value so the badge re-pops each time it changes */}
+                        {counts[s] ? (
+                          <b className="legend__n" key={counts[s]}>
+                            {counts[s]}
+                          </b>
+                        ) : null}
+                      </span>
+                    ))}
+                  </div>
+                  {/* Phase 4: the two relation grammars, named. The toggle hides
+                      parent links (they are presentation-only, so hiding them
+                      loses nothing the scheduler depends on). */}
+                  <div className="legend legend--relations" role="group" aria-label="Relation legend">
+                    <span className="legend__item legend__item--static" title="Dependency: work that must finish before the target stage may start">
+                      <span aria-hidden="true" className="legend__glyph legend__glyph--dep">⇢</span>
+                      dependency
+                    </span>
+                    <span className="legend__item legend__item--static" title="Ownership: parent/child structure — never a dependency, never an order">
+                      <span aria-hidden="true" className="legend__glyph legend__glyph--hier">┄</span>
+                      parent
+                    </span>
+                    <button
+                      type="button"
+                      className={`btn btn--ghost legend__toggle${showHierarchy ? "" : " legend__toggle--off"}`}
+                      aria-pressed={showHierarchy}
+                      title="Show or hide parent/child links on the graph (they are never dependencies)"
+                      onClick={() => setShowHierarchy((v) => !v)}
+                    >
+                      {showHierarchy ? "Hide parent links" : "Show parent links"}
+                    </button>
+                  </div>
+                  <div className="layout-ctl">
+                    <span className="exec__label">Layout</span>
+                    <div className="seg" role="group" aria-label="Layout algorithm">
+                      {LAYOUTS.map((l) => (
+                        <button
+                          key={l.kind}
+                          className={layout === l.kind ? "active" : ""}
+                          aria-pressed={layout === l.kind}
+                          title={l.title}
+                          onClick={() => pickLayout(l.kind)}
+                        >
+                          <span aria-hidden="true">{l.icon}</span> {l.label}
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      className="btn btn--ghost"
+                      title="Re-run auto-layout (discards manual drags)"
+                      onClick={() => setReorgNonce((n) => n + 1)}
+                    >
+                      ↻ Re-layout
+                    </button>
+                  </div>
+                </div>
+              </details>
             </div>
             <div className="dag-toolbar__right">
-              <div className="layout-ctl">
-                <span className="exec__label">Layout</span>
-                <div className="seg" role="group" aria-label="Layout algorithm">
-                  {LAYOUTS.map((l) => (
-                    <button
-                      key={l.kind}
-                      className={layout === l.kind ? "active" : ""}
-                      aria-pressed={layout === l.kind}
-                      title={l.title}
-                      onClick={() => pickLayout(l.kind)}
-                    >
-                      <span aria-hidden="true">{l.icon}</span> {l.label}
-                    </button>
-                  ))}
-                </div>
-                <button
-                  className="btn btn--ghost"
-                  title="Re-run auto-layout (discards manual drags)"
-                  onClick={() => setReorgNonce((n) => n + 1)}
-                >
-                  ↻ Re-layout
-                </button>
-              </div>
               <span className="dag-toolbar__meta">
                 {visibleDag.nodes.length} tasks · {visibleDag.edges.length} deps
               </span>
-              <ExecControls
-                runId={runId}
-                taskIds={visibleDag.nodes.map((n) => n.id)}
-                edges={visibleDag.edges}
-                readyCount={counts.ready ?? 0}
-                startingRunId={startingRunId}
-                status={runStatus}
-                workerHistoryLoading={workerHistoryLoading}
-                workerHistoryError={workerHistoryError}
-                onRunStarting={onRunStarting}
-                onRunStartFinished={onRunStartFinished}
-                onRunStopped={onRunStopped}
-              />
             </div>
 
             {/* the toolbar's bottom rule fills in with crayon as work lands */}
@@ -730,9 +811,17 @@ export default function App() {
                       role="tab"
                       aria-selected={communicationTab === "operations"}
                       className={communicationTab === "operations" ? "active" : ""}
-                      onClick={() => setCommunicationTab("operations")}
+                      onClick={() => {
+                        setOperationsSeen(true);
+                        setCommunicationTab("operations");
+                      }}
                     >
                       Operations
+                      {knownActionableCount > 0 && (
+                        <span className="operations-badge">
+                          {actionableCount === null ? `${knownActionableCount}+` : actionableCount}
+                        </span>
+                      )}
                     </button>
                     <button
                       type="button"
@@ -759,7 +848,7 @@ export default function App() {
                   <div hidden={communicationTab !== "activity"}>
                     <ActivityPanel
                         runId={runId}
-                        onSelectTask={(taskId) => selectStage(taskId)}
+                        onSelectTask={selectStage}
                         onResolved={refresh}
                         onPendingCount={setActivityPending}
                         onSnapshot={setActivitySnapshot}
@@ -767,15 +856,15 @@ export default function App() {
                         disabledReason={readiness?.reason}
                       />
                   </div>
-                  {communicationTab === "operations" && (
-                    // Mounted ONLY while the tab is active. The operations
-                    // panels poll (recovery reads, request-audit ledger), and
-                    // keeping them alive behind `hidden` meant a backgrounded
-                    // page kept issuing viewer API requests; unmounting tears
-                    // their intervals down, remounting re-arms them with an
-                    // immediate load. Activity and Chat stay mounted — their
-                    // warm state (unread counts, conversation) is the point.
-                    <div className="communication-center__operations">
+                  {operationsSeen && (
+                    // Keep panel state warm after its first visit. The two
+                    // polling children receive `active` and stop their
+                    // intervals while this tab is hidden.
+                    <div hidden={communicationTab !== "operations"} className="communication-center__operations">
+                      <OperationsAttention
+                        {...operationSnapshots}
+                        onFocus={setOperationFocus}
+                      />
                       {/* Promoted from a collapsed drawer under the timeline to
                           its own tab: gates, recovery, the durable fleet view,
                           the mutation audit and capability facts are operational
@@ -806,15 +895,15 @@ export default function App() {
                         disabledReason={readiness?.reason}
                       />
                       {/* Phase 7: runtime lane state — workspace identity,
-                          warnings, review, and explicit removal. Mounted
-                          only while the tab is active like the other
-                          polling operations panels. */}
+                          warnings, review, and explicit removal. Its polling
+                          pauses when Operations is out of view. */}
                       <LanesPanel
                         runId={runId}
+                        active={communicationOpen && communicationTab === "operations"}
                         disabled={execOff}
                         disabledReason={readiness?.reason}
                       />
-                      <RequestAuditPanel runId={runId} />
+                      <RequestAuditPanel runId={runId} active={communicationOpen && communicationTab === "operations"} />
                       <CapabilityPanel />
                     </div>
                   )}
@@ -824,7 +913,7 @@ export default function App() {
                       snapshot={activitySnapshot}
                       tasks={visibleDag.nodes}
                       leadTaskId={leadTaskId}
-                      onSelectTask={(taskId) => selectStage(taskId)}
+                      onSelectTask={selectStage}
                       onResolved={refresh}
                       coordinatorActive={selectedRunExecuting}
                       disabled={execOff}
@@ -867,7 +956,7 @@ export default function App() {
                 fitNonce={canvasFitNonce}
                 showHierarchy={showHierarchy}
                 workerRows={workerRows}
-                attempts={runStatus?.runId === runId ? runStatus.attempts : []}
+                  attempts={runStatus?.runId === runId ? runStatus.attempts : EMPTY_ATTEMPTS}
               />
 
               {/* Compact scheduler surface (Phase 4): intentionally its own
@@ -911,6 +1000,18 @@ export default function App() {
                   coordinatorStarting={selectedRunStarting}
                   workerHistoryLoading={workerHistoryLoading}
                   workerHistoryError={workerHistoryError}
+                  failedStart={Boolean(
+                    runStatus?.runId === runId && runStatus.attempts.some((attempt) =>
+                      attempt.taskId === selected.id &&
+                      attempt.settledVia === "start_failed" &&
+                      attempt.startReceipt?.ok === false,
+                    ),
+                  )}
+                  hasWorkerHistory={workerRows.some((row) => row.taskId === selected.id)}
+                  onOpenOperations={(target) => {
+                    setStageOpen(false);
+                    openOperation(target);
+                  }}
                   onClose={() => setStageOpen(false)}
                 />
               )}

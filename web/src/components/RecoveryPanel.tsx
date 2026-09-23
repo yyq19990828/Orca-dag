@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { memo, useCallback, useState } from "react";
 import { retryWorker } from "../api";
 import type { RunAttempt, RunStatus } from "../types";
 
@@ -14,7 +14,7 @@ import type { RunAttempt, RunStatus } from "../types";
  * /api/run-status poll and passes the snapshot down, so a backgrounded page
  * never hears a second caller of that endpoint.
  */
-export function RecoveryPanel({
+export const RecoveryPanel = memo(function RecoveryPanel({
   runId,
   status = null,
   onRetried,
@@ -144,7 +144,13 @@ export function RecoveryPanel({
       ))}
 
       {failedStarts.map((a) => (
-        <div key={`failed-${a.taskId}`} className="gate inbox__item inbox__debt">
+        <div
+          key={`failed-${a.taskId}`}
+          className="gate inbox__item inbox__debt"
+          data-operation-kind="recovery"
+          data-operation-id={a.taskId}
+          tabIndex={-1}
+        >
           <div className="gate__badge">Start failed{a.startReceipt?.failedStage ? ` at ${a.startReceipt.failedStage}` : ""}</div>
           <div className="gate__question">
             <code>{a.taskId}</code>
@@ -189,4 +195,4 @@ export function RecoveryPanel({
       {disabled && disabledReason && <div className="exec__hint">🔒 {disabledReason}</div>}
     </div>
   );
-}
+});

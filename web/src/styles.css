@@ -1858,6 +1858,9 @@ body {
 }
 .communication-center__chat {
   height: 100%;
+  /* The rail can be resized while the viewport stays wide, so Chat's
+     compact layout must respond to the rail itself. */
+  container: chat-panel / inline-size;
 }
 /* Operations is a full communication-center TAB now (promoted out of the
    collapsed drawer it used to be under the Activity timeline): page-level
@@ -2525,7 +2528,8 @@ body {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 14px;
+  flex-wrap: wrap;
+  gap: 4px 6px;
   color: var(--ink-soft);
   font-size: 12.75px;
 }
@@ -2598,11 +2602,17 @@ body {
 }
 .chat-message--system.chat-message--warning { border-color: var(--butter); }
 .chat-message--system.chat-message--error { border-color: var(--coral); }
+.chat-checkpoint-group {
+  display: grid;
+  width: min(84%, 460px);
+  max-width: 100%;
+  align-self: center;
+  gap: 4px;
+}
 .chat-checkpoint {
   position: relative;
   display: grid;
-  width: min(84%, 460px);
-  align-self: center;
+  width: 100%;
   grid-template-columns: 14px minmax(0, 1fr);
   align-items: stretch;
   gap: 7px;
@@ -2679,29 +2689,25 @@ body {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-.chat-checkpoint__details {
-  margin-top: 1px;
-  border-top: 1px dashed rgba(211, 204, 184, 0.72);
-}
-.chat-checkpoint__details > summary {
+.chat-checkpoint__toggle {
   display: inline-flex;
   width: max-content;
+  max-width: 100%;
   align-items: center;
   gap: 4px;
   padding-top: 5px;
   color: var(--sky-ink);
+  background: transparent;
+  border: 0;
   cursor: pointer;
+  font: inherit;
   font-size: 12px;
-  list-style: none;
 }
-.chat-checkpoint__details > summary::-webkit-details-marker {
-  display: none;
-}
-.chat-checkpoint__details > summary:hover,
-.chat-checkpoint__details > summary:focus-visible {
+.chat-checkpoint__toggle:hover,
+.chat-checkpoint__toggle:focus-visible {
   color: var(--lilac-ink);
 }
-.chat-checkpoint__details > summary:focus-visible {
+.chat-checkpoint__toggle:focus-visible {
   outline: 1px dashed currentColor;
   outline-offset: 2px;
 }
@@ -2713,29 +2719,53 @@ body {
   transform: rotate(0deg);
   transition: transform 140ms ease;
 }
-.chat-checkpoint__details[open] .chat-checkpoint__chevron {
+.chat-checkpoint__toggle[aria-expanded="true"] .chat-checkpoint__chevron {
   transform: rotate(90deg);
 }
-.chat-checkpoint__log {
+.chat-checkpoint__entries {
   display: grid;
-  gap: 7px;
-  margin-top: 6px;
-  padding: 7px;
-  background:
-    repeating-linear-gradient(180deg, transparent 0 19px, rgba(123, 177, 212, 0.12) 19px 20px),
-    rgba(255, 255, 255, 0.34);
-  border: 1px solid rgba(123, 177, 212, 0.26);
+  gap: 4px;
+}
+.chat-checkpoint__older {
+  justify-self: start;
+  margin-left: 21px;
+  padding: 3px 6px;
+  color: var(--sky-ink);
+  background: rgba(123, 183, 224, 0.12);
+  border: 1px dashed rgba(62, 123, 166, 0.4);
   border-radius: 6px 4px 7px 3px;
+  cursor: pointer;
+  font: inherit;
+}
+.chat-checkpoint__older:hover,
+.chat-checkpoint__older:focus-visible {
+  background: rgba(123, 183, 224, 0.22);
 }
 .chat-checkpoint__receipt {
   display: grid;
-  gap: 6px;
+  gap: 3px;
   min-width: 0;
-  padding: 2px 1px 6px;
+  padding: 7px;
+  background: rgba(255, 255, 255, 0.42);
 }
-.chat-checkpoint__receipt + .chat-checkpoint__receipt {
-  padding-top: 8px;
-  border-top: 1px dashed rgba(139, 135, 152, 0.35);
+.chat-checkpoint__receipt-details {
+  min-width: 0;
+  padding-top: 3px;
+  border-top: 1px dashed rgba(211, 204, 184, 0.72);
+}
+.chat-checkpoint__receipt-details > summary {
+  width: max-content;
+  max-width: 100%;
+  color: var(--sky-ink);
+  cursor: pointer;
+  font-size: 12px;
+}
+.chat-checkpoint__receipt-details > summary:focus-visible {
+  outline: 1px dashed currentColor;
+  outline-offset: 2px;
+}
+.chat-checkpoint__receipt-details[open] > summary {
+  margin-bottom: 6px;
 }
 .chat-checkpoint__receipt > header {
   display: flex;
@@ -3127,6 +3157,49 @@ body {
   .chat__messages {
     padding-right: 9px;
     padding-left: 9px;
+  }
+}
+
+/* The communication rail can reach this width on a large desktop too.
+   Keep conversations available above the message pane instead of squeezing
+   both columns until message metadata and controls spill out. */
+@container chat-panel (max-width: 520px) {
+  .chat {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 101px minmax(0, 1fr);
+  }
+  .chat__threads {
+    border-right: 0;
+    border-bottom: 2px dashed var(--line);
+  }
+  .chat__threads-title {
+    padding: 4px 10px 2px;
+    font-size: 12px;
+  }
+  .chat__thread-list {
+    display: flex;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  .chat-thread__section,
+  .chat-thread__avatar,
+  .chat-thread__system-label {
+    display: none;
+  }
+  .chat-thread {
+    width: 150px;
+    height: 100%;
+    flex: 0 0 150px;
+    grid-template-columns: minmax(0, 1fr);
+    padding: 7px 9px;
+  }
+  .chat-thread__topline time {
+    flex: none;
+    font-size: 11px;
+  }
+  .chat-thread__preview {
+    font-size: 12px;
   }
 }
 .node-panel__custom {
@@ -4724,13 +4797,19 @@ body {
   margin-top: 3px;
 }
 
-/* Message-level metadata chips. Keep the timestamp pinned right while the
-   chips hug the actor name. */
+/* Message-level metadata chips wrap as the rail shrinks; the timestamp
+   stays right-aligned on whichever line has room for it. */
 .chat-message__meta > * {
   flex: none;
 }
+.chat-message__meta strong {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
 .chat-message__meta time {
   margin-left: auto;
+  white-space: nowrap;
 }
 .chat-message__priority,
 .chat-message__read,

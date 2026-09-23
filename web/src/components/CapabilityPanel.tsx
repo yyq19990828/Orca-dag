@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { fetchCapabilities } from "../api";
 import { UMBRELLA_CAPABILITY_IDS, type RuntimeCapabilitiesResponse } from "../types";
 
@@ -24,7 +24,7 @@ const STATE_META: Record<
   absent: { label: "Not advertised", cls: "cap__state--off" },
 };
 
-export function CapabilityPanel() {
+export const CapabilityPanel = memo(function CapabilityPanel() {
   const [view, setView] = useState<RuntimeCapabilitiesResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -113,4 +113,4 @@ export function CapabilityPanel() {
       )}
     </section>
   );
-}
+});

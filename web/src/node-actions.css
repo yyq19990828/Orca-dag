@@ -1,0 +1,42 @@
+.node-panel__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: 13px 0 16px;
+  padding: 11px 0 0;
+  border-top: 1px dashed var(--line-strong);
+}
+
+.node-panel__action {
+  padding: 5px 9px;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 9px 7px 8px 6px;
+  background: var(--paper-2);
+  color: var(--ink);
+  font: 12px var(--font-body);
+  cursor: pointer;
+}
+
+.node-panel__action:hover {
+  border-color: var(--sky-ink);
+  background: var(--sky-wash);
+}
+
+.node-panel__action:focus-visible {
+  outline: 2px solid var(--sky-ink);
+  outline-offset: 2px;
+}
+
+[data-operation-kind] {
+  scroll-margin-block: 14px;
+}
+
+[data-operation-kind]:focus-visible {
+  outline: 2px solid var(--sky-ink);
+  outline-offset: 3px;
+}
+
+[data-operation-kind].operation-target {
+  outline: 3px solid var(--sky);
+  outline-offset: 3px;
+}

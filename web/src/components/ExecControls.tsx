@@ -276,58 +276,73 @@ export function ExecControls({
 
   return (
     <div className="exec">
-      <div className="exec__field">
-        <span className="exec__label">Default harness</span>
-        <DoodleSelect
-          size="sm"
-          value={defHarness}
-          onChange={pickDefault}
-          disabled={launchLocked}
-          options={[
-            ...HARNESSES.map((h) => ({ value: h, label: h })),
-            // "Custom…" only exists while the server allows custom commands —
-            // but a *stored* custom default must stay visible (and switchable
-            // away from) even when the flag is off, so it's never hidden data.
-            ...(customOk || storedIsCustom
-              ? [
-                  {
-                    value: CUSTOM,
-                    label: customOk ? "Custom…" : "Custom (disabled)",
-                    disabled: !customOk,
-                    hint: customOk ? undefined : "ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1",
-                  },
-                ]
-              : []),
-          ]}
-        />
-        {defHarness === CUSTOM && (
-          <input
-            className="exec__custom"
-            value={custom}
-            placeholder="command"
-            onChange={(e) => {
-              if (!launchLocked) setCustom(e.target.value);
-            }}
-            disabled={launchLocked || !customOk}
-          />
-        )}
-        {defHarness === CUSTOM && !customOk && <span className="exec__hint">{CUSTOM_OFF_HINT}</span>}
-      </div>
+      <details className="exec__settings">
+        <summary
+          aria-label={`Execution settings: ${resolvedDefault || "no default harness"}, maximum ${config.maxConcurrency} parallel workers`}
+          title={launchLockReason ?? "Choose the fallback harness and maximum parallel workers"}
+        >
+          <span aria-hidden="true">⚙</span>
+          <span>Settings</span>
+          <span className="exec__settings-summary">
+            {resolvedDefault || "No harness"} · max {config.maxConcurrency}
+          </span>
+        </summary>
+        <div className="exec__settings-panel" role="group" aria-label="Execution settings">
+          <div className="exec__field">
+            <span className="exec__label">Default harness</span>
+            <DoodleSelect
+              size="sm"
+              value={defHarness}
+              onChange={pickDefault}
+              disabled={launchLocked}
+              options={[
+                ...HARNESSES.map((h) => ({ value: h, label: h })),
+                // "Custom…" only exists while the server allows custom commands —
+                // but a *stored* custom default must stay visible (and switchable
+                // away from) even when the flag is off, so it's never hidden data.
+                ...(customOk || storedIsCustom
+                  ? [
+                      {
+                        value: CUSTOM,
+                        label: customOk ? "Custom…" : "Custom (disabled)",
+                        disabled: !customOk,
+                        hint: customOk ? undefined : "ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1",
+                      },
+                    ]
+                  : []),
+              ]}
+            />
+            {defHarness === CUSTOM && (
+              <input
+                className="exec__custom"
+                value={custom}
+                placeholder="command"
+                aria-label="Custom default harness command"
+                onChange={(e) => {
+                  if (!launchLocked) setCustom(e.target.value);
+                }}
+                disabled={launchLocked || !customOk}
+              />
+            )}
+            {defHarness === CUSTOM && !customOk && <span className="exec__hint">{CUSTOM_OFF_HINT}</span>}
+          </div>
 
-      <label className="exec__field">
-        <span className="exec__label">Max parallel</span>
-        <input
-          className="exec__num"
-          type="number"
-          min={1}
-          max={16}
-          value={config.maxConcurrency}
-          onChange={(e) => {
-            if (!launchLocked) setMaxConcurrency(Number(e.target.value) || 1);
-          }}
-          disabled={launchLocked}
-        />
-      </label>
+          <label className="exec__field">
+            <span className="exec__label">Max parallel</span>
+            <input
+              className="exec__num"
+              type="number"
+              min={1}
+              max={16}
+              value={config.maxConcurrency}
+              onChange={(e) => {
+                if (!launchLocked) setMaxConcurrency(Number(e.target.value) || 1);
+              }}
+              disabled={launchLocked}
+            />
+          </label>
+        </div>
+      </details>
 
       {running ? (
         <div className="exec__live">
@@ -355,6 +370,14 @@ export function ExecControls({
         </div>
       ) : starting ? (
         <div className="exec__live">
+          <button
+            type="button"
+            className="btn btn--stop-run"
+            disabled
+            title="Stop becomes available after Orca binds this Run"
+          >
+            ⏹ Stop
+          </button>
           <span className="exec__running">
             <span className="exec__pulse" /> Binding and recovering…
           </span>
@@ -373,8 +396,11 @@ export function ExecControls({
             className="exec__running exec__done"
             title={ownStatus?.completedAt ? `Completed at ${new Date(ownStatus.completedAt).toLocaleTimeString()}` : undefined}
           >
-            ✓ Completed · {ownStatus?.attempts.length ?? 0} worker
-            {(ownStatus?.attempts.length ?? 0) === 1 ? "" : "s"} released
+            <span className="exec__done-long">
+              ✓ Completed · {ownStatus?.attempts.length ?? 0} worker
+              {(ownStatus?.attempts.length ?? 0) === 1 ? "" : "s"} released
+            </span>
+            <span className="exec__done-short">✓ Done</span>
           </span>
         </div>
       ) : (
@@ -398,10 +424,16 @@ export function ExecControls({
 
       {/* explicit Stop must report every uncertain teardown, never swallow it */}
       {stopReport && !running && (
-        <div className={`exec__stop-report${stopReport.clean ? "" : " exec__stop-report--warn"}`}>
-          {stopReport.clean ? "Stop clean" : `Stop finished with ${stopUncertain.length} uncertain`} ·{" "}
-          {stopReport.results.length} action{stopReport.results.length === 1 ? "" : "s"}
-          {stopUncertain.length > 0 && (
+        stopReport.clean ? (
+          <span className="exec__notice exec__notice--ok" role="status">
+            ✓ Stop clean · {stopReport.results.length} action{stopReport.results.length === 1 ? "" : "s"}
+          </span>
+        ) : (
+          <details className="exec__stop-report exec__stop-report--warn">
+            <summary role="status">
+              ⚠ Stop finished with {stopUncertain.length} uncertain · {stopReport.results.length} action
+              {stopReport.results.length === 1 ? "" : "s"}
+            </summary>
             <ul className="exec__stop-unknowns">
               {stopUncertain.map((r, i) => (
                 <li key={`${r.target}-${i}`}>
@@ -409,30 +441,31 @@ export function ExecControls({
                 </li>
               ))}
             </ul>
+          </details>
+        )
+      )}
+
+      {(execOff || launchLockReason || otherRunStatus || (anotherRunStarting && !otherRunStatus) || err || ownStatus?.error) && (
+        <div className="exec__notices" aria-live="polite">
+          {execOff && <span className="exec__hint">🔒 {readiness?.reason}</span>}
+          {launchLockReason && <span className="exec__hint">🔒 {launchLockReason}</span>}
+          {otherRunStatus && (
+            <span className="exec__hint">
+              🔒 Run <code>{otherRunStatus.runId}</code> is executing; its Stop control appears when you select that Run.
+            </span>
+          )}
+          {anotherRunStarting && !otherRunStatus && (
+            <span className="exec__hint">
+              🔒 Run <code>{startingRunId}</code> is binding in this viewer; select it after startup to inspect or stop it.
+            </span>
+          )}
+          {(err || ownStatus?.error) && (
+            <span className="exec__err" role="alert" title={err || ownStatus?.error || undefined}>
+              ⚠️ {err || ownStatus?.error}
+            </span>
           )}
         </div>
       )}
-
-      {execOff && <span className="exec__hint">🔒 {readiness?.reason}</span>}
-
-      {launchLockReason && <span className="exec__hint">🔒 {launchLockReason}</span>}
-      {workerHistoryError && (
-        <span className="exec__hint">
-          ⚠️ Dispatch history could not be verified; launch settings remain locked until verification recovers.
-        </span>
-      )}
-      {otherRunStatus && (
-        <span className="exec__hint">
-          🔒 Run <code>{otherRunStatus.runId}</code> is executing; its Stop control appears when you select that Run.
-        </span>
-      )}
-      {anotherRunStarting && !otherRunStatus && (
-        <span className="exec__hint">
-          🔒 Run <code>{startingRunId}</code> is binding in this viewer; select it after startup to inspect or stop it.
-        </span>
-      )}
-
-      {(err || ownStatus?.error) && <span className="exec__err">⚠️ {err || ownStatus?.error}</span>}
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, type CSSProperties } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, type CSSProperties } from "react";
 import {
   Background,
   BackgroundVariant,
@@ -19,9 +19,18 @@ import {
   type NodeProps,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import "../stage-card.css";
 import { applyLayout } from "../layout";
 import { effectiveHarness, useConfig } from "../harness";
-import { STATUS_META, type DagResponse, type LayoutKind, type RunAttempt, type TaskStatus, type WorkerRowView } from "../types";
+import {
+  STATUS_META,
+  type DagNode,
+  type DagResponse,
+  type LayoutKind,
+  type RunAttempt,
+  type TaskStatus,
+  type WorkerRowView,
+} from "../types";
 
 /** Deterministic PRNG so each node's scribble stays stable across polls. */
 function mulberry32(seed: number) {
@@ -153,6 +162,10 @@ function scribbleLegs(seedId: string, w = 210, h = 72): ScribbleLeg[] {
 
 type TaskNodeData = {  label: string;
   status: TaskStatus;
+  /** One stable, single-line clue about what this stage needs or produced. */
+  summary: string;
+  /** Full evidence text, available on hover when the visible summary is clipped. */
+  summaryTitle: string;
   selected: boolean;
   /** Viewer-only semantic ownership; never changes DAG or Orca authority. */
   lead: boolean;
@@ -167,6 +180,146 @@ type TaskNodeData = {  label: string;
   /** the status changed on this poll — play the one-shot celebration */
   pop: boolean;
 };
+
+type StageSummary = { text: string; title: string };
+
+const STAGE_SUMMARY_LIMIT = 88;
+
+function cleanLine(value: string | null | undefined): string {
+  return value?.replace(/\s+/g, " ").trim() ?? "";
+}
+
+function boundedLine(value: string, limit = STAGE_SUMMARY_LIMIT): string {
+  const normalized = cleanLine(value);
+  if (normalized.length <= limit) return normalized;
+  return `${normalized.slice(0, limit - 1).trimEnd()}…`;
+}
+
+function firstSentence(value: string): string {
+  const normalized = cleanLine(value);
+  const end = normalized.search(/[.!?。！？](?:\s|$)/);
+  return end > 0 ? normalized.slice(0, end + 1) : normalized;
+}
+
+/** Keep the card preview useful for both structured worker reports and plain results. */
+function resultPreview(raw: string | null): string | null {
+  if (!raw?.trim()) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed === "string") return firstSentence(parsed) || null;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const report = parsed as { subject?: unknown; body?: unknown; outcome?: unknown };
+      if (typeof report.subject === "string" && report.subject.trim()) return firstSentence(report.subject);
+      if (typeof report.body === "string" && report.body.trim()) return firstSentence(report.body);
+      if (typeof report.outcome === "string" && report.outcome.trim()) {
+        return `Worker reported ${report.outcome.replaceAll("_", " ")}`;
+      }
+      return "Result recorded";
+    }
+  } catch {
+    // Plain text is a valid task result too; show its first sentence below.
+  }
+  return firstSentence(raw) || null;
+}
+
+function hostLabel(host: { kind: string; id: string } | null | undefined): string | null {
+  if (!host) return null;
+  if (host.kind === "local" || host.id.toLowerCase() === "local") return "Local";
+  const place = cleanLine(host.id) || cleanLine(host.kind);
+  return place ? `On ${place}` : null;
+}
+
+function activeStageSummary(worker: WorkerRowView | undefined, attempt: RunAttempt | undefined): string {
+  const stage = worker?.projection?.stage ?? attempt?.stage ?? null;
+  const detail = cleanLine(stage?.detail).replaceAll("_", " ");
+  const activity = cleanLine(stage?.activity).toLowerCase();
+  const activityLabel =
+    activity === "working" || activity === "implementing"
+      ? "Worker active"
+      : activity === "idle"
+        ? "Worker idle"
+        : activity && activity !== "unknown"
+          ? `Worker ${activity.replaceAll("_", " ")}`
+          : "Worker dispatch active";
+  const work = detail || activityLabel;
+  const location = hostLabel(worker?.projection?.host ?? attempt?.host);
+  return location ? `${work} · ${location}` : work;
+}
+
+function summarizeStage(
+  node: DagNode,
+  dag: DagResponse,
+  nodesById: Map<string, DagNode>,
+  worker?: WorkerRowView,
+  attempt?: RunAttempt,
+): StageSummary {
+  const readiness = dag.readiness[node.id];
+  const evidenceTitle = boundedLine(readiness?.reasons.join(" ") || "", 360);
+
+  if (node.status === "ready") {
+    const text = readiness?.codes.includes("waiting_for_capacity")
+      ? "Ready; waiting for a worker slot"
+      : "Ready to dispatch";
+    return { text, title: evidenceTitle || text };
+  }
+
+  if (node.status === "pending" || node.status === "blocked") {
+    const codes = readiness?.codes ?? [];
+    let text: string;
+    if (codes.includes("unmet_dependencies")) {
+      const ids = readiness?.unmetDependencyIds ?? [];
+      if (ids.length === 1) {
+        const dependency = nodesById.get(ids[0]);
+        text = dependency ? `Waiting on ${dependency.label}` : "Waiting on a dependency outside this Run";
+      } else {
+        text = `Waiting on ${ids.length} dependencies`;
+      }
+    } else if (codes.includes("pending_gate")) {
+      const gateIds = readiness?.pendingGateIds ?? [];
+      const gate = gateIds.length === 1 ? dag.gates.find((candidate) => candidate.id === gateIds[0]) : undefined;
+      text = gate?.question?.trim()
+        ? `Decision needed: ${gate.question}`
+        : gateIds.length > 1
+          ? `Waiting on ${gateIds.length} gate decisions`
+          : "Waiting on a gate decision";
+    } else {
+      text = node.status === "blocked"
+        ? "Blocked; inspect readiness details"
+        : "Pending; inspect readiness details";
+    }
+    return { text: boundedLine(text), title: evidenceTitle || text };
+  }
+
+  if (node.status === "dispatched") {
+    const text = activeStageSummary(worker, attempt);
+    const details = worker?.projection?.stage?.detail ?? attempt?.stage?.detail;
+    return { text: boundedLine(text), title: boundedLine(details || text, 360) };
+  }
+
+  const result = resultPreview(node.result);
+  if (result) {
+    return { text: boundedLine(result), title: boundedLine(node.result ?? result, 360) };
+  }
+
+  if (node.status === "completed") {
+    const succeeded = attempt?.outcome === "succeeded" || worker?.projection?.outcome === "succeeded";
+    const text = succeeded ? "Worker reported success" : "Completed without a result summary";
+    return { text, title: text };
+  }
+
+  if (node.status === "failed") {
+    if (attempt?.settledVia === "start_failed") {
+      const failedStage = attempt.startReceipt?.failedStage;
+      const text = failedStage ? `Worker start failed at ${failedStage.replaceAll("_", " ")}` : "Worker failed to start";
+      return { text: boundedLine(text), title: text };
+    }
+    const failed = attempt?.outcome === "failed" || worker?.projection?.outcome === "failed";
+    const text = failed ? "Worker reported failure" : "Failure details unavailable";
+    return { text, title: text };
+  }
+
+  return { text: "Stage context unavailable", title: "Stage context unavailable" };
+}
 
 function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
   const meta = STATUS_META[data.status];
@@ -186,7 +339,7 @@ function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
       className={[
         "task-node",
         data.selected ? "task-node--selected" : "",
-        data.lead ? "task-node--lead" : "",
+      data.lead ? "task-node--lead" : "",
         data.pop ? "task-node--pop" : "",
       ]
         .filter(Boolean)
@@ -197,7 +350,9 @@ function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
           ? "Lead stage — semantic main-agent ownership; Orca coordinator authority is shown separately"
           : undefined
       }
-      aria-label={`${data.label}. ${meta.label}. Harness ${data.harness}.${
+      aria-label={`${data.label}. ${meta.label}. ${data.summary}. Harness ${data.harness}${
+        data.harnessActual ? " (actual launch)" : " (planned or fallback)"
+      }.${
         data.lead ? " Lead stage: semantic main-agent ownership." : ""
       }`}
       onAnimationEnd={(event) => {
@@ -255,7 +410,7 @@ function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
           stays legible from the border alone, with nothing pulsing */}
       {alive && <div className="task-node__aura" aria-hidden="true" />}
       <Handle type="target" position={isTB ? Position.Top : Position.Left} />
-      <div className="task-node__title">{data.label}</div>
+      <div className="task-node__title" title={data.label}>{data.label}</div>
       <div className="task-node__row">
         <div className="task-node__status" style={{ color: meta.ink }}>
           <span className="dot" style={{ background: meta.color }} />
@@ -273,6 +428,9 @@ function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
         >
           {data.harness}
         </span>
+      </div>
+      <div className="task-node__summary" title={data.summaryTitle}>
+        {data.summary}
       </div>
       {/* hand-drawn sign-off: a tick that draws itself, or a scribbled-out cross */}
       {data.status === "completed" && (
@@ -536,6 +694,51 @@ function Flow({
     return map;
   }, [workerRows, attempts]);
 
+  // One compact, evidence-backed clue per card. Prefer the exact current
+  // Dispatch when Orca supplied its id; only fall back to newest-per-Task
+  // facts when the Task row has no current Dispatch id. Parent/child ownership
+  // is deliberately absent here: only server-projected readiness (which is
+  // based on dependencies and gates) can explain why a task is waiting.
+  const stageSummaries = useMemo(() => {
+    const nodesById = new Map(dag.nodes.map((node) => [node.id, node]));
+    const latestAttemptByTask = new Map<string, RunAttempt>();
+    const attemptByDispatch = new Map<string, RunAttempt>();
+    for (const attempt of attempts) {
+      const previous = latestAttemptByTask.get(attempt.taskId);
+      if (!previous || attempt.startedAt >= previous.startedAt) latestAttemptByTask.set(attempt.taskId, attempt);
+      if (attempt.dispatchId) attemptByDispatch.set(attempt.dispatchId, attempt);
+    }
+
+    const latestWorkerByTask = new Map<string, WorkerRowView>();
+    const activeWorkerByTask = new Map<string, WorkerRowView>();
+    const workerByDispatch = new Map<string, WorkerRowView>();
+    for (const worker of workerRows) {
+      if (!worker.taskId) continue;
+      // worker-list is newest-first; preserve its first row for the Task.
+      if (!latestWorkerByTask.has(worker.taskId)) latestWorkerByTask.set(worker.taskId, worker);
+      if (worker.dispatchId && !workerByDispatch.has(worker.dispatchId)) {
+        workerByDispatch.set(worker.dispatchId, worker);
+      }
+      if (worker.dispatchStatus === "dispatched" && !activeWorkerByTask.has(worker.taskId)) {
+        activeWorkerByTask.set(worker.taskId, worker);
+      }
+    }
+
+    return new Map(
+      dag.nodes.map((node) => {
+        const worker = node.dispatchId
+          ? workerByDispatch.get(node.dispatchId)
+          : node.status === "dispatched"
+            ? activeWorkerByTask.get(node.id)
+            : latestWorkerByTask.get(node.id);
+        const attempt = node.dispatchId
+          ? attemptByDispatch.get(node.dispatchId)
+          : latestAttemptByTask.get(node.id);
+        return [node.id, summarizeStage(node, dag, nodesById, worker, attempt)] as const;
+      }),
+    );
+  }, [dag, workerRows, attempts]);
+
   // --- Stage 4 · reconciliation: decoration onto positioned geometry ---------
   //
   // Re-derives the SEMANTICS — status colouring, selection, lead ring, harness
@@ -562,6 +765,8 @@ function Flow({
         data: {
           label: dagNode?.label ?? n.id,
           status: dagNode?.status ?? "pending",
+          summary: stageSummaries.get(n.id)?.text ?? "Stage context unavailable",
+          summaryTitle: stageSummaries.get(n.id)?.title ?? "Stage context unavailable",
           selected: n.id === selectedId,
           lead: n.id === leadTaskId,
           // A launched stage shows what Orca/the coordinator recorded; stages
@@ -641,7 +846,7 @@ function Flow({
       });
     });
     setEdges([...hierarchyEdges, ...decoratedEdges]);
-  }, [laid, dag, leadTaskId, selectedId, layout, reorgNonce, showHierarchy, actualHarness, config, setNodes, setEdges]);
+  }, [laid, dag, leadTaskId, selectedId, layout, reorgNonce, showHierarchy, actualHarness, stageSummaries, config, setNodes, setEdges]);
 
   // Auto-fit when the node count changes, so live status polls don't yank the
   // viewport while the user is inspecting (or dragging).
@@ -730,7 +935,7 @@ function Flow({
   );
 }
 
-export function DagView(props: {
+export const DagView = memo(function DagView(props: {
   dag: DagResponse;
   leadTaskId: string | null;
   selectedId: string | null;
@@ -751,4 +956,4 @@ export function DagView(props: {
       <Flow {...props} />
     </ReactFlowProvider>
   );
-}
+});

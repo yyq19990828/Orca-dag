@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import { resolveGate } from "../api";
 import type { Gate } from "../types";
 import { useDecisionDialog } from "./DecisionDialog";
@@ -25,7 +25,7 @@ const INTEGRATION_OPTIONS = new Set(["integrated"]);
 function isIntegrationGate(g: Gate): boolean {
   return g.options.length > 0 && g.options.every((o) => INTEGRATION_OPTIONS.has(o.trim().toLowerCase()));
 }
-export function GatePanel({
+export const GatePanel = memo(function GatePanel({
   gates,
   runId,
   onResolved,
@@ -67,7 +67,13 @@ export function GatePanel({
       {pending.map((g) => {
         const integration = isIntegrationGate(g);
         return (
-          <div key={g.id} className={`gate${integration ? " gate--integration" : ""}`}>
+          <div
+            key={g.id}
+            className={`gate${integration ? " gate--integration" : ""}`}
+            data-operation-kind="gate"
+            data-operation-id={g.id}
+            tabIndex={-1}
+          >
             <div className="gate__badge">
               {disabled
                 ? "Execution unavailable"
@@ -105,4 +111,4 @@ export function GatePanel({
       })}
     </div>
   );
-}
+});

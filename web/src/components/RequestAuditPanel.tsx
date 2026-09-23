@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
 import { fetchRequestDetail, fetchRequests } from "../api";
 import { formatTimestamp } from "../format";
 import { usePageVisible } from "../visibility";
@@ -45,7 +45,7 @@ function stateCaption(receipt: RequestReceiptView): string {
   }
 }
 
-export function RequestAuditPanel({ runId }: { runId: string }) {
+export const RequestAuditPanel = memo(function RequestAuditPanel({ runId, active = true }: { runId: string; active?: boolean }) {
   const [rows, setRows] = useState<RequestLedgerRowView[]>([]);
   const [otherRunCount, setOtherRunCount] = useState(0);
   const [loadedFor, setLoadedFor] = useState<string | null>(null);
@@ -56,11 +56,9 @@ export function RequestAuditPanel({ runId }: { runId: string }) {
 
   const visible = usePageVisible();
   useEffect(() => {
-    // Interval paused while hidden — this panel lives in the Operations tab,
-    // but the tab can stay selected under a backgrounded page, and its 4s
-    // ledger poll must not survive that. Returning visible re-runs the
-    // effect: one immediate load, then the interval re-arms.
-    if (!visible) return;
+    // Pause both for a backgrounded page and an inactive Operations tab.
+    // Returning to either performs one immediate refresh before re-arming.
+    if (!active || !visible) return;
     let alive = true;
     const load = async () => {
       try {
@@ -80,7 +78,7 @@ export function RequestAuditPanel({ runId }: { runId: string }) {
       alive = false;
       window.clearInterval(t);
     };
-  }, [runId, visible]);
+  }, [active, runId, visible]);
 
   // Probes are keyed by request id AND kept per Run switch — a stale probe
   // from another Run must never dress up this Run's rows.
@@ -200,4 +198,4 @@ export function RequestAuditPanel({ runId }: { runId: string }) {
       </div>
     </div>
   );
-}
+});

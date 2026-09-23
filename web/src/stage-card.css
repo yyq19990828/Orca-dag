@@ -1,0 +1,46 @@
+/* The Dagre/force layouts use a 210 × 72 task footprint. Keep that geometry
+   constant while adding one small context line, so polling worker facts never
+   moves handles or changes the spacing between cards. */
+.task-node.task-node {
+  box-sizing: border-box;
+  width: 210px;
+  height: 72px;
+  min-height: 72px;
+  max-height: 72px;
+  padding: 5px 15px;
+  gap: 2px;
+}
+
+/* A single clipped title leaves room for the new context line. The complete
+   label remains available in its title and the task node's accessible name. */
+.task-node .task-node__title {
+  display: block;
+  line-height: 19px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  -webkit-line-clamp: unset;
+  -webkit-box-orient: unset;
+}
+
+.task-node .task-node__row {
+  flex: 0 0 15px;
+  min-height: 15px;
+}
+
+.task-node .task-node__summary {
+  position: relative;
+  z-index: 1;
+  display: block;
+  flex: 0 0 12px;
+  min-height: 12px;
+  height: 12px;
+  overflow: hidden;
+  color: var(--crayon-ink, var(--ink-soft));
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 12px;
+  letter-spacing: 0.1px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}

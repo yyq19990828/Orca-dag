@@ -1,0 +1,48 @@
+.btn--operations {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ink);
+  background: var(--paper-2);
+  border-color: var(--line-strong);
+}
+
+.btn--operations.active,
+.btn--operations:hover {
+  background: #fff3e5;
+  border-color: var(--butter);
+}
+
+.operations-badge {
+  display: inline-grid;
+  min-width: 18px;
+  height: 18px;
+  place-items: center;
+  padding: 0 5px;
+  color: #fff;
+  background: var(--coral);
+  border-radius: 999px;
+  font: 700 10px/1 var(--font-body);
+}
+
+.btn--operations:focus-visible {
+  outline: 2px solid var(--sky-ink);
+  outline-offset: 2px;
+}
+
+@media (max-width: 620px) {
+  .communication-center__body {
+    overflow-x: hidden;
+  }
+
+  .communication-center__operations .workers__toggle {
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+
+  .communication-center__operations .workers__toggle > .inbox__meta {
+    flex: 1 1 100%;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+}

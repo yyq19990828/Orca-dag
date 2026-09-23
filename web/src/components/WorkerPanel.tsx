@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
 import {
   abandonWorker,
   fetchEnvironments,
@@ -55,7 +55,7 @@ const DECIDED = new Set(["released", "retained", "closed", "reused", "not_needed
 /** The exact label the plan prescribes for a qualified capability-gap row. */
 const QUALIFIED_LABEL = "Agent working · terminal live · supervised liveness unavailable";
 
-export function WorkerPanel({
+export const WorkerPanel = memo(function WorkerPanel({
   runId,
   rows,
   rowsError,
@@ -417,7 +417,14 @@ export function WorkerPanel({
             row.terminalState === "release_pending" ||
             (attempt?.settled === true && !DECIDED.has(attempt.terminalDecision));
           return (
-            <div key={row.dispatchId || row.taskId} className="workers__row">
+            <div
+              key={row.dispatchId || row.taskId}
+              className="workers__row"
+              data-operation-kind="worker"
+              data-operation-id={row.dispatchId || row.taskId}
+              data-operation-task-id={row.taskId}
+              tabIndex={-1}
+            >
               <button className="workers__toggle" onClick={() => toggle(row)}>
                 <span
                   className="workers__liveness"
@@ -828,4 +835,4 @@ export function WorkerPanel({
       </div>
     </div>
   );
-}
+});

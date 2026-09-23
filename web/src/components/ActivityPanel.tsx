@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchActivity,
   releaseWorker,
@@ -67,7 +67,7 @@ function provenanceLabel(event: ActivityEvent): { text: string; title: string } 
  * messages remain authoritative; this component only presents the server's
  * normalized projection and exposes actions when the event is still pending.
  */
-export function ActivityPanel({
+export const ActivityPanel = memo(function ActivityPanel({
   runId,
   onSelectTask,
   onResolved,
@@ -380,4 +380,4 @@ export function ActivityPanel({
       </div>
     </section>
   );
-}
+});

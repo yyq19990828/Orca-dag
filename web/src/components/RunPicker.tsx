@@ -151,8 +151,8 @@ export function RunPicker({
 
   return (
     <div className="runpick">
-      <span className="exec__label">Run</span>
       <DoodleSelect
+        size="sm"
         value={runId}
         onChange={onPick}
         disabled={disabled || combined.length === 0}
@@ -161,50 +161,71 @@ export function RunPicker({
         title={current ? `${current.id}\n${current.objective || "No objective"}` : "Pick a Run"}
         options={combined.map((r) => ({
           value: r.id,
-          label: r.id,
-          hint: r.objective || "No objective",
+          // The objective is what helps distinguish Runs at a glance. Keep
+          // the durable id in the option hint and trigger title for precise
+          // navigation without spending the whole top row on an opaque id.
+          label: r.objective?.trim() || r.id,
+          hint: r.id,
         }))}
       />
-      <button
-        className="btn btn--ghost"
-        onClick={onCreate}
-        disabled={disabled || creating}
-        title="Create an empty Run in this workspace and select it"
-      >
-        ＋ New Run
-      </button>
-      {nextCursor && (
-        <button
-          className="btn btn--ghost runpick__more"
-          onClick={loadOlder}
-          disabled={disabled || loadingMore}
-          title="Load the next older page of Runs"
-        >
-          {loadingMore ? "Loading…" : "↓ Older"}
-        </button>
+      <details className="runpick__menu">
+        <summary aria-label="More Run options" title="Create, find, or load older Runs">
+          <span aria-hidden="true">⋯</span>
+        </summary>
+        <div className="runpick__menu-panel" role="group" aria-label="Run actions">
+          <button
+            type="button"
+            className="btn btn--ghost"
+            onClick={onCreate}
+            disabled={disabled || creating}
+            title="Create an empty Run in this workspace and select it"
+          >
+            ＋ New Run
+          </button>
+          {nextCursor && (
+            <button
+              type="button"
+              className="btn btn--ghost runpick__more"
+              onClick={loadOlder}
+              disabled={disabled || loadingMore}
+              title="Load the next older page of Runs"
+            >
+              {loadingMore ? "Loading…" : "↓ Load older Runs"}
+            </button>
+          )}
+          <label className="runpick__exact-label" htmlFor="runpick-exact-id">
+            Open a Run by exact ID
+          </label>
+          <span className="runpick__exact">
+            <input
+              id="runpick-exact-id"
+              className="runpick__exact-input"
+              value={exactId}
+              placeholder="run_…"
+              spellCheck={false}
+              aria-label="Open a Run by exact ID"
+              onChange={(e) => setExactId(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void openExact();
+              }}
+            />
+            <button
+              type="button"
+              className="btn btn--ghost"
+              onClick={openExact}
+              disabled={disabled || exactBusy || !exactId.trim()}
+              title="Open one Run by its exact ID (workspace-checked server-side)"
+            >
+              {exactBusy ? "…" : "Go"}
+            </button>
+          </span>
+        </div>
+      </details>
+      {err && (
+        <span className="runpick__error" role="status" title={err}>
+          ⚠ {err}
+        </span>
       )}
-      <span className="runpick__exact">
-        <input
-          className="runpick__exact-input"
-          value={exactId}
-          placeholder="run_… exact ID"
-          spellCheck={false}
-          aria-label="Open a Run by exact ID"
-          onChange={(e) => setExactId(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") void openExact();
-          }}
-        />
-        <button
-          className="btn btn--ghost"
-          onClick={openExact}
-          disabled={disabled || exactBusy || !exactId.trim()}
-          title="Open one Run by its exact ID (workspace-checked server-side)"
-        >
-          {exactBusy ? "…" : "Go"}
-        </button>
-      </span>
-      {err && <span className="exec__err">⚠️ {err}</span>}
     </div>
   );
 }

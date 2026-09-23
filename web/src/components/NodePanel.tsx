@@ -39,6 +39,7 @@ import {
 } from "../types";
 import { DoodleSelect } from "./DoodleSelect";
 import { PlacementEditor } from "./PlacementEditor";
+import "../node-actions.css";
 
 const INHERIT = "__inherit__";
 const CUSTOM = "__custom__";
@@ -162,6 +163,12 @@ interface NodePanelProps {
   coordinatorStarting: boolean;
   workerHistoryLoading: boolean;
   workerHistoryError: string | null;
+  /** Open the existing Operations control for this stage; mutations stay there. */
+  onOpenOperations?: (focus: { kind: "gate" | "worker" | "recovery"; id: string }) => void;
+  /** A retry is offered only when the coordinator has a failed-start receipt. */
+  failedStart?: boolean;
+  /** A durable Worker row for this Task is available in the Operations fleet. */
+  hasWorkerHistory?: boolean;
   onClose: () => void;
 }
 
@@ -185,6 +192,9 @@ export function NodePanel({
   coordinatorStarting,
   workerHistoryLoading,
   workerHistoryError,
+  onOpenOperations,
+  failedStart = false,
+  hasWorkerHistory = false,
   onClose,
 }: NodePanelProps) {
   const meta = STATUS_META[node.status];
@@ -341,6 +351,39 @@ export function NodePanel({
       <div className="node-panel__id">
         <code>{node.id}</code>
       </div>
+
+      {onOpenOperations && (readiness?.pendingGateIds.length || failedStart || hasWorkerHistory) ? (
+        <nav className="node-panel__actions" aria-label="Stage operations">
+          {readiness?.pendingGateIds.map((gateId) => (
+            <button
+              key={gateId}
+              type="button"
+              className="node-panel__action"
+              onClick={() => onOpenOperations({ kind: "gate", id: gateId })}
+            >
+              Review gate
+            </button>
+          ))}
+          {failedStart && (
+            <button
+              type="button"
+              className="node-panel__action"
+              onClick={() => onOpenOperations({ kind: "recovery", id: node.id })}
+            >
+              Review failed start
+            </button>
+          )}
+          {hasWorkerHistory && (
+            <button
+              type="button"
+              className="node-panel__action"
+              onClick={() => onOpenOperations({ kind: "worker", id: node.id })}
+            >
+              View worker history
+            </button>
+          )}
+        </nav>
+      ) : null}
 
       {/* Phase 4: scheduler state + ownership, derived from Run-scoped
           task/gate/coordinator facts the server projected onto /api/dag.

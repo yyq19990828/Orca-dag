@@ -1,0 +1,537 @@
+/* Compact Run line and its secondary controls. Kept as overrides so the
+   shared paper/crayon theme remains the source for color, type, and shadows. */
+.app .topbar {
+  z-index: 20;
+  gap: 10px;
+  min-height: 52px;
+  padding: 6px 14px;
+  flex-wrap: nowrap;
+  overflow: visible;
+}
+
+.app .topbar__brand--compact {
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.app .topbar__brand--compact .topbar__logo {
+  width: 32px;
+  height: 26px;
+}
+
+.app .topbar__brand--compact .topbar__title {
+  font-size: 15px;
+  white-space: nowrap;
+}
+
+.app .topbar__brand--compact .topbar__title::after {
+  bottom: -2px;
+}
+
+.app .topbar__run {
+  flex: 1 1 250px;
+  min-width: 150px;
+  justify-content: flex-start;
+}
+
+.app .runpick {
+  position: relative;
+  width: 100%;
+  flex-wrap: nowrap;
+  gap: 6px;
+}
+
+.app .runpick .doodle-select {
+  flex: 1 1 180px;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  font-size: 12px;
+  padding: 5px 8px;
+}
+
+.app .runpick__menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.app .runpick__menu > summary,
+.app .view-menu > summary,
+.app .exec__settings > summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1.5px dashed var(--line-strong);
+  border-radius: 10px 8px 11px 8px;
+  background: var(--paper);
+  color: var(--ink-soft);
+  font-family: var(--font-display);
+  font-size: 12px;
+  line-height: 1.1;
+  list-style: none;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.app .runpick__menu > summary::-webkit-details-marker,
+.app .view-menu > summary::-webkit-details-marker,
+.app .exec__settings > summary::-webkit-details-marker {
+  display: none;
+}
+
+.app .runpick__menu > summary:hover,
+.app .view-menu > summary:hover,
+.app .exec__settings > summary:hover {
+  border-color: var(--ink-soft);
+  color: var(--ink);
+}
+
+.app .runpick__menu-panel,
+.app .view-menu__panel,
+.app .exec__settings-panel {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 7px);
+  padding: 11px;
+  border: 2px dashed var(--line-strong);
+  border-radius: 13px 11px 14px 10px;
+  background: var(--paper);
+  box-shadow: var(--shadow-sticker);
+}
+
+.app .runpick__menu-panel {
+  right: 0;
+  display: grid;
+  width: min(320px, calc(100vw - 28px));
+  gap: 8px;
+}
+
+.app .runpick__menu-panel .btn {
+  justify-self: start;
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.app .runpick__exact-label {
+  margin-top: 3px;
+  color: var(--ink-soft);
+  font-family: var(--font-display);
+  font-size: 11px;
+}
+
+.app .runpick__exact {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.app .runpick__exact-input {
+  min-width: 0;
+  flex: 1 1 auto;
+  padding: 5px 8px;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 8px 7px 9px 6px;
+  background: var(--paper-2);
+  color: var(--ink);
+  font: 12px var(--font-body);
+}
+
+.app .runpick__exact-input:focus {
+  outline: 2px solid var(--sky);
+  outline-offset: 1px;
+}
+
+.app .runpick__error {
+  position: absolute;
+  z-index: 32;
+  top: calc(100% + 5px);
+  left: 0;
+  max-width: min(520px, calc(100vw - 28px));
+  padding: 5px 8px;
+  overflow: hidden;
+  border: 1.5px solid color-mix(in srgb, var(--coral) 45%, var(--line));
+  border-radius: 8px 7px 9px 6px;
+  background: var(--blush-wash);
+  color: var(--coral);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app .topbar__progress {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 6px;
+  min-width: 0;
+  color: var(--ink-soft);
+  font-family: var(--font-display);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.app .topbar__progress-track {
+  display: block;
+  width: 56px;
+  height: 7px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px 5px 6px 4px;
+  background: var(--paper-2);
+}
+
+.app .topbar__progress-track > i {
+  display: block;
+  height: 100%;
+  background: repeating-linear-gradient(62deg, var(--meadow) 0 3px, color-mix(in srgb, var(--meadow) 55%, transparent) 3px 5px);
+  transition: width 0.35s ease;
+}
+
+.app .topbar__progress-failed {
+  color: var(--coral);
+}
+
+.app .topbar__status {
+  gap: 7px;
+}
+
+.app .topbar__status .conn {
+  gap: 5px;
+  padding: 3px 8px;
+  border-width: 1.5px;
+  font-size: 11px;
+}
+
+.app .topbar__status .conn::before {
+  width: 7px;
+  height: 7px;
+}
+
+.app .exec {
+  position: relative;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  gap: 7px;
+}
+
+.app .exec__settings {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.app .exec__settings > summary {
+  justify-content: flex-start;
+  max-width: 210px;
+}
+
+.app .exec__settings-summary {
+  max-width: 135px;
+  overflow: hidden;
+  color: var(--ink-soft);
+  font-family: var(--font-body);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+}
+
+.app .exec__settings-panel {
+  right: 0;
+  display: grid;
+  width: min(500px, calc(100vw - 28px));
+  gap: 10px;
+}
+
+.app .exec__settings-panel .exec__field {
+  flex-wrap: wrap;
+}
+
+.app .exec__settings-panel .exec__hint {
+  flex-basis: 100%;
+}
+
+.app .exec > .exec__live {
+  flex: 0 0 auto;
+  gap: 7px;
+}
+
+.app .exec > .btn--run,
+.app .exec > .exec__live > .btn--run,
+.app .exec > .exec__live > .btn--stop-run {
+  padding: 5px 11px;
+  border-width: 2px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.app .exec__running {
+  gap: 5px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.app .exec__beads,
+.app .exec__settled {
+  display: none;
+}
+
+.app .exec__retry {
+  font-size: 10px;
+}
+
+.app .exec__done-short {
+  display: none;
+}
+
+.app .exec__notices {
+  position: absolute;
+  z-index: 34;
+  top: calc(100% + 6px);
+  right: 0;
+  display: grid;
+  width: min(560px, calc(100vw - 28px));
+  gap: 4px;
+  padding: 7px 9px;
+  border: 1.5px dashed var(--line-strong);
+  border-radius: 9px 8px 10px 7px;
+  background: var(--paper);
+  box-shadow: var(--shadow-soft);
+}
+
+.app .exec__notices .exec__hint,
+.app .exec__notices .exec__err {
+  max-width: none;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  white-space: normal;
+}
+
+.app .exec__notices .exec__err {
+  color: var(--coral);
+}
+
+.app .exec__notice--ok {
+  color: #4f9e5d;
+  font-family: var(--font-display);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.app .exec__stop-report {
+  position: relative;
+  max-width: min(420px, calc(100vw - 28px));
+  color: var(--coral);
+  font-size: 10.5px;
+}
+
+.app .exec__stop-report > summary {
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.app .exec__stop-unknowns {
+  position: absolute;
+  z-index: 34;
+  top: calc(100% + 5px);
+  right: 0;
+  width: min(420px, calc(100vw - 28px));
+  max-height: 220px;
+  overflow: auto;
+  margin: 0;
+  padding: 8px 8px 8px 24px;
+  border: 1.5px dashed var(--line-strong);
+  border-radius: 9px 8px 10px 7px;
+  background: var(--paper);
+  box-shadow: var(--shadow-soft);
+}
+
+.app .dag-toolbar {
+  z-index: 8;
+  flex-wrap: nowrap;
+  gap: 10px;
+  min-height: 42px;
+  padding: 5px 12px;
+}
+
+.app .dag-toolbar__left,
+.app .dag-toolbar__right {
+  flex-wrap: nowrap;
+  gap: 8px;
+}
+
+.app .dag-toolbar__right {
+  margin-left: auto;
+}
+
+.app .view-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.app .view-menu > summary {
+  min-height: 29px;
+}
+
+/* Activity / Chat, Operations and View are peers in this toolbar. */
+.app .dag-toolbar__left > .btn,
+.app .dag-toolbar__left > .view-menu > summary {
+  font-size: 14px;
+}
+
+.app .view-menu__panel {
+  left: 0;
+  display: grid;
+  width: min(620px, calc(100vw - 28px));
+  gap: 11px;
+}
+
+.app .view-menu__panel .legend {
+  gap: 10px;
+}
+
+.app .view-menu__panel .legend__item {
+  font-size: 11px;
+}
+
+.app .view-menu__panel .layout-ctl {
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.app .view-menu__panel .layout-ctl .btn--ghost {
+  padding: 4px 9px;
+  font-size: 11px;
+}
+
+.app .dag-toolbar__meta {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+@media (max-width: 1120px) {
+  .app .topbar {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .app .topbar__brand {
+    order: 0;
+  }
+
+  .app .topbar__run {
+    order: 1;
+    flex: 1 1 280px;
+  }
+
+  .app .topbar__progress {
+    order: 2;
+    margin-left: auto;
+  }
+
+  .app .topbar__status {
+    order: 3;
+  }
+
+  .app .topbar > .exec {
+    order: 4;
+  }
+}
+
+@media (max-width: 760px) {
+  .app .topbar {
+    padding: 6px 10px;
+  }
+
+  .app .topbar__brand {
+    flex-basis: 100%;
+  }
+
+  .app .topbar__run {
+    order: 1;
+    flex: 1 1 100%;
+  }
+
+  .app .topbar__progress {
+    order: 2;
+    margin-left: 0;
+  }
+
+  .app .topbar__status {
+    order: 3;
+    margin-left: auto;
+  }
+
+  .app .topbar > .exec {
+    order: 4;
+    flex: 1 1 100%;
+    justify-content: space-between;
+  }
+
+  .app .exec__settings > summary {
+    max-width: min(240px, 58vw);
+  }
+
+  .app .dag-toolbar {
+    min-height: 38px;
+  }
+
+  .app .dag-toolbar__meta {
+    display: none;
+  }
+
+  .app .view-menu__panel {
+    left: auto;
+    right: 0;
+    width: min(300px, calc(100vw - 28px));
+  }
+
+  .app .exec__settings-panel {
+    left: 0;
+    right: auto;
+    width: min(500px, calc(100vw - 20px));
+  }
+}
+
+@media (max-width: 430px) {
+  .app .topbar > .exec,
+  .app .exec > .exec__live {
+    min-width: 0;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .app .exec__running {
+    white-space: normal;
+  }
+
+  .app .topbar__brand--compact .topbar__title {
+    font-size: 14px;
+  }
+
+  .app .topbar__progress-track {
+    width: 42px;
+  }
+
+  .app .topbar__status .conn {
+    padding: 3px 6px;
+    font-size: 10px;
+  }
+
+  .app .exec__settings-summary {
+    display: none;
+  }
+
+  .app .exec__done-long {
+    display: none;
+  }
+
+  .app .exec__done-short {
+    display: inline;
+  }
+
+  .app .dag-toolbar__left > .btn--activity {
+    padding: 5px 8px;
+    font-size: 11px;
+  }
+}

@@ -1,0 +1,226 @@
+.ops-attention {
+  min-width: 0;
+  padding: 13px 15px 12px;
+  color: var(--ink);
+  background:
+    linear-gradient(135deg, rgba(240, 185, 78, 0.08), transparent 58%),
+    var(--paper);
+  border: 1.5px solid var(--line-strong);
+  border-radius: 13px 11px 14px 10px;
+  box-shadow: 2px 3px 0 rgba(74, 71, 84, 0.08);
+}
+
+.ops-attention__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 9px;
+}
+
+.ops-attention__heading {
+  min-width: 0;
+}
+
+.ops-attention__item-label {
+  display: block;
+  color: var(--ink-soft);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.ops-attention__heading h2 {
+  margin: 0 0 2px;
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.ops-attention__heading p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.ops-attention__count {
+  display: grid;
+  flex: 0 0 auto;
+  min-width: 28px;
+  height: 28px;
+  place-items: center;
+  padding: 0 7px;
+  color: #874c31;
+  background: #fff3e5;
+  border: 1px solid rgba(240, 151, 94, 0.52);
+  border-radius: 10px 8px 11px 7px;
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.ops-attention__count--clear {
+  color: #39714a;
+  background: #edf8ef;
+  border-color: rgba(127, 201, 140, 0.7);
+}
+
+.ops-attention__list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ops-attention__item {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 9px 8px 11px;
+  background: rgba(255, 255, 255, 0.58);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--butter);
+  border-radius: 8px 10px 8px 9px;
+}
+
+.ops-attention__item--recovery {
+  border-left-color: var(--coral);
+}
+
+.ops-attention__item--worker {
+  border-left-color: var(--lilac);
+}
+
+.ops-attention__copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.ops-attention__copy strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ops-attention__detail {
+  overflow: hidden;
+  color: var(--ink-soft);
+  font-size: 10px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ops-attention__action,
+.ops-attention__more-button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  min-height: 30px;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 4px 8px;
+  color: var(--sky-ink);
+  background: var(--sky-wash);
+  border: 1px solid rgba(123, 183, 224, 0.55);
+  border-radius: 8px 7px 9px 7px;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 120ms ease, transform 120ms ease;
+}
+
+.ops-attention__action:hover,
+.ops-attention__more-button:hover {
+  background: #dceefa;
+  transform: translateY(-1px);
+}
+
+.ops-attention__action:focus-visible,
+.ops-attention__more-button:focus-visible {
+  outline: 2px solid var(--sky-ink);
+  outline-offset: 2px;
+}
+
+.ops-attention__more {
+  display: flex;
+  justify-content: center;
+}
+
+.ops-attention__more-button {
+  min-height: 27px;
+  padding-inline: 11px;
+  color: var(--ink-soft);
+  background: var(--paper-2);
+  border-color: var(--line);
+}
+
+.ops-attention__more-button:hover {
+  background: var(--paper-3);
+}
+
+.ops-attention__empty {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 10px;
+  color: #527b5c;
+  background: rgba(127, 201, 140, 0.1);
+  border: 1px dashed rgba(127, 201, 140, 0.55);
+  border-radius: 8px 10px 8px 9px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.ops-attention__empty > span {
+  color: var(--meadow);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.ops-attention__empty--unknown {
+  color: var(--ink-soft);
+  background: rgba(245, 241, 230, 0.66);
+  border-color: var(--line);
+}
+
+@media (max-width: 520px) {
+  .ops-attention {
+    padding: 11px;
+  }
+
+  .ops-attention__item {
+    align-items: flex-start;
+    gap: 8px;
+    padding-inline: 8px;
+  }
+
+  .ops-attention__action {
+    min-height: 28px;
+    align-self: center;
+    padding-inline: 7px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ops-attention__action,
+  .ops-attention__more-button {
+    transition: none;
+  }
+
+  .ops-attention__action:hover,
+  .ops-attention__more-button:hover {
+    transform: none;
+  }
+}

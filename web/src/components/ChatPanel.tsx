@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, memo, useEffect, useMemo, useState } from "react";
 import { fetchAudiencePreview, replyToMessage, sendGroupMessage, sendTaskMessage } from "../api";
 import { formatClock, formatDateTime, isUrgent, priorityLabel } from "../format";
 import { useDecisionDialog } from "./DecisionDialog";
@@ -332,7 +332,7 @@ function checkDeliveryLabel(receipt: CoordinatorCheckReceipt): string {
  * normalized events by task preserves one source of truth while presenting
  * coordinator/worker exchanges in the familiar inbox + conversation shape.
  */
-export function ChatPanel({
+export const ChatPanel = memo(function ChatPanel({
   runId,
   snapshot,
   tasks,
@@ -408,6 +408,10 @@ export function ChatPanel({
   }, [leadTaskId, snapshot.events, snapshot.presence, tasks]);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Quiet Runs can accumulate hundreds of checks in one digest. Keep their
+  // evidence out of the DOM until the user opens Details, then reveal it in
+  // bounded pages so tab changes never style thousands of hidden elements.
+  const [expandedChecks, setExpandedChecks] = useState<Record<string, number>>({});
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -432,6 +436,7 @@ export function ChatPanel({
 
   useEffect(() => {
     setSelectedId(null);
+    setExpandedChecks({});
     setDraft("");
     setError(null);
   }, [runId]);
@@ -586,6 +591,10 @@ export function ChatPanel({
 
   function renderTimelineCheck(group: TimelineCheckGroup) {
     const receipt = group.receipts.at(-1)!;
+    const firstReceipt = group.receipts[0];
+    const checkKey = `check:${selected?.id ?? ""}:${firstReceipt.checkedAt}:${firstReceipt.sequence}`;
+    const visibleCount = expandedChecks[checkKey] ?? 0;
+    const firstVisible = Math.max(0, group.receipts.length - visibleCount);
     const receiptDetail = (candidate: CoordinatorCheckReceipt) => {
       if (candidate.evidence) return candidate.evidence;
       const agent = selected?.taskId
@@ -599,122 +608,151 @@ export function ChatPanel({
     const detail = receiptDetail(receipt);
     const important = Boolean(receipt.error || receipt.messageCount > 0 || agent?.attention.length);
     const detailsLabel = group.receipts.length > 1
-      ? `${group.receipts.length} checks · Details`
-      : "Details";
+      ? `${group.receipts.length} checks`
+      : "1 check";
     return (
-      <div
-        key={`check:${group.receipts[0].checkedAt}:${receipt.checkedAt}`}
-        className={`chat-checkpoint${important ? " chat-checkpoint--important" : ""}${receipt.error ? " chat-checkpoint--error" : ""}`}
-        aria-label="Coordinator check"
-      >
-        <span className="chat-checkpoint__rail" aria-hidden="true">
-          <span className="chat-checkpoint__dot" />
-        </span>
-        <div className="chat-checkpoint__copy">
-          <div className="chat-checkpoint__head">
-            <strong>{checkGroupTitle(group.receipts)}</strong>
-            <time dateTime={new Date(receipt.checkedAt).toISOString()}>{formatClock(new Date(receipt.checkedAt).toISOString())}</time>
-          </div>
-          {important && detail && <span className="chat-checkpoint__summary">{detail}</span>}
-          <details className="chat-checkpoint__details">
-            <summary>
-              <span>{detailsLabel}</span>
+      <div className="chat-checkpoint-group" key={checkKey}>
+        <div
+          className={`chat-checkpoint chat-checkpoint--digest${important ? " chat-checkpoint--important" : ""}${receipt.error ? " chat-checkpoint--error" : ""}`}
+          aria-label="Coordinator checks"
+        >
+          <span className="chat-checkpoint__rail" aria-hidden="true">
+            {visibleCount === 0 && <span className="chat-checkpoint__dot" />}
+          </span>
+          <div className="chat-checkpoint__copy">
+            <div className="chat-checkpoint__head">
+              <strong>{checkGroupTitle(group.receipts)}</strong>
+              <time dateTime={new Date(receipt.checkedAt).toISOString()}>{formatClock(new Date(receipt.checkedAt).toISOString())}</time>
+            </div>
+            {important && detail && <span className="chat-checkpoint__summary">{detail}</span>}
+            <button
+              type="button"
+              className="chat-checkpoint__toggle"
+              aria-expanded={visibleCount > 0}
+              aria-controls={visibleCount > 0 ? `${checkKey}-entries` : undefined}
+              onClick={() => setExpandedChecks((current) => {
+                const next = { ...current };
+                if (current[checkKey]) delete next[checkKey];
+                else next[checkKey] = 5;
+                return next;
+              })}
+            >
               <span className="chat-checkpoint__chevron" aria-hidden="true">›</span>
-            </summary>
-            <div className="chat-checkpoint__log">
-              {group.receipts.map((item, index) => {
+              {visibleCount > 0 ? `Hide ${detailsLabel}` : `Expand ${detailsLabel}`}
+            </button>
+          </div>
+        </div>
+        {visibleCount > 0 && <div className="chat-checkpoint__entries" id={`${checkKey}-entries`}>
+              {firstVisible > 0 && (
+                <button
+                  type="button"
+                  className="chat-checkpoint__older"
+                  onClick={() => setExpandedChecks((current) => ({
+                    ...current,
+                    [checkKey]: Math.min(group.receipts.length, (current[checkKey] ?? 5) + 5),
+                  }))}
+                >
+                  Show {Math.min(5, firstVisible)} older checks ({firstVisible} remaining)
+                </button>
+              )}
+              {group.receipts.slice(firstVisible).map((item, index) => {
                 const relevantAgents = selected?.taskId
                   ? item.agents.filter((candidate) => candidate.taskId === selected.taskId)
                   : item.agents;
                 const itemIso = new Date(item.checkedAt).toISOString();
+                const itemDetail = receiptDetail(item);
                 return (
-                  <article className="chat-checkpoint__receipt" key={`${item.checkedAt}:${item.sequence}`}>
-                    <header>
-                      <span>{group.receipts.length > 1 ? `Check ${index + 1} of ${group.receipts.length}` : "Check record"}</span>
-                      <time dateTime={itemIso}>{formatDateTime(itemIso)}</time>
-                    </header>
-                    <dl className="chat-checkpoint__facts">
-                      <div>
-                        <dt>Source</dt>
-                        <dd>{checkSourceLabel(item)}</dd>
-                      </div>
-                      <div>
-                        <dt>Inbox result</dt>
-                        <dd>{checkInboxResult(item)}</dd>
-                      </div>
-                      <div>
-                        <dt>Wait duration</dt>
-                        <dd>{checkDurationLabel(item)}</dd>
-                      </div>
-                      <div>
-                        <dt>Delivery</dt>
-                        <dd title={checkDeliveryLabel(item)}>{checkDeliveryLabel(item)}</dd>
-                      </div>
-                      {item.replayed && (
-                        <div>
-                          <dt>Replay</dt>
-                          <dd>Previously observed delivery</dd>
-                        </div>
-                      )}
-                    </dl>
-                    {/* Expand the aggregated batch into its rows. The summary
-                        above ("5 messages: Heartbeat, Worker done") is the
-                        digest; this is the evidence behind it. Receipts
-                        persisted before the digest existed render no list at
-                        all — absence is unknown, never a guess. */}
-                    {(item.messages?.length ?? 0) > 0 && (
-                      <details className="chat-checkpoint__messages">
-                        <summary>
-                          <span>{item.messages!.length === 1 ? "1 message" : `${item.messages!.length} messages`}</span>
-                          <span className="chat-checkpoint__chevron" aria-hidden="true">›</span>
-                        </summary>
-                        <ul>
-                          {item.messages!.map((message) => {
-                            const iso = new Date(message.createdAt).toISOString();
-                            return (
-                              <li key={message.id}>
-                                <span className="chat-checkpoint__message-type">
-                                  {compactSignal(message.type) ?? message.type}
-                                </span>
-                                <span className="chat-checkpoint__message-subject" title={message.subject}>
-                                  {message.subject || "(no subject)"}
-                                </span>
-                                <time dateTime={iso}>{formatClock(iso)}</time>
-                              </li>
-                            );
-                          })}
-                        </ul>
-                      </details>
-                    )}
-                    {item.evidence && (
-                      <p className="chat-checkpoint__evidence">
-                        <strong>Why this check appears</strong>
-                        <span>{item.evidence}</span>
-                      </p>
-                    )}
-                    <div className="chat-checkpoint__agents">
-                      <strong>Agent snapshot</strong>
-                      {relevantAgents.length > 0 ? relevantAgents.map((candidate) => {
-                        const stage = tasks.find((task) => task.id === candidate.taskId);
-                        const agentName = candidate.agent === "unknown agent" ? null : candidate.agent;
-                        const runtime = [agentName, candidate.model, candidate.effort].filter(Boolean).join(" · ");
-                        return (
-                          <div className="chat-checkpoint__agent" key={`${item.sequence}:${candidate.taskId}`}>
-                            <span>{stage?.label ?? candidate.taskId}</span>
-                            <small>{runtime || "Runtime not recorded"}</small>
-                            <p>{checkAgentLine(candidate)}</p>
+                  <article className={`chat-checkpoint chat-checkpoint--entry${item.error ? " chat-checkpoint--error" : ""}`} key={`${item.checkedAt}:${item.sequence}`} aria-label="Coordinator check">
+                    <span className="chat-checkpoint__rail" aria-hidden="true">
+                      <span className="chat-checkpoint__dot" />
+                    </span>
+                    <div className="chat-checkpoint__copy chat-checkpoint__receipt">
+                      <header>
+                        <span>{group.receipts.length > 1 ? `Check ${firstVisible + index + 1} of ${group.receipts.length}` : "Check record"}</span>
+                        <time dateTime={itemIso}>{formatDateTime(itemIso)}</time>
+                      </header>
+                      {itemDetail && <span className="chat-checkpoint__summary" title={itemDetail}>{itemDetail}</span>}
+                      <details className="chat-checkpoint__receipt-details">
+                        <summary>Check evidence</summary>
+                        <dl className="chat-checkpoint__facts">
+                          <div>
+                            <dt>Source</dt>
+                            <dd>{checkSourceLabel(item)}</dd>
                           </div>
-                        );
-                      }) : (
-                        <p className="chat-checkpoint__empty">No agent state was attached to this check.</p>
-                      )}
+                          <div>
+                            <dt>Inbox result</dt>
+                            <dd>{checkInboxResult(item)}</dd>
+                          </div>
+                          <div>
+                            <dt>Wait duration</dt>
+                            <dd>{checkDurationLabel(item)}</dd>
+                          </div>
+                          <div>
+                            <dt>Delivery</dt>
+                            <dd title={checkDeliveryLabel(item)}>{checkDeliveryLabel(item)}</dd>
+                          </div>
+                          {item.replayed && (
+                            <div>
+                              <dt>Replay</dt>
+                              <dd>Previously observed delivery</dd>
+                            </div>
+                          )}
+                        </dl>
+                        {/* A receipt's messages are evidence behind its digest.
+                            Older receipts may have no retained rows. */}
+                        {(item.messages?.length ?? 0) > 0 && (
+                          <details className="chat-checkpoint__messages">
+                            <summary>
+                              <span>{item.messages!.length === 1 ? "1 message" : `${item.messages!.length} messages`}</span>
+                              <span className="chat-checkpoint__chevron" aria-hidden="true">›</span>
+                            </summary>
+                            <ul>
+                              {item.messages!.map((message) => {
+                                const iso = new Date(message.createdAt).toISOString();
+                                return (
+                                  <li key={message.id}>
+                                    <span className="chat-checkpoint__message-type">
+                                      {compactSignal(message.type) ?? message.type}
+                                    </span>
+                                    <span className="chat-checkpoint__message-subject" title={message.subject}>
+                                      {message.subject || "(no subject)"}
+                                    </span>
+                                    <time dateTime={iso}>{formatClock(iso)}</time>
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          </details>
+                        )}
+                        {item.evidence && (
+                          <p className="chat-checkpoint__evidence">
+                            <strong>Why this check appears</strong>
+                            <span>{item.evidence}</span>
+                          </p>
+                        )}
+                        <div className="chat-checkpoint__agents">
+                          <strong>Agent snapshot</strong>
+                          {relevantAgents.length > 0 ? relevantAgents.map((candidate) => {
+                            const stage = tasks.find((task) => task.id === candidate.taskId);
+                            const agentName = candidate.agent === "unknown agent" ? null : candidate.agent;
+                            const runtime = [agentName, candidate.model, candidate.effort].filter(Boolean).join(" · ");
+                            return (
+                              <div className="chat-checkpoint__agent" key={`${item.sequence}:${candidate.taskId}`}>
+                                <span>{stage?.label ?? candidate.taskId}</span>
+                                <small>{runtime || "Runtime not recorded"}</small>
+                                <p>{checkAgentLine(candidate)}</p>
+                              </div>
+                            );
+                          }) : (
+                            <p className="chat-checkpoint__empty">No agent state was attached to this check.</p>
+                          )}
+                        </div>
+                      </details>
                     </div>
                   </article>
                 );
               })}
-            </div>
-          </details>
-        </div>
+        </div>}
       </div>
     );
   }
@@ -1136,4 +1174,4 @@ export function ChatPanel({
       </div>
     </section>
   );
-}
+});

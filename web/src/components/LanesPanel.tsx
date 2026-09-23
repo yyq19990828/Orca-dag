@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
 import { fetchWorktreeLanes, openLaneChanges, removeLaneWorktree } from "../api";
 import { useDecisionDialog } from "./DecisionDialog";
 import { usePageVisible } from "../visibility";
@@ -45,12 +45,15 @@ function stateHint(state: WorktreeLaneRuntimeView["state"]): string {
   }
 }
 
-export function LanesPanel({
+export const LanesPanel = memo(function LanesPanel({
   runId,
+  active = true,
   disabled = false,
   disabledReason,
 }: {
   runId: string;
+  /** Pause the lane poll while Operations is out of view. */
+  active?: boolean;
   /** Execution-disabled gate (readiness): mutations hide behind the reason. */
   disabled?: boolean;
   disabledReason?: string | null;
@@ -64,13 +67,16 @@ export function LanesPanel({
   const visible = usePageVisible();
 
   useEffect(() => {
-    if (!visible || !runId) return;
     // A Run switch must not show the previous Run's lanes for one poll
     // interval — drop stale rows before the first scoped response lands.
     setLanes([]);
     setErr(null);
     setLoadedFor(null);
     setNotes(new Map());
+  }, [runId]);
+
+  useEffect(() => {
+    if (!active || !visible || !runId) return;
     let alive = true;
     const load = async () => {
       try {
@@ -82,7 +88,10 @@ export function LanesPanel({
         setLoadedFor(runId);
         setErr(null);
       } catch (e) {
-        if (alive) setErr(String((e as Error).message ?? e));
+        if (alive) {
+          setLoadedFor(runId);
+          setErr(String((e as Error).message ?? e));
+        }
       }
     };
     void load();
@@ -91,7 +100,7 @@ export function LanesPanel({
       alive = false;
       window.clearInterval(t);
     };
-  }, [runId, visible]);
+  }, [active, runId, visible]);
 
   const review = useCallback(
     async (laneId: string, mode: "files" | "diff") => {
@@ -166,7 +175,7 @@ export function LanesPanel({
     [dialog],
   );
 
-  if (!runId || (loadedFor !== runId && lanes.length === 0 && !err)) return null;
+  if (!runId || loadedFor !== runId) return null;
 
   return (
     <div className="gates lanes" data-testid="lanes-panel">
@@ -274,4 +283,4 @@ export function LanesPanel({
       </div>
     </div>
   );
-}
+});
