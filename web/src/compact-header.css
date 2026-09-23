@@ -205,6 +205,15 @@
   font-size: 11px;
 }
 
+/* The language toggle sits in this cluster too — match the compact conn pill
+   so the three chips stay level (base .btn--lang is sized for the roomy
+   topbar and reads ~2-3px taller here). */
+.app .topbar__status .btn--lang {
+  padding: 3px 8px;
+  border-width: 1.5px;
+  font-size: 11px;
+}
+
 .app .topbar__status .conn::before {
   width: 7px;
   height: 7px;
