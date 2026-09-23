@@ -240,7 +240,7 @@ export function validateLaneTotalOrder(
   return issues;
 }
 
-/** One lane's renderable runtime projection (TECH_SPEC "Runtime projections"). */
+/** One lane's renderable runtime projection. */
 export type WorktreeLaneState =
   | "planned"
   | "creating"
