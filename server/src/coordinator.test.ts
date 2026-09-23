@@ -1266,6 +1266,32 @@ describe("Phase 4: ambiguous worker-start recovery", () => {
 });
 
 describe("Phase 4: failed-before-ready starts", () => {
+  it("closes a prepared Codex pane when worker-start rejects it before Dispatch", async () => {
+    const runId = "run_codex_bind_rejected";
+    await singleTaskState(runId);
+    await mutateState((state) => {
+      state.workerStartFail = { code: "invalid_argument", message: "terminal bind rejected" };
+    });
+    await startCoordinator(baseOpts(runId, {
+      harnessByTask: { task_aaa: "codex" },
+      modelByTask: { task_aaa: "gpt-6-luna" },
+    }));
+    await waitFor(() => (
+      findAttempt("task_aaa")?.terminalDecision === "not_needed" ? true : null
+    ), "prepared Codex pane closed after rejected bind");
+    assert.equal(attempt("task_aaa").settledVia, "start_failed");
+    assert.equal(attempt("task_aaa").dispatchId, null);
+    assert.equal(calls("worker-start").length, 1);
+    assert.equal(calls("dispatch").length, 0, "rejected bind must not fall through to a second legacy Dispatch");
+    const prepared = readLog().find((c) => c.argv[0] === "terminal" && c.argv[1] === "create" &&
+      c.argv.some((arg) => arg.startsWith("codex ")));
+    assert.ok(prepared);
+    assert.ok(readLog().some((c) => c.argv[0] === "terminal" && c.argv[1] === "close" &&
+      c.argv.includes(attempt("task_aaa").handle!)));
+    assert.deepEqual(coordinatorStatus().cleanupDebt, []);
+    await stopCoordinator();
+  });
+
   it("keeps the attempt with its receipt, owes no cleanup, never auto-retries, and retries only on request", async () => {
     const runId = "run_fbready";
     await singleTaskState(runId);
@@ -1507,14 +1533,34 @@ describe("Phase 5: terminal reuse and retain", () => {
   it("forces a fresh worker when the follow-up uses a different harness", async () => {
     const runId = "run_fresh_harness";
     await chainState(runId);
-    await startCoordinator(baseOpts(runId, { maxConcurrency: 2, harnessByTask: { task_bbb: "codex" } }));
+    await startCoordinator(baseOpts(runId, {
+      maxConcurrency: 2,
+      harnessByTask: { task_bbb: "codex" },
+      modelByTask: { task_bbb: "gpt-6-luna" },
+    }));
     await waitFor(() => (calls("worker-start").length === 1 ? true : null), "A to start");
     await settleViaWorkerDone("task_aaa", "succeeded", "msg_fh1");
     await waitFor(() => (attempt("task_aaa").terminalDecision === "released" ? true : null), "A released");
     await waitFor(() => (calls("worker-start").some((c) => c.argv.includes("task_bbb")) ? true : null), "B to start fresh");
     const bStart = calls("worker-start").find((c) => c.argv.includes("task_bbb"))!;
-    assert.ok(bStart.argv.includes("--agent") && bStart.argv.includes("codex"), "B started on its own agent");
-    assert.equal(bStart.argv.indexOf("--terminal"), -1, "a terminal runs ONE agent — never handed across harnesses");
+    const prepared = readLog().find((c) => c.argv[0] === "terminal" &&
+      c.argv[1] === "create" && c.argv.includes("--command") && c.argv.some((arg) => arg.startsWith("codex ")));
+    assert.ok(prepared, "Codex was started before worker-start injected its preamble");
+    assert.equal(
+      prepared.argv[prepared.argv.indexOf("--worktree") + 1],
+      bStart.argv[bStart.argv.indexOf("--worktree") + 1],
+      "prewarm and Dispatch used the same worktree selector",
+    );
+    assert.ok(prepared.argv.includes("codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen -m 'gpt-6-luna'"));
+    assert.ok(bStart.argv.includes("--terminal"), "Orca bound the prepared Codex terminal");
+    assert.equal(bStart.argv.indexOf("--agent"), -1, "worker-start must not relaunch Codex");
+    assert.equal(bStart.argv.indexOf("--model"), -1, "model belongs to the prepared TUI command");
+    assert.notEqual(
+      bStart.argv[bStart.argv.indexOf("--terminal") + 1],
+      getState().dispatches[attempt("task_aaa").dispatchId!].agentTerminal,
+      "a terminal runs one harness and is not shared across Claude/Codex",
+    );
+    assert.equal(attempt("task_bbb").requested.model, "gpt-6-luna");
     assert.equal(callsOf("worker-release", "--dispatch", attempt("task_aaa").dispatchId!).length, 1);
     await stopCoordinator();
   });

@@ -406,6 +406,16 @@ export const WorkerPanel = memo(function WorkerPanel({
             projection?.launch?.agent ??
             row.launchEvidence?.agent ??
             null;
+          // A prepared Codex terminal receives its model before Orca binds the
+          // Dispatch, so worker-start --terminal cannot echo that model. Keep
+          // the configured choice visible, explicitly marked as requested;
+          // never promote it to a runtime-observed fact.
+          const requestedModel =
+            !projection?.provider?.model && !projection?.launch?.model &&
+            attempt && !attempt.adopted ? attempt.requested.model : null;
+          const providerLabel = requestedModel
+            ? `${provider ?? attempt?.requested.agent ?? "unknown"} · ${requestedModel} (requested)`
+            : provider;
           // Structured transcript reads are a peer capability (Phase 6):
           // offered for local workers always, for remote workers only when
           // their environment advertises it. Unknown host → auto only.
@@ -442,7 +452,7 @@ export const WorkerPanel = memo(function WorkerPanel({
                   {projection?.outcome ? ` · ${projection.outcome}` : ""}
                   {row.workerState === "unsupervised" ? " · unsupervised" : ""}
                   {` · ${hostLabel}`}
-                  {provider ? ` · ${provider}` : ""}
+                  {providerLabel ? ` · ${providerLabel}` : ""}
                   {` · ${row.terminalState}`}
                   {(projection?.attention?.categories ?? []).length > 0
                     ? ` · ⚑ ${(projection?.attention?.categories ?? []).join(", ")}`
@@ -483,7 +493,7 @@ export const WorkerPanel = memo(function WorkerPanel({
                   <div className="inbox__body">
                     Provider/model:{" "}
                     <b>
-                      {provider ??
+                      {providerLabel ??
                         (attempt && !attempt.adopted
                           ? `${attempt.requested.agent}${attempt.requested.model ? ` · ${attempt.requested.model}` : ""} (requested)`
                           : "unknown")}

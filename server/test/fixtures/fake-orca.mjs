@@ -714,7 +714,11 @@ if (ns === "orchestration" && verb === "task-list") {
   const t = (state.terminals ?? []).find((x) => x.handle === handle);
   if (t) t.connected = false;
   ok({});
-} else if (ns === "terminal" && (verb === "wait" || verb === "send")) {
+} else if (ns === "terminal" && verb === "wait") {
+  ok({ wait: { satisfied: true } });
+} else if (ns === "terminal" && verb === "read") {
+  ok({ terminal: { source: "screen", tail: ["model: GPT-6-Luna", "› Ask Codex to do anything"] } });
+} else if (ns === "terminal" && verb === "send") {
   ok({});
 } else {
   // Unknown surface: fail loudly rather than silently succeeding, so a drift

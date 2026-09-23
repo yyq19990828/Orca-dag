@@ -19,6 +19,7 @@ import {
   parseCoordinatorTitle,
   parsePeerCapabilities,
   parseWorkerDonePayload,
+  prepareCodexTerminal,
   readWorkerOutput,
   releaseWorker,
   replyToMessage,
@@ -3519,6 +3520,25 @@ async function startOne(
       });
     } else {
       try {
+        // On a local current/existing workspace, Codex's first loading
+        // repaint can swallow worker-start's injected preamble. Prewarm its
+        // TUI, wait for a stable composer, then let Orca bind that terminal
+        // to the supervised Dispatch. Creation/remote starts stay on Orca's
+        // native path: they cannot safely precreate a terminal here.
+        let preparedCodexHandle: string | null = null;
+        const canPrepareCodex =
+          attempt.harness === "codex" && !environment && !reuseTerminal &&
+          process.platform !== "win32" &&
+          wt.worktree !== "new-child" && wt.worktree !== "new-top-level";
+        if (canPrepareCodex) {
+          preparedCodexHandle = await prepareCodexTerminal({
+            worktree: wt.worktree ?? "current",
+            model: model ?? undefined,
+            effort: attempt.requested.effort ?? undefined,
+            onHandle: (handle) => { attempt.handle = handle; },
+          });
+          attempt.requested = { ...attempt.requested, terminal: preparedCodexHandle };
+        }
         started = await startSupervisedWorker({
           taskId: task.id,
           agent: attempt.harness,
@@ -3536,13 +3556,13 @@ async function startOne(
           comment: wt.comment,
           setup: wt.setup,
           on: environment ?? undefined,
-          model: model ?? undefined,
+          model: preparedCodexHandle ? undefined : model ?? undefined,
           // Phase 5: per-task effort (model-gated) and terminal reuse are
           // mutually exclusive by the CLI's own contract — the adapter
           // refuses the combination, and the reuse candidate filter above
           // already excludes model-carrying follow-ups.
-          effort: attempt.requested.effort ?? undefined,
-          terminal: reuseTerminal,
+          effort: preparedCodexHandle ? undefined : attempt.requested.effort ?? undefined,
+          terminal: reuseTerminal ?? preparedCodexHandle ?? undefined,
           retryRequestId: startRequestId,
           retryOf: retryOf ?? undefined,
         });
@@ -3554,7 +3574,10 @@ async function startOne(
         // Worktree lanes: likewise never for a lane member — the bare-shell
         // fallback always runs in the coordinator worktree.
         const code = (err as OrcaCliError).code;
-        if (environment || lane || !code || !UNCONFIGURED_AGENT_CODES.has(code)) throw err;
+        // A prepared Codex pane already contains the chosen model and may
+        // have been claimed by worker-start. Never create a second legacy
+        // pane or overwrite its handle after a rejection.
+        if (environment || lane || attempt.handle || !code || !UNCONFIGURED_AGENT_CODES.has(code)) throw err;
         started = await startLegacyWorker({
           taskId: task.id,
           harness: attempt.harness,
@@ -3570,7 +3593,10 @@ async function startOne(
     }
     attempt.mode = started.mode;
     attempt.dispatchId = started.dispatchId;
-    attempt.handle = started.handle;
+    // A prewarmed Codex terminal was created by this viewer before Orca took
+    // ownership. The supervised start returns no handle, but the terminal is
+    // still the same exact resource recorded above.
+    attempt.handle = started.handle ?? attempt.handle;
     if (started.receipt) {
       attempt.startReceipts.push(started.receipt);
       if (attempt.startReceipts.length > START_RECEIPTS_MAX) {
@@ -3697,9 +3723,12 @@ async function startOne(
             startErr.receipt?.failedStage ? ` at ${startErr.receipt.failedStage}` : ""
           } — receipt retained`,
     });
-    if (attempt.handle) {
+    if (attempt.handle && !responseLost && !attempt.dispatchId) {
       // A legacy-lane start can fail after creating its terminal. The pane is
-      // provably ours — close it; a refusal becomes cleanup debt, not silence.
+      // provably ours — close it. A prewarmed terminal is likewise ours only
+      // BEFORE worker-start has minted a Dispatch. Unknown responses and
+      // receipt-bearing Dispatches may have transferred ownership to Orca;
+      // closing then could kill a real worker.
       try {
         await closeTerminalStrict(attempt.handle);
         attempt.terminalDecision = "not_needed";

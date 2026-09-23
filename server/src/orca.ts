@@ -3714,6 +3714,64 @@ export function harnessCommand(harness: string): string {
   return HARNESS_LAUNCH[harness] ?? harness;
 }
 
+/** Quote one argument for the local POSIX shell used by terminal create. */
+function quoteLocalShellArg(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+/**
+ * Codex can repaint its loading screen after Orca has accepted dispatch input,
+ * losing the preamble before a turn begins. For local existing workspaces,
+ * start the TUI first and hand its ready terminal to worker-start. The model
+ * (and optional effort) belong on THIS command: Orca forbids --model/--effort
+ * with worker-start --terminal. The returned handle is only a provisional
+ * resource until worker-start transfers it to a Dispatch.
+ */
+export async function prepareCodexTerminal(opts: {
+  worktree: string;
+  model?: string;
+  effort?: string;
+  onHandle: (handle: string) => void;
+}): Promise<string> {
+  const command = [
+    "codex",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--no-alt-screen",
+    ...(opts.model ? ["-m", quoteLocalShellArg(opts.model)] : []),
+    ...(opts.effort ? ["-c", quoteLocalShellArg(`model_reasoning_effort=${JSON.stringify(opts.effort)}`)] : []),
+  ].join(" ");
+  const created = await runOrca<{ terminal?: { handle?: string } }>([
+    "terminal", "create", "--worktree", opts.worktree, "--command", command,
+  ]);
+  const handle = created.terminal?.handle;
+  if (!handle) throw new OrcaCliError("orca terminal create returned no Codex handle");
+  opts.onHandle(handle);
+
+  const waited = await runOrca<{ wait?: { satisfied?: boolean } }>([
+    "terminal", "wait", "--terminal", handle, "--for", "tui-idle", "--timeout-ms", "90000",
+  ]);
+  if (!waited.wait?.satisfied) {
+    throw new OrcaCliError(`Codex terminal ${handle} did not become idle before dispatch`, "codex_not_ready");
+  }
+  // tui-idle alone can precede the final Codex splash repaint. Require the
+  // actual composer and a loaded model on two separate rendered frames; an
+  // output-stream match would mistake old scrollback for the current screen.
+  let readyFrames = 0;
+  for (let i = 0; i < 40; i++) {
+    const read = await runOrca<{ terminal?: { source?: string; tail?: string[] } }>([
+      "terminal", "read", "--terminal", handle, "--screen",
+    ]);
+    const screen = read.terminal;
+    const lines = screen?.source === "screen" && Array.isArray(screen.tail) ? screen.tail : [];
+    const composerReady = lines.some((line) => line.includes("Ask Codex to do anything"));
+    const modelReady = lines.some((line) => /model:\s*\S+/i.test(line) && !/model:\s*loading\b/i.test(line));
+    readyFrames = composerReady && modelReady ? readyFrames + 1 : 0;
+    if (readyFrames >= 2) return handle;
+    await sleep(750);
+  }
+  throw new OrcaCliError(`Codex terminal ${handle} never showed a stable ready composer`, "codex_not_ready");
+}
+
 /** How a task's worker was started — decides how we tear it down. */
 export type WorkerMode = "supervised" | "legacy";
 
