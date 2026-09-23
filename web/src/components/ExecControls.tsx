@@ -9,6 +9,7 @@ import {
   harnessMap,
   modelMap,
   placementMap,
+  refreshConfig,
   retainMap,
   setDefaultHarness,
   setMaxConcurrency,
@@ -167,7 +168,7 @@ export function ExecControls({
       setErr(readiness?.reason ?? "Execution is unavailable on this Orca runtime.");
       return;
     }
-    if (!resolvedDefault) {
+    if (forceCustom && !custom.trim()) {
       setErr("Pick a default harness");
       return;
     }
@@ -181,32 +182,6 @@ export function ExecControls({
     }
     if (otherRunStatus) {
       setErr(`Run ${otherRunStatus.runId} is already executing in this viewer. Pick that Run to stop it.`);
-      return;
-    }
-    // Mirror the server's custom-command policy for a fast, clear error — the
-    // server re-checks (403) regardless, so this is UX, not the real gate.
-    if (!customOk) {
-      const customs = [resolvedDefault, ...Object.values(harnessMap(taskIdsRef.current))].some(
-        (h) => !KNOWN.includes(h),
-      );
-      if (customs) {
-        setErr(CUSTOM_OFF_HINT);
-        return;
-      }
-    }
-    // Phase 7: validate the whole placement plan BEFORE any mutation (PRD
-    // UX). The server is the authority and re-validates everything; this
-    // preflight surfaces lane problems (unordered members, dangling refs,
-    // double-placed tasks) before a terminal is bound.
-    const laneProblems = lanePlanProblems(
-      config.laneByTask,
-      config.worktreeLanes,
-      config.placementByTask,
-      config.environmentByTask,
-      edges,
-    );
-    if (laneProblems.length > 0) {
-      setErr(`Placement plan needs a fix before this Run can start — ${laneProblems[0]}`);
       return;
     }
     // Binding is the only way to get mutation authority on a Run, and it fences
@@ -223,18 +198,43 @@ export function ExecControls({
     });
     if (!ok) return;
 
-    if (defHarness === CUSTOM) setDefaultHarness(resolvedDefault);
-    // Raise the App-level lock before the request: the server's binding and
-    // recovery phases intentionally precede the first status with runId.
-    onRunStarting?.(runId);
     setBusy(true);
     setErr(null);
     let startedStatus: RunStatus | null = null;
+    let startRequested = false;
     try {
+      // Config may have been written by a CLI or another Viewer while this
+      // tab stayed open. Flush local edits, then use the persisted plan for
+      // every launch field. A stale in-memory map would silently send the
+      // wrong model or "current" worktree to /api/run.
+      if (forceCustom) setDefaultHarness(custom.trim());
+      const launchConfig = await refreshConfig();
+      const launchDefault = launchConfig.defaultHarness;
+      if (!launchDefault) throw new Error("Pick a default harness");
+      if (!customOk) {
+        const customs = [launchDefault, ...Object.values(harnessMap(taskIdsRef.current))].some(
+          (h) => !KNOWN.includes(h),
+        );
+        if (customs) throw new Error(CUSTOM_OFF_HINT);
+      }
+      // Validate the refreshed placement plan before binding a terminal.
+      const laneProblems = lanePlanProblems(
+        launchConfig.laneByTask,
+        launchConfig.worktreeLanes,
+        launchConfig.placementByTask,
+        launchConfig.environmentByTask,
+        edges,
+      );
+      if (laneProblems.length > 0) {
+        throw new Error(`Placement plan needs a fix before this Run can start — ${laneProblems[0]}`);
+      }
+      // Raise the App-level lock only after config refresh and preflight.
+      onRunStarting?.(runId);
+      startRequested = true;
       const s = await startRun(
         runId,
         harnessMap(taskIdsRef.current),
-        resolvedDefault,
+        launchDefault,
         getMaxConcurrency(),
         modelMap(taskIdsRef.current),
         effortMap(taskIdsRef.current),
@@ -253,7 +253,7 @@ export function ExecControls({
       setErr(String((e as Error).message ?? e));
     } finally {
       setBusy(false);
-      onRunStartFinished?.(runId, startedStatus);
+      if (startRequested) onRunStartFinished?.(runId, startedStatus);
     }
   }
 

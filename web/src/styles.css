@@ -1666,6 +1666,30 @@ body {
   display: flex;
   flex-direction: column;
 }
+.node-panel__group {
+  border-top: 1.5px dashed var(--line-strong);
+  padding-top: 12px;
+  margin-top: 3px;
+}
+.node-panel__group-title {
+  margin: 0 0 12px;
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 500;
+}
+.node-panel__actual-worktree {
+  padding: 9px 10px;
+  border-radius: 10px 8px 11px 8px;
+  background: var(--sky-wash);
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.node-panel__actual-worktree code {
+  overflow-wrap: anywhere;
+  font: inherit;
+}
 .node-panel__key {
   display: flex;
   align-items: center;

@@ -3162,9 +3162,20 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       // membership stay disjoint, and the environment/placement matrix holds.
       const configWorktreeLanes = validateWorktreeLaneMap(body.worktreeLanes, "worktreeLanes");
       const configLaneByTask = validateLaneTaskMap(body.laneByTask, "laneByTask");
-      assertLaneReferences(configLaneByTask, configWorktreeLanes);
-      assertLanePlacementDisjoint(configPlacementByTask, configLaneByTask);
-      assertEnvironmentPlacementCompatibility(configEnvironmentByTask, configPlacementByTask);
+      // PUT /api/config is a patch, not a replacement. Validate cross-map
+      // relationships against the resulting plan: a lane membership edit may
+      // omit worktreeLanes because that map was saved earlier, and a runId-only
+      // update must never force the browser to resend every launch setting.
+      if (["environmentByTask", "placementByTask", "worktreeLanes", "laneByTask"].some((key) => key in body)) {
+        const stored = await loadConfig(workspaceDir);
+        const environmentByTask = configEnvironmentByTask ?? stored.environmentByTask ?? null;
+        const placementByTask = configPlacementByTask ?? stored.placementByTask ?? null;
+        const worktreeLanes = configWorktreeLanes ?? stored.worktreeLanes ?? null;
+        const laneByTask = configLaneByTask ?? stored.laneByTask ?? null;
+        assertLaneReferences(laneByTask, worktreeLanes);
+        assertLanePlacementDisjoint(placementByTask, laneByTask);
+        assertEnvironmentPlacementCompatibility(environmentByTask, placementByTask);
+      }
       // One semantic lead Task per Run. It is presentation metadata rather
       // than an Orca mutation, but both sides of the map are still real Orca
       // ids and receive the same strict HTTP-boundary validation as Task maps.

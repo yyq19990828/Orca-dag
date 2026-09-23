@@ -1012,6 +1012,7 @@ export default function App() {
                     ),
                   )}
                   hasWorkerHistory={workerRows.some((row) => row.taskId === selected.id)}
+                  workerRows={workerRows}
                   onOpenOperations={(target) => {
                     setStageOpen(false);
                     openOperation(target);

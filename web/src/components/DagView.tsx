@@ -174,6 +174,9 @@ type TaskNodeData = {  label: string;
   harnessActual: boolean;
   /** A Task with no Dispatch can show its configured future harness. */
   harnessPlanned: boolean;
+  /** Visible launch choices for a Stage that has not dispatched yet. */
+  plannedSettings: string | null;
+  plannedSettingsTitle: string;
   dir: "LR" | "TB";
   /** paint order on first draw — staggers the entrance so the DAG "grows" */
   index: number;
@@ -229,6 +232,17 @@ function hostLabel(host: { kind: string; id: string } | null | undefined): strin
   if (host.kind === "local" || host.id.toLowerCase() === "local") return "Local";
   const place = cleanLine(host.id) || cleanLine(host.kind);
   return place ? `On ${place}` : null;
+}
+
+function plannedWorktreeLabel(selector: string): string {
+  const path = selector.split("::").at(-1) ?? selector;
+  return path.split("/").filter(Boolean).at(-1) ?? "existing workspace";
+}
+
+function plannedPlacementLabel(placement: { kind: string; selector?: string; name?: string } | undefined): string | null {
+  if (!placement || placement.kind === "current") return null;
+  if (placement.kind === "existing" && placement.selector) return plannedWorktreeLabel(placement.selector);
+  return placement.name || (placement.kind === "new-child" ? "new child workspace" : "new workspace");
 }
 
 function activeStageSummary(worker: WorkerRowView | undefined, attempt: RunAttempt | undefined): string {
@@ -354,7 +368,7 @@ function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
       }
       aria-label={`${data.label}. ${meta.label}. ${data.summary}. Harness ${data.harness}${
         data.harnessActual ? " (actual launch)" : " (planned or fallback)"
-      }.${
+      }.${data.plannedSettings ? ` Planned settings: ${data.plannedSettingsTitle}.` : ""}${
         data.lead ? " Lead stage: semantic main-agent ownership." : ""
       }`}
       onAnimationEnd={(event) => {
@@ -434,6 +448,11 @@ function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
       <div className="task-node__summary" title={data.summaryTitle}>
         {data.summary}
       </div>
+      {data.plannedSettings && (
+        <div className="task-node__planned" title={data.plannedSettingsTitle}>
+          {data.plannedSettings}
+        </div>
+      )}
       {/* hand-drawn sign-off: a tick that draws itself, or a scribbled-out cross */}
       {data.status === "completed" && (
         <svg className="task-node__stamp task-node__stamp--ok" viewBox="0 0 46 36" aria-hidden="true">
@@ -759,6 +778,18 @@ function Flow({
       const status = dagNode?.status ?? "pending";
       const harnessPlanned = !harnessEvidence.launched.has(n.id) &&
         (status === "pending" || status === "ready" || status === "blocked");
+      const laneId = config.laneByTask[n.id];
+      const placement = laneId
+        ? config.worktreeLanes[laneId]?.placement
+        : config.placementByTask[n.id];
+      const plannedParts = harnessPlanned
+        ? [
+            config.modelByTask[n.id] ? `Model ${config.modelByTask[n.id]}` : null,
+            laneId
+              ? `Lane ${laneId}${plannedPlacementLabel(placement) ? `: ${plannedPlacementLabel(placement)}` : ""}`
+              : plannedPlacementLabel(placement),
+          ].filter((part): part is string => Boolean(part))
+        : [];
       return {
         ...n,
         type: "task",
@@ -776,6 +807,10 @@ function Flow({
             (harnessPlanned ? effectiveHarness(n.id) : "unknown"),
           harnessActual: harnessEvidence.actual.has(n.id),
           harnessPlanned,
+          plannedSettings: plannedParts.length ? plannedParts.join(" · ") : null,
+          plannedSettingsTitle: plannedParts.length
+            ? `Planned: ${plannedParts.join(" · ")}${placement?.kind === "existing" ? ` (${placement.selector})` : ""}`
+            : "",
           dir,
           index: i,
           // deterministic pseudo-random tilt from the paint order: stickers

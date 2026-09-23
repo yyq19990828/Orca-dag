@@ -49,6 +49,7 @@ const DEFAULTS: ViewerConfig = {
 
 let config: ViewerConfig = { ...DEFAULTS };
 const listeners = new Set<() => void>();
+let configRefreshTimer: number | null = null;
 
 // Server-side policy flags, from GET /api/session (see api.ts). Not config —
 // the server owns them — but the UI needs them reactively, and this store is
@@ -105,8 +106,8 @@ export function useReadiness(): OrcaReadiness | null {
 
 /**
  * Hydrate the store from the server once at startup. Missing fields fall back
- * to legacy localStorage values; the merged result is written back so the
- * migration completes in one shot.
+ * to legacy localStorage values. Only fields actually migrated are written
+ * back: a full write here could erase settings another Viewer just saved.
  */
 export async function initConfig(): Promise<void> {
   // Session (mutation token + policy flags) hydrates reactively: api.ts blocks
@@ -131,15 +132,39 @@ export async function initConfig(): Promise<void> {
       /* stays null — UI keeps working, server re-gates mutations itself */
     });
   let server: Partial<ViewerConfig> = {};
+  let fetched = false;
   try {
     server = await fetchConfig();
+    fetched = true;
   } catch {
     // backend unreachable — stay on defaults / localStorage mirror
   }
-  config = {
+  config = hydratedConfig(server, true);
+  const migrated: Partial<ViewerConfig> = {};
+  if (fetched) {
+    if (!server.defaultHarness && localStorage.getItem(DEFAULT_KEY)) migrated.defaultHarness = config.defaultHarness;
+    if (!server.harnessByTask && Object.keys(config.harnessByTask).length) migrated.harnessByTask = config.harnessByTask;
+    if (!server.layout && config.layout) migrated.layout = config.layout;
+    if (!server.runId && config.runId) migrated.runId = config.runId;
+  }
+  mirrorToLocalStorage();
+  emit();
+  if (Object.keys(migrated).length) schedulePersist(migrated);
+  // An open Viewer can receive a Run built by CLI or another tab. Keep its
+  // Stage editor/card in sync instead of waiting for a full page reload.
+  if (configRefreshTimer === null) {
+    configRefreshTimer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refreshConfig().catch(() => {});
+    }, 10_000);
+    window.addEventListener("focus", () => { void refreshConfig().catch(() => {}); });
+  }
+}
+
+function hydratedConfig(server: Partial<ViewerConfig>, legacy: boolean): ViewerConfig {
+  return {
     defaultHarness:
-      asString(server.defaultHarness) || localStorage.getItem(DEFAULT_KEY) || DEFAULTS.defaultHarness,
-    harnessByTask: asHarnessMap(server.harnessByTask) ?? readLegacyNodeHarnesses(),
+      asString(server.defaultHarness) || (legacy ? localStorage.getItem(DEFAULT_KEY) : "") || DEFAULTS.defaultHarness,
+    harnessByTask: asHarnessMap(server.harnessByTask) ?? (legacy ? readLegacyNodeHarnesses() : {}),
     modelByTask: asHarnessMap(server.modelByTask) ?? {},
     // Phase 5 maps: absent in pre-Phase-5 files → empty (backward-compatible
     // hydration; the server sanitizer already dropped malformed entries).
@@ -158,30 +183,77 @@ export async function initConfig(): Promise<void> {
     // most one lead Task per Run, while old config files simply hydrate empty.
     leadTaskByRun: asHarnessMap(server.leadTaskByRun) ?? {},
     maxConcurrency: asConcurrency(server.maxConcurrency) ?? DEFAULTS.maxConcurrency,
-    layout: asLayout(server.layout) || asLayout(localStorage.getItem(LAYOUT_KEY)) || "",
-    runId: asString(server.runId) || localStorage.getItem(RUN_KEY) || "",
+    layout: asLayout(server.layout) || (legacy ? asLayout(localStorage.getItem(LAYOUT_KEY)) : "") || "",
+    runId: asString(server.runId) || (legacy ? localStorage.getItem(RUN_KEY) : "") || "",
   };
-  emit();
-  persist();
 }
 
 function update(patch: Partial<ViewerConfig>): void {
   config = { ...config, ...patch };
+  revision++;
   mirrorToLocalStorage();
   emit();
-  persist();
+  schedulePersist(patch);
 }
 
 let persistTimer: number | null = null;
-/** Debounced write-through to the server-side config file. */
-function persist(): void {
+let pendingPatch: Partial<ViewerConfig> = {};
+let persistInFlight: Promise<void> | null = null;
+let revision = 0;
+
+/** Debounced, field-scoped write-through. Run selection cannot overwrite maps. */
+function schedulePersist(patch: Partial<ViewerConfig>): void {
+  pendingPatch = { ...pendingPatch, ...patch };
   if (persistTimer !== null) window.clearTimeout(persistTimer);
   persistTimer = window.setTimeout(() => {
     persistTimer = null;
-    saveConfig(config).catch(() => {
+    flushConfigChanges().catch(() => {
       /* keep the in-memory state; next change retries */
     });
   }, 250);
+}
+
+async function flushConfigChanges(): Promise<void> {
+  if (persistTimer !== null) {
+    window.clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  if (persistInFlight) {
+    await persistInFlight;
+    return flushConfigChanges();
+  }
+  if (!Object.keys(pendingPatch).length) return;
+  const patch = pendingPatch;
+  pendingPatch = {};
+  persistInFlight = saveConfig(patch).catch((error: unknown) => {
+    pendingPatch = { ...patch, ...pendingPatch };
+    throw error;
+  });
+  try {
+    await persistInFlight;
+  } finally {
+    persistInFlight = null;
+  }
+  return flushConfigChanges();
+}
+
+/** Refresh the exact plan used by Run, after all local edits have reached disk. */
+export async function refreshConfig(): Promise<ViewerConfig> {
+  for (;;) {
+    await flushConfigChanges();
+    const before = revision;
+    const server = await fetchConfig();
+    // An edit while GET was in flight must be saved before that snapshot is
+    // allowed to replace the store or become a launch plan.
+    if (revision !== before) continue;
+    const refreshed = hydratedConfig(server, false);
+    if (JSON.stringify(refreshed) !== JSON.stringify(config)) {
+      config = refreshed;
+      mirrorToLocalStorage();
+      emit();
+    }
+    return config;
+  }
 }
 
 function mirrorToLocalStorage(): void {

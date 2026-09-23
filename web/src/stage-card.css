@@ -44,3 +44,18 @@
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+
+/* The pre-dispatch plan occupies the remaining fixed-height line. The full
+   model/worktree selector stays in the title when the card clips it. */
+.task-node .task-node__planned {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 11px;
+  min-height: 11px;
+  overflow: hidden;
+  color: var(--ink-soft);
+  font-size: 9px;
+  line-height: 11px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}

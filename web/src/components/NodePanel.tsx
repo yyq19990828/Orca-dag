@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { fetchEnvironments, fetchModels } from "../api";
+import { fetchEnvironments, fetchModels, fetchWorkerDetail } from "../api";
 import { formatDateTime } from "../format";
 import { lanePlanProblems, laneLabel } from "../placement";
+import { workerWorkspaceLabel } from "../workerWorkspace";
 import {
   effectiveHarness,
   allLaneIds,
@@ -36,6 +37,7 @@ import {
   type DagNodeReadiness,
   type OrcaEnvironmentView,
   type PlacementSpec,
+  type WorkerRowView,
 } from "../types";
 import { DoodleSelect } from "./DoodleSelect";
 import { PlacementEditor } from "./PlacementEditor";
@@ -169,6 +171,8 @@ interface NodePanelProps {
   failedStart?: boolean;
   /** A durable Worker row for this Task is available in the Operations fleet. */
   hasWorkerHistory?: boolean;
+  /** Run-scoped Dispatch rows; the selected worker's actual worktree comes from worker-show. */
+  workerRows: WorkerRowView[];
   onClose: () => void;
 }
 
@@ -195,6 +199,7 @@ export function NodePanel({
   onOpenOperations,
   failedStart = false,
   hasWorkerHistory = false,
+  workerRows,
   onClose,
 }: NodePanelProps) {
   const meta = STATUS_META[node.status];
@@ -337,6 +342,46 @@ export function NodePanel({
     };
   }, [effHarness]);
 
+  // Placement is launch intent. The worker's terminal observation is the
+  // actual worktree, including legacy starts whose fleet projection has no
+  // workspace (such as OpenCode tracking Dispatches). Keep the two distinct.
+  const taskWorkers = workerRows.filter((row) => row.runId === runId && row.taskId === node.id);
+  const worker = taskWorkers.find((row) => row.dispatchId === node.dispatchId) ?? taskWorkers[0];
+  const dispatchId = worker?.dispatchId ?? null;
+  const [workerWorktree, setWorkerWorktree] = useState<{
+    dispatchId: string;
+    path: string | null;
+    branch: string | null;
+    error: boolean;
+  } | null>(null);
+  useEffect(() => {
+    if (!dispatchId) return;
+    let alive = true;
+    fetchWorkerDetail(runId, dispatchId)
+      .then((detail) => {
+        if (!alive) return;
+        setWorkerWorktree({
+          dispatchId,
+          path: detail.terminal?.worktreePath ?? workerWorkspaceLabel(detail.fleet?.projection?.workspace),
+          branch: detail.terminal?.branch ?? null,
+          error: false,
+        });
+      })
+      .catch(() => {
+        // The fleet row can still carry a usable workspace identity; a
+        // failed detail read must never turn launch intent into actual fact.
+        if (alive) setWorkerWorktree({ dispatchId, path: null, branch: null, error: true });
+      });
+    return () => { alive = false; };
+  }, [runId, dispatchId]);
+  const actualWorktree =
+    (workerWorktree?.dispatchId === dispatchId ? workerWorktree.path : null) ??
+    workerWorkspaceLabel(worker?.projection?.workspace) ??
+    worker?.projection?.launch?.worktree ?? null;
+  const actualBranch = workerWorktree?.dispatchId === dispatchId ? workerWorktree.branch : null;
+  const worktreeLoading = dispatchId && workerWorktree?.dispatchId !== dispatchId;
+  const worktreeError = workerWorktree?.dispatchId === dispatchId && workerWorktree.error;
+
   return (
     <aside className="node-panel">
       <button className="node-panel__close" onClick={onClose} aria-label="Close">
@@ -468,233 +513,248 @@ export function NodePanel({
         </div>
       )}
 
-      <div className="node-panel__field">
-        <span className="node-panel__key">Harness (which agent runs this node)</span>
-        <DoodleSelect
-          value={sel}
-          onChange={pick}
-          disabled={launchLocked}
-          title={launchLocked ? lockReason ?? "Launch settings are locked" : undefined}
-          options={[
-            { value: INHERIT, label: `Default (${getDefaultHarness()})` },
-            ...HARNESSES.map((h) => ({ value: h, label: h })),
-            // Same policy as the toolbar: no "Custom…" unless the server allows
-            // it — but a stored custom value stays visible (and clearable via
-            // "Inherit") while the flag is off.
-            ...(customOk || (stored !== null && !KNOWN.includes(stored))
-              ? [
-                  {
-                    value: CUSTOM,
-                    label: customOk ? "Custom…" : "Custom (disabled)",
-                    disabled: !customOk,
-                    hint: customOk ? undefined : "ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1",
-                  },
-                ]
-              : []),
-          ]}
-        />
-        {sel === CUSTOM && (
-          <input
-            className="node-panel__custom"
-            value={custom}
-            placeholder="command, e.g. aider"
-            onChange={(e) => pickCustom(e.target.value)}
-            disabled={!customOk || launchLocked}
+      <section className="node-panel__group" aria-label="Agent settings">
+        <h4 className="node-panel__group-title">Agent</h4>
+        <div className="node-panel__field">
+          <span className="node-panel__key">Harness (which agent runs this node)</span>
+          <DoodleSelect
+            value={sel}
+            onChange={pick}
+            disabled={launchLocked}
+            title={launchLocked ? lockReason ?? "Launch settings are locked" : undefined}
+            options={[
+              { value: INHERIT, label: `Default (${getDefaultHarness()})` },
+              ...HARNESSES.map((h) => ({ value: h, label: h })),
+              // Same policy as the toolbar: no "Custom…" unless the server allows
+              // it — but a stored custom value stays visible (and clearable via
+              // "Inherit") while the flag is off.
+              ...(customOk || (stored !== null && !KNOWN.includes(stored))
+                ? [
+                    {
+                      value: CUSTOM,
+                      label: customOk ? "Custom…" : "Custom (disabled)",
+                      disabled: !customOk,
+                      hint: customOk ? undefined : "ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1",
+                    },
+                  ]
+                : []),
+            ]}
           />
-        )}
-        {sel === CUSTOM && !customOk && (
-          <span className="node-panel__hint">{CUSTOM_OFF_HINT}</span>
-        )}
-      </div>
+          {sel === CUSTOM && (
+            <input
+              className="node-panel__custom"
+              value={custom}
+              placeholder="command, e.g. aider"
+              onChange={(e) => pickCustom(e.target.value)}
+              disabled={!customOk || launchLocked}
+            />
+          )}
+          {sel === CUSTOM && !customOk && (
+            <span className="node-panel__hint">{CUSTOM_OFF_HINT}</span>
+          )}
+        </div>
 
-      {/* Phase 6: run this node on a saved environment (or keep it local —
-          the zero-configuration default). List contents come only from
-          `orca environment list`; nothing is ever invented client-side. */}
-      <div className="node-panel__field">
-        <span className="node-panel__key">Environment (which server executes this node)</span>
-        <DoodleSelect
-          value={envId ?? ""}
-          onChange={pickEnvironment}
-          disabled={launchLocked || Boolean(laneId)}
-          title={
-            laneId
-              ? "This task runs in a local workspace lane — remove it from the lane to pin a remote environment."
-              : undefined
-          }
-          loading={envs === null}
-          options={[
-            { value: "", label: `Local (this server)` },
-            ...(envs ?? []).map((e) => ({
-              value: e.id,
-              label: e.name === e.id ? e.id : `${e.name} (${e.id})`,
-            })),
-          ]}
-        />
-        {envId && envs !== null && !selectedEnv && (
-          <span className="node-panel__hint">
-            Saved environment “{envId}” is no longer listed — re-discover it or switch back to Local.
-          </span>
+        {/* A model belongs to the harness above. A remote peer that does not
+            advertise model/effort forwarding cannot accept either control. */}
+        {picker !== "none" && peerModelEffort && (
+          <div className="node-panel__field">
+            <span className="node-panel__key">
+              Model ({effHarness}){model ? null : " · default"}
+            </span>
+            {picker === "select" ? (
+              <DoodleSelect
+                value={model ?? ""}
+                onChange={(v) => {
+                  if (!launchLocked) setNodeModel(node.id, v || null);
+                }}
+                disabled={launchLocked}
+                loading={openCodeModels === null}
+                options={[
+                  { value: "", label: "(default model)" },
+                  ...(openCodeModels ?? []).map((m) => ({ value: m, label: m })),
+                ]}
+              />
+            ) : (
+              <input
+                className="node-panel__custom"
+                value={model ?? ""}
+                placeholder={`model name, e.g. ${effHarness === "claude" ? "opus" : effHarness === "codex" ? "o3" : "<model>"}`}
+                onChange={(e) => setNodeModel(node.id, e.target.value.trim() || null)}
+                disabled={launchLocked}
+              />
+            )}
+          </div>
         )}
-        {envId && selectedEnv && !selectedEnv.peer.modelEffort && (
-          <span className="node-panel__hint">
-            This peer does not advertise model/effort — those controls are hidden for this node.
-          </span>
-        )}
-      </div>
 
-      {/* Phase 7: durable workspace lanes. A lane is ONE shared local
-          non-current workspace for a dependency-ordered task chain. The seed
-          editor is the same placement grammar minus `current` (`current` is
-          no lane), and the ordering preflight explains — before any mutation
-          — why an unordered set of tasks cannot share a lane. */}
-      <div className="node-panel__field">
-        <span className="node-panel__key">Workspace lane (serial tasks sharing one workspace)</span>
-        <DoodleSelect
-          value={laneId ?? ""}
-          onChange={pickLane}
-          disabled={launchLocked}
-          options={[
-            { value: "", label: "(no lane — per-task placement)" },
-            ...allLaneIds().map((id) => ({
-              value: id,
-              label: `${id} · ${laneSpecOf(id)}`,
-              hint: id,
-            })),
-            { value: NEW_LANE, label: "＋ New lane…", disabled: launchLocked },
-          ]}
-        />
-        {laneId && laneSpec && (
-          <>
-            <PlacementEditor
-              scope="lane"
-              envId={null}
-              title="Lane placement (shared by every task in the lane)"
-              value={laneSpec.placement}
-              onChange={(p) => {
-                if (launchLocked || !laneId || p === null || p.kind === "current") return;
-                setLaneSpec(laneId, { placement: p });
+        {/* worker-start accepts effort only alongside a model, and only for
+            supported harnesses. Clearing the model clears stored effort. */}
+        {model && EFFORT_SUPPORTED.has(effHarness) && peerModelEffort && (
+          <div className="node-panel__field">
+            <span className="node-panel__key">Effort ({effHarness})</span>
+            <DoodleSelect
+              value={getNodeEffort(node.id) ?? ""}
+              onChange={(v) => {
+                if (!launchLocked) setNodeEffort(node.id, v || null);
               }}
               disabled={launchLocked}
+              options={[
+                { value: "", label: "(default effort)" },
+                ...EFFORT_LEVELS.map((e) => ({ value: e, label: e })),
+              ]}
             />
-            {laneMembers.length > 1 && (
-              <span className="node-panel__hint">
-                Lane members (run one after another):{" "}
-                {laneMembers.map((id) => labelsById[id] ?? id).join(" → ")}
-              </span>
-            )}
-            {laneProblems.map((p) => (
-              <span key={p} className="node-panel__hint placement__warn">
-                ⚠ {p}
-              </span>
-            ))}
-            {!launchLocked && (
-              <button
-                type="button"
-                className="node-panel__lane-remove"
-                onClick={() => pickLane("")}
-                title="Remove this task from the lane (the lane itself stays if other tasks still use it)"
-              >
-                Remove from lane
-              </button>
-            )}
-          </>
+            <span className="node-panel__hint">Reasoning effort for the selected model.</span>
+          </div>
         )}
-        {!laneId && (
-          <span className="node-panel__hint">
-            Tasks in one lane never run concurrently; different lanes may. Leave empty for per-task placement.
-          </span>
-        )}
-      </div>
+      </section>
 
-      {/* Per-task placement editor — skipped while the task is in a lane (the
-          lane owns its members' placement). Local offers the full four-choice
-          matrix; a saved environment offers the two remote-safe choices. */}
-      {!laneId && !envId && (
+      <section className="node-panel__group" aria-label="Workspace settings">
+        <h4 className="node-panel__group-title">Workspace</h4>
+        {dispatchId && (
+          <div className="node-panel__field node-panel__actual-worktree">
+            <span className="node-panel__key">Worktree used by this Dispatch</span>
+            {actualWorktree ? <code>{actualWorktree}</code> : (
+              <span>{worktreeLoading ? "Loading recorded worktree…" : worktreeError ? "Could not load worktree evidence." : "Worktree not reported by Orca."}</span>
+            )}
+            {actualBranch && <span className="node-panel__hint">Branch: {actualBranch.replace(/^refs\/heads\//, "")}</span>}
+            {taskWorkers.length > 1 && (
+              <span className="node-panel__hint">Dispatch {dispatchId} · other attempts are in worker history.</span>
+            )}
+          </div>
+        )}
+
+        {/* Phase 6: run this node on a saved environment (or keep it local —
+            the zero-configuration default). List contents come only from
+            `orca environment list`; nothing is ever invented client-side. */}
         <div className="node-panel__field">
-          <PlacementEditor
-            scope="local"
-            envId={null}
-            title="Placement (local workspace)"
-            value={placement}
-            onChange={pickPlacement}
-            disabled={launchLocked}
+          <span className="node-panel__key">Environment (which server executes this node)</span>
+          <DoodleSelect
+            value={envId ?? ""}
+            onChange={pickEnvironment}
+            disabled={launchLocked || Boolean(laneId)}
+            title={
+              laneId
+                ? "This task runs in a local workspace lane — remove it from the lane to pin a remote environment."
+                : undefined
+            }
+            loading={envs === null}
+            options={[
+              { value: "", label: `Local (this server)` },
+              ...(envs ?? []).map((e) => ({
+                value: e.id,
+                label: e.name === e.id ? e.id : `${e.name} (${e.id})`,
+              })),
+            ]}
           />
-        </div>
-      )}
-      {!laneId && envId && (
-        <div className="node-panel__field">
-          <PlacementEditor
-            scope="remote"
-            envId={envId}
-            title={`Placement on ${selectedEnv?.name ?? envId}`}
-            value={placement}
-            onChange={pickPlacement}
-            disabled={launchLocked}
-          />
-          {placement === null && (
+          {envId && envs !== null && !selectedEnv && (
             <span className="node-panel__hint">
-              Pick an exact workspace or a new top-level worktree — remote “current” is not a valid placement.
+              Saved environment “{envId}” is no longer listed — re-discover it or switch back to Local.
+            </span>
+          )}
+          {envId && selectedEnv && !selectedEnv.peer.modelEffort && (
+            <span className="node-panel__hint">
+              This peer does not advertise model/effort — those controls are hidden for this node.
             </span>
           )}
         </div>
-      )}
 
-      {/* Model/effort are gated on the peer: a remote environment that does
-          not advertise model/effort forwarding hides both controls (the
-          coordinator would refuse the start anyway — this makes it honest
-          UI instead of a runtime error). */}
-      {picker !== "none" && peerModelEffort && (
+        {/* Phase 7: durable workspace lanes. A lane is ONE shared local
+            non-current workspace for a dependency-ordered task chain. The seed
+            editor is the same placement grammar minus `current` (`current` is
+            no lane), and the ordering preflight explains — before any mutation
+            — why an unordered set of tasks cannot share a lane. */}
         <div className="node-panel__field">
-          <span className="node-panel__key">
-            Model ({effHarness}){model ? null : " · default"}
-          </span>
-          {picker === "select" ? (
-            <DoodleSelect
-              value={model ?? ""}
-              onChange={(v) => {
-                if (!launchLocked) setNodeModel(node.id, v || null);
-              }}
-              disabled={launchLocked}
-              loading={openCodeModels === null}
-              options={[
-                { value: "", label: "(default model)" },
-                ...(openCodeModels ?? []).map((m) => ({ value: m, label: m })),
-              ]}
-            />
-          ) : (
-            <input
-              className="node-panel__custom"
-              value={model ?? ""}
-              placeholder={`model name, e.g. ${effHarness === "claude" ? "opus" : effHarness === "codex" ? "o3" : "<model>"}`}
-              onChange={(e) => setNodeModel(node.id, e.target.value.trim() || null)}
-              disabled={launchLocked}
-            />
-          )}
-        </div>
-      )}
-
-      {/* Phase 5: effort only exists WITH a model (worker-start --effort
-          requires --model), and only for harnesses that take the flag at all
-          — opencode runs the legacy path and has none. Clearing the model
-          clears the effort in the store, so the pair can never dangle.
-          Phase 6: also gated on the peer advertising model/effort. */}
-      {model && EFFORT_SUPPORTED.has(effHarness) && peerModelEffort && (
-        <div className="node-panel__field">
-          <span className="node-panel__key">Effort ({effHarness})</span>
+          <span className="node-panel__key">Workspace lane (serial tasks sharing one workspace)</span>
           <DoodleSelect
-            value={getNodeEffort(node.id) ?? ""}
-            onChange={(v) => {
-              if (!launchLocked) setNodeEffort(node.id, v || null);
-            }}
+            value={laneId ?? ""}
+            onChange={pickLane}
             disabled={launchLocked}
             options={[
-              { value: "", label: "(default effort)" },
-              ...EFFORT_LEVELS.map((e) => ({ value: e, label: e })),
+              { value: "", label: "(no lane — per-task placement)" },
+              ...allLaneIds().map((id) => ({
+                value: id,
+                label: `${id} · ${laneSpecOf(id)}`,
+                hint: id,
+              })),
+              { value: NEW_LANE, label: "＋ New lane…", disabled: launchLocked },
             ]}
           />
-          <span className="node-panel__hint">Reasoning effort for the selected model.</span>
+          {laneId && laneSpec && (
+            <>
+              <PlacementEditor
+                scope="lane"
+                envId={null}
+                title="Lane placement (shared by every task in the lane)"
+                value={laneSpec.placement}
+                onChange={(p) => {
+                  if (launchLocked || !laneId || p === null || p.kind === "current") return;
+                  setLaneSpec(laneId, { placement: p });
+                }}
+                disabled={launchLocked}
+              />
+              {laneMembers.length > 1 && (
+                <span className="node-panel__hint">
+                  Lane members (run one after another):{" "}
+                  {laneMembers.map((id) => labelsById[id] ?? id).join(" → ")}
+                </span>
+              )}
+              {laneProblems.map((p) => (
+                <span key={p} className="node-panel__hint placement__warn">
+                  ⚠ {p}
+                </span>
+              ))}
+              {!launchLocked && (
+                <button
+                  type="button"
+                  className="node-panel__lane-remove"
+                  onClick={() => pickLane("")}
+                  title="Remove this task from the lane (the lane itself stays if other tasks still use it)"
+                >
+                  Remove from lane
+                </button>
+              )}
+            </>
+          )}
+          {!laneId && (
+            <span className="node-panel__hint">
+              Tasks in one lane never run concurrently; different lanes may. Leave empty for per-task placement.
+            </span>
+          )}
         </div>
-      )}
+
+        {/* Per-task placement editor — skipped while the task is in a lane (the
+            lane owns its members' placement). Local offers the full four-choice
+            matrix; a saved environment offers the two remote-safe choices. */}
+        {!laneId && !envId && (
+          <div className="node-panel__field">
+            <PlacementEditor
+              scope="local"
+              envId={null}
+              title="Requested placement (local workspace)"
+              value={placement}
+              onChange={pickPlacement}
+              disabled={launchLocked}
+            />
+          </div>
+        )}
+        {!laneId && envId && (
+          <div className="node-panel__field">
+            <PlacementEditor
+              scope="remote"
+              envId={envId}
+              title={`Requested placement on ${selectedEnv?.name ?? envId}`}
+              value={placement}
+              onChange={pickPlacement}
+              disabled={launchLocked}
+            />
+            {placement === null && (
+              <span className="node-panel__hint">
+                Pick an exact workspace or a new top-level worktree — remote “current” is not a valid placement.
+              </span>
+            )}
+          </div>
+        )}
+
+      </section>
 
       {/* Phase 5: retain-for-debugging — the settled worker's terminal stays
           alive and visible (in the Workers panel) until manually released. */}
