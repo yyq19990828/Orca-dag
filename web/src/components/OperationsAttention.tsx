@@ -95,6 +95,7 @@ function makeItems({ runId, dag, status, workers }: ActionableOperationSnapshots
   const scopedDag = dagForRun(dag, runId);
   const scopedStatus = statusForRun(status, runId);
   const items: AttentionItem[] = [];
+  const labels = new Map(scopedDag?.nodes.map((node) => [node.id, node.label]));
 
   for (const gate of pendingGates(scopedDag?.gates ?? [])) {
     items.push({
@@ -105,7 +106,7 @@ function makeItems({ runId, dag, status, workers }: ActionableOperationSnapshots
       eyebrow: t("attention.decision"),
       title: gate.question || t("gate.resolveFallback"),
       detail: gate.taskId
-        ? t("attention.taskDetail", { id: gate.taskId })
+        ? t("attention.taskDetail", { id: labels.get(gate.taskId) || gate.taskId })
         : t("attention.gateDetail", { id: gate.id }),
       action: t("attention.reviewGate"),
     });
@@ -121,9 +122,7 @@ function makeItems({ runId, dag, status, workers }: ActionableOperationSnapshots
       id: attempt.taskId,
       tone: "recovery",
       eyebrow: t("attention.startFailed"),
-      title: attempt.startReceipt?.failedStage
-        ? t("attention.failedAt", { stage: attempt.startReceipt.failedStage })
-        : t("attention.retryTask", { id: attempt.taskId }),
+      title: labels.get(attempt.taskId) || attempt.taskId,
       detail: attempt.terminalDetail || t("attention.startFailedDetail"),
       action: t("attention.reviewRetry"),
     });
@@ -144,7 +143,7 @@ function makeItems({ runId, dag, status, workers }: ActionableOperationSnapshots
       id: dispatchKey,
       tone: "worker",
       eyebrow: decisionOwed ? t("attention.decisionOwed") : t("attention.workerNeedsAttention"),
-      title: row.taskId,
+      title: labels.get(row.taskId) || row.taskId,
       detail: decisionOwed
         ? row.terminalState === "release_pending"
           ? t("attention.decisionPending")

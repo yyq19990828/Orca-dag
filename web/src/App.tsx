@@ -56,6 +56,7 @@ const EMPTY_ACTIVITY: ActivitySnapshot = {
 };
 const EMPTY_ATTEMPTS: RunAttempt[] = [];
 const POLL_MS = 2000;
+const OPERATION_GROUPS = ["decisions", "execution", "diagnostics"] as const;
 const COMMUNICATION_MIN_WIDTH = 380;
 const COMMUNICATION_MAX_WIDTH = 820;
 const CANVAS_MIN_WIDTH = 320;
@@ -205,7 +206,9 @@ export default function App() {
   const [communicationOpen, setCommunicationOpen] = useState(false);
   const [communicationWidth, setCommunicationWidth] = useState<number | null>(null);
   const [communicationResizing, setCommunicationResizing] = useState(false);
-  const [communicationTab, setCommunicationTab] = useState<"activity" | "chat" | "operations">("activity");
+  const [communicationTab, setCommunicationTab] = useState<"activity" | "chat">("activity");
+  const [sidePanel, setSidePanel] = useState<"communication" | "operations">("communication");
+  const [operationGroup, setOperationGroup] = useState<typeof OPERATION_GROUPS[number]>("decisions");
   const [operationsSeen, setOperationsSeen] = useState(false);
   const [operationFocus, setOperationFocus] = useState<OperationFocus | null>(null);
   // Parent/child ownership links (Phase 4) are hideable: on dense graphs they
@@ -526,16 +529,17 @@ export default function App() {
   const knownActionableCount = countKnownActionableOperations(operationSnapshots);
 
   function openOperation(target: OperationFocus) {
+    setOperationGroup(target.kind === "worker" ? "execution" : "decisions");
     setOperationFocus(target);
     setOperationsSeen(true);
-    setCommunicationTab("operations");
+    setSidePanel("operations");
     openCommunication();
   }
 
   useEffect(() => {
-    if (!communicationOpen || communicationTab !== "operations" || !operationFocus) return;
+    if (!communicationOpen || sidePanel !== "operations" || !operationFocus) return;
     if (focusOperation(communicationRef.current, operationFocus)) setOperationFocus(null);
-  }, [communicationOpen, communicationTab, operationFocus, visibleDag, workerRows, runStatus]);
+  }, [communicationOpen, sidePanel, operationGroup, operationFocus, visibleDag, workerRows, runStatus]);
   const startedTaskIds = useMemo(
     () => new Set(runId ? startedByRun.current.get(runId) ?? [] : []),
     [runId, startedRevision],
@@ -677,10 +681,10 @@ export default function App() {
             <div className="dag-toolbar__left">
               <button
                 type="button"
-                className={`btn btn--activity${communicationOpen ? " active" : ""}`}
-                aria-pressed={communicationOpen && communicationTab !== "operations"}
+                className={`btn btn--activity${communicationOpen && sidePanel !== "operations" ? " active" : ""}`}
+                aria-pressed={communicationOpen && sidePanel !== "operations"}
                 onClick={() => {
-                  setCommunicationTab("activity");
+                  setSidePanel("communication");
                   openCommunication();
                 }}
               >
@@ -689,8 +693,8 @@ export default function App() {
               </button>
               <button
                 type="button"
-                className={`btn btn--operations${communicationOpen && communicationTab === "operations" ? " active" : ""}`}
-                aria-pressed={communicationOpen && communicationTab === "operations"}
+                className={`btn btn--operations${communicationOpen && sidePanel === "operations" ? " active" : ""}`}
+                aria-pressed={communicationOpen && sidePanel === "operations"}
                 aria-label={actionableCount === null
                   ? knownActionableCount > 0
                     ? t("toolbar.openOperationsAtLeast", { n: knownActionableCount })
@@ -698,7 +702,7 @@ export default function App() {
                   : t("toolbar.openOperationsCount", { n: actionableCount })}
                 onClick={() => {
                   setOperationsSeen(true);
-                  setCommunicationTab("operations");
+                  setSidePanel("operations");
                   openCommunication();
                 }}
               >
@@ -794,8 +798,24 @@ export default function App() {
             </div>
           </div>
 
+          {runId && (
+            <div className="run-overview" role="group" aria-label={t("overview.title")}>
+              <span className="run-overview__label">{t("overview.title")}</span>
+              {visibleDag.runId !== runId ? <span>{t("overview.loading")}</span> :
+                (Object.keys(STATUS_META) as TaskStatus[]).map((status) => (
+                  <span key={status} className="run-overview__stat" data-empty={!counts[status]}>
+                    <span className="legend__dot" style={{ background: STATUS_META[status].color }} />
+                    {t(`status.${status}`)} <b>{counts[status] ?? 0}</b>
+                  </span>
+                ))}
+              {connError && <span className="run-overview__stale" role="status">{t("overview.stale")}</span>}
+            </div>
+          )}
           <div className="dag-workspace">
-            {/* Activity and Chat are two readings of the same live snapshot.
+            {/* Independent Operations and Communication panels share this resizable
+                rail. Only Communication has Activity/Chat tabs; switching the
+                top-level panel preserves its last conversation selection.
+                Activity and Chat are two readings of the same live snapshot.
                 Keep this mounted while closed so unread counts and the Chat
                 conversation list stay warm without opening a second stream.
                 The communication surface is a real left rail, not a canvas
@@ -803,12 +823,16 @@ export default function App() {
             <aside
               ref={communicationRef}
               className={`communication-center${communicationOpen ? "" : " communication-center--closed"}${communicationResizing ? " communication-center--resizing" : ""}`}
-              aria-label={t("toolbar.communicationCenterAria")}
+              aria-label={t(sidePanel === "operations" ? "toolbar.operations" : "toolbar.communicationCenterAria")}
               aria-hidden={!communicationOpen}
               style={{ width: communicationWidth === null ? undefined : `${communicationWidth}px` }}
             >
                 <header className="communication-center__header">
-                  <div className="communication-center__tabs" role="tablist" aria-label={t("toolbar.communicationViewAria")}>
+                  {sidePanel === "operations" ? (
+                    <h2 className="operations-center__title">{t("toolbar.operations")}
+                      {knownActionableCount > 0 && <span className="operations-badge">{actionableCount === null ? `${knownActionableCount}+` : actionableCount}</span>}
+                    </h2>
+                  ) : <div className="communication-center__tabs" role="tablist" aria-label={t("toolbar.communicationViewAria")}>
                     <button
                       type="button"
                       role="tab"
@@ -822,23 +846,6 @@ export default function App() {
                     <button
                       type="button"
                       role="tab"
-                      aria-selected={communicationTab === "operations"}
-                      className={communicationTab === "operations" ? "active" : ""}
-                      onClick={() => {
-                        setOperationsSeen(true);
-                        setCommunicationTab("operations");
-                      }}
-                    >
-                      {t("toolbar.operations")}
-                      {knownActionableCount > 0 && (
-                        <span className="operations-badge">
-                          {actionableCount === null ? `${knownActionableCount}+` : actionableCount}
-                        </span>
-                      )}
-                    </button>
-                    <button
-                      type="button"
-                      role="tab"
                       aria-selected={communicationTab === "chat"}
                       className={communicationTab === "chat" ? "active" : ""}
                       onClick={() => setCommunicationTab("chat")}
@@ -846,11 +853,11 @@ export default function App() {
                       {t("toolbar.chat")}
                       {activityPending > 0 && <span className="activity-badge">{activityPending}</span>}
                     </button>
-                  </div>
+                  </div>}
                   <button
                     type="button"
                     className="communication-center__close"
-                    aria-label={t("toolbar.closeCommunicationAria")}
+                    aria-label={t(sidePanel === "operations" ? "operations.close" : "toolbar.closeCommunicationAria")}
                     onClick={closeCommunication}
                   >
                     ✕
@@ -858,7 +865,7 @@ export default function App() {
                 </header>
 
                 <div className="communication-center__body">
-                  <div hidden={communicationTab !== "activity"}>
+                  <div hidden={sidePanel !== "communication" || communicationTab !== "activity"}>
                     <ActivityPanel
                         runId={runId}
                         onSelectTask={selectStage}
@@ -872,59 +879,84 @@ export default function App() {
                   {operationsSeen && (
                     // Keep panel state warm after its first visit. The two
                     // polling children receive `active` and stop their
-                    // intervals while this tab is hidden.
-                    <div hidden={communicationTab !== "operations"} className="communication-center__operations">
-                      <OperationsAttention
-                        {...operationSnapshots}
-                        onFocus={setOperationFocus}
-                      />
-                      {/* Promoted from a collapsed drawer under the timeline to
-                          its own tab: gates, recovery, the durable fleet view,
-                          the mutation audit and capability facts are operational
-                          state, not an afterthought. */}
-                      <GatePanel
-                        gates={visibleDag.gates}
-                        runId={runId}
-                        onResolved={refresh}
-                        disabled={execOff}
-                        disabledReason={readiness?.reason}
-                      />
-                      {/* Recovery no longer polls: App owns /api/run-status and
-                          passes it down, so there is exactly one periodic
-                          caller of that endpoint in the whole app. */}
-                      <RecoveryPanel
-                        runId={runId}
-                        status={runStatus}
-                        taskIds={visibleDag.nodes.map((node) => node.id)}
-                        blockedTaskIds={visibleDag.nodes.filter((node) => node.status === "blocked").map((node) => node.id)}
-                        onRunStarting={onRunStarting}
-                        onRunStartFinished={onRunStartFinished}
-                        onRetried={refresh}
-                        disabled={execOff}
-                        disabledReason={readiness?.reason}
-                      />
-                      <WorkerPanel
-                        runId={runId}
-                        rows={workerRows}
-                        rowsError={workerHistoryError}
-                        status={runStatus}
-                        disabled={execOff}
-                        disabledReason={readiness?.reason}
-                      />
-                      {/* Phase 7: runtime lane state — workspace identity,
-                          warnings, review, and explicit removal. Its polling
-                          pauses when Operations is out of view. */}
-                      <LanesPanel
-                        runId={runId}
-                        active={communicationOpen && communicationTab === "operations"}
-                        disabled={execOff}
-                        disabledReason={readiness?.reason}
-                      />
-                      <RequestAuditPanel runId={runId} active={communicationOpen && communicationTab === "operations"} />
-                      <CapabilityPanel />
+                    // intervals while the Operations panel is hidden.
+                    <div hidden={sidePanel !== "operations"} className="communication-center__operations">
+                      <nav className="operations-nav" aria-label={t("operations.groups")}>
+                        {OPERATION_GROUPS.map((group) => (
+                          <button
+                            key={group}
+                            type="button"
+                            aria-pressed={operationGroup === group}
+                            aria-controls={`operations-${group}`}
+                            onClick={() => { setOperationFocus(null); setOperationGroup(group); }}
+                          >
+                            {t(`operations.${group}`)}
+                          </button>
+                        ))}
+                      </nav>
+                      <section id="operations-decisions" hidden={operationGroup !== "decisions"} aria-label={t("operations.decisions")}>
+                        <OperationsAttention
+                          {...operationSnapshots}
+                          onFocus={openOperation}
+                        />
+                        <p className="operations-intro">{t("operations.decisionsHint")}</p>
+                        {/* Promoted from a collapsed drawer under the timeline to
+                            its own panel: gates, recovery, the durable fleet view,
+                            the mutation audit and capability facts are operational
+                            state, not an afterthought. */}
+                        <GatePanel
+                          gates={visibleDag.gates}
+                          runId={runId}
+                          onResolved={refresh}
+                          disabled={execOff}
+                          disabledReason={readiness?.reason}
+                        />
+                        {/* Recovery no longer polls: App owns /api/run-status and
+                            passes it down, so there is exactly one periodic
+                            caller of that endpoint in the whole app. */}
+                        <RecoveryPanel
+                          runId={runId}
+                          status={runStatus}
+                          taskIds={visibleDag.nodes.map((node) => node.id)}
+                          blockedTaskIds={visibleDag.nodes.filter((node) => node.status === "blocked").map((node) => node.id)}
+                          onRunStarting={onRunStarting}
+                          onRunStartFinished={onRunStartFinished}
+                          onRetried={refresh}
+                          disabled={execOff}
+                          disabledReason={readiness?.reason}
+                        />
+                      </section>
+                      <section id="operations-execution" hidden={operationGroup !== "execution"} aria-label={t("operations.execution")}>
+                        <p className="operations-intro">{t("operations.executionHint")}</p>
+                        {!workerHistoryLoading && !workerHistoryError && workerRows.length === 0 && <p className="operations-empty">{t("operations.noWorkers")}</p>}
+                        <WorkerPanel
+                          labelsById={labelsById}
+                          focusId={operationFocus?.kind === "worker" ? operationFocus.id : null}
+                          runId={runId}
+                          rows={workerRows}
+                          rowsError={workerHistoryError}
+                          status={runStatus}
+                          disabled={execOff}
+                          disabledReason={readiness?.reason}
+                        />
+                        {/* Phase 7: runtime lane state — workspace identity,
+                            warnings, review, and explicit removal. Its polling
+                            pauses when Operations is out of view. */}
+                        <LanesPanel
+                          runId={runId}
+                          active={communicationOpen && sidePanel === "operations" && operationGroup === "execution"}
+                          disabled={execOff}
+                          disabledReason={readiness?.reason}
+                        />
+                      </section>
+                      <section id="operations-diagnostics" hidden={operationGroup !== "diagnostics"} aria-label={t("operations.diagnostics")}>
+                        <p className="operations-intro">{t("operations.diagnosticsHint")}</p>
+                        <RequestAuditPanel labelsById={labelsById} runId={runId} active={communicationOpen && sidePanel === "operations" && operationGroup === "diagnostics"} />
+                        <CapabilityPanel />
+                      </section>
                     </div>
                   )}
-                  <div hidden={communicationTab !== "chat"} className="communication-center__chat">
+                  <div hidden={sidePanel !== "communication" || communicationTab !== "chat"} className="communication-center__chat">
                     <ChatPanel
                       runId={runId}
                       snapshot={activitySnapshot}

@@ -19,6 +19,7 @@ import type {
   WorkerRowView,
   WorkerTerminalReceiptView,
 } from "../types";
+import { terminalStateLabel } from "../format";
 import { workerWorkspaceLabel } from "../workerWorkspace";
 
 /**
@@ -64,6 +65,8 @@ const QUALIFIED_LABEL: TranslationKey = "worker.qualified";
 export const WorkerPanel = memo(function WorkerPanel({
   runId,
   rows,
+  labelsById,
+  focusId,
   rowsError,
   status,
   disabled = false,
@@ -72,6 +75,9 @@ export const WorkerPanel = memo(function WorkerPanel({
   runId: string;
   /** Durable, Run-scoped fleet rows (fully paginated server-side). */
   rows: WorkerRowView[];
+  labelsById: Record<string, string>;
+  /** A navigation target must stay reachable even behind a previous filter. */
+  focusId: string | null;
   /** Last fleet-read error — kept visible while stale rows remain on screen. */
   rowsError: string | null;
   /** Process-local coordinator state (requested launch prefs, decisions). */
@@ -109,6 +115,11 @@ export const WorkerPanel = memo(function WorkerPanel({
   const dialog = useDecisionDialog();
   const [terminalFilter, setTerminalFilter] = useState<string>("all");
   const [attentionFilter, setAttentionFilter] = useState<string>("all");
+  useEffect(() => {
+    if (!focusId) return;
+    setTerminalFilter("all");
+    setAttentionFilter("all");
+  }, [focusId]);
   // Structured-read source picker + the environment capability list it is
   // gated on (cached in api.ts; one fetch, not one per render).
   const [source, setSource] = useState<string>("auto");
@@ -338,6 +349,7 @@ export const WorkerPanel = memo(function WorkerPanel({
     }
   }
   const filtered = rows.filter((row) => {
+    if (focusId && (row.dispatchId === focusId || row.taskId === focusId)) return true;
     if (terminalFilter !== "all" && row.terminalState !== terminalFilter) return false;
     if (attentionFilter === "needs_action") {
       if (!row.projection?.attention?.requiresAction) return false;
@@ -364,7 +376,7 @@ export const WorkerPanel = memo(function WorkerPanel({
               <option value="all">{t("worker.filterStateAll")}</option>
               {TERMINAL_STATES.map((state) => (
                 <option key={state} value={state}>
-                  {t("worker.filterState", { state })}
+                  {t("worker.filterState", { state: terminalStateLabel(state) })}
                 </option>
               ))}
             </select>
@@ -449,30 +461,27 @@ export const WorkerPanel = memo(function WorkerPanel({
               data-operation-task-id={row.taskId}
               tabIndex={-1}
             >
-              <button className="workers__toggle" onClick={() => toggle(row)}>
-                <span
-                  className="workers__liveness"
-                  data-verdict={verdict}
-                  title={liveness?.reason ? `${verdict} (${liveness.reason})` : verdict}
-                >
-                  {verdict}
+              <button className="workers__toggle" onClick={() => toggle(row)} aria-expanded={open}>
+                <span className="workers__summary">
+                  <strong>{labelsById[row.taskId] || row.taskId}</strong>
+                  <span className="workers__context">{hostLabel}{providerLabel ? ` · ${providerLabel}` : ""}</span>
+                  <span className="workers__context">{terminalStateLabel(row.terminalState)}</span>
+                  {projection?.attention?.requiresAction && <span className="workers__attention">{t("attention.workerNeedsAttention")}</span>}
                 </span>
-                <code className="workers__task">{row.taskId}</code>
-                <span className="inbox__meta">
-                  <code className="workers__dispatch">{row.dispatchId || t("worker.noDispatch")}</code>
-                  {projection?.outcome ? ` · ${projection.outcome}` : ""}
-                  {row.workerState === "unsupervised" ? " · unsupervised" : ""}
-                  {` · ${hostLabel}`}
-                  {providerLabel ? ` · ${providerLabel}` : ""}
-                  {` · ${row.terminalState}`}
-                  {(projection?.attention?.categories ?? []).length > 0
-                    ? ` · ⚑ ${(projection?.attention?.categories ?? []).join(", ")}`
-                    : ""}
+                <span className="workers__liveness" data-verdict={verdict} title={liveness?.reason ?? verdict}>
+                  {t(`worker.live.${verdict}`)}
                 </span>
+                <span aria-hidden="true">{open ? "−" : "+"}</span>
               </button>
 
               {open && (
                 <div className="workers__detail">
+                  <dl className="record-facts">
+                    <dt>{t("record.task")}</dt><dd><code>{row.taskId}</code></dd>
+                    <dt>{t("record.dispatch")}</dt><dd><code>{row.dispatchId || t("worker.noDispatch")}</code></dd>
+                    <dt>{t("record.workerState")}</dt><dd>{row.workerState}</dd>
+                    {projection?.outcome && <><dt>{t("record.outcome")}</dt><dd>{projection.outcome}</dd></>}
+                  </dl>
                   {/* --- Liveness: both evidence layers, never merged away --- */}
                   {detail?.liveness.qualifiedWorking ? (
                     <div className="inbox__body workers__qualified" data-testid="qualified-working">
@@ -487,7 +496,7 @@ export const WorkerPanel = memo(function WorkerPanel({
                     </div>
                   ) : (
                     <div className="inbox__body">
-                      {t("worker.liveness")} <b>{verdict}</b>
+                      {t("worker.liveness")} <b>{t(`worker.live.${verdict}`)}</b>
                       {liveness?.reason ? ` — ${liveness.reason}` : ""}
                       {detail?.liveness.observationStatus
                         ? t("worker.observed", { status: detail.liveness.observationStatus }) +

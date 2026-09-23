@@ -544,3 +544,18 @@
     font-size: 11px;
   }
 }
+
+/* Persistent execution notices need their own row. Absolute positioning hid
+   the Activity / Operations controls, especially once localized copy wrapped.
+   Flatten only this layout wrapper so notice height is measured naturally. */
+.app .topbar:has(.exec__notices) { flex-wrap: wrap; }
+.app .exec:has(.exec__notices) { display: contents; }
+.app .exec:has(.exec__notices) > * { order: 4; }
+.app .exec:has(.exec__notices) > .exec__notices {
+  position: static;
+  order: 5;
+  flex: 1 1 100%;
+  width: auto;
+  min-width: 0;
+  box-shadow: none;
+}

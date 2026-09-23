@@ -46,3 +46,123 @@
     overflow-wrap: anywhere;
   }
 }
+
+/* A reading hierarchy inside the existing paper shell. One category at a
+   time, summary before evidence, and no extra floating canvas panels. */
+.run-overview {
+  display: flex;
+  flex: none;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  padding: 9px 14px;
+  background: var(--paper-2);
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.run-overview__label { font-weight: 600; }
+.run-overview__stat { display: inline-flex; align-items: center; gap: 6px; }
+.run-overview__stat b { font-variant-numeric: tabular-nums; }
+.run-overview__stat[data-empty="true"] { color: #716b79; }
+.run-overview__stale { color: #a74436; }
+.operations-nav {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  padding: 8px 0;
+  background: var(--paper);
+  border-bottom: 1px solid var(--line-strong);
+}
+.operations-nav button {
+  min-height: 40px;
+  padding: 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  font: 500 12px/1.5 var(--font-body);
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.operations-nav button[aria-pressed="true"] { background: var(--sky-wash); color: #315f80; box-shadow: inset 0 -2px var(--sky-ink); }
+.operations-nav button:hover { background: var(--paper-2); }
+.operations-nav button:active { transform: scale(.97); }
+.operations-nav button:focus-visible,
+.workers__toggle:focus-visible,
+.audit__toggle:focus-visible,
+.structured-data summary:focus-visible { outline: 2px solid var(--sky-ink); outline-offset: 2px; }
+.operations-intro, .operations-empty { margin: 12px 0; color: #716b79; font-size: 13px; line-height: 1.7; }
+.operations-empty { padding: 14px 0; }
+.communication-center__operations > section[hidden] { display: none; }
+.communication-center__operations { container: operations / inline-size; }
+.communication-center__operations .workers__toggle,
+.communication-center__operations .audit__toggle { align-items: flex-start; min-height: 52px; padding: 10px 0; gap: 10px; }
+.workers__summary, .audit__summary { display: grid; flex: 1; min-width: 0; gap: 4px; overflow-wrap: anywhere; }
+.workers__summary strong, .audit__summary strong { font-size: 14px; line-height: 1.5; }
+.workers__context, .audit__summary > span, .audit__summary time { color: #716b79; font-size: 12px; line-height: 1.6; }
+.workers__attention { color: #a74436; font-size: 12px; }
+.workers__liveness { text-transform: none; letter-spacing: normal; }
+.record-facts { display: grid; grid-template-columns: minmax(80px, 28%) minmax(0, 1fr); gap: 7px 12px; margin: 10px 0; font-size: 13px; line-height: 1.7; }
+.record-facts dt { color: #716b79; overflow-wrap: anywhere; }
+.record-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.record-facts code { font-size: 11px; }
+.structured-data__field { display: contents; }
+.structured-data__list { padding-left: 20px; margin: 5px 0; }
+.structured-data__list li + li { margin-top: 6px; }
+.structured-data .record-facts { grid-template-columns: 1fr; }
+.structured-data summary, .node-result summary, .audit__outcome summary { cursor: pointer; padding: 7px 0; }
+.structured-data__text, .node-result__body { white-space: pre-wrap; overflow-wrap: anywhere; }
+.node-result { min-width: 0; overflow-wrap: anywhere; }
+.node-result__body { line-height: 1.75; }
+.node-result__details pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.audit__detail, .workers__detail { min-width: 0; }
+.audit__detail { overflow-wrap: anywhere; }
+@container operations (max-width: 400px) {
+  .communication-center__operations .audit__toggle { flex-wrap: wrap; }
+  .audit__summary { flex-basis: 100%; }
+  .workers__liveness { font-size: 10px; padding: 2px 5px; }
+}
+@media (max-width: 620px) {
+  .run-overview { gap: 6px 12px; padding: 8px 10px; }
+  .run-overview__label { flex-basis: 100%; }
+  .communication-center__operations { padding: 8px 10px 16px; }
+}
+
+/* Keep the sketch headings; factual prose uses the system reading face. */
+.workers__summary, .audit__summary, .record-facts, .node-result__body,
+.operations-intro, .operations-empty, .ops-attention__copy {
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+.ops-attention { margin-top: 12px; }
+.ops-attention__copy strong, .ops-attention__detail { white-space: normal; overflow-wrap: anywhere; }
+.ops-attention__detail { line-height: 1.6; font-size: 12px; color: #716b79; }
+.ops-attention__item { border-left-width: 1px; border-left-color: var(--line); }
+.ops-attention__action, .ops-attention__more-button { min-height: 40px; }
+@container operations (max-width: 400px) {
+  .ops-attention__item { align-items: flex-start; flex-direction: column; gap: 8px; }
+}
+
+.node-result > .structured-data { grid-template-columns: 1fr; gap: 2px; }
+.node-result > .structured-data > .structured-data__field > dd { margin-bottom: 10px; }
+
+/* The stage inspector shares the remaining canvas width after the rail opens. */
+.node-panel { max-width: calc(100% - 32px); }
+
+.communication-center__operations .gate__actions { flex-wrap: wrap; }
+.communication-center__operations .gate__actions > .btn { flex-shrink: 0; max-width: 100%; }
+.communication-center__operations .inbox__body {
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.operations-center__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font: 500 15px/1.5 var(--font-display);
+}

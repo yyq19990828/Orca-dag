@@ -1,5 +1,5 @@
 import type { ActivityEvent } from "./types";
-import { langLocale, t } from "./i18n";
+import { langLocale, t, type TranslationKey } from "./i18n";
 
 /**
  * Shared presentation helpers (Phase 7 integration).
@@ -94,4 +94,22 @@ export function priorityLabel(event: Pick<ActivityEvent, "priority">): string {
   if (normalized === "low") return t("priority.low");
   if (normalized === "normal") return t("priority.normal");
   return t("priority.high");
+}
+
+/** Translate only known runtime values. New values remain visible verbatim. */
+const TERMINAL_LABELS: Record<string, TranslationKey> = {
+  active: "terminal.active", release_pending: "terminal.release_pending",
+  retained: "terminal.retained", reclaimable: "terminal.reclaimable",
+  release_unknown: "terminal.release_unknown", released: "terminal.released",
+};
+export function terminalStateLabel(state: string): string {
+  return Object.hasOwn(TERMINAL_LABELS, state) ? t(TERMINAL_LABELS[state]) : state;
+}
+const OPERATION_LABELS: Record<string, TranslationKey> = {
+  "worker-start": "operation.start", "worker-release": "operation.release",
+  "worker-retain": "operation.retain", "worker-stop": "operation.stop",
+  "worker-abandon": "operation.abandon", "worker-focus": "operation.focus",
+};
+export function operationLabel(operation: string): string {
+  return Object.hasOwn(OPERATION_LABELS, operation) ? t(OPERATION_LABELS[operation]) : operation;
 }

@@ -1,6 +1,7 @@
+import { StructuredData } from "./StructuredData";
 import { memo, useCallback, useEffect, useState } from "react";
 import { fetchRequestDetail, fetchRequests } from "../api";
-import { formatTimestamp } from "../format";
+import { formatTimestamp, operationLabel } from "../format";
 import { t, useT } from "../i18n";
 import { usePageVisible } from "../visibility";
 import type { RequestLedgerRowView, RequestReceiptView } from "../types";
@@ -17,12 +18,8 @@ import type { RequestLedgerRowView, RequestReceiptView } from "../types";
  * interpretation verbatim. `absent` never proves a mutation did not happen,
  * a failed probe renders as "unknown", and the local ledger hint
  * (`settledLocally`) is labeled as exactly that — a hint, never authority.
- * The panel renders only once there is something audited to show.
+ * Loading, empty and failed reads remain visible in the diagnostics category.
  */
-
-function shortId(id: string): string {
-  return id.length > 12 ? `${id.slice(0, 12)}…` : id;
-}
 
 /** The presentation bucket for a receipt state; unknown states stay verbatim. */
 function stateBucket(state: string): "completed" | "pending" | "absent" | "unknown" | "other" {
@@ -46,7 +43,7 @@ function stateCaption(receipt: RequestReceiptView): string {
   }
 }
 
-export const RequestAuditPanel = memo(function RequestAuditPanel({ runId, active = true }: { runId: string; active?: boolean }) {
+export const RequestAuditPanel = memo(function RequestAuditPanel({ runId, labelsById, active = true }: { runId: string; labelsById: Record<string, string>; active?: boolean }) {
   const t = useT();
   const [rows, setRows] = useState<RequestLedgerRowView[]>([]);
   const [otherRunCount, setOtherRunCount] = useState(0);
@@ -110,8 +107,7 @@ export const RequestAuditPanel = memo(function RequestAuditPanel({ runId, active
     [open, probing, runId],
   );
 
-  if (loadedFor !== runId) return null;
-  if (rows.length === 0 && !err) return null;
+  if (loadedFor !== runId) return <p className="operations-empty" role="status">{err || t("audit.loading")}</p>;
 
   return (
     <div className="gates inbox audit" data-testid="request-audit-panel">
@@ -131,29 +127,32 @@ export const RequestAuditPanel = memo(function RequestAuditPanel({ runId, active
                 className="audit__toggle"
                 onClick={() => void inspect(row)}
                 disabled={probing === row.requestId}
-                title={t("audit.inspectTitle")}
+                aria-expanded={isOpen}
+                title={`${t("audit.inspectTitle")}\n${row.requestId}`}
               >
-                <span className="audit__op" data-op={row.operation}>
-                  {row.operation}
+                <span className="audit__summary">
+                  <strong>{operationLabel(row.operation)}</strong>
+                  <span>{row.taskId ? labelsById[row.taskId] || row.taskId : t("audit.runOperation")}</span>
+                  <time dateTime={row.updatedAt}>{formatTimestamp(row.updatedAt)}</time>
                 </span>
                 {receipt && (
                   <span className="audit__state" data-state={bucket}>
-                    {receipt.state}
+                    {bucket && bucket !== "other" ? t(`audit.state.${bucket}`) : receipt.state}
                     {receipt.probe === "failed" ? t("audit.probeFailed") : ""}
                   </span>
                 )}
-                <code>{shortId(row.requestId)}</code>
-                <span className="inbox__meta">
-                  {row.taskId ? ` · ${row.taskId}` : ""}
-                  {row.dispatchId ? ` · ${row.dispatchId}` : ""}
-                  {` · ${row.runId === null ? t("audit.scopeUnknown") : row.runId}`}
-                  {` · ${formatTimestamp(row.updatedAt)}`}
-                </span>
                 <span className="audit__hint">{isOpen ? "▲" : t("audit.inspect")}</span>
               </button>
               {row.note && <div className="inbox__body audit__note">{row.note}</div>}
               {isOpen && receipt && (
                 <div className="audit__detail">
+                  <dl className="record-facts">
+                    <dt>{t("record.request")}</dt><dd><code>{row.requestId}</code></dd>
+                    <dt>{t("record.operation")}</dt><dd><code>{row.operation}</code></dd>
+                    <dt>{t("record.run")}</dt><dd><code>{row.runId ?? t("audit.scopeUnknown")}</code></dd>
+                    {row.taskId && <><dt>{t("record.task")}</dt><dd><code>{row.taskId}</code></dd></>}
+                    {row.dispatchId && <><dt>{t("record.dispatch")}</dt><dd><code>{row.dispatchId}</code></dd></>}
+                  </dl>
                   <div className={`audit__receipt audit__receipt--${bucket}`}>
                     <b>{receipt.state}</b> — {stateCaption(receipt)}
                   </div>
@@ -172,10 +171,14 @@ export const RequestAuditPanel = memo(function RequestAuditPanel({ runId, active
                     {t("audit.settledTail")}
                   </div>
                   {receipt.outcome != null && (
-                    <details className="audit__outcome">
-                      <summary>{t("audit.outcome")}</summary>
-                      <pre className="workers__rawpre">{JSON.stringify(receipt.outcome, null, 2)}</pre>
-                    </details>
+                    <div className="audit__outcome">
+                      <h4>{t("record.outcome")}</h4>
+                      <StructuredData value={receipt.outcome} />
+                      <details>
+                        <summary>{t("report.raw")}</summary>
+                        <pre className="workers__rawpre">{JSON.stringify(receipt.outcome, null, 2)}</pre>
+                      </details>
+                    </div>
                   )}
                 </div>
               )}

@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { fetchEnvironments, fetchModels, fetchWorkerDetail } from "../api";
-import { formatDateTime } from "../format";
 import { useT, type Translator } from "../i18n";
 import { lanePlanProblems, laneLabel, laneProblemPrefix } from "../placement";
 import { workerWorkspaceLabel } from "../workerWorkspace";
@@ -41,6 +40,7 @@ import {
   type WorkerRowView,
 } from "../types";
 import { DoodleSelect } from "./DoodleSelect";
+import { ResultSummary } from "./ResultSummary";
 import { PlacementEditor } from "./PlacementEditor";
 import "../node-actions.css";
 
@@ -53,100 +53,6 @@ const KNOWN = HARNESSES as readonly string[];
 function laneSpecOf(laneId: string, t: Translator): string {
   const spec = getLaneSpec(laneId);
   return spec ? laneLabel(spec) : t("node.laneNoSeed");
-}
-
-interface WorkerReportResult {
-  provenance?: string;
-  outcome?: string;
-  subject?: string;
-  body?: string;
-  completedAt?: string;
-  reportedBy?: string;
-  completedBy?: string;
-  messageId?: string;
-  filesModified?: string[];
-  reportPath?: string | null;
-}
-
-function parseWorkerReport(raw: string): WorkerReportResult | null {
-  try {
-    const value = JSON.parse(raw) as unknown;
-    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-    return value as WorkerReportResult;
-  } catch {
-    return null;
-  }
-}
-
-function resultExcerpt(body: string): { text: string; clipped: boolean } {
-  const normalized = body.replace(/\s+/g, " ").trim();
-  if (normalized.length <= 420) return { text: normalized, clipped: false };
-  const candidate = normalized.slice(0, 420);
-  const sentenceEnd = Math.max(candidate.lastIndexOf(". "), candidate.lastIndexOf("。"));
-  const text = sentenceEnd > 180 ? candidate.slice(0, sentenceEnd + 1) : candidate.trimEnd();
-  return { text, clipped: true };
-}
-
-/**
- * A worker result's completion stamp, or null when absent/unparseable — the
- * caller renders nothing rather than a fabricated date. Formatting itself is
- * delegated to the shared `formatDateTime` so the label can't drift from the
- * other panels.
- */
-function resultTime(value: string | undefined): string | null {
-  if (!value) return null;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  return formatDateTime(value);
-}
-
-function ResultSummary({ raw }: { raw: string }) {
-  const t = useT();
-  const report = parseWorkerReport(raw);
-  if (!report) return <p className="node-panel__result-text">{raw}</p>;
-
-  const outcome = report.outcome?.trim() || "reported";
-  const body = typeof report.body === "string" ? resultExcerpt(report.body) : null;
-  const files = Array.isArray(report.filesModified)
-    ? report.filesModified.filter((file): file is string => typeof file === "string" && Boolean(file.trim()))
-    : [];
-  const completedAt = resultTime(report.completedAt);
-  return (
-    <section className="node-result" data-outcome={outcome} aria-label={t("report.resultAria")}>
-      <div className="node-result__head">
-        <span className="node-result__outcome">{outcome.replaceAll("_", " ")}</span>
-        {completedAt && <time dateTime={report.completedAt}>{completedAt}</time>}
-      </div>
-      <strong>{report.subject?.trim() || t("report.workerReport")}</strong>
-      {body?.text && <p>{body.text}</p>}
-      {files.length > 0 && (
-        <div className="node-result__files">
-          <span>
-            {files.length === 1
-              ? t("report.filesModifiedOne", { n: files.length })
-              : t("report.filesModifiedMany", { n: files.length })}
-          </span>
-          <ul>
-            {files.map((file) => <li key={file}><code>{file}</code></li>)}
-          </ul>
-        </div>
-      )}
-      {report.reportPath && (
-        <p className="node-result__report">{t("report.reportLabel")} <code>{report.reportPath}</code></p>
-      )}
-      <details className="node-result__details">
-        <summary>{t(body?.clipped ? "report.fullDetails" : "report.details")}</summary>
-        {body?.clipped && <p>{report.body}</p>}
-        <dl>
-          {report.reportedBy && <><dt>{t("report.reportedBy")}</dt><dd><code>{report.reportedBy}</code></dd></>}
-          {!report.reportedBy && report.completedBy && <><dt>{t("report.completedBy")}</dt><dd><code>{report.completedBy}</code></dd></>}
-          {report.messageId && <><dt>{t("report.message")}</dt><dd><code>{report.messageId}</code></dd></>}
-          {report.provenance && <><dt>{t("report.provenance")}</dt><dd>{report.provenance.replaceAll("_", " ")}</dd></>}
-        </dl>
-        <pre>{JSON.stringify(report, null, 2)}</pre>
-      </details>
-    </section>
-  );
 }
 
 interface NodePanelProps {
@@ -471,6 +377,13 @@ export function NodePanel({
           {readiness && readiness.runnable && readiness.reasons.length === 0 && (
             <p className="node-panel__relation node-panel__relation--ready">{t("node.readyDispatchable")}</p>
           )}
+        </div>
+      )}
+
+      {node.result && (
+        <div className="node-panel__field">
+          <span className="node-panel__key">{t("node.resultKey")}</span>
+          <ResultSummary raw={node.result} />
         </div>
       )}
 
@@ -823,12 +736,6 @@ export function NodePanel({
         <span className="node-panel__hint">{t("node.specHint")}</span>
       </div>
 
-      {node.result && (
-        <div className="node-panel__field">
-          <span className="node-panel__key">{t("node.resultKey")}</span>
-          <ResultSummary raw={node.result} />
-        </div>
-      )}
     </aside>
   );
 }

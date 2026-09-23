@@ -13,3 +13,5 @@ server/.sessions/
 .orca-dag.requests.jsonl
 .orca-dag.sessions.json
 .orca-dag.launches.jsonl
+.playwright-cli/
+output/playwright/
