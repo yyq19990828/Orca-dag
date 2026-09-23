@@ -308,6 +308,12 @@ const en = {
     "Lane {lane}: {a} and {b} share a workspace but no dependency orders them — " +
     "add a dependency between them or move one out of the lane.",
   "laneProblem.cycle": "Lane {lane}: {a} and {b} depend on each other in a cycle.",
+  // Lane identity as a prefix (placement.ts, lanePrefix/laneSummaryLabel) —
+  // the same words as laneProblem.lanePrefix, minus its punctuation, so a lane
+  // reads identically whether it is quoted in a problem or summarized on a
+  // node card. The " · " between the parts of a summary stays structural.
+  "lane.prefix": "Lane {lane}",
+  "lane.withPlacement": "{lane}: {placement}",
   // Workspace lanes runtime panel (LanesPanel) — what the coordinator did with
   // the lane plan. State tokens and every Orca-reported fact (selectors,
   // paths, branches, hashes, warnings, server notes) render verbatim.
@@ -969,6 +975,123 @@ const en = {
   "inbox.debt.coordinatorCloseFailed": "Coordinator close refused",
   "inbox.debt.stopUnknown": "Stop outcome unknown",
   "inbox.debt.reclaimable": "Reclaimable worker left",
+
+  // Run picker (RunPicker) — the header's Run dropdown, its ⋯ menu and the
+  // exact-ID open. Run ids and objectives are server data: an absent objective
+  // falls back to the picker's own wording, and the exact-ID field keeps its
+  // "run_…" shape hint verbatim.
+  "picker.noRuns": "(no Runs)",
+  "picker.noObjective": "No objective",
+  "picker.pickRun": "Pick a Run",
+  "picker.moreAria": "More Run options",
+  "picker.moreTitle": "Create, find, or load older Runs",
+  "picker.actionsAria": "Run actions",
+  "picker.newRun": "＋ New Run",
+  "picker.newRunTitle": "Create an empty Run in this workspace and select it",
+  "picker.loadOlder": "↓ Load older Runs",
+  "picker.loadOlderTitle": "Load the next older page of Runs",
+  "picker.loading": "Loading…",
+  "picker.exactLabel": "Open a Run by exact ID",
+  "picker.exactTitle": "Open one Run by its exact ID (workspace-checked server-side)",
+  "picker.go": "Go",
+  "picker.createTitle": "Create a new Run",
+  "picker.createMessage":
+    "A Run is an orchestration namespace for one task graph. Give this one a concise objective.",
+  "picker.createFieldLabel": "Objective",
+  "picker.createPlaceholder": "What should this Run accomplish?",
+  "picker.createConfirm": "New Run",
+
+  // Hand-drawn select (DoodleSelect) — the shared control behind the Run
+  // picker. Only its own chrome is viewer copy; option labels and hints, and
+  // the trigger's title, come from the caller.
+  "doodle.placeholder": "Select…",
+  "doodle.empty": "No options",
+  "doodle.loading": "Loading…",
+  "doodle.searchPlaceholder": "Search…",
+  "doodle.searchAria": "Search options",
+  "doodle.noMatches": "No matches",
+
+  // DAG canvas (DagView) — per-node summaries, the planned-settings chip, the
+  // lead badge, the empty state, and the labels handed to React Flow (whose
+  // controls and screen-reader descriptions are English by default). Stage /
+  // Dispatch / worker / harness stay terms; ids, selectors, paths, readiness
+  // reason text and task results are server data and render verbatim.
+  "dag.workerReported": "Worker reported {outcome}",
+  "dag.resultRecorded": "Result recorded",
+  "dag.hostLocal": "Local",
+  "dag.hostOn": "On {place}",
+  "dag.workerActive": "Worker active",
+  "dag.workerIdle": "Worker idle",
+  "dag.workerActivity": "Worker {activity}",
+  "dag.workerDispatchActive": "Worker dispatch active",
+  "dag.readyWaitingSlot": "Ready; waiting for a worker slot",
+  "dag.readyDispatch": "Ready to dispatch",
+  "dag.waitingOnStage": "Waiting on {stage}",
+  "dag.waitingOutside": "Waiting on a dependency outside this Run",
+  "dag.waitingOnDeps": "Waiting on {n} dependencies",
+  "dag.decisionNeeded": "Decision needed: {question}",
+  "dag.waitingOnGates": "Waiting on {n} gate decisions",
+  "dag.waitingOnGate": "Waiting on a gate decision",
+  "dag.blockedInspect": "Blocked; inspect readiness details",
+  "dag.pendingInspect": "Pending; inspect readiness details",
+  "dag.workerSucceeded": "Worker reported success",
+  "dag.completedNoSummary": "Completed without a result summary",
+  "dag.startFailedAt": "Worker start failed at {stage}",
+  "dag.startFailed": "Worker failed to start",
+  "dag.workerFailed": "Worker reported failure",
+  "dag.failureUnavailable": "Failure details unavailable",
+  "dag.contextUnavailable": "Stage context unavailable",
+  "dag.harnessUnknown": "unknown",
+  // Planned-settings chip: what this Stage would launch with. DagView joins
+  // the parts (model · lane · placement) with the structural " · ".
+  "dag.plannedModel": "Model {model}",
+  "dag.plannedTitle": "Planned: {summary}",
+  "dag.plannedSelectorSuffix": " ({selector})",
+  "dag.plannedExistingWorkspace": "existing workspace",
+  "dag.plannedNewChildWorkspace": "new child workspace",
+  "dag.plannedNewWorkspace": "new workspace",
+  // Card aria-label (one sentence per fact) and the hover titles of the small
+  // badges on it.
+  "dag.node.ariaHarnessActual": "Harness {harness} (actual launch).",
+  "dag.node.ariaHarnessPlanned": "Harness {harness} (planned or fallback).",
+  "dag.node.ariaPlannedSettings": "Planned settings: {settings}.",
+  "dag.node.ariaLead": "Lead stage: semantic main-agent ownership.",
+  "dag.node.lead": "Lead",
+  "dag.node.leadTitle":
+    "Lead stage — semantic main-agent ownership; Orca coordinator authority is shown separately",
+  "dag.node.leadBadgeTitle": "Semantic main-agent ownership; not Orca coordinator authority",
+  "dag.node.harnessActualTitle": "Harness recorded for this stage's actual launch",
+  "dag.node.harnessPlannedTitle": "Planned harness — nothing launched here yet",
+  "dag.node.harnessUnknownTitle": "Launch harness unavailable for this stage",
+  "dag.edge.hierarchyAria": "Parent-child ownership link (not a dependency)",
+  // Empty state: the agent-skill pointer (the code element keeps its name),
+  // then how the graph grows.
+  "dag.empty.title": "A blank page, for now",
+  "dag.empty.body": "Load the",
+  "dag.empty.bodyTail":
+    "skill in your agent and talk through what you want to build — it will break the work down and draw the graph.",
+  "dag.empty.hint":
+    "Tasks and deps grow here stroke by stroke, like crayon — then pick a harness per node and fire.",
+  // Canvas labels handed to React Flow (its ariaLabelConfig prop). The
+  // controls and the descriptions it injects for nodes and edges are
+  // library-owned chrome, so the viewer supplies their words; a keyboard move
+  // announces a translated direction, not the library's raw token.
+  "dag.canvas.controlsAria": "DAG canvas controls",
+  "dag.canvas.zoomIn": "Zoom in",
+  "dag.canvas.zoomOut": "Zoom out",
+  "dag.canvas.fitView": "Fit view",
+  "dag.a11y.nodeDesc":
+    "Press enter or space to select a stage node. Press delete to remove it and escape to cancel.",
+  "dag.a11y.nodeDescKeyboard":
+    "Press enter or space to select a stage node. You can then use the arrow keys to move the node around. " +
+    "Press delete to remove it and escape to cancel.",
+  "dag.a11y.edgeDesc":
+    "Press enter or space to select an edge. You can then press delete to remove it or escape to cancel.",
+  "dag.a11y.nodeMoved": "Moved selected stage {direction}. New position, x: {x}, y: {y}",
+  "dag.a11y.dirLeft": "left",
+  "dag.a11y.dirRight": "right",
+  "dag.a11y.dirUp": "up",
+  "dag.a11y.dirDown": "down",
 } as const;
 export default en;
 export { en };

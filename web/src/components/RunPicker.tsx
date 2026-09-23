@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { createRun, fetchRunById, fetchRunsPage } from "../api";
+import { useT } from "../i18n";
 import type { OrcaRun } from "../types";
 import { usePageVisible } from "../visibility";
 import { DoodleSelect } from "./DoodleSelect";
@@ -13,7 +14,7 @@ import { useDecisionDialog } from "./DecisionDialog";
  * shows the DAG *of a Run*, and this picker is how you choose which.
  *
  * History loads as bounded cursor pages: the polled first page keeps the
- * newest Runs fresh, "Load older" walks the opaque cursor, and an exact Run
+ * newest Runs fresh, picker.loadOlder walks the opaque cursor, and an exact Run
  * ID can be opened directly even when pagination has not reached it. Every
  * path preserves workspace ownership — that check lives server-side, and a
  * miss renders as "not found in this workspace", never a global lookup.
@@ -39,6 +40,7 @@ export function RunPicker({
   disabled?: boolean;
 }) {
   const dialog = useDecisionDialog();
+  const t = useT();
   // Newest page (polled) + accumulated older pages + exact-ID pins, deduped
   // for display. The ref mirrors the combined list so the poll's newest-Run
   // fallback can see Runs that only exist on an older page or via a pin —
@@ -126,11 +128,11 @@ export function RunPicker({
 
   async function onCreate() {
     const objective = await dialog.prompt({
-      title: "Create a new Run",
-      message: "A Run is an orchestration namespace for one task graph. Give this one a concise objective.",
-      fieldLabel: "Objective",
-      placeholder: "What should this Run accomplish?",
-      confirmLabel: "New Run",
+      title: t("picker.createTitle"),
+      message: t("picker.createMessage"),
+      fieldLabel: t("picker.createFieldLabel"),
+      placeholder: t("picker.createPlaceholder"),
+      confirmLabel: t("picker.createConfirm"),
       required: true,
     });
     if (!objective?.trim()) return;
@@ -156,9 +158,13 @@ export function RunPicker({
         value={runId}
         onChange={onPick}
         disabled={disabled || combined.length === 0}
-        placeholder="(no Runs)"
-        emptyText="(no Runs)"
-        title={current ? `${current.id}\n${current.objective || "No objective"}` : "Pick a Run"}
+        placeholder={t("picker.noRuns")}
+        emptyText={t("picker.noRuns")}
+        title={
+          current
+            ? `${current.id}\n${current.objective || t("picker.noObjective")}`
+            : t("picker.pickRun")
+        }
         options={combined.map((r) => ({
           value: r.id,
           // The objective is what helps distinguish Runs at a glance. Keep
@@ -169,18 +175,18 @@ export function RunPicker({
         }))}
       />
       <details className="runpick__menu">
-        <summary aria-label="More Run options" title="Create, find, or load older Runs">
+        <summary aria-label={t("picker.moreAria")} title={t("picker.moreTitle")}>
           <span aria-hidden="true">⋯</span>
         </summary>
-        <div className="runpick__menu-panel" role="group" aria-label="Run actions">
+        <div className="runpick__menu-panel" role="group" aria-label={t("picker.actionsAria")}>
           <button
             type="button"
             className="btn btn--ghost"
             onClick={onCreate}
             disabled={disabled || creating}
-            title="Create an empty Run in this workspace and select it"
+            title={t("picker.newRunTitle")}
           >
-            ＋ New Run
+            {t("picker.newRun")}
           </button>
           {nextCursor && (
             <button
@@ -188,13 +194,13 @@ export function RunPicker({
               className="btn btn--ghost runpick__more"
               onClick={loadOlder}
               disabled={disabled || loadingMore}
-              title="Load the next older page of Runs"
+              title={t("picker.loadOlderTitle")}
             >
-              {loadingMore ? "Loading…" : "↓ Load older Runs"}
+              {loadingMore ? t("picker.loading") : t("picker.loadOlder")}
             </button>
           )}
           <label className="runpick__exact-label" htmlFor="runpick-exact-id">
-            Open a Run by exact ID
+            {t("picker.exactLabel")}
           </label>
           <span className="runpick__exact">
             <input
@@ -203,7 +209,7 @@ export function RunPicker({
               value={exactId}
               placeholder="run_…"
               spellCheck={false}
-              aria-label="Open a Run by exact ID"
+              aria-label={t("picker.exactLabel")}
               onChange={(e) => setExactId(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") void openExact();
@@ -214,9 +220,9 @@ export function RunPicker({
               className="btn btn--ghost"
               onClick={openExact}
               disabled={disabled || exactBusy || !exactId.trim()}
-              title="Open one Run by its exact ID (workspace-checked server-side)"
+              title={t("picker.exactTitle")}
             >
-              {exactBusy ? "…" : "Go"}
+              {exactBusy ? "…" : t("picker.go")}
             </button>
           </span>
         </div>

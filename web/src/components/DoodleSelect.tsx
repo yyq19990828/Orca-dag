@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useT } from "../i18n";
 
 export interface DoodleOption {
   value: string;
@@ -34,10 +35,10 @@ export function DoodleSelect({
   value,
   onChange,
   options,
-  placeholder = "Select…",
+  placeholder,
   disabled = false,
   loading = false,
-  emptyText = "No options",
+  emptyText,
   size = "md",
   className,
   title,
@@ -45,16 +46,23 @@ export function DoodleSelect({
   value: string;
   onChange: (value: string) => void;
   options: DoodleOption[];
+  /** Trigger text while nothing is selected; defaults to doodle.placeholder. */
   placeholder?: string;
   disabled?: boolean;
-  /** Async list not here yet — shows "Loading…" instead of the empty state. */
+  /** Async list not here yet — shows the loading key instead of the empty state. */
   loading?: boolean;
+  /** Empty-list text; defaults to doodle.empty (no options to offer at all). */
   emptyText?: string;
   /** sm for the toolbars, md (full width) for panels. */
   size?: "sm" | "md";
   className?: string;
   title?: string;
 }) {
+  const t = useT();
+  // The caller's own wording wins (a Run picker says "(no Runs)", not "No
+  // options"); these defaults are the control's fallback chrome.
+  const placeholderText = placeholder ?? t("doodle.placeholder");
+  const emptyLabel = emptyText ?? t("doodle.empty");
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
@@ -200,7 +208,7 @@ export function DoodleSelect({
         onKeyDown={onTriggerKeyDown}
       >
         <span className={`doodle-select__value${current ? "" : " doodle-select__value--dim"}`}>
-          {current ? current.label : placeholder}
+          {current ? current.label : placeholderText}
         </span>
         {/* hand-scribbled chevron — the fine grain keeps a small glyph legible */}
         <svg className="doodle-select__chev" viewBox="0 0 14 9" aria-hidden="true" focusable="false">
@@ -231,16 +239,18 @@ export function DoodleSelect({
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={onInputKeyDown}
-                placeholder="Search…"
-                aria-label="Search options"
+                placeholder={t("doodle.searchPlaceholder")}
+                aria-label={t("doodle.searchAria")}
                 spellCheck={false}
               />
             </div>
             <div className="doodle-select__options" ref={listRef} style={{ maxHeight: pos.listMaxH }}>
               {loading ? (
-                <div className="doodle-select__empty">Loading…</div>
+                <div className="doodle-select__empty">{t("doodle.loading")}</div>
               ) : filtered.length === 0 ? (
-                <div className="doodle-select__empty">{query ? "No matches" : emptyText}</div>
+                <div className="doodle-select__empty">
+                  {query ? t("doodle.noMatches") : emptyLabel}
+                </div>
               ) : (
                 filtered.map((o, i) => (
                   <div

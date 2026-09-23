@@ -204,6 +204,27 @@ export function laneProblemPrefix(laneId: string): string {
   return t("laneProblem.lanePrefix", { lane: laneId });
 }
 
+/**
+ * Lane identity as a bare prefix ("Lane <id>") — the same words as
+ * laneProblemPrefix, minus its punctuation, so a lane reads identically
+ * whether it is quoted in a problem message or summarized on a node card.
+ */
+export function lanePrefix(laneId: string): string {
+  return t("lane.prefix", { lane: laneId });
+}
+
+/**
+ * A lane and its seed placement as one summary ("Lane <id>: <placement>", or
+ * just the lane when there is nothing to add). The separator lives in the key
+ * so each language owns its punctuation; `placement` is already-translated
+ * text from the caller (DagView's planned-settings chip).
+ */
+export function laneSummaryLabel(laneId: string, placement: string | null): string {
+  return placement
+    ? t("lane.withPlacement", { lane: lanePrefix(laneId), placement })
+    : lanePrefix(laneId);
+}
+
 /** The lane seed of `spec`, summarized for pickers and chips. */
 export function laneLabel(spec: WorktreeLaneSpec): string {
   return placementLabel(spec.placement as PlacementSpec);

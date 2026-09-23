@@ -281,6 +281,12 @@ const zh: Dict = {
   "laneProblem.unordered": "通道 {lane}：{a} 与 {b} 共享一个工作区，但没有依赖为二者排序 —— " +
     "请添加一条依赖，或将其中一个移出通道。",
   "laneProblem.cycle": "通道 {lane}：{a} 与 {b} 相互依赖，形成环。",
+  // 通道身份的裸前缀（placement.ts 的 lanePrefix/laneSummaryLabel）—— 与
+  // laneProblem.lanePrefix 同一套词，只是不带标点，这样同一条通道无论是在问题
+  // 消息里被引用，还是在节点卡片上做摘要，读起来都一致。摘要各部分之间的「 · 」
+  // 属于结构分隔符。
+  "lane.prefix": "通道 {lane}",
+  "lane.withPlacement": "{lane}：{placement}",
   // 工作区通道运行时面板（LanesPanel）：协调器对通道计划的执行结果。状态 token 与
   // 所有 Orca 上报的事实（选择器、路径、分支、哈希、警告、服务端备注）原样展示。
   "lane.badge": "工作区通道 · 共享的串行工作区",
@@ -917,6 +923,109 @@ const zh: Dict = {
   "inbox.debt.coordinatorCloseFailed": "协调器关闭被拒绝",
   "inbox.debt.stopUnknown": "停止结果未知",
   "inbox.debt.reclaimable": "残留可回收 worker",
+
+  // Run 选择器（RunPicker）：顶部栏的 Run 下拉框、它的 ⋯ 菜单和按 ID 打开。
+  // Run id 与目标都是服务器数据：目标缺失时回退为选择器自己的措辞，按 ID 输入的
+  // 「run_…」形状提示原样保留。
+  "picker.noRuns": "（暂无 Run）",
+  "picker.noObjective": "无目标",
+  "picker.pickRun": "选择一个 Run",
+  "picker.moreAria": "更多 Run 选项",
+  "picker.moreTitle": "新建、查找或加载更早的 Run",
+  "picker.actionsAria": "Run 操作",
+  "picker.newRun": "＋ 新建 Run",
+  "picker.newRunTitle": "在本工作区新建一个空 Run 并选中它",
+  "picker.loadOlder": "↓ 加载更早的 Run",
+  "picker.loadOlderTitle": "加载更早的一页 Run",
+  "picker.loading": "加载中…",
+  "picker.exactLabel": "按确切 ID 打开 Run",
+  "picker.exactTitle": "按确切 ID 打开某个 Run（工作区归属由服务端校验）",
+  "picker.go": "打开",
+  "picker.createTitle": "新建 Run",
+  "picker.createMessage": "Run 是一个任务图的编排命名空间。请给这个 Run 写一个简洁的目标。",
+  "picker.createFieldLabel": "目标",
+  "picker.createPlaceholder": "这个 Run 要完成什么？",
+  "picker.createConfirm": "新建 Run",
+
+  // 自绘下拉框（DoodleSelect）：Run 选择器背后的共用控件。只有它自身的外壳是
+  // 查看器文案；选项标签/提示与触发器的 title 都由调用方提供。
+  "doodle.placeholder": "请选择…",
+  "doodle.empty": "无可选项",
+  "doodle.loading": "加载中…",
+  "doodle.searchPlaceholder": "搜索…",
+  "doodle.searchAria": "搜索选项",
+  "doodle.noMatches": "无匹配项",
+
+  // DAG 画布（DagView）：节点摘要、计划设置标签、主阶段徽标、空态，以及交给
+  // React Flow 的文案（它的控制条与给读屏软件的描述默认是英文）。Stage /
+  // Dispatch / worker / harness 保持术语不译；id、选择器、路径、就绪原因文本、
+  // 任务结果都是服务器数据，原样展示。
+  "dag.workerReported": "Worker 报告 {outcome}",
+  "dag.resultRecorded": "已记录结果",
+  "dag.hostLocal": "本地",
+  "dag.hostOn": "位于 {place}",
+  "dag.workerActive": "Worker 运行中",
+  "dag.workerIdle": "Worker 空闲",
+  "dag.workerActivity": "Worker {activity}",
+  "dag.workerDispatchActive": "Worker 派发进行中",
+  "dag.readyWaitingSlot": "已就绪；等待 worker 名额",
+  "dag.readyDispatch": "可以派发",
+  "dag.waitingOnStage": "等待 {stage}",
+  "dag.waitingOutside": "等待本 Run 之外的依赖",
+  "dag.waitingOnDeps": "等待 {n} 个依赖",
+  "dag.decisionNeeded": "需要决策：{question}",
+  "dag.waitingOnGates": "等待 {n} 个门禁决策",
+  "dag.waitingOnGate": "等待门禁决策",
+  "dag.blockedInspect": "已阻塞；请查看就绪详情",
+  "dag.pendingInspect": "待处理；请查看就绪详情",
+  "dag.workerSucceeded": "Worker 报告成功",
+  "dag.completedNoSummary": "已完成，但没有结果摘要",
+  "dag.startFailedAt": "Worker 启动在 {stage} 处失败",
+  "dag.startFailed": "Worker 启动失败",
+  "dag.workerFailed": "Worker 报告失败",
+  "dag.failureUnavailable": "失败详情不可用",
+  "dag.contextUnavailable": "阶段上下文不可用",
+  "dag.harnessUnknown": "未知",
+  // 计划设置标签：该阶段将要使用的启动设置。DagView 用结构分隔符「 · 」把各部分
+  // （模型 · 通道 · 放置）连起来。
+  "dag.plannedModel": "模型 {model}",
+  "dag.plannedTitle": "计划：{summary}",
+  "dag.plannedSelectorSuffix": "（{selector}）",
+  "dag.plannedExistingWorkspace": "现有工作区",
+  "dag.plannedNewChildWorkspace": "新建子工作区",
+  "dag.plannedNewWorkspace": "新建工作区",
+  // 卡片的 aria-label（每条事实一句）以及卡上小徽标的悬停提示。
+  "dag.node.ariaHarnessActual": "harness {harness}（实际启动）。",
+  "dag.node.ariaHarnessPlanned": "harness {harness}（计划或回退）。",
+  "dag.node.ariaPlannedSettings": "计划设置：{settings}。",
+  "dag.node.ariaLead": "主阶段：语义上的主 agent 归属。",
+  "dag.node.lead": "主阶段",
+  "dag.node.leadTitle": "主阶段 —— 语义上的主 agent 归属；Orca 协调器权限另有展示",
+  "dag.node.leadBadgeTitle": "语义上的主 agent 归属；不等于 Orca 协调器权限",
+  "dag.node.harnessActualTitle": "此阶段实际启动时记录的 harness",
+  "dag.node.harnessPlannedTitle": "计划使用的 harness —— 此处尚未启动",
+  "dag.node.harnessUnknownTitle": "此阶段没有可用的启动 harness",
+  "dag.edge.hierarchyAria": "父子归属连线（不是依赖）",
+  // 空态：指向 agent skill（code 元素保留其名字），然后说明任务图如何生长。
+  "dag.empty.title": "暂时还是一张白纸",
+  "dag.empty.body": "在你的 agent 中加载",
+  "dag.empty.bodyTail": "skill，然后聊聊你想构建什么 —— 它会拆分工作并画出任务图。",
+  "dag.empty.hint": "任务与依赖会像蜡笔画一样一笔笔长出来 —— 然后为每个节点选好 harness 并点火。",
+  // 交给 React Flow 的画布文案（它的 ariaLabelConfig 属性）。控制条与它注入的
+  // 节点/连线描述都属于库自带的外壳，所以文案由查看器提供；键盘移动节点时播报
+  // 的是译好的方向词，而不是库里的原始 token。
+  "dag.canvas.controlsAria": "DAG 画布控制",
+  "dag.canvas.zoomIn": "放大",
+  "dag.canvas.zoomOut": "缩小",
+  "dag.canvas.fitView": "适应视图",
+  "dag.a11y.nodeDesc": "按回车或空格选中阶段节点。按 delete 删除，按 escape 取消。",
+  "dag.a11y.nodeDescKeyboard": "按回车或空格选中阶段节点，然后用方向键移动它。按 delete 删除，按 escape 取消。",
+  "dag.a11y.edgeDesc": "按回车或空格选中连线，然后按 delete 删除，或按 escape 取消。",
+  "dag.a11y.nodeMoved": "已移动所选阶段，方向：{direction}。新位置，x：{x}，y：{y}",
+  "dag.a11y.dirLeft": "向左",
+  "dag.a11y.dirRight": "向右",
+  "dag.a11y.dirUp": "向上",
+  "dag.a11y.dirDown": "向下",
 };
 export default zh;
 export { zh };

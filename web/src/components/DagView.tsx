@@ -22,7 +22,8 @@ import "@xyflow/react/dist/style.css";
 import "../stage-card.css";
 import { applyLayout } from "../layout";
 import { effectiveHarness, useConfig } from "../harness";
-import { useT } from "../i18n";
+import { useLang, useT, type TranslationKey, type Translator } from "../i18n";
+import { laneSummaryLabel } from "../placement";
 import {
   STATUS_META,
   type DagNode,
@@ -191,6 +192,19 @@ type StageSummary = { text: string; title: string };
 
 const STAGE_SUMMARY_LIMIT = 88;
 
+/**
+ * React Flow announces a keyboard node move with the raw arrow token it read
+ * off the key event; each maps to a key, exactly like PLACEMENT_KIND_KEY in
+ * placement.ts. An unknown token falls back to the token itself rather than
+ * inventing a direction.
+ */
+const MOVE_DIRECTION_KEY: Record<string, TranslationKey> = {
+  left: "dag.a11y.dirLeft",
+  right: "dag.a11y.dirRight",
+  up: "dag.a11y.dirUp",
+  down: "dag.a11y.dirDown",
+};
+
 function cleanLine(value: string | null | undefined): string {
   return value?.replace(/\s+/g, " ").trim() ?? "";
 }
@@ -207,8 +221,14 @@ function firstSentence(value: string): string {
   return end > 0 ? normalized.slice(0, end + 1) : normalized;
 }
 
-/** Keep the card preview useful for both structured worker reports and plain results. */
-function resultPreview(raw: string | null): string | null {
+/**
+ * Result previews and stage summaries are built by plain functions below, not
+ * React components: they take the translator as a parameter (the contract
+ * placement.ts documents) and the caller — Flow — subscribes to the language
+ * store, so a language switch re-runs them. Their own text is viewer copy;
+ * task results, readiness reasons and host identities render verbatim.
+ */
+function resultPreview(raw: string | null, t: Translator): string | null {
   if (!raw?.trim()) return null;
   try {
     const parsed: unknown = JSON.parse(raw);
@@ -218,9 +238,9 @@ function resultPreview(raw: string | null): string | null {
       if (typeof report.subject === "string" && report.subject.trim()) return firstSentence(report.subject);
       if (typeof report.body === "string" && report.body.trim()) return firstSentence(report.body);
       if (typeof report.outcome === "string" && report.outcome.trim()) {
-        return `Worker reported ${report.outcome.replaceAll("_", " ")}`;
+        return t("dag.workerReported", { outcome: report.outcome.replaceAll("_", " ") });
       }
-      return "Result recorded";
+      return t("dag.resultRecorded");
     }
   } catch {
     // Plain text is a valid task result too; show its first sentence below.
@@ -228,38 +248,49 @@ function resultPreview(raw: string | null): string | null {
   return firstSentence(raw) || null;
 }
 
-function hostLabel(host: { kind: string; id: string } | null | undefined): string | null {
+function hostLabel(host: { kind: string; id: string } | null | undefined, t: Translator): string | null {
   if (!host) return null;
-  if (host.kind === "local" || host.id.toLowerCase() === "local") return "Local";
+  if (host.kind === "local" || host.id.toLowerCase() === "local") return t("dag.hostLocal");
   const place = cleanLine(host.id) || cleanLine(host.kind);
-  return place ? `On ${place}` : null;
+  return place ? t("dag.hostOn", { place }) : null;
 }
 
-function plannedWorktreeLabel(selector: string): string {
+function plannedWorktreeLabel(selector: string, t: Translator): string {
   const path = selector.split("::").at(-1) ?? selector;
-  return path.split("/").filter(Boolean).at(-1) ?? "existing workspace";
+  return path.split("/").filter(Boolean).at(-1) ?? t("dag.plannedExistingWorkspace");
 }
 
-function plannedPlacementLabel(placement: { kind: string; selector?: string; name?: string } | undefined): string | null {
+function plannedPlacementLabel(
+  placement: { kind: string; selector?: string; name?: string } | undefined,
+  t: Translator,
+): string | null {
   if (!placement || placement.kind === "current") return null;
-  if (placement.kind === "existing" && placement.selector) return plannedWorktreeLabel(placement.selector);
-  return placement.name || (placement.kind === "new-child" ? "new child workspace" : "new workspace");
+  if (placement.kind === "existing" && placement.selector) {
+    return plannedWorktreeLabel(placement.selector, t);
+  }
+  return placement.name || (placement.kind === "new-child" ? t("dag.plannedNewChildWorkspace") : t("dag.plannedNewWorkspace"));
 }
 
-function activeStageSummary(worker: WorkerRowView | undefined, attempt: RunAttempt | undefined): string {
+function activeStageSummary(
+  worker: WorkerRowView | undefined,
+  attempt: RunAttempt | undefined,
+  t: Translator,
+): string {
   const stage = worker?.projection?.stage ?? attempt?.stage ?? null;
   const detail = cleanLine(stage?.detail).replaceAll("_", " ");
   const activity = cleanLine(stage?.activity).toLowerCase();
   const activityLabel =
     activity === "working" || activity === "implementing"
-      ? "Worker active"
+      ? t("dag.workerActive")
       : activity === "idle"
-        ? "Worker idle"
+        ? t("dag.workerIdle")
         : activity && activity !== "unknown"
-          ? `Worker ${activity.replaceAll("_", " ")}`
-          : "Worker dispatch active";
+          ? t("dag.workerActivity", { activity: activity.replaceAll("_", " ") })
+          : t("dag.workerDispatchActive");
   const work = detail || activityLabel;
-  const location = hostLabel(worker?.projection?.host ?? attempt?.host);
+  const location = hostLabel(worker?.projection?.host ?? attempt?.host, t);
+  // " · " between two finished fragments is structural (the same separator the
+  // planned-settings chip joins its parts with); both sides are translated.
   return location ? `${work} · ${location}` : work;
 }
 
@@ -267,16 +298,17 @@ function summarizeStage(
   node: DagNode,
   dag: DagResponse,
   nodesById: Map<string, DagNode>,
-  worker?: WorkerRowView,
-  attempt?: RunAttempt,
+  worker: WorkerRowView | undefined,
+  attempt: RunAttempt | undefined,
+  t: Translator,
 ): StageSummary {
   const readiness = dag.readiness[node.id];
   const evidenceTitle = boundedLine(readiness?.reasons.join(" ") || "", 360);
 
   if (node.status === "ready") {
     const text = readiness?.codes.includes("waiting_for_capacity")
-      ? "Ready; waiting for a worker slot"
-      : "Ready to dispatch";
+      ? t("dag.readyWaitingSlot")
+      : t("dag.readyDispatch");
     return { text, title: evidenceTitle || text };
   }
 
@@ -287,55 +319,57 @@ function summarizeStage(
       const ids = readiness?.unmetDependencyIds ?? [];
       if (ids.length === 1) {
         const dependency = nodesById.get(ids[0]);
-        text = dependency ? `Waiting on ${dependency.label}` : "Waiting on a dependency outside this Run";
+        text = dependency
+          ? t("dag.waitingOnStage", { stage: dependency.label })
+          : t("dag.waitingOutside");
       } else {
-        text = `Waiting on ${ids.length} dependencies`;
+        text = t("dag.waitingOnDeps", { n: ids.length });
       }
     } else if (codes.includes("pending_gate")) {
       const gateIds = readiness?.pendingGateIds ?? [];
       const gate = gateIds.length === 1 ? dag.gates.find((candidate) => candidate.id === gateIds[0]) : undefined;
       text = gate?.question?.trim()
-        ? `Decision needed: ${gate.question}`
+        ? t("dag.decisionNeeded", { question: gate.question })
         : gateIds.length > 1
-          ? `Waiting on ${gateIds.length} gate decisions`
-          : "Waiting on a gate decision";
+          ? t("dag.waitingOnGates", { n: gateIds.length })
+          : t("dag.waitingOnGate");
     } else {
-      text = node.status === "blocked"
-        ? "Blocked; inspect readiness details"
-        : "Pending; inspect readiness details";
+      text = node.status === "blocked" ? t("dag.blockedInspect") : t("dag.pendingInspect");
     }
     return { text: boundedLine(text), title: evidenceTitle || text };
   }
 
   if (node.status === "dispatched") {
-    const text = activeStageSummary(worker, attempt);
+    const text = activeStageSummary(worker, attempt, t);
     const details = worker?.projection?.stage?.detail ?? attempt?.stage?.detail;
     return { text: boundedLine(text), title: boundedLine(details || text, 360) };
   }
 
-  const result = resultPreview(node.result);
+  const result = resultPreview(node.result, t);
   if (result) {
     return { text: boundedLine(result), title: boundedLine(node.result ?? result, 360) };
   }
 
   if (node.status === "completed") {
     const succeeded = attempt?.outcome === "succeeded" || worker?.projection?.outcome === "succeeded";
-    const text = succeeded ? "Worker reported success" : "Completed without a result summary";
+    const text = succeeded ? t("dag.workerSucceeded") : t("dag.completedNoSummary");
     return { text, title: text };
   }
 
   if (node.status === "failed") {
     if (attempt?.settledVia === "start_failed") {
       const failedStage = attempt.startReceipt?.failedStage;
-      const text = failedStage ? `Worker start failed at ${failedStage.replaceAll("_", " ")}` : "Worker failed to start";
+      const text = failedStage
+        ? t("dag.startFailedAt", { stage: failedStage.replaceAll("_", " ") })
+        : t("dag.startFailed");
       return { text: boundedLine(text), title: text };
     }
     const failed = attempt?.outcome === "failed" || worker?.projection?.outcome === "failed";
-    const text = failed ? "Worker reported failure" : "Failure details unavailable";
+    const text = failed ? t("dag.workerFailed") : t("dag.failureUnavailable");
     return { text, title: text };
   }
 
-  return { text: "Stage context unavailable", title: "Stage context unavailable" };
+  return { text: t("dag.contextUnavailable"), title: t("dag.contextUnavailable") };
 }
 
 function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
@@ -366,16 +400,21 @@ function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
         .filter(Boolean)
         .join(" ")}
       data-status={data.status}
-      title={
-        data.lead
-          ? "Lead stage — semantic main-agent ownership; Orca coordinator authority is shown separately"
-          : undefined
-      }
-      aria-label={`${data.label}. ${statusLabel}. ${data.summary}. Harness ${data.harness}${
-        data.harnessActual ? " (actual launch)" : " (planned or fallback)"
-      }.${data.plannedSettings ? ` Planned settings: ${data.plannedSettingsTitle}.` : ""}${
-        data.lead ? " Lead stage: semantic main-agent ownership." : ""
-      }`}
+      title={data.lead ? t("dag.node.leadTitle") : undefined}
+      aria-label={[
+        `${data.label}.`,
+        `${statusLabel}.`,
+        `${data.summary}.`,
+        data.harnessActual
+          ? t("dag.node.ariaHarnessActual", { harness: data.harness })
+          : t("dag.node.ariaHarnessPlanned", { harness: data.harness }),
+        data.plannedSettings
+          ? t("dag.node.ariaPlannedSettings", { settings: data.plannedSettingsTitle })
+          : null,
+        data.lead ? t("dag.node.ariaLead") : null,
+      ]
+        .filter(Boolean)
+        .join(" ")}
       onAnimationEnd={(event) => {
         if (event.target === event.currentTarget && event.animationName === "node-in") {
           // React Flow may take its first handle measurement while the card is
@@ -400,9 +439,9 @@ function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
           <span className="task-node__lead-ring" aria-hidden="true" />
           <span
             className="task-node__lead-badge"
-            title="Semantic main-agent ownership; not Orca coordinator authority"
+            title={t("dag.node.leadBadgeTitle")}
           >
-            <span aria-hidden="true">★</span> Lead
+            <span aria-hidden="true">★</span> {t("dag.node.lead")}
           </span>
         </>
       )}
@@ -441,10 +480,10 @@ function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
           className="task-node__harness"
           title={
             data.harnessActual
-              ? "Harness recorded for this stage's actual launch"
+              ? t("dag.node.harnessActualTitle")
               : data.harnessPlanned
-                ? "Planned harness — nothing launched here yet"
-                : "Launch harness unavailable for this stage"
+                ? t("dag.node.harnessPlannedTitle")
+                : t("dag.node.harnessUnknownTitle")
           }
         >
           {data.harness}
@@ -552,6 +591,9 @@ const edgeTypes = { pencil: PencilEdge, hierarchy: HierarchyEdge };
  * the toolbar toggle when they hurt readability.
  */
 function HierarchyEdge(props: EdgeProps) {
+  // Its own aria-label is viewer copy, so this edge subscribes to the
+  // language store like TaskNode does.
+  const t = useT();
   const [path] = getSmoothStepPath({
     sourceX: props.sourceX,
     sourceY: props.sourceY,
@@ -562,7 +604,7 @@ function HierarchyEdge(props: EdgeProps) {
     borderRadius: 14,
   });
   return (
-    <g className="hierarchy-edge" aria-label="Parent-child ownership link (not a dependency)">
+    <g className="hierarchy-edge" aria-label={t("dag.edge.hierarchyAria")}>
       <path className="hierarchy-edge__link" d={path} fill="none" />
       {/* the open ring marks the CHILD end: who something belongs to, drawn
           like a little hoop resting on the owned stage */}
@@ -603,6 +645,13 @@ function Flow({
 }) {
   const rf = useReactFlow();
   const config = useConfig();
+  // Two subscriptions to the same store, on purpose: `t` is the stable
+  // translator, while the language VALUE is what the memoized summaries and
+  // the decoration effect below must key on — a language switch leaves every
+  // other dependency (dag, worker rows, attempts, config) identical, so
+  // without it the canvas would keep rendering the previous language.
+  const t = useT();
+  const lang = useLang();
   const prevCount = useRef(-1);
   // positions the user has explicitly dragged — preserved across status polls
   const dragged = useRef<Map<string, { x: number; y: number }>>(new Map());
@@ -755,10 +804,10 @@ function Flow({
         const attempt = node.dispatchId
           ? attemptByDispatch.get(node.dispatchId)
           : latestAttemptByTask.get(node.id);
-        return [node.id, summarizeStage(node, dag, nodesById, worker, attempt)] as const;
+        return [node.id, summarizeStage(node, dag, nodesById, worker, attempt, t)] as const;
       }),
     );
-  }, [dag, workerRows, attempts]);
+  }, [dag, workerRows, attempts, lang]);
 
   // --- Stage 4 · reconciliation: decoration onto positioned geometry ---------
   //
@@ -789,10 +838,10 @@ function Flow({
         : config.placementByTask[n.id];
       const plannedParts = harnessPlanned
         ? [
-            config.modelByTask[n.id] ? `Model ${config.modelByTask[n.id]}` : null,
+            config.modelByTask[n.id] ? t("dag.plannedModel", { model: config.modelByTask[n.id] }) : null,
             laneId
-              ? `Lane ${laneId}${plannedPlacementLabel(placement) ? `: ${plannedPlacementLabel(placement)}` : ""}`
-              : plannedPlacementLabel(placement),
+              ? laneSummaryLabel(laneId, plannedPlacementLabel(placement, t))
+              : plannedPlacementLabel(placement, t),
           ].filter((part): part is string => Boolean(part))
         : [];
       return {
@@ -801,20 +850,26 @@ function Flow({
         data: {
           label: dagNode?.label ?? n.id,
           status,
-          summary: stageSummaries.get(n.id)?.text ?? "Stage context unavailable",
-          summaryTitle: stageSummaries.get(n.id)?.title ?? "Stage context unavailable",
+          summary: stageSummaries.get(n.id)?.text ?? t("dag.contextUnavailable"),
+          summaryTitle: stageSummaries.get(n.id)?.title ?? t("dag.contextUnavailable"),
           selected: n.id === selectedId,
           lead: n.id === leadTaskId,
           // A launched stage shows what Orca/the coordinator recorded; stages
           // with no Dispatch show the planned harness. Unknown historical
           // launches never borrow today's editable default.
           harness: harnessEvidence.actual.get(n.id) ??
-            (harnessPlanned ? effectiveHarness(n.id) : "unknown"),
+            (harnessPlanned ? effectiveHarness(n.id) : t("dag.harnessUnknown")),
           harnessActual: harnessEvidence.actual.has(n.id),
           harnessPlanned,
           plannedSettings: plannedParts.length ? plannedParts.join(" · ") : null,
           plannedSettingsTitle: plannedParts.length
-            ? `Planned: ${plannedParts.join(" · ")}${placement?.kind === "existing" ? ` (${placement.selector})` : ""}`
+            ? t("dag.plannedTitle", {
+                summary:
+                  plannedParts.join(" · ") +
+                  (placement?.kind === "existing"
+                    ? t("dag.plannedSelectorSuffix", { selector: placement.selector })
+                    : ""),
+              })
             : "",
           dir,
           index: i,
@@ -888,7 +943,7 @@ function Flow({
       });
     });
     setEdges([...hierarchyEdges, ...decoratedEdges]);
-  }, [laid, dag, leadTaskId, selectedId, layout, reorgNonce, showHierarchy, harnessEvidence, stageSummaries, config, setNodes, setEdges]);
+  }, [laid, dag, leadTaskId, selectedId, layout, reorgNonce, showHierarchy, harnessEvidence, stageSummaries, config, lang, setNodes, setEdges]);
 
   // Auto-fit when the node count changes, so live status polls don't yank the
   // viewport while the user is inspecting (or dragging).
@@ -926,17 +981,40 @@ function Flow({
     draggingId.current = null;
   }, []);
 
+  // React Flow's own chrome — the controls panel and the screen-reader
+  // descriptions it injects for nodes and edges — is English out of the box;
+  // its ariaLabelConfig prop is the seam for supplying the viewer's words.
+  // Memoized on the language: React Flow re-syncs this prop whenever its
+  // identity changes, so a fresh literal on every render would push a new
+  // config into its store on each poll.
+  const ariaLabelConfig = useMemo(
+    () => ({
+      "controls.ariaLabel": t("dag.canvas.controlsAria"),
+      "controls.zoomIn.ariaLabel": t("dag.canvas.zoomIn"),
+      "controls.zoomOut.ariaLabel": t("dag.canvas.zoomOut"),
+      "controls.fitView.ariaLabel": t("dag.canvas.fitView"),
+      "node.a11yDescription.default": t("dag.a11y.nodeDesc"),
+      "node.a11yDescription.keyboardDisabled": t("dag.a11y.nodeDescKeyboard"),
+      "edge.a11yDescription.default": t("dag.a11y.edgeDesc"),
+      "node.a11yDescription.ariaLiveMessage": ({ direction, x, y }: { direction: string; x: number; y: number }) => {
+        const key = MOVE_DIRECTION_KEY[direction];
+        return t("dag.a11y.nodeMoved", { direction: key ? t(key) : direction, x, y });
+      },
+    }),
+    [lang, t],
+  );
+
   if (dag.nodes.length === 0) {
     return (
       <div className="dag-empty">
         <div className="dag-empty__doodle">🖍️</div>
-        <div className="dag-empty__title">A blank page, for now</div>
+        <div className="dag-empty__title">{t("dag.empty.title")}</div>
         <div className="dag-empty__hint">
-          Load the <code>orca-dag</code> skill in your agent and talk through what you want to
-          build — it will break the work down and draw the graph.
+          {t("dag.empty.body")}{" "}
+          <code>orca-dag</code>{" "}
+          {t("dag.empty.bodyTail")}
           <br />
-          Tasks and deps grow here stroke by stroke, like crayon — then pick a harness per node and
-          fire.
+          {t("dag.empty.hint")}
         </div>
       </div>
     );
@@ -967,6 +1045,7 @@ function Flow({
            accessibility are untouched — only off-screen DOM is skipped. */
         onlyRenderVisibleElements
         proOptions={{ hideAttribution: true }}
+        ariaLabelConfig={ariaLabelConfig}
         onNodeClick={(_, n) => onSelect(n.id === selectedId ? null : n.id)}
         onPaneClick={() => onSelect(null)}
       >
