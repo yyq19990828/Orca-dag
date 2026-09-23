@@ -144,7 +144,7 @@ const zh: Dict = {
   // exec.lock* 的同句子；只有「首次派发后锁定」是节点面板专有。
   // 括号内的补充说明一律用全角括号，harness、worker、agent、dispatch 保留原词。
   "node.operationsAria": "阶段运维",
-  "node.reviewGate": "查看审批门",
+  "node.reviewGate": "查看门禁",
   "node.reviewFailedStart": "查看失败的启动",
   "node.viewWorkerHistory": "查看 worker 历史",
   "node.subStageOf": "子阶段：",
@@ -397,7 +397,7 @@ const zh: Dict = {
   "chat.actor.agent": "Agent",
   "chat.signal.promptAccepted": "提示词已被接受，agent 正在工作",
   "chat.state.waitingReply": "等待回复",
-  "chat.state.workingTerminalLive": "agent 工作中 · 终端在线 · 无法监督存活状态",
+  "chat.state.workingTerminalLive": "Agent 工作中 · 终端存活 · 无法进行受监督存活判定",
   "chat.state.connectionUnknown": "连接状态未知",
   "chat.state.running": "运行中",
   "chat.state.pending": "待命",
