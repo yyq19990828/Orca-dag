@@ -11,6 +11,7 @@ import { SchedulerPanel } from "./components/SchedulerPanel";
 import { WorkerPanel } from "./components/WorkerPanel";
 import { RunPicker } from "./components/RunPicker";
 import { RunHealthBadge } from "./components/RunHealthBadge";
+import { LangToggle } from "./components/LangToggle";
 import { CapabilityPanel } from "./components/CapabilityPanel";
 import { fetchDag, fetchRunStatus, fetchWorkers } from "./api";
 import { initConfig, setLayout, setLeadTask, setRunId, useConfig, useReadiness } from "./harness";
@@ -631,6 +632,7 @@ export default function App() {
         {/* The conn pill is focusable with a live-region role so its state is
             reachable and announced without hovering. */}
         <div className="topbar__status">
+          <LangToggle />
           <RunHealthBadge runId={runId} />
           <div
             className={`conn ${connError ? "conn--bad" : execOff ? "conn--warn" : "conn--ok"}`}
