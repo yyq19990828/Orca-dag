@@ -124,10 +124,20 @@ npm run check          # skill validation + typecheck + tests + web build (what 
 npm run dev            # frontend :5173 + backend :8787 (vite proxies /api) → http://localhost:5173
 npm run build:npm      # stage the publishable package → dist-npm/ (Node only)
 npm run build:binary   # portable single binary → dist/orca-dag (~100 MB, frontend embedded; needs Bun)
-npm run release 0.2.0  # tag + push; CI publishes to npm and attaches every binary to a GitHub release
+npm run release 1.0.0  # tag + push; CI publishes to npm and attaches every binary to a GitHub release
 ```
 
 Cross-compile a binary for another platform with `TARGET=bun-linux-x64 npm run build:binary`; `bash scripts/build-all-binaries.sh` does every target at once, which is what the release workflow runs.
+
+The npm release job uses **Trusted Publishing (OIDC)**, so it needs no `NPM_TOKEN` GitHub secret. npm requires the package to exist before you can configure a trusted publisher. For the first release only, sign in to npm with 2FA and publish a prerelease from the staged package without moving the `latest` tag:
+
+```bash
+npm login
+PKG_VERSION=1.0.0-oidc-bootstrap.0 npm run build:npm
+npm publish ./dist-npm --access public --tag bootstrap
+```
+
+Then, on npmjs.com, open **orca-orchestration-launcher → Settings → Trusted publishing → GitHub Actions**. Set user `yyq19990828`, repository `Orca-dag`, workflow filename `release.yml`, no environment, and allow **npm publish**. Commit and push the OIDC workflow to `main` before running `npm run release 1.0.0`. That command pushes the first stable tag; future releases use the same tag workflow. The staged package's `repository.url` already matches this GitHub repository. See [npm's Trusted Publishing setup](https://docs.npmjs.com/trusted-publishers/).
 
 ## Quick start
 

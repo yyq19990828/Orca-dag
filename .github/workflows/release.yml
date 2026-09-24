@@ -15,17 +15,21 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # Required for npm provenance: the publish is signed with a Sigstore
-      # attestation tying the tarball to this workflow run.
+      # npm exchanges this GitHub OIDC identity for a short-lived publish
+      # credential. The trusted publisher must allow this exact workflow file.
       id-token: write
     steps:
       - uses: actions/checkout@v5
 
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
-          cache: npm
+          # Trusted publishing needs Node >=22.14 and npm >=11.5.1.
+          node-version: 24
+          package-manager-cache: false
           registry-url: https://registry.npmjs.org
+
+      - name: Install OIDC-capable npm
+        run: npm install --global npm@^11.5.1
 
       - run: npm ci
 
@@ -37,10 +41,10 @@ jobs:
         env:
           PKG_VERSION: ${{ inputs.version || github.ref_name }}
 
-      - name: Publish
-        run: npm publish ./dist-npm --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # npm detects Actions OIDC automatically and generates provenance for
+      # this public package. No long-lived npm token is stored in GitHub.
+      - name: Publish with npm Trusted Publishing
+        run: npm publish ./dist-npm --access public
 
   binaries:
     name: Build + attach standalone binaries
