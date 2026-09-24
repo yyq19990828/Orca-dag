@@ -129,7 +129,7 @@ npm run release 1.0.0  # tag + push; CI publishes to npm and attaches every bina
 
 Cross-compile a binary for another platform with `TARGET=bun-linux-x64 npm run build:binary`; `bash scripts/build-all-binaries.sh` does every target at once, which is what the release workflow runs.
 
-The npm release job uses **Trusted Publishing (OIDC)**, so it needs no `NPM_TOKEN` GitHub secret. npm requires the package to exist before you can configure a trusted publisher. For the first release only, sign in to npm with 2FA and publish a prerelease from the staged package without moving the `latest` tag:
+The npm release job uses **Trusted Publishing (OIDC)**, so it needs no `NPM_TOKEN` GitHub secret. npm requires the package to exist before you can configure a trusted publisher. For the first release only, sign in to npm with 2FA and publish a prerelease from the staged package under the `bootstrap` tag:
 
 ```bash
 npm login
@@ -137,7 +137,7 @@ PKG_VERSION=1.0.0-oidc-bootstrap.0 npm run build:npm
 npm publish ./dist-npm --access public --tag bootstrap
 ```
 
-Then, on npmjs.com, open **orca-orchestration-launcher → Settings → Trusted publishing → GitHub Actions**. Set user `yyq19990828`, repository `Orca-dag`, workflow filename `release.yml`, no environment, and allow **npm publish**. Commit and push the OIDC workflow to `main` before running `npm run release 1.0.0`. That command pushes the first stable tag; future releases use the same tag workflow. The staged package's `repository.url` already matches this GitHub repository. See [npm's Trusted Publishing setup](https://docs.npmjs.com/trusted-publishers/).
+On the first publish, npm also initialized `latest` to the prerelease despite `--tag bootstrap`; the first stable release will move `latest` to `1.0.0`. Then, on npmjs.com, open **orca-orchestration-launcher → Settings → Trusted publishing → GitHub Actions**. Set user `yyq19990828`, repository `Orca-dag`, workflow filename `release.yml`, no environment, and allow **npm publish**. Or, with npm >=11.15.0, run `npm trust github orca-orchestration-launcher --repo yyq19990828/Orca-dag --file release.yml --allow-publish` and verify with `npm trust list orca-orchestration-launcher`. Commit and push the OIDC workflow to `main` before running `npm run release 1.0.0`. That command pushes the first stable tag; future releases use the same tag workflow. The staged package's `repository.url` already matches this GitHub repository. See [npm's Trusted Publishing setup](https://docs.npmjs.com/trusted-publishers/).
 
 ## Quick start
 

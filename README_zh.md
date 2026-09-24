@@ -128,7 +128,7 @@ npm run release 1.0.0  # 打 tag 并推送；CI 负责发 npm + 把各平台二�
 
 用 `TARGET=bun-linux-x64 npm run build:binary` 交叉编译到别的平台；`bash scripts/build-all-binaries.sh` 一次编出全部目标，release workflow 跑的就是它。
 
-npm 发布任务使用 **Trusted Publishing（OIDC）**，不需要 GitHub 的 `NPM_TOKEN` secret。npm 要求先有包，才能配置 Trusted Publisher。仅首次发版时，先用启用了 2FA 的 npm 账号登录，发布一个不占用 `latest` 标签的预发布版本来创建包：
+npm 发布任务使用 **Trusted Publishing（OIDC）**，不需要 GitHub 的 `NPM_TOKEN` secret。npm 要求先有包，才能配置 Trusted Publisher。仅首次发版时，先用启用了 2FA 的 npm 账号登录，用 `bootstrap` 标签发布一个预发布版本来创建包：
 
 ```bash
 npm login
@@ -136,7 +136,7 @@ PKG_VERSION=1.0.0-oidc-bootstrap.0 npm run build:npm
 npm publish ./dist-npm --access public --tag bootstrap
 ```
 
-然后在 npmjs.com 打开 **orca-orchestration-launcher → Settings → Trusted publishing → GitHub Actions**，填写用户 `yyq19990828`、仓库 `Orca-dag`、工作流文件名 `release.yml`，环境留空，并允许 **npm publish**。先将 OIDC 工作流提交并推送到 `main`，再运行 `npm run release 1.0.0`；它会推送首个正式版 tag，此后发版沿用同一流程。暂存包的 `repository.url` 已与这个 GitHub 仓库一致。参见 [npm Trusted Publishing 配置说明](https://docs.npmjs.com/trusted-publishers/)。
+首次发布后，npm 也把 `latest` 初始化为这个预发布版，尽管命令指定了 `--tag bootstrap`；正式版发布时会将 `latest` 更新到 `1.0.0`。然后在 npmjs.com 打开 **orca-orchestration-launcher → Settings → Trusted publishing → GitHub Actions**，填写用户 `yyq19990828`、仓库 `Orca-dag`、工作流文件名 `release.yml`，环境留空，并允许 **npm publish**。也可以用 npm ≥11.15.0 执行 `npm trust github orca-orchestration-launcher --repo yyq19990828/Orca-dag --file release.yml --allow-publish`，再用 `npm trust list orca-orchestration-launcher` 核对。先将 OIDC 工作流提交并推送到 `main`，再运行 `npm run release 1.0.0`；它会推送首个正式版 tag，此后发版沿用同一流程。暂存包的 `repository.url` 已与这个 GitHub 仓库一致。参见 [npm Trusted Publishing 配置说明](https://docs.npmjs.com/trusted-publishers/)。
 
 ## Quick start
 
