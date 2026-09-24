@@ -90,6 +90,16 @@ Workspace lanes 面板可能显示 `planned`、`creating`、`active`、`integrat
 
 ## 理解并解决集成门
 
+### 已提交 Stage 的交接
+
+需要保证**先合并、后开发**的汇合点，应拆成两个有依赖关系的 Task。第一个是合并准备 Task，spec 中包含 `[orca-dag:merge-prep]`，直接依赖所有来源 Stage；它只负责将来源提交合并进目标工作树、解决冲突、提交，并保持工作区干净。第二个是开发 Task，依赖合并准备 Task，并放在同一个工作树。两者可以选择相同 harness，但 Orca 不保证复用同一个 agent 会话。
+
+只要 Run 中有合并准备 Task，viewer 就会把启动时的 Git HEAD 固定为基准提交。新 Stage 工作树从这个提交创建；不要再设置各节点的 base branch。每个成功 Stage 都必须以干净、已提交的工作树结束。viewer 将实际工作树路径、分支、Dispatch 和 HEAD SHA 记入仓库 Git 元数据中的 `orca-dag/stage-git/`，并把依赖工作树路径及 SHA 发给合并 agent。冲突如何解决由 agent 判断；合并须保留来源提交的祖先关系。viewer 在确认所有依赖 SHA 都是目标干净 HEAD 的祖先后，才记录合并准备完成，并检查后续开发 Task 是否在该已验证工作树启动。证据缺失时下游任务会暂停，错误显示在 Run 状态中。
+
+此模式要求所有工作树都是本机同一 Git 仓库的工作树。并行 Task 不能共用工作树，因为它们共用 Git index 和 HEAD；应分配独立工作树，或用依赖关系串行化。串行的单工作树链可用。根 Stage 使用的现有工作树必须位于启动时的基准提交。如果旧 Run 缺少 Stage 证据文件，viewer 不会从可能已移动的分支猜测当时的提交。
+
+### 其他 Run 的人工集成门
+
 如果一个 Task 的 lane 与某个**直接依赖**的 lane 不同，它就是跨 lane 汇合。此时 Current 也算一个独立工作区：Current 中的集成验证 Task 依赖 api lane，同样是跨工作区。coordinator 会为该 Task 建立一个 Orca 集成门，并暂停它，直到人工选择 `integrated`。
 
 这个自动检查依据的是 **lane 归属**，不是每个 Stage 实际放置的路径。两个独立 Stage 即使放在不同工作树，只要没有使用 lane，汇合时也可能不会自动创建集成门。执行前应将分支纳入 lane，或在计划的 DAG 中显式添加决策门。

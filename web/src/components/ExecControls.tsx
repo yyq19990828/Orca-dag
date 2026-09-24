@@ -469,7 +469,7 @@ export function ExecControls({
         )
       )}
 
-      {(execOff || launchLockReason || otherRunStatus || (anotherRunStarting && !otherRunStatus) || err || ownStatus?.error) && (
+      {(execOff || launchLockReason || otherRunStatus || (anotherRunStarting && !otherRunStatus) || err || ownStatus?.error || Object.keys(ownStatus?.stageGit?.errors ?? {}).length > 0) && (
         <div className="exec__notices" aria-live="polite">
           {execOff && <span className="exec__hint">🔒 {readiness?.reason}</span>}
           {launchLockReason && <span className="exec__hint">🔒 {launchLockReason}</span>}
@@ -492,6 +492,11 @@ export function ExecControls({
               ⚠️ {err || ownStatus?.error}
             </span>
           )}
+          {Object.entries(ownStatus?.stageGit?.errors ?? {}).map(([taskId, detail]) => (
+            <span className="exec__err" role="alert" key={taskId}>
+              ⚠️ <code>{taskId}</code>: {detail}
+            </span>
+          ))}
         </div>
       )}
     </div>

@@ -784,6 +784,8 @@ export interface RunStatus {
   recoverySessions?: RecoverySessionView[];
   /** The configured worker-slot budget; null while no coordinator is running (unknown capacity). */
   maxConcurrency: number | null;
+  /** Committed Stage mode records its base and any Git verification blockers. */
+  stageGit?: { base: string; artifactFile: string; errors: Record<string, string> } | null;
 }
 
 /**

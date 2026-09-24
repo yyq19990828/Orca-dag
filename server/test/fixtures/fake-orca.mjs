@@ -310,6 +310,21 @@ const [ns, verb] = args;
 if (ns === "orchestration" && verb === "task-list") {
   deriveReadiness();
   ok({ tasks: Object.values(state.tasks ?? {}) });
+} else if (ns === "orchestration" && verb === "worker-show") {
+  const d = state.dispatches?.[flag("--dispatch")];
+  if (!d) fail("dispatch_not_found", "unknown Dispatch");
+  const worktree = (state.worktrees ?? []).find((w) => w.id === d.launch?.worktree);
+  ok({
+    dispatch: { id: d.id, task_id: d.task_id, runId: d.run_id, status: d.status },
+    worker: { state: d.workerState, startOptions: {
+      agent: d.launch?.agent, resolvedWorktreeId: d.launch?.worktree,
+    } },
+    terminal: {
+      handle: d.agentTerminal,
+      worktreePath: worktree?.path ?? (d.launch?.worktree ? null : process.cwd()),
+      branch: worktree?.branch ?? null,
+    },
+  });
 } else if (ns === "orchestration" && verb === "gate-list") {
   ok({ gates: state.gates ?? [] });
 } else if (ns === "orchestration" && verb === "gate-create") {

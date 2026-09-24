@@ -23,6 +23,7 @@ import { ACTIVITY_FILE } from "./activity";
 import { REQUESTS_FILE } from "./requestLedger";
 import { SESSIONS_FILE } from "./providerSessions";
 import { LAUNCHES_FILE } from "./launchHistory";
+import { stageGitStoreDir } from "./stageGit";
 
 export interface UninstallOptions {
   /** Print what would happen, change nothing. */
@@ -146,6 +147,24 @@ export async function runUninstall(opts: UninstallOptions): Promise<void> {
       // default would turn uninstall into an unexpected history eraser.
       log(`${act("kept")}${item.path} — ${item.label} (delete with --purge)`);
     }
+  }
+  // Committed-Stage snapshots live in Git metadata (shared by this repo's
+  // worktrees), so they cannot accidentally make a Stage dirty or be committed
+  // as source. They are still viewer-owned state: report/keep them normally
+  // and remove them under the same explicit --purge contract as the ledger.
+  try {
+    const dir = stageGitStoreDir(opts.workspace);
+    if (existsSync(dir)) {
+      if (opts.purge) {
+        if (!opts.dryRun) rmSync(dir, { recursive: true, force: true });
+        log(`${act(opts.dryRun ? "would remove" : "removed")}${dir}`);
+        workspaceFiles++;
+      } else {
+        log(`${act("kept")}${dir} — committed Stage evidence (delete with --purge)`);
+      }
+    }
+  } catch {
+    // A folder workspace or removed Git repo never had committed-Stage state.
   }
 
   if (lines.length === 0) console.log("  Nothing to remove — orca-dag left no traces on this machine.");

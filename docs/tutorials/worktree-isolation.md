@@ -90,6 +90,16 @@ The Workspace lanes panel can show `planned`, `creating`, `active`, `integration
 
 ## Understand and resolve the integration gate
 
+### Committed Stage handoff
+
+For a join that must be merged **before development**, create two dependency-ordered Tasks. The first is a merge-preparation Task with `[orca-dag:merge-prep]` in its spec and all source Stages as direct dependencies. Its only job is to merge the source commits into the target worktree, resolve conflicts, commit, and leave the worktree clean. The second is the development Task; make it depend on the merge-preparation Task and place it in the same worktree. The merge-preparation Task and its development Task may use the same harness, although Orca does not guarantee the same agent session.
+
+If a Run contains a merge-preparation Task, the viewer captures its starting Git HEAD as an immutable base. New Stage worktrees are created from that commit; remove per-placement base-branch overrides. Every successful Stage must end with a clean committed worktree. The viewer records the actual worktree path, branch, Dispatch, and HEAD SHA under the repository's Git metadata in `orca-dag/stage-git/`, then sends the merge worker its dependencies' paths and SHAs. The agent chooses how to resolve conflicts and makes history-preserving merges. The viewer verifies that every dependency SHA is an ancestor of the clean target HEAD before it records merge preparation as complete. It then checks that the development Task starts in that verified worktree. Missing evidence parks downstream work and appears in Run status.
+
+All worktrees in this mode must be local Git worktrees of the same repository. Parallel Tasks cannot share one worktree because they also share one Git index and HEAD; assign them separate worktrees or order them by dependencies. A serial single-worktree chain works. Existing worktrees used for root Stages must be at the captured base commit. If an old Run lacks its Stage evidence file, the viewer refuses to infer past commit tips from branches that may have moved.
+
+### Human integration gate for other Runs
+
 A **cross-lane join** occurs when a Task's own lane differs from a direct dependency's lane. Current counts as its own workspace in this check: a Current integration Task depending on an API lane also joins across workspaces. The coordinator creates one Orca gate for that Task and parks it until the human chooses `integrated`.
 
 This automatic check uses **lane membership**, not the effective path of every per-Stage placement. Two independent Stages placed in separate worktrees without lanes can converge without an automatic integration gate. Put the branches in lanes or add an explicit decision gate to the planned DAG before execution.

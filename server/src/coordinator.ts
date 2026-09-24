@@ -49,6 +49,8 @@ import type { LaneSeedPlacement, PlacementSpec, WorktreeLaneSpec } from "./confi
 import { ProviderSessionStore, discoverProviderSession } from "./providerSessions";
 import type { ProviderSessionBinding, ProviderSessionObservation, ProviderSessionStatus } from "./providerSessions";
 import { LaunchHistory } from "./launchHistory";
+import { MERGE_PREP_MARKER, StageGit, validateStagePlan } from "./stageGit";
+import { realpath } from "node:fs/promises";
 
 /**
  * Self-driven coordinator (Phase 3: closed supervised-worker lifecycle).
@@ -102,9 +104,10 @@ import { LaunchHistory } from "./launchHistory";
  *    decision gate carrying INTEGRATION_GATE_MARKER, whose only resolution is
  *    `integrated`. Dependency completion is not merge evidence; only a human
  *    assertion is.
- *  - The coordinator performs no git operation of any kind. Every mutation
- *    goes through the resolved Orca CLI; "integration" is asserted by a
- *    human through the gate, never executed here.
+ *  - The legacy integration gate is still available for ordinary lane Runs.
+ *    A Run containing a marked merge-prep Task opts into the Stage Git
+ *    contract: the agent performs every merge; this coordinator reads Git
+ *    history and cleanliness before releasing dependent development Tasks.
  */
 
 /** Stable viewer marker embedding in every integration gate's question. */
@@ -732,6 +735,10 @@ interface State {
    * boundary (a gated join holds the run open — it is human-owed work).
    */
   integrationParked: Set<string>;
+  /** Opt-in committed Stage protocol; null keeps the legacy gate behavior. */
+  stageGit: StageGit | null;
+  /** A settled Task whose Git evidence is missing or invalid stays visible. */
+  stageGitErrors: Map<string, string>;
   /** Recent check receipts for the live Chat trace, oldest first. */
   checks: CoordinatorCheckReceipt[];
   checkSequence: number;
@@ -788,6 +795,8 @@ const state: State = {
   retryOfByTask: new Map(),
   lanes: new Map(),
   integrationParked: new Set(),
+  stageGit: null,
+  stageGitErrors: new Map(),
   checks: [],
   checkSequence: 0,
 };
@@ -822,6 +831,8 @@ export function resetCoordinatorForTests(): void {
   state.retryOfByTask = new Map();
   state.lanes = new Map();
   state.integrationParked = new Set();
+  state.stageGit = null;
+  state.stageGitErrors = new Map();
   state.checks = [];
   state.checkSequence = 0;
 }
@@ -906,6 +917,11 @@ export function coordinatorStatus() {
     recoverySessions: state.recoverySessions.map((session) => ({ ...session })),
     /** Workspace-lane projections (worktree-lanes epic): identity + lifecycle. */
     worktreeLanes: laneViews(),
+    stageGit: state.stageGit ? {
+      base: state.stageGit.base,
+      artifactFile: state.stageGit.artifactFile,
+      errors: Object.fromEntries(state.stageGitErrors),
+    } : null,
     checks: state.checks.map((receipt) => ({
       ...receipt,
       messageTypes: [...receipt.messageTypes],
@@ -915,9 +931,10 @@ export function coordinatorStatus() {
 }
 
 /** Public read model consumed by HTTP and the activity normalizer. */
-export type CoordinatorStatus = Omit<ReturnType<typeof coordinatorStatus>, "recoverySessions"> & {
+export type CoordinatorStatus = Omit<ReturnType<typeof coordinatorStatus>, "recoverySessions" | "stageGit"> & {
   /** Runtime always includes this; optional for consumers replaying older snapshots. */
   recoverySessions?: RecoverySessionView[];
+  stageGit?: ReturnType<typeof coordinatorStatus>["stageGit"];
 };
 
 /**
@@ -956,6 +973,8 @@ export async function startCoordinator(opts: StartOpts): Promise<void> {
   state.retryOfByTask = new Map();
   state.lanes = new Map();
   state.integrationParked = new Set();
+  state.stageGit = null;
+  state.stageGitErrors = new Map();
   state.checks = [];
   state.checkSequence = 0;
   state.startedAt = Date.now();
@@ -977,8 +996,9 @@ export async function startCoordinator(opts: StartOpts): Promise<void> {
     //      silently serialized. A rejected plan refuses startup loudly; it is
     //      never "fixed" by dropping members or splitting lanes behind the
     //      user's back.
+    const planTasks = await listTasks(opts.runId);
     if (opts.laneByTask && Object.keys(opts.laneByTask).length > 0) {
-      const laneTasks = await listTasks(opts.runId);
+      const laneTasks = planTasks;
       const laneIssues = validateLaneTotalOrder(laneTasks, opts.laneByTask);
       if (laneIssues.length > 0) {
         const first = laneIssues[0];
@@ -987,6 +1007,57 @@ export async function startCoordinator(opts: StartOpts): Promise<void> {
           "invalid_lane",
         );
       }
+    }
+    // A merge-prep marker switches the whole Run to the committed Stage
+    // protocol. Reject ambiguous sharing and unprotected cross-workspace
+    // edges before binding/fencing the existing coordinator. Git records the
+    // original HEAD once, so every new worktree can anchor on that immutable
+    // commit instead of a branch that may advance during the Run.
+    if (planTasks.some((task) => task.spec?.includes(MERGE_PREP_MARKER))) {
+      if (Object.keys(opts.environmentByTask ?? {}).length) {
+        throw new OrcaCliError("Committed Stage Git verification requires local worktrees", "stage_remote_unsupported");
+      }
+      // Two selectors or lane ids may still name ONE physical worktree. Use
+      // Orca's exact existing-worktree rows (and real paths) to reject
+      // concurrent Git index/HEAD ownership even across such aliases.
+      const resolvedKeys: Record<string, string> = {};
+      for (const task of planTasks) {
+        const laneId = opts.laneByTask?.[task.id];
+        const placement = laneId
+          ? opts.worktreeLanes?.[laneId]?.placement
+          : opts.placementByTask?.[task.id];
+        if (laneId && !placement) throw new OrcaCliError(
+          `Committed Stage task ${task.id} names unknown lane ${laneId}`,
+          "unknown_lane",
+        );
+        if (!placement || placement.kind === "current") {
+          resolvedKeys[task.id] = `path:${getOrcaRuntime().workspace.dir}`;
+        } else if (placement.kind === "existing") {
+          const row = await showWorktree(placement.selector);
+          if (!row?.path) throw new OrcaCliError(
+            `Committed Stage workspace ${placement.selector} has no verified local path`,
+            "workspace_unverifiable",
+          );
+          resolvedKeys[task.id] = `path:${await realpath(row.path)}`;
+        } else {
+          const name = placement.name ?? deriveWorktreeName(opts.runId, laneId ?? task.id);
+          resolvedKeys[task.id] = `create:${name}`;
+        }
+      }
+      const issues = validateStagePlan(planTasks, opts.laneByTask, opts.placementByTask, resolvedKeys);
+      if (issues.length) throw new OrcaCliError(`Invalid committed Stage plan: ${issues[0]}`, "invalid_stage_plan");
+      for (const placement of [
+        ...Object.values(opts.placementByTask ?? {}),
+        ...Object.values(opts.worktreeLanes ?? {}).map((lane) => lane.placement),
+      ]) {
+        if ((placement.kind === "new-child" || placement.kind === "new-top-level") && placement.baseBranch) {
+          throw new OrcaCliError(
+            "Committed Stage worktrees use the Run's captured base commit; remove the configured base branch",
+            "stage_base_conflict",
+          );
+        }
+      }
+      state.stageGit = await StageGit.open(getOrcaRuntime().workspace.dir, opts.runId, planTasks);
     }
     buildLaneRuntimes(opts);
     // Phase 4 restart: a crashed viewer's coordinator terminal may still be
@@ -2532,6 +2603,32 @@ function settleAttempt(attempt: Attempt, outcome: "succeeded" | "failed", via: "
   attempt.terminalDecision = "pending";
 }
 
+/** Git reads use the actual worker workspace, never a requested placement. */
+async function stageWorkerPath(attempt: Attempt): Promise<string> {
+  if (!attempt.dispatchId) throw new Error(`Task ${attempt.taskId} has no exact Dispatch identity`);
+  const detail = await showWorkerDetail(attempt.dispatchId);
+  if (detail?.terminal?.worktreePath) return detail.terminal.worktreePath;
+  const selector = detail?.launch?.resolvedWorktreeId ?? attempt.effective?.worktree;
+  if (selector && !RESERVED_WORKTREE_ECHOES.has(selector)) {
+    const row = await showWorktree(selector);
+    if (row?.path) return row.path;
+  }
+  // Current placement is the process's immutable startup workspace. An
+  // adopted historical Dispatch needs its own runtime evidence instead.
+  if (!attempt.adopted && attempt.requested.worktree === "current") {
+    return getOrcaRuntime().workspace.dir;
+  }
+  throw new Error(`Task ${attempt.taskId} has no positively observed Git worktree path`);
+}
+
+async function stageStartPath(worktree: string | undefined): Promise<string | null> {
+  if (!worktree || worktree === "current") return getOrcaRuntime().workspace.dir;
+  if (worktree === "new-child" || worktree === "new-top-level") return null;
+  const row = await showWorktree(worktree);
+  if (!row?.path) throw new Error(`Cannot inspect exact Stage workspace ${worktree}`);
+  return row.path;
+}
+
 /**
  * Reserve a concurrency slot for a task before its (slow, async) start runs,
  * so the next tick can never over-dispatch. `requested` launch preferences
@@ -2594,7 +2691,7 @@ async function reconcile(): Promise<void> {
   // its first dispatch could ever happen. One Run-scoped read per pass, only
   // when the pass can actually use it.
   const blocked = tasks.filter((t) => t.status === "blocked");
-  const readyJoins = tasks.filter(
+  const readyJoins = state.stageGit ? [] : tasks.filter(
     (t) => t.status === "ready" && isCrossLaneJoin(t, opts.laneByTask),
   );
   const gates = blocked.length > 0 || readyJoins.length > 0 ? await listGates(runId) : [];
@@ -2642,7 +2739,7 @@ async function reconcile(): Promise<void> {
   //   - join whose marker gate is resolved `integrated` → free to dispatch.
   // A BLOCKED task with no marker gate is an entry gate — not ours to create.
   state.integrationParked = new Set();
-  for (const task of [...readyJoins, ...blocked]) {
+  for (const task of state.stageGit ? [] : [...readyJoins, ...blocked]) {
     const gate = gates.find((g) => g.taskId === task.id && isIntegrationGate(g)) ?? null;
     if (!gate) {
       if (task.status !== "ready") continue;
@@ -2742,11 +2839,40 @@ async function reconcile(): Promise<void> {
     }
 
     if (attempt.settled) {
+      if (state.stageGit && attempt.outcome === "succeeded" && attempt.dispatchId && task &&
+          !state.stageGit.artifact(task.id)) {
+        try {
+          const path = await stageWorkerPath(attempt);
+          // The merge-prep Task is allowed to start before its source commits
+          // are in its target. Its success is accepted as an artifact only
+          // after every source SHA is actually an ancestor of the target HEAD.
+          if (task.spec?.includes(MERGE_PREP_MARKER)) {
+            await state.stageGit.verifyDependencies(task, path);
+          }
+          await state.stageGit.snapshot(task.id, attempt.dispatchId, path);
+          state.stageGitErrors.delete(task.id);
+        } catch (err) {
+          state.stageGitErrors.set(task.id, String((err as Error).message ?? err));
+        }
+      }
       await decideTerminalOwnership(
         attempt,
         opts,
-        tasks.filter((t) => t.status === "ready"),
+        // Terminal reuse can start a follow-up immediately, before this
+        // pass's Stage artifact checks and parking have run. In committed
+        // Stage mode, release the settled terminal first; the later dispatch
+        // batch is the only path that may start verified downstream work.
+        state.stageGit ? [] : tasks.filter((t) => t.status === "ready"),
       );
+    }
+  }
+
+  if (state.stageGit) {
+    for (const task of tasks) {
+      if (task.status !== "ready" && task.status !== "blocked") continue;
+      if (taskDeps(task).some((id) => !state.stageGit!.artifact(id))) {
+        state.integrationParked.add(task.id);
+      }
     }
   }
 
@@ -3179,17 +3305,21 @@ async function evaluateCompletionBoundary(tasks: OrcaTask[]): Promise<void> {
     state.phase = "awaiting_input";
     return;
   }
+  // A final Stage can have no successors to park. Its accepted worker_done
+  // still must not make the Run look complete if Git is dirty, inaccessible,
+  // or its immutable commit snapshot could not be recorded.
+  if (state.stageGit && (state.stageGitErrors.size > 0 ||
+      tasks.some((task) => task.status === "completed" && !state.stageGit!.artifact(task.id)))) {
+    state.phase = "awaiting_input";
+    return;
+  }
   if (readyOrDispatched.length > 0 || unsettled.length > 0) {
     state.phase = "running";
     return;
   }
 
-  // Worktree lanes: a cross-lane join is parked behind an unresolved
-  // integration gate. Integration is a human assertion — the coordinator
-  // never merges, rebases, commits, pushes, or deletes — so the run waits in
-  // `awaiting_input` instead of completing around the gate. Resolving the
-  // gate `integrated` (the only resolution its options carry) releases the
-  // task back to ready on a later pass.
+  // A legacy cross-lane join waits for a human integration gate. Committed
+  // Stage mode instead parks a join until its dependency SHAs are recorded.
   if (state.integrationParked.size > 0) {
     state.phase = "awaiting_input";
     return;
@@ -3447,6 +3577,21 @@ async function startOne(
         setup: placement.setup,
       };
     }
+    if (state.stageGit) {
+      if (wt.worktree === "new-child" || wt.worktree === "new-top-level") {
+        // A branch name moves while parallel Stages complete. All new Stage
+        // worktrees start at the exact HEAD captured when this Run began.
+        wt.baseBranch = state.stageGit.base;
+      }
+      const target = await stageStartPath(wt.worktree);
+      const prep = task.spec?.includes(MERGE_PREP_MARKER) ?? false;
+      if (prep) state.stageGit.mergeInputs(task); // every dependency must already have an immutable SHA
+      if (target) {
+        if (prep) await state.stageGit.verifyRepository(target);
+        else if (taskDeps(task).length) await state.stageGit.verifyDependencies(task, target);
+        else await state.stageGit.verifyBase(target);
+      }
+    }
     attempt.requested = { ...attempt.requested, worktree: wt.worktree ?? "current" };
     // Phase 6 capability gate: remote model/effort forwarding happens ONLY
     // when the peer advertises it. The environment row is re-inspected per
@@ -3593,6 +3738,30 @@ async function startOne(
     }
     attempt.mode = started.mode;
     attempt.dispatchId = started.dispatchId;
+    if (state.stageGit && task.spec?.includes(MERGE_PREP_MARKER) && started.dispatchId) {
+      const inputs = state.stageGit.mergeInputs(task);
+      const lines = inputs.map((dep) =>
+        `${dep.taskId}: ${dep.path} (branch ${dep.branch || "detached"}, commit ${dep.sha})`,
+      );
+      try {
+        await runOrca([
+          "orchestration", "send", "--run", runId, "--from", from,
+          "--to", `dispatch:${started.dispatchId}`, "--type", "status",
+          "--subject", `Committed merge inputs for ${task.id}`,
+          "--body", [
+            `This is a merge-preparation Task. Read these immutable dependency commits before changing code:`,
+            ...lines,
+            `Merge each commit into this worktree with history-preserving Git merges; resolve conflicts and commit the result.`,
+            `Do not begin the dependent development Task. The coordinator checks ancestry and a clean worktree after worker_done.`,
+          ].join("\n"),
+        ]);
+      } catch (err) {
+        // Enqueue failure is not proof the worker never saw its Task. Keep the
+        // Dispatch and the missing-guidance evidence; the Task spec remains
+        // authoritative and Git verification still blocks downstream work.
+        state.stageGitErrors.set(task.id, `Merge input delivery failed: ${String((err as Error).message ?? err)}`);
+      }
+    }
     // A prewarmed Codex terminal was created by this viewer before Orca took
     // ownership. The supervised start returns no handle, but the terminal is
     // still the same exact resource recorded above.

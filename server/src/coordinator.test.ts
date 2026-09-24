@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import type { Server } from "node:http";
 import {
   coordinatorStatus,
@@ -2845,5 +2846,91 @@ describe("worktree lanes: cross-lane integration gates", () => {
     }
     await waitFor(() => (coordinatorStatus().phase === "completed" ? true : null), "run to complete");
     assert.deepEqual((getState().gates ?? []), [], "no gate exists in Orca");
+  });
+});
+
+describe("committed Stage integration before development", () => {
+  it("parks development until three parallel Stage commits are merged into the clean target", async () => {
+    const git = (dir: string, ...args: string[]) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" }).trim();
+    git(workspace, "init", "-b", "main");
+    git(workspace, "config", "user.name", "Test");
+    git(workspace, "config", "user.email", "test@example.com");
+    writeFileSync(join(workspace, ".gitignore"), "*\n");
+    for (const id of ["a", "b", "c"]) writeFileSync(join(workspace, `${id}.txt`), "base\n");
+    git(workspace, "add", "-f", ".gitignore", "a.txt", "b.txt", "c.txt");
+    git(workspace, "commit", "-m", "base");
+    const base = git(workspace, "rev-parse", "HEAD");
+    const paths = Object.fromEntries(["a", "b", "c"].map((id) => [id, `${workspace}-${id}`]));
+    for (const id of ["a", "b", "c"]) git(workspace, "worktree", "add", "-b", `stage-${id}`, paths[id], base);
+    const runId = "run_t";
+    const selectors = Object.fromEntries(["a", "b", "c"].map((id) => [id, `id:repoA::${paths[id]}`]));
+    await mutateState((state) => {
+      state.tasks = {
+        a: { id: "a", run_id: runId, status: "pending", deps: "[]", spec: "stage a" },
+        b: { id: "b", run_id: runId, status: "pending", deps: "[]", spec: "stage b" },
+        c: { id: "c", run_id: runId, status: "pending", deps: "[]", spec: "stage c" },
+        merge: { id: "merge", run_id: runId, status: "pending", deps: '["a","b","c"]', spec: "[orca-dag:merge-prep] Merge only" },
+        dev: { id: "dev", run_id: runId, status: "pending", deps: '["merge"]', spec: "Develop after merge" },
+      };
+      state.runs = { [runId]: { id: runId, objective: "test", legacy: 0 } };
+      state.worktrees = ["a", "b", "c"].map((id) => ({
+        id: selectors[id], repoId: "repoA", path: paths[id], displayName: `stage-${id}`,
+        branch: `stage-${id}`, hostId: null, parentWorktreeId: null, isMainWorktree: false,
+      }));
+    });
+    await startCoordinator(baseOpts(runId, {
+      maxConcurrency: 3,
+      worktreeLanes: Object.fromEntries(["a", "b", "c"].map((id) =>
+        [`lane_${id}`, { placement: { kind: "existing", selector: selectors[id] } }])),
+      laneByTask: { a: "lane_a", b: "lane_b", c: "lane_c" },
+    }));
+    await waitFor(() => (calls("worker-start").length === 3 ? true : null), "three parallel source Stages");
+    assert.equal(coordinatorStatus().stageGit?.base, base);
+    for (const id of ["a", "b", "c"]) {
+      writeFileSync(join(paths[id], `${id}.txt`), `${id} result\n`);
+      git(paths[id], "add", `${id}.txt`);
+      git(paths[id], "commit", "-m", `stage ${id}`);
+      await settleViaWorkerDone(id, "succeeded", `msg_${id}`);
+    }
+    await waitFor(() => (callsOf("worker-start", "--task", "merge").length === 1 ? true : null), "merge preparation to start");
+    assert.equal(callsOf("worker-start", "--task", "dev").length, 0);
+    await waitFor(() => (calls("send").some((call) => call.argv.some((arg) => arg.includes(paths.a))) ? true : null), "source paths delivered");
+    await settleViaWorkerDone("merge", "succeeded", "msg_merge");
+    await waitFor(() => (coordinatorStatus().stageGit?.errors.merge ? true : null), "missing merge to be rejected");
+    assert.equal(callsOf("worker-start", "--task", "dev").length, 0, "worker_done alone cannot start development");
+    for (const id of ["a", "b", "c"]) git(workspace, "merge", "--no-ff", "--no-edit", git(paths[id], "rev-parse", "HEAD"));
+    await waitFor(() => (callsOf("worker-start", "--task", "dev").length === 1 ? true : null), "development after verified merge");
+    assert.equal(coordinatorStatus().stageGit?.errors.merge, undefined);
+    await dispatchIdOf("dev");
+    writeFileSync(join(workspace, "a.txt"), "development result\n");
+    await settleViaWorkerDone("dev", "succeeded", "msg_dev");
+    await waitFor(() => (coordinatorStatus().stageGit?.errors.dev ? true : null), "uncommitted final Stage to be rejected");
+    assert.equal(coordinatorStatus().phase, "awaiting_input", "a dirty final Stage cannot complete the Run");
+    git(workspace, "add", "a.txt");
+    git(workspace, "commit", "-m", "development");
+    await waitFor(() => (coordinatorStatus().phase === "completed" ? true : null), "clean committed Run to finish");
+    await stopCoordinator();
+    for (const id of ["a", "b", "c"]) git(workspace, "worktree", "remove", "--force", paths[id]);
+  });
+
+  it("passes the captured base SHA when Orca creates a new Stage worktree", async () => {
+    const git = (...args: string[]) => execFileSync("git", ["-C", workspace, ...args], { encoding: "utf8" }).trim();
+    const runId = "run_stage_base";
+    await mutateState((state) => {
+      state.tasks = {
+        source: { id: "source", run_id: runId, status: "pending", deps: "[]", spec: "source" },
+        merge: { id: "merge", run_id: runId, status: "pending", deps: '["source"]', spec: "[orca-dag:merge-prep] merge" },
+        dev: { id: "dev", run_id: runId, status: "pending", deps: '["merge"]', spec: "develop" },
+      };
+      state.runs = { [runId]: { id: runId, objective: "test", legacy: 0 } };
+    });
+    await startCoordinator(baseOpts(runId, {
+      worktreeLanes: { source_lane: { placement: { kind: "new-child", setup: "skip" } } },
+      laneByTask: { source: "source_lane" },
+    }));
+    await waitFor(() => (callsOf("worker-start", "--task", "source").length === 1 ? true : null), "new source worktree start");
+    const argv = callsOf("worker-start", "--task", "source")[0].argv;
+    assert.equal(argv[argv.indexOf("--base-branch") + 1], git("rev-parse", "HEAD"));
+    await stopCoordinator();
   });
 });
