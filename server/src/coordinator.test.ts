@@ -1267,6 +1267,34 @@ describe("Phase 4: ambiguous worker-start recovery", () => {
 });
 
 describe("Phase 4: failed-before-ready starts", () => {
+  it("creates a new local Codex worktree before starting the TUI and binding its ready terminal", async () => {
+    const runId = "run_codex_child_ready";
+    await singleTaskState(runId);
+    await startCoordinator(baseOpts(runId, {
+      harnessByTask: { task_aaa: "codex" },
+      modelByTask: { task_aaa: "gpt-6-luna" },
+      placementByTask: {
+        task_aaa: { kind: "new-child", name: "codex-child-ready", setup: "skip" },
+      },
+    }));
+    await waitFor(() => (calls("worker-start").length === 1 ? true : null), "prewarmed child to bind");
+    const log = readLog();
+    const create = log.findIndex((call) => call.argv[0] === "worktree" && call.argv[1] === "create");
+    const launch = log.findIndex((call) => call.argv[0] === "terminal" && call.argv[1] === "send" &&
+      call.argv.some((arg) => String(arg).startsWith("codex --dangerously-bypass-approvals-and-sandbox")));
+    const bind = log.findIndex((call) => call.argv[0] === "orchestration" && call.argv[1] === "worker-start");
+    assert.ok(create >= 0 && create < launch && launch < bind, "create → ready Codex → supervised bind");
+    assert.ok(log[create].argv.includes("--parent-worktree"));
+    assert.ok(log[create].argv.includes("--setup") && log[create].argv.includes("skip"));
+    assert.ok(log[launch].argv.some((arg) => String(arg).includes("-m 'gpt-6-luna'")));
+    const argv = log[bind].argv;
+    assert.ok(argv.includes("--terminal"), "bind the already ready terminal");
+    assert.ok(argv.includes("id:repoL::/ws/codex-child-ready"), "bind to the created exact workspace");
+    assert.ok(!argv.includes("--agent") && !argv.includes("--model") && !argv.includes("--name"),
+      "do not create a second Codex process or send creation-only flags on bind");
+    await stopCoordinator();
+  });
+
   it("closes a prepared Codex pane when worker-start rejects it before Dispatch", async () => {
     const runId = "run_codex_bind_rejected";
     await singleTaskState(runId);
@@ -1338,6 +1366,28 @@ describe("Phase 4: failed-before-ready starts", () => {
     await settleViaWorkerDone("task_aaa", "succeeded", "msg_fbr1");
     await waitFor(() => (coordinatorStatus().phase === "completed" ? true : null), "completion");
     assert.deepEqual(coordinatorStatus().cleanupDebt, []);
+  });
+});
+
+describe("worker_done acceptance", () => {
+  it("keeps a rejected worker_done dispatched even when its payload says succeeded", async () => {
+    const runId = "run_rejected_done";
+    await singleTaskState(runId);
+    await startCoordinator(baseOpts(runId));
+    await waitFor(() => calls("worker-start").length === 1 ? true : null, "worker to start");
+    const dispatchId = await dispatchIdOf("task_aaa");
+    const rejected = {
+      ...workerDoneMessage("task_aaa", dispatchId, "succeeded", "msg_rejected_done"),
+      run_id: runId,
+      subject: "Rejected worker_done: missing Dispatch capability",
+    };
+    await injectMail([rejected]);
+    await waitFor(() => processedRow("msg_rejected_done") ? true : null,
+      "rejected report to be processed");
+    assert.equal(getState().tasks.task_aaa.status, "dispatched");
+    assert.equal(attempt("task_aaa").settled, false);
+    assert.equal(calls("worker-release").length, 0, "a rejected report grants no release authority");
+    await stopCoordinator();
   });
 });
 

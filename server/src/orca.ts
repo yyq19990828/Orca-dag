@@ -3735,7 +3735,7 @@ function quoteLocalShellArg(value: string): string {
 
 /**
  * Codex can repaint its loading screen after Orca has accepted dispatch input,
- * losing the preamble before a turn begins. For local existing workspaces,
+ * losing the preamble before a turn begins. For local workspaces,
  * start the TUI first and hand its ready terminal to worker-start. The model
  * (and optional effort) belong on THIS command: Orca forbids --model/--effort
  * with worker-start --terminal. The returned handle is only a provisional
@@ -3745,6 +3745,8 @@ export async function prepareCodexTerminal(opts: {
   worktree: string;
   model?: string;
   effort?: string;
+  /** A shell just created by `worktree create`; launch Codex in that pane. */
+  terminal?: string;
   onHandle: (handle: string) => void;
 }): Promise<string> {
   const command = [
@@ -3754,12 +3756,18 @@ export async function prepareCodexTerminal(opts: {
     ...(opts.model ? ["-m", quoteLocalShellArg(opts.model)] : []),
     ...(opts.effort ? ["-c", quoteLocalShellArg(`model_reasoning_effort=${JSON.stringify(opts.effort)}`)] : []),
   ].join(" ");
-  const created = await runOrca<{ terminal?: { handle?: string } }>([
+  const created = opts.terminal ? null : await runOrca<{ terminal?: { handle?: string } }>([
     "terminal", "create", "--worktree", opts.worktree, "--command", command,
   ]);
-  const handle = created.terminal?.handle;
+  const handle = opts.terminal ?? created?.terminal?.handle;
   if (!handle) throw new OrcaCliError("orca terminal create returned no Codex handle");
   opts.onHandle(handle);
+  if (opts.terminal) {
+    // worktree create opens a shell but exposes no handle in its receipt on
+    // 1.4.209. Once that exact pane has been identified below, start Codex
+    // there. Its later ready-composer check proves the command actually ran.
+    await runOrca(["terminal", "send", "--terminal", handle, "--text", command, "--enter"]);
+  }
 
   const waited = await runOrca<{ wait?: { satisfied?: boolean } }>([
     "terminal", "wait", "--terminal", handle, "--for", "tui-idle", "--timeout-ms", "90000",
@@ -3784,6 +3792,68 @@ export async function prepareCodexTerminal(opts: {
     await sleep(750);
   }
   throw new OrcaCliError(`Codex terminal ${handle} never showed a stable ready composer`, "codex_not_ready");
+}
+
+/**
+ * `worker-start --worktree new-child --agent codex` can report
+ * `input_accepted` while its newly launched Codex TUI repaints away the
+ * preamble. Create the local workspace first, then start Codex in the shell
+ * Orca opens for that workspace and bind the ready pane with --terminal.
+ *
+ * Orca 1.4.209's worktree-create receipt names the exact worktree but omits
+ * the startup shell handle. A terminal-list difference scoped to that newly
+ * created worktree is the only positive handle evidence. If it is ambiguous,
+ * leave the worktree in place for recovery and never guess a terminal.
+ */
+export async function createLocalCodexWorktree(opts: {
+  kind: "new-child" | "new-top-level";
+  name: string;
+  repo?: string;
+  parentWorktree: string;
+  baseBranch?: string;
+  displayName?: string;
+  comment?: string;
+  setup?: string;
+}): Promise<{ selector: string; path: string; terminal: string }> {
+  assertValidWorkerStart({
+    agent: "codex", worktree: opts.kind, name: opts.name,
+    repo: opts.repo, baseBranch: opts.baseBranch,
+    displayName: opts.displayName, comment: opts.comment, setup: opts.setup,
+  });
+  const before = new Set((await listTerminals()).map((terminal) => terminal.handle));
+  const result = await runOrca<{ worktree?: Record<string, unknown> }>([
+    "worktree", "create", "--name", opts.name,
+    ...(opts.kind === "new-child"
+      ? ["--parent-worktree", opts.parentWorktree]
+      : [...(opts.repo ? ["--repo", opts.repo] : []), "--no-parent"]),
+    ...(opts.baseBranch ? ["--base-branch", opts.baseBranch] : []),
+    ...(opts.comment ? ["--comment", opts.comment] : []),
+    ...(opts.setup ? ["--setup", opts.setup] : []),
+  ]);
+  const id = pickString(asRecord(result.worktree), "id");
+  if (!id) throw new OrcaCliError("worktree create returned no exact worktree id", "workspace_unverifiable");
+  const selector = id.startsWith("id:") ? id : `id:${id}`;
+  const row = await showWorktree(selector);
+  if (!row || row.id !== id || !row.path) {
+    throw new OrcaCliError(`Created Codex worktree ${selector} could not be verified`, "workspace_unverifiable");
+  }
+  if (opts.displayName) {
+    await runOrca(["worktree", "set", "--worktree", selector, "--display-name", opts.displayName]);
+  }
+  let candidates: OrcaTerminal[] = [];
+  for (let i = 0; i < 20; i++) {
+    candidates = (await listTerminals()).filter((terminal) =>
+      terminal.connected && terminal.worktreeId === id && !before.has(terminal.handle));
+    if (candidates.length) break;
+    await sleep(250);
+  }
+  if (candidates.length !== 1) {
+    throw new OrcaCliError(
+      `Created Codex worktree ${selector}, but its startup terminal is ${candidates.length ? "ambiguous" : "unreported"}; recover it through Orca`,
+      "workspace_unverifiable",
+    );
+  }
+  return { selector, path: row.path, terminal: candidates[0].handle };
 }
 
 /** How a task's worker was started — decides how we tear it down. */

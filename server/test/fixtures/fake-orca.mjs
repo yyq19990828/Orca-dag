@@ -698,6 +698,36 @@ if (ns === "orchestration" && verb === "task-list") {
   ok({ environment: env });
 } else if (ns === "repo" && verb === "list") {
   ok({ repos: state.repos ?? [] });
+} else if (ns === "worktree" && verb === "create") {
+  const name = flag("--name");
+  if (!name) fail("invalid_argument", "worktree create requires --name");
+  state.worktrees ??= [];
+  if (state.worktrees.some((w) => (w.displayName ?? w.name) === name)) {
+    fail("worktree_exists", `worktree ${name} already exists`);
+  }
+  const repoSel = flag("--repo");
+  const repoId = repoSel?.startsWith("id:") ? repoSel.slice(3) : "repoL";
+  const row = {
+    id: `id:${repoId}::/ws/${name}`, repoId, path: `/ws/${name}`,
+    displayName: name, branch: `feat/${name}`, hostId: null,
+    parentWorktreeId: flag("--parent-worktree") ? "id:repoL::/ws/main" : null,
+    isMainWorktree: false,
+  };
+  state.worktrees.push(row);
+  state.seq ??= {};
+  state.seq.terminal = (state.seq.terminal ?? 0) + 1;
+  state.terminals ??= [];
+  state.terminals.push({
+    handle: `term_f${state.seq.terminal}`, title: name, connected: true,
+    worktreeId: row.id, worktreePath: row.path,
+  });
+  ok({ worktree: row });
+} else if (ns === "worktree" && verb === "set") {
+  const sel = flag("--worktree");
+  const row = (state.worktrees ?? []).find((w) => w.id === sel);
+  if (!row) fail("selector_not_found", `no workspace matches ${sel}`);
+  if (flag("--display-name")) row.displayName = flag("--display-name");
+  ok({ worktree: row });
 } else if (ns === "worktree" && verb === "list") {
   // hideWorktrees simulates a workspace Orca holds but this listing cannot
   // see (scoped/host-paged listings) — the identity-exists-but-unverifiable

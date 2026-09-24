@@ -4,6 +4,7 @@ import {
   checkInbox,
   closeTerminal,
   closeTerminalStrict,
+  createLocalCodexWorktree,
   deriveWorktreeName,
   ensureCoordinatorTerminal,
   followableNextAction,
@@ -2406,11 +2407,18 @@ async function processDelivery(delivery: {
   messages: OrcaMessage[];
   replayed: boolean;
 }): Promise<void> {
+  // A rejected lifecycle report can still arrive as a worker_done-shaped
+  // mailbox row. Orca's Task status, which changes atomically when it accepts
+  // worker_done, is the settlement authority. Read it before marking any
+  // message processed so a failed read leaves the Delivery replayable.
+  const tasks = delivery.messages.some((message) => message.type === "worker_done") && state.runId
+    ? await listTasks(state.runId)
+    : [];
   for (const message of delivery.messages) {
     if (markProcessed(message.id)) continue;
     switch (message.type) {
       case "worker_done": {
-        const settledTaskId = handleWorkerDone(message);
+        const settledTaskId = handleWorkerDone(message, tasks);
         if (settledTaskId && delivery.deliveryId) {
           // The batch may not be acknowledged until the ownership decision for
           // this worker has actually executed (plan §Phase 3 item 6) — an ack
@@ -2519,19 +2527,20 @@ function acknowledgePendingDeliveryIfResolved(): Promise<void> {
 
 /**
  * Validate a worker_done against the expected active Dispatch before treating
- * it as settlement (plan §Phase 3 item 4). The runtime already refuses mail
- * from non-assignee panes, so anything arriving here is authentic — what we
- * are checking is whether it is OURS, CURRENT, and UNAMBIGUOUS:
+ * it as settlement (plan §Phase 3 item 4). Orca may place a rejected
+ * worker_done attempt in the mailbox with the same message type, so the
+ * Task's terminal status is required in addition to matching identities:
  *
  *  - unknown task/dispatch        → not ours; recorded, never settles.
  *  - duplicate for a settled row  → replay; idempotent no-op.
  *  - dispatch-id mismatch         → stale cross-task signal; never settles.
  *  - outcome other than the two   → unverifiable; never settles.
+ *  - Task still dispatched        → rejected report; never settles.
  *
  * Returns the taskId whose attempt settled (for Delivery-ack deferral), or
  * null when the row was recorded but did not settle anything.
  */
-function handleWorkerDone(message: OrcaMessage): string | null {
+function handleWorkerDone(message: OrcaMessage, tasks: OrcaTask[]): string | null {
   const payload = parseWorkerDonePayload(message);
   const payloadTask = payload?.taskId ?? null;
   const payloadDispatch = payload?.dispatchId ?? null;
@@ -2564,6 +2573,14 @@ function handleWorkerDone(message: OrcaMessage): string | null {
   }
   if (outcome !== "succeeded" && outcome !== "failed") {
     noteRecent(message, "worker_done without a verifiable outcome — not treated as completion");
+    return null;
+  }
+  const runtimeTask = tasks.find((task) => task.id === attempt.taskId);
+  const expectedStatus = outcome === "succeeded" ? "completed" : "failed";
+  if (message.subject?.startsWith("Rejected worker_done") ||
+      !runtimeTask || runtimeTask.status !== expectedStatus ||
+      (runtimeTask.dispatch_id && runtimeTask.dispatch_id !== attempt.dispatchId)) {
+    noteRecent(message, "worker_done was not accepted by Orca — Task remains unsettled");
     return null;
   }
   settleAttempt(attempt, outcome, "worker_done");
@@ -3665,11 +3682,36 @@ async function startOne(
       });
     } else {
       try {
-        // On a local current/existing workspace, Codex's first loading
-        // repaint can swallow worker-start's injected preamble. Prewarm its
-        // TUI, wait for a stable composer, then let Orca bind that terminal
-        // to the supervised Dispatch. Creation/remote starts stay on Orca's
-        // native path: they cannot safely precreate a terminal here.
+        // A local newly created worktree must exist BEFORE Codex launches.
+        // worker-start's combined create + launch + injection can report
+        // input_accepted while Codex's final splash repaint discards the
+        // preamble. Create the workspace and identify its startup shell first;
+        // then the same ready-composer prewarm used by current/existing
+        // workspaces can bind that exact pane to the Dispatch.
+        let codexStartupTerminal: string | null = null;
+        const creatingLocalCodex =
+          attempt.harness === "codex" && !environment && !reuseTerminal &&
+          process.platform !== "win32" &&
+          (wt.worktree === "new-child" || wt.worktree === "new-top-level");
+        if (creatingLocalCodex) {
+          const created = await createLocalCodexWorktree({
+            kind: wt.worktree as "new-child" | "new-top-level",
+            name: wt.name ?? deriveWorktreeName(runId, laneId ?? task.id),
+            repo: wt.repo,
+            parentWorktree: opts.worktree,
+            baseBranch: wt.baseBranch,
+            displayName: wt.displayName,
+            comment: wt.comment,
+            setup: wt.setup,
+          });
+          codexStartupTerminal = created.terminal;
+          attempt.handle = created.terminal;
+          if (state.stageGit) await state.stageGit.verifyBase(created.path);
+          if (lane) adoptLaneSelector(lane, created.selector, "worktree_show", { path: created.path });
+          // Creation-only flags cannot accompany worker-start --terminal.
+          // The exact registered selector is now the placement authority.
+          wt = { worktree: created.selector };
+        }
         let preparedCodexHandle: string | null = null;
         const canPrepareCodex =
           attempt.harness === "codex" && !environment && !reuseTerminal &&
@@ -3680,6 +3722,7 @@ async function startOne(
             worktree: wt.worktree ?? "current",
             model: model ?? undefined,
             effort: attempt.requested.effort ?? undefined,
+            terminal: codexStartupTerminal ?? undefined,
             onHandle: (handle) => { attempt.handle = handle; },
           });
           attempt.requested = { ...attempt.requested, terminal: preparedCodexHandle };
