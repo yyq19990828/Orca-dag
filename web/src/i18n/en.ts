@@ -943,9 +943,10 @@ const en = {
   "capability.state.alias": "Via legacy alias",
   "capability.state.absent": "Not advertised",
   "capability.noAdvertisement": "This runtime source does not expose a capability advertisement, so every capability below reads “not advertised” — the viewer treats that as unsupported, never as a guess from the version number.",
+  "capability.localAdvertisement": "These are the local Orca runtime's declarations. A remote environment must declare its own capabilities separately.",
   "capability.umbrellaTitle": "Umbrella row: informational only — it does not enable the narrower capabilities under it.",
   "capability.umbrellaBadge": "umbrella · informational",
-  "capability.unknownAdvertised": "Advertised but unrecognized here (kept off):",
+  "capability.unknownAdvertised": "Unrecognized orchestration capabilities (kept off):",
   "capability.umbrellaNote": "Umbrella rows summarize capability families. They are display-only: the viewer enables a control only on the specific capability it belongs to, never on an umbrella alone.",
 
   // Decision gates (GatePanel). Option strings are Orca's own; `integrated`

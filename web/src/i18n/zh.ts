@@ -893,9 +893,10 @@ const zh: Dict = {
   "capability.state.alias": "经由旧别名",
   "capability.state.absent": "未声明",
   "capability.noAdvertisement": "该运行时来源没有暴露能力声明，因此下面每一项能力都读作“未声明” —— 查看器将其视为不支持，绝不根据版本号猜测。",
+  "capability.localAdvertisement": "这里显示本地 Orca 运行时的能力声明；远端环境仍须分别声明自己的能力。",
   "capability.umbrellaTitle": "伞形条目：仅供参考 —— 它不会启用其下的细分能力。",
   "capability.umbrellaBadge": "伞形 · 仅供参考",
-  "capability.unknownAdvertised": "已声明但此处无法识别（保持关闭）：",
+  "capability.unknownAdvertised": "未识别的编排能力（保持关闭）：",
   "capability.umbrellaNote": "伞形条目只汇总能力族。它们仅供展示：查看器只会依据某项具体能力启用对应控件，绝不单凭伞形条目启用。",
 
   // 决策门禁（GatePanel）。选项字符串由 Orca 提供；`integrated` 在说明中

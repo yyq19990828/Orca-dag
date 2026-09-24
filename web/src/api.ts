@@ -256,10 +256,9 @@ export async function fetchReadiness(): Promise<OrcaReadiness> {
 }
 
 /**
- * Read-only canonical capability projection for the connected runtime. The
- * local CLI exposes no capability advertisement yet, so `advertised` is null
- * and every canonical capability renders "not advertised" — an honest matrix,
- * never an inferred one. Fetched once per page load like readiness.
+ * Read-only canonical capability projection from the local runtime's
+ * `status --json` advertisement. Missing fields remain unadvertised; support
+ * is never inferred from the version. Fetched once per page load like readiness.
  */
 export async function fetchCapabilities(): Promise<RuntimeCapabilitiesResponse> {
   return get<RuntimeCapabilitiesResponse>("/api/capabilities");

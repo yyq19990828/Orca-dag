@@ -73,6 +73,9 @@ export const CapabilityPanel = memo(function CapabilityPanel() {
       {view.advertised === null && (
         <p className="cap__note">{t("capability.noAdvertisement")}</p>
       )}
+      {view.advertised !== null && (
+        <p className="cap__note">{t("capability.localAdvertisement")}</p>
+      )}
       <ul className="cap__list">
         {view.capabilities.map((cap) => {
           // Umbrella rows (orchestration.contract.v1 / federation.v1) are

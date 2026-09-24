@@ -183,7 +183,7 @@ npm publish ./dist-npm --access public --tag bootstrap
 
 - **按 workspace 隔离的 Run 选择器**：Orca 的 Run 注册表是全局的，但 viewer 只显示任务创建者身份与当前 workspace 匹配的 Run（以及该 workspace 已保存/刚创建的空 Run）。紧凑选择器以稳定的 `run_*` 编号为主信息，objective 作为次级说明。**＋ Create Run** 会从当前 workspace 创建一个空 Run 并立即选中。**Load older** 沿 Orca 的游标分页注册表继续往前翻（不透明游标逐字节透传），也可以直接按精确 `run_*` id 打开 —— 精确查找会重新校验 workspace 归属，外来 id 一律按不存在处理，绝不泄露其他 workspace 的 Run。
 - **Run 健康徽标**：选中的 Run 始终报告它的归属状态 —— **viewer 自己协调**、**外部协调中**、**无绑定** 或 **内部不一致**（Orca 自身记录相互矛盾），并给出按来源的计数，读取失败时显示警告（读取失败绝不是悄悄当零处理）。任务为空但仍有消息的 Run 会被解释成这种情况，而不是看起来像渲染故障。
-- **运行时能力矩阵**：只读面板展示连接的 Orca 运行时**明确通告**的能力与 1.4.206 规范能力 id 的对照 —— 有旧别名的注明别名，未知名称与缺失字段一律显示 "Not advertised" 并保持关闭。`orchestration.contract.v1` 与 `orchestration.federation.v1` 这两行伞能力只作信息展示，绝不会因此启用它们名下更细粒度的能力。支持与否绝不从版本号推断。
+- **运行时能力矩阵**：只读面板读取本地 Orca 运行时 `status --json` 返回的能力声明，并与 1.4.206 规范编排能力 id 对照 —— 有旧别名的注明别名，未知编排能力与缺失字段保持关闭。API 响应保留完整的本地声明；浏览器、终端等无关能力不会铺满面板。远端环境依据各自的能力声明判断，不沿用本地声明。`orchestration.contract.v1` 与 `orchestration.federation.v1` 伞能力仅供参考，绝不会因此启用其下的细分能力。支持与否绝不从版本号推断。
 - **实时可视化** DAG，节点状态 `pending / ready / dispatched / completed / failed / blocked` 映射颜色；每个节点角上标着它的 harness。
 - **布局算法切换**：顶栏 "Layout" 段控可切**横向/纵向分层**（dagre / Sugiyama）与**力导向**（Fruchterman–Reingold）；**↻ Re-layout** 一键重新自动布局（清除手动拖拽）。选择会持久化。
 - **层级与依赖分离**：Task 的 `parent_id` 会被保留，并以安静的点线括弧（子端带圆环）呈现——与铅笔依赖箭头刻意采用不同的视觉语法。父子关系绝不等于依赖：它不影响就绪判定，也不参与布局；顶栏开关（**Hide/Show parent links**）可在影响可读性时隐藏它。

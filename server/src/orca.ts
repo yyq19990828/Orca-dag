@@ -3004,6 +3004,20 @@ export function parseAdvertisedCapabilities(raw: unknown): string[] | null {
   return caps;
 }
 
+/**
+ * Read the local runtime's actual capability advertisement from `status`.
+ * `--version` only establishes the execution floor; it says nothing about
+ * individual capabilities. The status receipt nests the list under
+ * `result.runtime.capabilities` (runOrca already unwraps `result`). Missing
+ * fields stay null, so older or mixed-version runtimes never gain support by
+ * inference. This uses the same resolved CLI and workspace as every other
+ * Orca call, rather than probing whichever `orca` happens to be on PATH.
+ */
+export async function readLocalRuntimeCapabilities(): Promise<string[] | null> {
+  const status = asRecord(await runOrca<unknown>(["status"]));
+  return parseAdvertisedCapabilities(asRecord(status.runtime).capabilities);
+}
+
 /** The three remote operations Phase 6 gates on peer advertisement. */
 export interface PeerCapabilities {
   /** Forward `--model`/`--effort` through a remote `worker-start`. */

@@ -38,6 +38,7 @@ import {
   parseWorkerDonePayload,
   parsePeerCapabilities,
   previewRunAudiences,
+  readLocalRuntimeCapabilities,
   readWorkerOutput,
   releaseWorker,
   removeWorktree,
@@ -1694,19 +1695,19 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
   /**
    * Read-only runtime capability projection (operations epic O1).
    *
-   * The local CLI exposes no capability advertisement this viewer can read
-   * (there is no `--version`-style surface listing capability ids), so the
-   * local projection honestly reports `advertised: null` — every canonical
-   * capability reads "absent", nothing is inferred from the version number.
-   * The canonical machinery is exercised for real on peer environments, see
-   * /api/environments below, whose rows DO carry advertised capability lists.
+   * `status --json` advertises the local runtime's capability ids under
+   * `result.runtime.capabilities`. Project those ids, never the version, onto
+   * the orchestration table. A missing field stays null and gates rows off.
+   * Peer environments have their own advertisements in /api/environments;
+   * this local projection does not grant a remote peer any capability.
    * Token-free and read-only like the other discovery reads; safe on
    * view-only runtimes (no execution gate — this endpoint mutates nothing).
    */
   app.get(
     "/api/capabilities",
     route(async (_req, res) => {
-      const r = await readiness();
+      const [r, advertised] = await Promise.all([readiness(), readLocalRuntimeCapabilities()]);
+      const projection = describeRuntimeCapabilities(advertised);
       res.json({
         runtime: {
           cli: r.cli,
@@ -1714,10 +1715,19 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
           executionEnabled: r.executionEnabled,
           reason: r.reason,
         },
-        /** null = this source exposes no capability list (unknown, never "none needed"). */
-        advertised: null,
-        advertisedSource: "local-runtime",
-        ...describeRuntimeCapabilities(null),
+        /** Verbatim local advertisement; null means the status receipt omitted it. */
+        advertised,
+        advertisedSource: "local-runtime-status",
+        ...projection,
+        // Status also lists browser, terminal, and other unrelated namespaces.
+        // Keep the full advertisement above for inspection, but only call out
+        // unknown orchestration ids here. The two family-wide umbrella ids
+        // are known informational markers, not unknown actionable features.
+        unknownAdvertised: projection.unknownAdvertised.filter(
+          (id) => id.startsWith("orchestration.") &&
+            id !== "orchestration.contract.v1" &&
+            id !== "orchestration.federation.v1",
+        ),
       });
     }),
   );

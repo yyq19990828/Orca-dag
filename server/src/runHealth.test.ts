@@ -31,6 +31,7 @@ let wsDir: string;
 
 interface FakeConf {
   version?: string;
+  statusResult?: Record<string, unknown>;
   runsById?: Record<string, unknown>;
   tasksByRun?: Record<string, unknown[]>;
   gatesByRun?: Record<string, unknown[]>;
@@ -65,6 +66,7 @@ if (fail) {
   process.exit(1);
 }
 const out = { ok: true, result: {} };
+if (args[0] === "status") out.result = conf.statusResult ?? { runtime: {} };
 if (args[0] === "orchestration" && args[1] === "run-show") {
   const id = args[args.indexOf("--id") + 1];
   const run = (conf.runsById ?? {})[id];
@@ -529,18 +531,8 @@ describe("GET /api/run-health with the live viewer coordinator", () => {
 // --- capability projection endpoint (read-only, Phase 1) -----------------------
 
 describe("GET /api/capabilities", () => {
-  it("projects the canonical table without inventing local support", async () => {
-    const res = await fetch(`${base}/api/capabilities`);
-    assert.equal(res.status, 200);
-    const json = (await res.json()) as {
-      runtime: Record<string, unknown>;
-      advertised: string[] | null;
-      capabilities: Array<{ id: string; supported: boolean; state: string }>;
-      unknownAdvertised: string[];
-    };
-    // the local CLI advertises nothing this viewer can read: null, not []
-    assert.equal(json.advertised, null);
-    assert.deepEqual(json.capabilities.map((c) => c.id), [
+  it("projects the local status advertisement without treating unrelated capabilities as unknown orchestration ids", async () => {
+    const ids = [
       "orchestration.worker-launch-preferences.v1",
       "orchestration.federation-structured-read.v1",
       "orchestration.federation-fleet-snapshot.v1",
@@ -548,13 +540,54 @@ describe("GET /api/capabilities", () => {
       "orchestration.federation-lifecycle-settlement.v1",
       "orchestration.federation-release-archive.v1",
       "orchestration.worker-stop-verdict.v1",
-    ]);
+    ];
+    const advertised = [...ids, "orchestration.contract.v1", "orchestration.future.v1", "browser.screencast.v1"];
+    writeScript({ version: "1.4.209", statusResult: { runtime: { capabilities: advertised } } });
+    const res = await fetch(`${base}/api/capabilities`);
+    assert.equal(res.status, 200);
+    const json = (await res.json()) as {
+      runtime: Record<string, unknown>;
+      advertised: string[] | null;
+      advertisedSource: string;
+      capabilities: Array<{ id: string; supported: boolean; state: string }>;
+      unknownAdvertised: string[];
+    };
+    assert.deepEqual(json.advertised, advertised);
+    assert.equal(json.advertisedSource, "local-runtime-status");
+    assert.deepEqual(json.capabilities.map((c) => c.id), ids);
     for (const cap of json.capabilities) {
-      assert.equal(cap.supported, false, `${cap.id} must stay gated off with no advertisement`);
+      assert.equal(cap.supported, true, `${cap.id} was advertised by status`);
+      assert.equal(cap.state, "supported");
+    }
+    assert.deepEqual(json.unknownAdvertised, ["orchestration.future.v1"]);
+    assert.equal(json.runtime.version, "1.4.209");
+    assert.equal(json.runtime.executionEnabled, true);
+  });
+
+  it("keeps every row absent when status omits the capability field, regardless of version", async () => {
+    writeScript({ version: "1.4.209", statusResult: { runtime: {} } });
+    const res = await fetch(`${base}/api/capabilities`);
+    assert.equal(res.status, 200);
+    const json = (await res.json()) as {
+      advertised: string[] | null;
+      capabilities: Array<{ supported: boolean; state: string }>;
+    };
+    assert.equal(json.advertised, null);
+    for (const cap of json.capabilities) {
+      assert.equal(cap.supported, false);
       assert.equal(cap.state, "absent");
     }
-    assert.deepEqual(json.unknownAdvertised, []);
-    // readiness rides along so the UI can name the runtime version
-    assert.equal(json.runtime.executionEnabled, true, "the fake CLI reports 1.4.205");
+  });
+
+  it("distinguishes an explicit empty advertisement from a missing field", async () => {
+    writeScript({ statusResult: { runtime: { capabilities: [] } } });
+    const res = await fetch(`${base}/api/capabilities`);
+    assert.equal(res.status, 200);
+    const json = (await res.json()) as {
+      advertised: string[] | null;
+      capabilities: Array<{ supported: boolean }>;
+    };
+    assert.deepEqual(json.advertised, []);
+    assert.ok(json.capabilities.every((cap) => !cap.supported));
   });
 });
