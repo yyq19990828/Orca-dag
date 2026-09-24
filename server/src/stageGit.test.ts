@@ -31,6 +31,21 @@ function task(id: string, deps: string[], spec = "develop"): OrcaTask {
 }
 
 describe("committed Stage Git contract", () => {
+  it("rejects a Stage that committed only in a nested worktree", async () => {
+    const root = repo();
+    const store = await StageGit.open(root, "run_nested", [task("a", [])]);
+    const assigned = join(root, "..", `${root.split("/").at(-1)}-assigned`);
+    const nested = join(root, "..", `${root.split("/").at(-1)}-nested`);
+    dirs.push(assigned, nested);
+    git(root, "worktree", "add", "-b", "stage-a", assigned, store.base);
+    git(root, "worktree", "add", "-b", "stage-a-nested", nested, store.base);
+    writeFileSync(join(nested, "result.md"), "nested result\n");
+    git(nested, "add", "result.md");
+    git(nested, "commit", "-m", "nested result");
+    await assert.rejects(store.snapshot("a", "ctx_a", assigned), /left its assigned worktree.*at Run base/);
+    assert.equal(store.artifact("a"), undefined);
+  });
+
   it("captures immutable source tips and verifies a clean history-preserving merge", async () => {
     const root = repo();
     const tasks = [task("a", []), task("b", []), task("merge", ["a", "b"], MERGE_PREP_MARKER), task("dev", ["merge"])];

@@ -203,6 +203,14 @@ export class StageGit {
     const current = await inspect(path);
     if (current.commonDir !== this.record.commonDir) throw new Error(`${path} belongs to another Git repository`);
     if (!await ancestor(current.path, this.base)) throw new Error(`${path} does not descend from Run base ${this.base}`);
+    // A root Stage that made its commit in a second, nested worktree leaves
+    // the assigned worktree at the Run base. Recording that unchanged HEAD as
+    // its artifact would let the merge Stage "integrate" a commit containing
+    // none of the worker's changes. Root Stages in committed mode must advance
+    // their assigned worktree before they can satisfy downstream dependencies.
+    if (current.sha === this.base) {
+      throw new Error(`Stage ${taskId} left its assigned worktree ${path} at Run base ${this.base}; commit the result in this worktree`);
+    }
     const artifact = { taskId, dispatchId, path: current.path, branch: current.branch, sha: current.sha };
     this.record.artifacts[taskId] = artifact;
     await this.save();
