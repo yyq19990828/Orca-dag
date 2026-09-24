@@ -3740,6 +3740,14 @@ function quoteLocalShellArg(value: string): string {
  * (and optional effort) belong on THIS command: Orca forbids --model/--effort
  * with worker-start --terminal. The returned handle is only a provisional
  * resource until worker-start transfers it to a Dispatch.
+ *
+ * Pass --enable hooks explicitly even when `codex features list` reports the
+ * feature enabled. A reused Codex app-server can have no Orca
+ * pane environment; on 0.156.1, an otherwise identical prewarmed Codex TUI
+ * then produced no Orca agent-status row (worker-list: missing_status).
+ * A live A/B Dispatch with this flag produced fresh agent_status evidence.
+ * This covers viewer-launched local Codex, not an already-running TUI or
+ * Orca's own native/remote Codex launcher.
  */
 export async function prepareCodexTerminal(opts: {
   worktree: string;
@@ -3751,6 +3759,7 @@ export async function prepareCodexTerminal(opts: {
 }): Promise<string> {
   const command = [
     "codex",
+    "--enable hooks",
     "--dangerously-bypass-approvals-and-sandbox",
     "--no-alt-screen",
     ...(opts.model ? ["-m", quoteLocalShellArg(opts.model)] : []),

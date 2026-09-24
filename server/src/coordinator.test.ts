@@ -1281,7 +1281,7 @@ describe("Phase 4: failed-before-ready starts", () => {
     const log = readLog();
     const create = log.findIndex((call) => call.argv[0] === "worktree" && call.argv[1] === "create");
     const launch = log.findIndex((call) => call.argv[0] === "terminal" && call.argv[1] === "send" &&
-      call.argv.some((arg) => String(arg).startsWith("codex --dangerously-bypass-approvals-and-sandbox")));
+      call.argv.some((arg) => String(arg).startsWith("codex --enable hooks --dangerously-bypass-approvals-and-sandbox")));
     const bind = log.findIndex((call) => call.argv[0] === "orchestration" && call.argv[1] === "worker-start");
     assert.ok(create >= 0 && create < launch && launch < bind, "create → ready Codex → supervised bind");
     assert.ok(log[create].argv.includes("--parent-worktree"));
@@ -1602,7 +1602,7 @@ describe("Phase 5: terminal reuse and retain", () => {
       bStart.argv[bStart.argv.indexOf("--worktree") + 1],
       "prewarm and Dispatch used the same worktree selector",
     );
-    assert.ok(prepared.argv.includes("codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen -m 'gpt-6-luna'"));
+    assert.ok(prepared.argv.includes("codex --enable hooks --dangerously-bypass-approvals-and-sandbox --no-alt-screen -m 'gpt-6-luna'"));
     assert.ok(bStart.argv.includes("--terminal"), "Orca bound the prepared Codex terminal");
     assert.equal(bStart.argv.indexOf("--agent"), -1, "worker-start must not relaunch Codex");
     assert.equal(bStart.argv.indexOf("--model"), -1, "model belongs to the prepared TUI command");

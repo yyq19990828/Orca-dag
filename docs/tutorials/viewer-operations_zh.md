@@ -111,3 +111,21 @@ viewer 也通过本地 HTTP API 提供同一套控制。`GET` 是回环地址上
 使用 Workspace lanes 的 **Changed files / Diff** 或文件审核操作，在 Orca 中打开精确的本地工作区。只有目标工作区已经包含预期代码，才解决集成门。lane 已落定，且改动和 worker 归属都已处理后，才能在明确确认下通过 `orca worktree rm` 移除工作树。
 
 几个工作区文件各有用途：`.orca-dag.config.json` 保存偏好，`.orca-dag.activity.jsonl` 保存有界的解释性活动记录，`.orca-dag.requests.jsonl` 保存可审计的修改请求 ID，`.orca-dag.sessions.json` 保存精确的提供方会话绑定。它们都不能代替 Orca 权威的 Run/Task/Dispatch 记录。`orca-dag uninstall` 会移除已安装的 skill 和残留的 viewer coordinator 终端；加 `--purge` 还会移除工作区配置和 Activity 文件。它不会替你集成或发布分支。
+
+## 已知局限
+
+后续运行时发现可继续加在这里，写清受影响的启动路径、可观察的现象和已验证的处理方式。Codex TUI 可见、Task 已完成与 Orca 的 worker 存活状态是不同的证据。
+
+### 已运行或由 Orca 原生启动的 Codex 会话可能缺少状态钩子
+
+在 Orca 1.4.209、Codex 0.156.1 上，未显式传入 `--enable hooks` 的 Codex TUI 可以执行注入的 Task 并发送 `worker_done`，但 `worker-list` 仍显示 `unverifiable / missing_status`。同一 Run 的 GPT-6 Luna 对照测试中，用 `codex --enable hooks ...` 新启动的 TUI 在任务运行时显示 `live`，来源为 `agent_status`；本机的 `codex features list` 原本就显示 `hooks` 已启用。复用的 Codex app-server 缺少 Orca pane 环境变量是可能的原因，但尚未直接捕获钩子子进程的环境。
+
+viewer 现在会给**自己启动的本地 Codex 终端**显式添加 `--enable hooks`，再通过 `worker-start --terminal` 绑定。这个 Codex CLI 参数不能直接加到其他 harness 的命令上；它们的状态集成需分别诊断。此改动不会追溯改变已运行的 Codex TUI、手动启动的 `codex resume`，也不覆盖 Orca 自己的原生或远端 Codex 启动路径。手动会话应在 Orca 管理的终端中新启动 `codex --enable hooks`；恢复会话可用 `codex --enable hooks resume`。在 Dispatch 运行期间，用 `worker-list` 检查 `liveness.source: agent_status`。仅凭 `missing_status` 不能判断进程已退出，也不能据此重试。
+
+### OpenCode 的跟踪 Dispatch 没有 fleet 存活证据
+
+viewer 用一次性的 `opencode run --auto` 命令启动 OpenCode，并创建 Orca Dispatch 记录任务。这条路径标记为 `unsupervised`，没有受监督的 worker 资源，也没有 `agent_status` fleet 证据。在 Orca 1.4.209 的并行只读对照中，OpenCode 通过 `worker_done` 完成了 Task，但运行时的 `worker-list` 显示 `unverifiable / missing_status`，落定后变为 `unverifiable / unsupervised_settled`。运行期间，`worker-show` 另外观察到精确的 OpenCode 终端仍然存活。这些 fleet 值符合 viewer 当前 OpenCode 启动路径的设计，不能单独证明 OpenCode 钩子损坏。对此路径应核对 Task/Dispatch 的结果与精确终端观察，也不能把 `unverifiable` 当作进程已退出的证据。
+
+在 Orca 1.4.209、OpenCode 2.0.15 上直接执行只读 `worker-start --agent opencode` 测试，任务正文仍未送达：回执显示 `input_accepted`，但 OpenCode TUI 始终停在空白初始输入框，没有 agent 回合或 `worker_done`。测试 Dispatch 已隔离，精确终端已关闭，Task 已标记失败。因此 viewer 仍保留一次性兼容路径；不能只凭 `input_accepted` 判断任务已经送达。
+
+在上述版本中，先在 Orca 终端启动并等候 `opencode mini` 就绪，再通过 `worker-start --terminal <handle>` 绑定，**可以**送达只读 Task，并通过 `worker_done` 完成。此时 Dispatch 是受监督的，但 `worker-list` 仍显示 `unverifiable / missing_status`。`mini` 是交互界面，`opencode run` 才是一次性 CLI 模式；OpenCode 2.0.15 的 `mini --help` 没有 `--auto` 选项。尚未验证 mini 在自动编辑时的权限行为，所以这次实验还不足以替换 viewer 的 `opencode run --auto` 路径。
