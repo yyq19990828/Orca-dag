@@ -1225,6 +1225,8 @@ export async function focusTerminal(handle: string): Promise<TerminalFocusReceip
 
 /** Orca version that introduced the supervised Dispatch contract this viewer drives. */
 export const MIN_EXECUTION_VERSION = "1.4.205";
+/** First Orca release with fixed Codex readiness and per-terminal server isolation. */
+export const MIN_NATIVE_CODEX_VERSION = "1.4.217";
 /** Oldest Orca whose Run/Task/Dispatch model the viewer can still render. */
 export const MIN_VIEW_VERSION = "1.4.160";
 
@@ -3735,8 +3737,10 @@ function quoteLocalShellArg(value: string): string {
 
 /**
  * Codex can repaint its loading screen after Orca has accepted dispatch input,
- * losing the preamble before a turn begins. For local workspaces,
- * start the TUI first and hand its ready terminal to worker-start. The model
+ * losing the preamble before a turn begins. Older/unknown local runtimes and
+ * newly created local worktrees still prestart the TUI and hand its ready
+ * terminal to worker-start. Existing workspaces on Orca 1.4.217+ use native
+ * worker-start instead. The compatibility path's model
  * (and optional effort) belong on THIS command: Orca forbids --model/--effort
  * with worker-start --terminal. The returned handle is only a provisional
  * resource until worker-start transfers it to a Dispatch.
@@ -3785,8 +3789,11 @@ export async function prepareCodexTerminal(opts: {
     throw new OrcaCliError(`Codex terminal ${handle} did not become idle before dispatch`, "codex_not_ready");
   }
   // tui-idle alone can precede the final Codex splash repaint. Require the
-  // actual composer and a loaded model on two separate rendered frames; an
-  // output-stream match would mistake old scrollback for the current screen.
+  // actual empty composer on two separate rendered frames; an output-stream
+  // match would mistake old scrollback for the current screen. Codex 0.159.2
+  // displays the model as "GPT-…" rather than "model:", so a positive model
+  // label requirement rejects an otherwise ready TUI. Keep only the loading
+  // refusal, not a provider/model-name parser that will drift again.
   let readyFrames = 0;
   for (let i = 0; i < 40; i++) {
     const read = await runOrca<{ terminal?: { source?: string; tail?: string[] } }>([
@@ -3794,9 +3801,9 @@ export async function prepareCodexTerminal(opts: {
     ]);
     const screen = read.terminal;
     const lines = screen?.source === "screen" && Array.isArray(screen.tail) ? screen.tail : [];
-    const composerReady = lines.some((line) => line.includes("Ask Codex to do anything"));
-    const modelReady = lines.some((line) => /model:\s*\S+/i.test(line) && !/model:\s*loading\b/i.test(line));
-    readyFrames = composerReady && modelReady ? readyFrames + 1 : 0;
+    const composerReady = lines.some((line) => /^\s*›\s*Ask Codex to do anything\s*$/.test(line));
+    const modelLoading = lines.some((line) => /model:\s*loading\b/i.test(line));
+    readyFrames = composerReady && !modelLoading ? readyFrames + 1 : 0;
     if (readyFrames >= 2) return handle;
     await sleep(750);
   }

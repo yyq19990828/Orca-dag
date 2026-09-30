@@ -1267,9 +1267,78 @@ describe("Phase 4: ambiguous worker-start recovery", () => {
 });
 
 describe("Phase 4: failed-before-ready starts", () => {
+  for (const placement of ["current", "existing"] as const) {
+    it(`uses native Codex launch on Orca 1.4.217 for ${placement} with model and effort`, async () => {
+      const runId = `run_codex_native_${placement}`;
+      await singleTaskState(runId);
+      await mutateState((state) => { state.runtime = { appVersion: "1.4.217" }; });
+      const selector = placement === "existing" ? "id:repoL::/ws/existing" : "current";
+      await startCoordinator(baseOpts(runId, {
+        harnessByTask: { task_aaa: "codex" },
+        modelByTask: { task_aaa: "gpt-6-luna" },
+        effortByTask: { task_aaa: "high" },
+        ...(placement === "existing" ? { placementByTask: { task_aaa: { kind: "existing", selector } } } : {}),
+      }));
+      await waitFor(() => findAttempt("task_aaa")?.dispatchId ?? null, "native Codex dispatch");
+      const argv = calls("worker-start")[0].argv;
+      assert.equal(argv[argv.indexOf("--agent") + 1], "codex");
+      assert.equal(argv[argv.indexOf("--model") + 1], "gpt-6-luna");
+      assert.equal(argv[argv.indexOf("--effort") + 1], "high");
+      assert.equal(argv[argv.indexOf("--worktree") + 1], selector);
+      assert.equal(argv.includes("--terminal"), false);
+      assert.equal(readLog().some((call) => call.argv[0] === "terminal" &&
+        call.argv.includes("--command") && call.argv.some((arg) => arg.startsWith("codex "))), false);
+      await settleViaWorkerDone("task_aaa", "succeeded", `msg_native_${placement}`);
+      await waitFor(() => coordinatorStatus().phase === "completed", "native Codex settlement");
+      assert.equal(attempt("task_aaa").terminalDecision, "released");
+    });
+  }
+
+  for (const runtime of [{ appVersion: "1.4.216" }, { appVersion: "1.4.217-preview" }, {}]) {
+    it(`keeps Codex prewarm with a new CLI and ${runtime.appVersion ?? "unknown"} runtime`, async () => {
+      const runId = "run_codex_compat";
+      await singleTaskState(runId);
+      await mutateState((state) => { state.version = "1.4.217"; state.runtime = runtime; });
+      await startCoordinator(baseOpts(runId, { harnessByTask: { task_aaa: "codex" } }));
+      await waitFor(() => findAttempt("task_aaa")?.dispatchId ?? null, "compatible Codex dispatch");
+      const argv = calls("worker-start")[0].argv;
+      assert.ok(argv.includes("--terminal"), "the running runtime, not CLI version, chooses compatibility");
+      assert.equal(argv.includes("--agent"), false);
+      await stopCoordinator();
+    });
+  }
+
+  it("parks a rejected native Codex start without launching a compatibility worker", async () => {
+    const runId = "run_codex_native_rejected";
+    await singleTaskState(runId);
+    await mutateState((state) => {
+      state.runtime = { appVersion: "1.4.217" };
+      state.workerStartFail = { code: "agent_prompt_blocked", message: "Codex has a blocking prompt" };
+    });
+    await startCoordinator(baseOpts(runId, { harnessByTask: { task_aaa: "codex" } }));
+    await waitFor(() => findAttempt("task_aaa")?.settledVia === "start_failed", "native rejection to park");
+    const argv = calls("worker-start")[0].argv;
+    assert.equal(argv[argv.indexOf("--agent") + 1], "codex");
+    assert.equal(calls("worker-start").length, 1);
+    assert.equal(calls("dispatch").length, 0);
+    assert.equal(readLog().some((call) => call.argv[0] === "terminal" &&
+      call.argv.includes("--command") && call.argv.some((arg) => arg.startsWith("codex "))), false);
+    await stopCoordinator();
+  });
+
   it("creates a new local Codex worktree before starting the TUI and binding its ready terminal", async () => {
     const runId = "run_codex_child_ready";
     await singleTaskState(runId);
+    await mutateState((state) => {
+      state.runtime = { appVersion: "1.4.217" };
+      state.terminalScreen = { source: "screen", tail: [
+        "› Ask Codex to do anything", "  GPT-5.6-Sol medium fast · main · Context 96% left",
+      ] };
+      state.terminalScreens = [
+        { source: "output", tail: ["model: GPT-6-Luna", "› Ask Codex to do anything"] },
+        { source: "screen", tail: ["model: loading", "› Ask Codex to do anything"] },
+      ];
+    });
     await startCoordinator(baseOpts(runId, {
       harnessByTask: { task_aaa: "codex" },
       modelByTask: { task_aaa: "gpt-6-luna" },
@@ -1292,6 +1361,8 @@ describe("Phase 4: failed-before-ready starts", () => {
     assert.ok(argv.includes("id:repoL::/ws/codex-child-ready"), "bind to the created exact workspace");
     assert.ok(!argv.includes("--agent") && !argv.includes("--model") && !argv.includes("--name"),
       "do not create a second Codex process or send creation-only flags on bind");
+    assert.equal(log.filter((call) => call.argv[0] === "terminal" && call.argv[1] === "read").length, 4,
+      "ignore output/loading frames, then accept two current Codex composer frames without model:");
     await stopCoordinator();
   });
 

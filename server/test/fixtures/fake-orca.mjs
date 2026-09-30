@@ -762,9 +762,12 @@ if (ns === "orchestration" && verb === "task-list") {
 } else if (ns === "terminal" && verb === "wait") {
   ok({ wait: { satisfied: true } });
 } else if (ns === "terminal" && verb === "read") {
-  ok({ terminal: { source: "screen", tail: ["model: GPT-6-Luna", "› Ask Codex to do anything"] } });
+  ok({ terminal: state.terminalScreens?.shift() ?? state.terminalScreen ??
+    { source: "screen", tail: ["model: GPT-6-Luna", "› Ask Codex to do anything"] } });
 } else if (ns === "terminal" && verb === "send") {
   ok({});
+} else if (ns === "status") {
+  ok({ runtime: state.runtime ?? { appVersion: state.version ?? "1.4.205" } });
 } else {
   // Unknown surface: fail loudly rather than silently succeeding, so a drift
   // between the adapter and this double shows up as a test error, not a lie.

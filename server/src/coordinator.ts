@@ -4,6 +4,7 @@ import {
   checkInbox,
   closeTerminal,
   closeTerminalStrict,
+  compareVersions,
   createLocalCodexWorktree,
   deriveWorktreeName,
   ensureCoordinatorTerminal,
@@ -14,6 +15,7 @@ import {
   listTerminals,
   listWorktrees,
   listWorkers,
+  MIN_NATIVE_CODEX_VERSION,
   newRequestId,
   normalizeLiveness,
   normalizeTerminalReceipt,
@@ -3717,7 +3719,21 @@ async function startOne(
           attempt.harness === "codex" && !environment && !reuseTerminal &&
           process.platform !== "win32" &&
           wt.worktree !== "new-child" && wt.worktree !== "new-top-level";
-        if (canPrepareCodex) {
+        // 1.4.217 fixes native Codex readiness and isolates each terminal's
+        // server, so existing workspaces no longer need viewer-owned TUI
+        // parsing. Inspect the RUNNING runtime: a newer CLI can still talk to
+        // an older app. Missing/unrecognizable versions keep compatibility.
+        // New worktrees retain create → base-SHA verification → prewarm until
+        // that separate placement path has been accepted end to end. Choose
+        // before launching; never retry a failed native start by prewarming.
+        let nativeCodex = false;
+        if (canPrepareCodex && !creatingLocalCodex) {
+          const status = await runOrca<{ runtime?: { appVersion?: string } }>(["status"]);
+          const version = status.runtime?.appVersion;
+          nativeCodex = typeof version === "string" && /^\d+\.\d+\.\d+$/.test(version) &&
+            compareVersions(version, MIN_NATIVE_CODEX_VERSION) >= 0;
+        }
+        if (canPrepareCodex && !nativeCodex) {
           preparedCodexHandle = await prepareCodexTerminal({
             worktree: wt.worktree ?? "current",
             model: model ?? undefined,

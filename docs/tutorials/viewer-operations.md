@@ -116,11 +116,15 @@ Workspace files have distinct purposes: `.orca-dag.config.json` stores preferenc
 
 Add new runtime findings here with the affected launch path, observable symptom, and tested recovery. Keep Orca fleet liveness separate from whether the Codex TUI is visible or a Task has completed.
 
-### Codex status hooks in existing or native sessions
+### Codex native startup and compatibility
 
 On Orca 1.4.209 and Codex 0.156.1, a Codex TUI started without an explicit `--enable hooks` could execute the injected Task and send `worker_done` while `worker-list` still reported `unverifiable / missing_status`. In a same-Run GPT-6 Luna comparison, a fresh TUI started with `codex --enable hooks ...` reported `live` from `agent_status`, although `codex features list` already reported `hooks` enabled on this machine. A reused Codex app-server without Orca pane variables is a likely contributor, but the hook subprocess environment was not captured directly.
 
-The viewer now adds `--enable hooks` to the **local Codex terminals it starts** before binding them with `worker-start --terminal`. This Codex CLI flag does not belong on other harness commands; their status integrations must be diagnosed separately. The change does not affect an already-running Codex TUI, a manually launched `codex resume`, or Orca's native/remote Codex launch path. For a manual session, start a new Codex process from an Orca-managed terminal with `codex --enable hooks` (or `codex --enable hooks resume` when resuming). Check `worker-list` for `liveness.source: agent_status` during an active Dispatch. Do not infer process exit or retry permission from `missing_status` alone.
+Orca 1.4.217 fixes Codex readiness and isolates each new terminal's background server by default. A local read-only test with Codex 0.159.2 confirmed native `worker-start --agent codex`, observed turn start, `live / agent_status`, an exact transcript, and accepted `worker_done`. The viewer therefore uses native startup for current/existing POSIX workspaces when `status.runtime.appVersion` is at least 1.4.217, forwarding model and effort directly. The running app version selects the path; a newer CLI alone does not establish support. Existing terminals need reopening to receive Orca's isolation change. See the [1.4.217 release notes](https://github.com/stablyai/orca/releases/tag/v1.4.217).
+
+Older or unknown runtimes keep prestart-and-bind compatibility with explicit `--enable hooks`. Newly created local POSIX worktrees also keep this path so creation and any committed-Stage base-SHA verification finish before the worker starts; native combined creation has not been accepted here. Compatibility readiness checks two stable empty-composer screen frames and refuses `model: loading`, but does not require a `model:` footer: Codex 0.159.2 displays `GPT-…` instead. Remote and Windows Codex retain native startup. A native failure is recorded without automatically launching a second compatibility worker.
+
+For a manual session on an older runtime, start a fresh Codex process in an Orca-managed terminal with `codex --enable hooks` (or `codex --enable hooks resume`). Check `worker-list` for `liveness.source: agent_status` during an active Dispatch. Do not infer process exit or retry permission from `missing_status` alone. `worker-release` may retain a terminal attributed to `user_takeover`; that ownership verdict is separate from whether progress and completion were supervised successfully.
 
 ### OpenCode's tracking Dispatch has no fleet liveness
 
