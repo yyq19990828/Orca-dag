@@ -191,9 +191,9 @@ const en = {
   // verbatim; only the prose around them is translated.
   "dialog.confirmRunTitle": "Let Viewer coordinate this Run?",
   "dialog.confirmRunMessage":
-    "Starting execution transfers coordinator authority to the Viewer. Any agent terminal " +
-    "currently coordinating this Run will be fenced, so its orchestration mutations will fail " +
-    "with consumer_fenced. It can take authority back with:\n\n" +
+    "Starting execution transfers coordinator authority to the Viewer. Any agent terminal or " +
+    "Orca-native chat currently coordinating this Run will be fenced, so its orchestration " +
+    "mutations will fail with consumer_fenced. It can take authority back with:\n\n" +
     "orca orchestration run-use --id {id}",
   "dialog.startRun": "Start Run",
   "dialog.notNow": "Not now",
@@ -969,9 +969,9 @@ const en = {
   "health.ownership.otherRun.label": "Viewer bound · Run mismatch",
   "health.ownership.otherRun.brief": "The viewer's coordinator terminal is bound here but the loop reports another Run.",
   "health.ownership.external.label": "External coordinator",
-  "health.ownership.external.brief": "Another terminal is bound as coordinator; starting here would fence it.",
+  "health.ownership.external.brief": "Another coordinator is bound; starting here would fence it.",
   "health.ownership.unbound.label": "No coordinator",
-  "health.ownership.unbound.brief": "No coordinator terminal is bound to this Run.",
+  "health.ownership.unbound.brief": "No coordinator is bound to this Run.",
   "health.ownership.unverifiable.label": "Ownership unknown",
   "health.ownership.unverifiable.brief": "The Run record could not be read, so ownership cannot be verified.",
   "health.counts": "Tasks {tasks} · Messages {messages} · Workers {workers} · Gates {gates}",

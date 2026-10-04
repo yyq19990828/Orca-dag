@@ -262,6 +262,16 @@ describe("evaluateRunOwnership (pure)", () => {
     assert.doesNotMatch(view.detail, /stale|dead|exited/i);
   });
 
+  it("names a native chat coordinator as a chat", () => {
+    const view = evaluateRunOwnership(
+      { id: "run_chat", coordinator_handle: "orca_session_id:chat_123", consumer_generation: 6 },
+      idle,
+    );
+    assert.equal(view.state, "external_coordinator");
+    assert.match(view.detail, /Native chat orca_session_id:chat_123/);
+    assert.doesNotMatch(view.detail, /Terminal/);
+  });
+
   it("external_coordinator notes when the viewer's coordinator is bound elsewhere", () => {
     const view = evaluateRunOwnership(
       { id: "run_a", coordinator_handle: "term_user", consumer_generation: 5 },

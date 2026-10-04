@@ -57,9 +57,9 @@ A Run is a namespace, **not a DAG** — several unrelated graphs can live in one
 Every Orca orchestration call goes through `resolveRunScope`:
 
 - **Reads** (`task-list` / `gate-list`) skip the consumer check as long as they pass `--run <id>` — **any process can read**. That's all the viewer's polling needs.
-- **Mutations** (`dispatch` / `gate-resolve` / `task-create` / `worker-start`) require the caller to **be the Orca terminal currently bound to that Run**, proven by resolving `--from <handle>` to a pane.
+- **Mutations** (`dispatch` / `gate-resolve` / `task-create` / `worker-start`) require the caller to own that Run's coordinator binding. Orca-native chats can act through their session identity; this external viewer acts through a bound terminal supplied as `--from <handle>`.
 
-The viewer is an ordinary process with no terminal identity, so every mutation would fail with `run_required`. The fix: the viewer opens its own Orca terminal titled `orca-dag coordinator · <workspace-hash> · <instance-id>`, binds it with `run-use`, and passes `--from` on every mutation. **Binding fences the previous coordinator** (usually the agent terminal that drew your graph), so the viewer asks for explicit confirmation before starting; the agent can reclaim the Run anytime with `orca orchestration run-use --id <run>`. On stop, the viewer closes that terminal and releases the Run.
+The viewer is an ordinary process with no Orca session or terminal identity, so every mutation would fail with `run_required`. It opens its own Orca terminal titled `orca-dag coordinator · <workspace-hash> · <instance-id>`, binds it with `run-use`, and passes `--from` on every mutation. **Binding fences the previous coordinator**, whether an agent terminal or an Orca-native chat, so the viewer asks for explicit confirmation before starting; that agent can reclaim the Run with `orca orchestration run-use --id <run>`. On stop, the viewer closes its terminal and releases the Run.
 
 The title's `<workspace-hash>` scopes the coordinator to one workspace: two viewers pointed at **different** workspaces each get their own coordinator terminal and never touch each other's, and a second viewer started on the **same** workspace refuses with a `coordinator_conflict` error (HTTP 409) instead of silently taking over or closing the first one's terminal.
 
@@ -168,7 +168,7 @@ An end-to-end pass, starting from nothing installed:
 
 5. **Choose harnesses.** Set the toolbar's **Default harness** (fallback for every node), and optionally click individual nodes to override harness/model per node. Set **Max parallel**.
 
-6. **Click "▶ Run with Orca"** and accept the confirmation (it explains that the viewer takes over the Run's coordinator slot, fencing your agent's terminal — that's expected). Ready tasks fire in parallel; running nodes get the crayon scribble; the graph advances as workers report `worker_done`.
+6. **Click "▶ Run with Orca"** and accept the confirmation (it explains that the viewer takes over the Run's coordinator slot, fencing the agent terminal or Orca-native chat coordinating it). Ready tasks fire in parallel; running nodes get the crayon scribble; the graph advances as workers report `worker_done`.
 
 7. **Resolve gates when they pop.** If the plan includes approval gates, approve/reject buttons float over the DAG at the right moment.
 

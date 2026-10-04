@@ -16,6 +16,8 @@
 
 Orca 提供这些记录和 worker 生命周期操作，但不决定下一个就绪 Task、工作区放置位置或并行度。viewer 的 coordinator 循环负责这些选择，再调用启动时确定的 Orca CLI。它将自己的终端绑定到 Run，取得修改权限；其他终端仍可读取 Run，竞争性的修改会被权限隔离。viewer 接管绑定前会要求确认。
 
+Orca 1.4.218+ 也允许原生聊天以自身会话身份协调 Run。viewer 可以选中并观察这个 Run，不必接管绑定。点击 **Run with Orca** 会在现有确认之后把协调权移交给 viewer，并 fence 该聊天；Run 归属徽标会将其标为聊天会话，而不会误称为终端。
+
 ## 完整示例：CSV 导出
 
 先让规划 agent 定义 CSV 格式，再并行处理 API 和 UI：

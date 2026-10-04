@@ -49,18 +49,18 @@ const pExecFile = promisify(execFile);
  *     consumer check entirely — any process can read any Run. The viewer's
  *     polling path needs nothing else.
  *   - MUTATIONS (`dispatch`, `gate-resolve`, `task-create`, `task-update`) and
- *     `worker-start` require the CALLER to be the live Orca terminal currently
- *     bound to that Run. The check resolves `--from <handle>` to a pane key and
- *     compares it against the Run's binding.
+ *     `worker-start` require the caller to own the Run's coordinator binding.
+ *     Orca-native chats can use their own session identity; this external
+ *     server has none, so it supplies a bound terminal via `--from <handle>`.
  *
  * A plain `execFile("orca", ...)` from this server has no terminal identity, so
  * every mutation would fail `run_required`. The escape hatch is `--from`: we
  * keep our own Orca terminal (see `ensureCoordinatorTerminal`), bind it to the
  * Run, and pass its handle on every mutating call.
  *
- * Binding fences whichever terminal was bound before — so starting a run here
- * takes coordination of that Run away from the user's agent terminal. The
- * agent can always take it back with `orca orchestration run-use --id <run>`.
+ * Binding fences the previous coordinator, whether an agent terminal or an
+ * Orca-native chat. That agent can take the Run back with
+ * `orca orchestration run-use --id <run>`.
  */
 
 // --- CLI + workspace resolution (Phase 2) ----------------------------------

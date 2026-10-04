@@ -1422,8 +1422,8 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
   );
 
   /**
-   * An abandoned Dispatch cannot send worker_done after its capability was
-   * revoked. Let the operator record an independently reviewed result on the
+   * An abandoned Dispatch cannot send worker_done after it has settled as
+   * abandoned. Let the operator record an independently reviewed result on the
    * blocked Task, without inventing a successful Dispatch or replaying work.
    * Re-read Orca's Task, fleet, gate and provider evidence at the mutation
    * boundary: old viewer projections and a closed terminal are insufficient.

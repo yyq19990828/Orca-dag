@@ -69,7 +69,7 @@ export function evaluateRunOwnership(
     return {
       state: "unbound",
       detail:
-        "No coordinator terminal is bound to this Run. This viewer may start it; the start will " +
+        "No coordinator is bound to this Run. This viewer may start it; the start will " +
         "bind its own coordinator terminal.",
     };
   }
@@ -90,11 +90,15 @@ export function evaluateRunOwnership(
     viewer.running && viewer.runId && viewer.runId !== run.id
       ? " This viewer's coordinator is currently bound to another Run."
       : "";
+  // Orca 1.4.218+ lets a native chat coordinate a Run under its own session
+  // id. The viewer may observe it, but the Run button will fence that chat.
+  const chat = bound.startsWith("orca_session_id:") || bound.startsWith("session:");
   return {
     state: "external_coordinator",
     detail:
-      `Terminal ${bound} is bound as this Run's coordinator. This viewer cannot mutate the Run ` +
-      `until it takes over, which would fence that terminal.` + elsewhere,
+      `${chat ? "Native chat" : "Terminal"} ${bound} is bound as this Run's coordinator. ` +
+      `This viewer cannot mutate the Run until it takes over, which would fence that ` +
+      `${chat ? "chat" : "terminal"}.` + elsewhere,
   };
 }
 

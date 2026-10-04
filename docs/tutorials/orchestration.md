@@ -16,6 +16,8 @@ This tutorial follows one feature from requirement to completed Run. It describe
 
 Orca provides these records and worker lifecycle operations, but deliberately does not pick the next ready Task, placement, or parallelism. The viewer's coordinator loop makes those choices and calls the resolved Orca CLI. Its terminal is bound to the Run for mutation authority; other terminals can read the Run, but a competing mutation is fenced. The viewer asks for confirmation when it takes this binding.
 
+Orca 1.4.218+ also lets an Orca-native chat coordinate a Run under its own session identity. The viewer can select and observe that Run without taking its binding. Clicking **Run with Orca** transfers coordination to the viewer after the existing confirmation and fences the chat; the Run ownership badge names a chat session instead of calling it a terminal.
+
 ## Worked example: CSV export
 
 Ask the planning agent to define the CSV format first, then let API and UI work proceed in parallel:

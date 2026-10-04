@@ -187,7 +187,7 @@ const zh: Dict = {
   // 对话框文案。orca 命令与 consumer_fenced 错误码原样保留，只翻叙述。
   "dialog.confirmRunTitle": "让查看器协调这个 Run？",
   "dialog.confirmRunMessage":
-    "开始执行会把协调器权限移交给查看器。当前正在协调这个 Run 的任何 agent 终端都会被 fence，" +
+    "开始执行会把协调器权限移交给查看器。当前正在协调这个 Run 的任何 agent 终端或 Orca 原生聊天都会被 fence，" +
     "其编排变更会以 consumer_fenced 失败。它可以用以下命令取回权限：\n\n" +
     "orca orchestration run-use --id {id}",
   "dialog.startRun": "启动 Run",
@@ -919,9 +919,9 @@ const zh: Dict = {
   "health.ownership.otherRun.label": "查看器已绑定 · Run 不匹配",
   "health.ownership.otherRun.brief": "查看器的协调器终端绑定在此处，但循环上报的是另一个 Run。",
   "health.ownership.external.label": "外部协调器",
-  "health.ownership.external.brief": "另一个终端已绑定为协调器；在此启动会将其隔离（fence）。",
+  "health.ownership.external.brief": "另一个协调者已绑定；在此启动会将其隔离（fence）。",
   "health.ownership.unbound.label": "无协调器",
-  "health.ownership.unbound.brief": "没有协调器终端绑定到该 Run。",
+  "health.ownership.unbound.brief": "没有协调者绑定到该 Run。",
   "health.ownership.unverifiable.label": "归属未知",
   "health.ownership.unverifiable.brief": "无法读取 Run 记录，因此归属无法核实。",
   "health.counts": "Task {tasks} · 消息 {messages} · Worker {workers} · 门禁 {gates}",

@@ -56,9 +56,9 @@ Run 是命名空间，**不等于 DAG** —— 一个 Run 里可以躺多张互�
 Orca 的所有编排调用都过 `resolveRunScope`：
 
 - **读**（`task-list` / `gate-list`）只要带 `--run <id>` 就跳过 consumer 检查，**任何进程都能读**。viewer 的轮询只需要这个。
-- **写**（`dispatch` / `gate-resolve` / `task-create` / `worker-start`）要求调用方**就是当前绑定该 Run 的那个 Orca 终端**，靠 `--from <handle>` 解析出 pane 来比对。
+- **写**（`dispatch` / `gate-resolve` / `task-create` / `worker-start`）要求调用方拥有该 Run 的协调者绑定。Orca 原生聊天可以用自身会话身份操作；外部 viewer 则通过 `--from <handle>` 使用已绑定的终端。
 
-viewer 是个普通进程，没有终端身份，所以写操作一律 `run_required`。解法是 viewer 自己开一个标题为 `orca-dag coordinator · <workspace-hash> · <instance-id>` 的 Orca 终端，`run-use` 绑定，然后所有写操作带 `--from`。**绑定会 fence 掉原来的 coordinator**（通常就是给你画图的那个 agent 终端），所以点执行前 viewer 会明确确认一次；agent 随时可以用 `orca orchestration run-use --id <run>` 抢回去。停止执行时 viewer 会关掉这个终端，把 Run 让出来。
+viewer 是个普通进程，没有 Orca 会话或终端身份，所以写操作会报 `run_required`。它会自己开一个标题为 `orca-dag coordinator · <workspace-hash> · <instance-id>` 的 Orca 终端，`run-use` 绑定，然后所有写操作带 `--from`。**绑定会 fence 掉原来的 coordinator**，无论它是 agent 终端还是 Orca 原生聊天，所以点执行前 viewer 会明确确认一次；该 agent 可以用 `orca orchestration run-use --id <run>` 取回权限。停止执行时 viewer 会关掉自己的终端，把 Run 让出来。
 
 标题里的 `<workspace-hash>` 把 coordinator 限定在一个工作区：两个 viewer 指向**不同**工作区时各用各的 coordinator 终端，互不干扰；第二个 viewer 若启动在**同一**工作区，会直接报 `coordinator_conflict`（HTTP 409）——不会悄悄接管，也不会关掉第一个的终端。
 
@@ -167,7 +167,7 @@ npm publish ./dist-npm --access public --tag bootstrap
 
 5. **选 harness。** 设置工具条上的 **Default harness**（所有节点的兜底），需要的话再点单个节点覆盖它的 harness/模型。设好 **Max parallel**。
 
-6. **点「▶ Run with Orca」**，确认弹窗（它会说明 viewer 将接管该 Run 的 coordinator，你的 agent 终端会被 fence —— 这是预期行为）。ready 任务并行开跑；执行中的节点出现蜡笔涂鸦；worker 回报 `worker_done` 后整张图逐步推进。
+6. **点「▶ Run with Orca」**，确认弹窗（它会说明 viewer 将接管该 Run 的 coordinator，原先协调它的 agent 终端或 Orca 原生聊天会被 fence）。ready 任务并行开跑；执行中的节点出现蜡笔涂鸦；worker 回报 `worker_done` 后整张图逐步推进。
 
 7. **审批门弹出时处理它。** 计划里有审批门的话，到点会在 DAG 上浮出批准/驳回按钮。
 
