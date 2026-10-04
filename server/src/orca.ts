@@ -1227,6 +1227,8 @@ export async function focusTerminal(handle: string): Promise<TerminalFocusReceip
 export const MIN_EXECUTION_VERSION = "1.4.205";
 /** First Orca release with fixed Codex readiness and per-terminal server isolation. */
 export const MIN_NATIVE_CODEX_VERSION = "1.4.217";
+/** First Orca release where this viewer verified the OpenCode 2 TUI worker path. */
+export const MIN_NATIVE_OPENCODE_VERSION = "1.4.220";
 /** Oldest Orca whose Run/Task/Dispatch model the viewer can still render. */
 export const MIN_VIEW_VERSION = "1.4.160";
 

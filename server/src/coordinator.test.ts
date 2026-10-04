@@ -1030,6 +1030,9 @@ describe("legacy (opencode) lane settlement", () => {
   it("closes its proven viewer-created terminal and settles the unsupervised tracking dispatch without worker-stop, then completes", async () => {
     const runId = "run_legacy";
     await singleTaskState(runId);
+    await mutateState((state) => {
+      state.runtime = { appVersion: "1.4.219" };
+    });
     const events: CoordinatorActivityNotice[] = [];
     await startCoordinator(
       baseOpts(runId, {
@@ -1075,6 +1078,60 @@ describe("legacy (opencode) lane settlement", () => {
     assert.equal((state.terminals as any[]).find((t) => t.handle === legacyHandle)?.connected, false, "only the proven viewer-created terminal closed");
     const reclaimable = Object.values(state.dispatches as Record<string, any>).filter((d) => d.terminalState === "reclaimable");
     assert.deepEqual(reclaimable, [], "no reclaimable workers after the legacy lane settles");
+  });
+});
+
+describe("native OpenCode 2", () => {
+  it("maps the existing opencode choice to a supervised TUI worker on Orca 1.4.220", async () => {
+    const runId = "run_opencode2";
+    await singleTaskState(runId);
+    await mutateState((state) => {
+      state.runtime = { appVersion: "1.4.220" };
+    });
+    await startCoordinator(baseOpts(runId, { defaultHarness: "opencode" }));
+    await waitFor(() => findAttempt("task_aaa")?.dispatchId ?? null, "native OpenCode 2 Dispatch");
+    assert.equal(attempt("task_aaa").mode, "supervised");
+    assert.equal(callsOf("worker-start", "--agent", "opencode2").length, 1);
+    assert.equal(calls("dispatch").length, 0, "no unsupervised tracking Dispatch");
+    await settleViaWorkerDone("task_aaa", "succeeded", "msg_oc2");
+    await waitFor(() => (attempt("task_aaa").terminalDecision === "released" ? true : null), "native terminal release");
+    await waitFor(() => (coordinatorStatus().phase === "completed" ? true : null), "native completion");
+  });
+
+  it("parks a rejected native start instead of creating a second legacy worker", async () => {
+    const runId = "run_opencode2_unconfigured";
+    await singleTaskState(runId);
+    await mutateState((state) => {
+      state.runtime = { appVersion: "1.4.220" };
+      state.workerStartFail = { code: "agent_unconfigured", message: "opencode2 is unavailable" };
+    });
+    await startCoordinator(baseOpts(runId, { defaultHarness: "opencode" }));
+    await waitFor(() => findAttempt("task_aaa")?.settledVia === "start_failed", "unconfigured agent to park");
+    assert.equal(callsOf("worker-start", "--agent", "opencode2").length, 1);
+    assert.equal(calls("dispatch").length, 0);
+    assert.equal(readLog().some((call) => call.argv[0] === "terminal" &&
+      call.argv[1] === "create" && call.argv.includes("--command") &&
+      call.argv[call.argv.indexOf("--command") + 1] === "opencode2"), false);
+  });
+
+  it("preserves a chosen OpenCode model on the one-shot path", async () => {
+    const runId = "run_opencode_model";
+    await singleTaskState(runId);
+    await mutateState((state) => {
+      state.runtime = { appVersion: "1.4.220" };
+    });
+    await startCoordinator(baseOpts(runId, {
+      defaultHarness: "opencode",
+      modelByTask: { task_aaa: "provider/model" },
+    }));
+    await waitFor(() => (calls("dispatch").length === 1 ? true : null), "model-pinned tracking Dispatch");
+    await waitFor(() => readLog().some((call) => call.argv[0] === "terminal" &&
+      call.argv[1] === "send" && call.argv.some((arg) => String(arg).includes(' -m "provider/model"')))
+      ? true : null, "model passed to one-shot OpenCode");
+    assert.equal(calls("worker-start").length, 0);
+    await waitFor(() => findAttempt("task_aaa")?.dispatchId ?? null, "tracking Dispatch adopted");
+    await settleViaWorkerDone("task_aaa", "succeeded", "msg_oc_model");
+    await waitFor(() => (coordinatorStatus().phase === "completed" ? true : null), "model-pinned completion");
   });
 });
 

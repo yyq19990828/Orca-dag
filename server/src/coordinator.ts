@@ -16,6 +16,7 @@ import {
   listWorktrees,
   listWorkers,
   MIN_NATIVE_CODEX_VERSION,
+  MIN_NATIVE_OPENCODE_VERSION,
   newRequestId,
   normalizeLiveness,
   normalizeTerminalReceipt,
@@ -3467,6 +3468,18 @@ async function startOne(
     on: environment,
   };
   try {
+    // The viewer's `opencode` choice already means OpenCode 2. On a running
+    // Orca 1.4.220+ with no per-node model override, launch its native agent
+    // id (`opencode2`). Older/unknown runtimes and explicit `-m` selections
+    // keep the proven one-shot path. Do not use CLI version as a proxy for the
+    // app version, and do not retry an attempted native start as legacy.
+    let nativeOpenCode = false;
+    if (attempt.harness === "opencode" && !model) {
+      const status = await runOrca<{ runtime?: { appVersion?: string } }>(["status"]);
+      const version = status.runtime?.appVersion;
+      nativeOpenCode = typeof version === "string" && /^\d+\.\d+\.\d+$/.test(version) &&
+        compareVersions(version, MIN_NATIVE_OPENCODE_VERSION) >= 0;
+    }
     // --- Worktree-lane pre-flight: every refusal below happens BEFORE Orca
     // --- sees a mutation, and lands as a parked start_failed record.
     //
@@ -3494,7 +3507,7 @@ async function startOne(
     // 2. The legacy path creates a LOCAL terminal in the coordinator worktree
     //    — it can never honor a non-current lane. Refuse before a terminal or
     //    Dispatch exists (the same rule remote placement has always had).
-    if (lane && (attempt.harness === "opencode" || attempt.harness === "custom")) {
+    if (lane && ((attempt.harness === "opencode" && !nativeOpenCode) || attempt.harness === "custom")) {
       throw new OrcaCliError(
         `Cannot start task ${task.id} in lane "${laneId}": the ${attempt.harness} harness runs through ` +
           `the viewer's local legacy path and cannot honor non-current placement. ` +
@@ -3650,17 +3663,15 @@ async function startOne(
       }
     }
     let started: StartedWorker;
-    // opencode's TUI does not reliably accept `worker-start`'s injected
-    // preamble (orca #9951) even though orca recognizes it as an agent — the
-    // app opens with no prompt and never runs. Route it straight through the
-    // legacy path, which runs `opencode run --auto` in a bare shell instead of
-    // pasting into the TUI (verified 2026-08-10). The tracking Dispatch it
-    // mints stays marked unsupervised — see decideTerminalOwnership.
+    // `opencode` is the viewer's stable harness name for OpenCode 2. Orca's
+    // older `--agent opencode` can lose the preamble (orca #9951), while
+    // `--agent opencode2` delivered read-only and writing Tasks on 1.4.220.
+    // Keep the one-shot path for model overrides and older/unknown runtimes.
     // Phase 6: the legacy path creates a LOCAL terminal in the coordinator
     // worktree — it can never honor a remote environment. Refuse instead of
     // silently executing "remotely requested" work locally (that would be the
     // synthetic local fallback the plan forbids).
-    if (attempt.harness === "opencode") {
+    if (attempt.harness === "opencode" && !nativeOpenCode) {
       if (environment) {
         throw new OrcaCliError(
           `Cannot start task ${task.id} on environment "${environment}": the ${attempt.harness} ` +
@@ -3745,7 +3756,7 @@ async function startOne(
         }
         started = await startSupervisedWorker({
           taskId: task.id,
-          agent: attempt.harness,
+          agent: nativeOpenCode ? "opencode2" : attempt.harness,
           runId,
           from,
           // Exact placement (lane-recovered selector, existing selector, or a
@@ -3781,7 +3792,10 @@ async function startOne(
         // A prepared Codex pane already contains the chosen model and may
         // have been claimed by worker-start. Never create a second legacy
         // pane or overwrite its handle after a rejection.
-        if (environment || lane || attempt.handle || !code || !UNCONFIGURED_AGENT_CODES.has(code)) throw err;
+        // A native OpenCode start may have effects even if Orca rejects it.
+        // Never launch a second one-shot worker after that attempt.
+        if (nativeOpenCode || environment || lane || attempt.handle ||
+            !code || !UNCONFIGURED_AGENT_CODES.has(code)) throw err;
         started = await startLegacyWorker({
           taskId: task.id,
           harness: attempt.harness,

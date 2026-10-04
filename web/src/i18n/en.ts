@@ -247,6 +247,7 @@ const en = {
   "node.modelDefaultSuffix": " · default",
   "node.defaultModel": "(default model)",
   "node.modelPlaceholder": "model name, e.g. {example}",
+  "node.openCodeModelLaunchHint": "A selected OpenCode model uses the one-shot runner. Clear it to allow the supervised TUI on Orca 1.4.220+.",
   "node.effortKey": "Effort ({harness})",
   "node.defaultEffort": "(default effort)",
   "node.effortHint": "Reasoning effort for the selected model.",

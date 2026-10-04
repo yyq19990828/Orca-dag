@@ -203,10 +203,9 @@ export function validateHarness(raw: unknown, policy: SecurityPolicy): string {
 
 /**
  * One model override. opencode models are interpolated into a shell line on
- * the legacy worker path, so they must match the enumerated `provider/model`
- * grammar exactly — with an optional bounded `#variant` suffix (e.g.
- * `zai-coding-plan/glm-5.3-flash#high`). Other harnesses take plain model names through
- * `worker-start --model` argv — still charset-bound for defense in depth.
+ * the legacy path, so they need the enumerated `provider/model` grammar with
+ * an optional bounded `#variant`. Other model-selectable harnesses take plain
+ * names through `worker-start --model` argv, still charset-bound.
  */
 export function validateModel(raw: unknown, harness: string): string {
   const v = String(raw ?? "").trim();

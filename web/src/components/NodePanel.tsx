@@ -510,6 +510,9 @@ export function NodePanel({
                 disabled={launchLocked}
               />
             )}
+            {effHarness === "opencode" && model && (
+              <span className="node-panel__hint">{t("node.openCodeModelLaunchHint")}</span>
+            )}
           </div>
         )}
 

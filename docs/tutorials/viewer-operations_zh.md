@@ -114,6 +114,8 @@ viewer 也通过本地 HTTP API 提供同一套控制。`GET` 是回环地址上
 
 ## 已知局限
 
+viewer 的 `opencode` 选择运行的就是 OpenCode 2。在运行中的 Orca ≥ 1.4.220 且未设置逐节点模型时，Task 使用原生 `worker-start --agent opencode2`。在 OpenCode 2.0.22 上，这条路径已送达只读 Task，并在隔离工作树中自主写入、读回一个文件；Orca 接受 `worker_done`、报告 `agent_status` 并释放终端。选择模型或使用旧版、版本未知的 Orca 时，保留下文的一次性路径。原生启动失败后绝不再启动第二个 worker。当前 `worker-read --source auto` 对 OpenCode 2 会回退到终端输出，无法得到精确的 provider transcript。
+
 后续运行时发现可继续加在这里，写清受影响的启动路径、可观察的现象和已验证的处理方式。Codex TUI 可见、Task 已完成与 Orca 的 worker 存活状态是不同的证据。
 
 ### Codex 原生启动与兼容路径
@@ -128,7 +130,7 @@ Orca 1.4.217 修复了 Codex 就绪检测，并默认隔离每个新终端的后
 
 ### OpenCode 的跟踪 Dispatch 没有 fleet 存活证据
 
-viewer 用一次性的 `opencode run --auto` 命令启动 OpenCode，并创建 Orca Dispatch 记录任务。这条路径标记为 `unsupervised`，没有受监督的 worker 资源，也没有 `agent_status` fleet 证据。在 Orca 1.4.209 的并行只读对照中，OpenCode 通过 `worker_done` 完成了 Task，但运行时的 `worker-list` 显示 `unverifiable / missing_status`，落定后变为 `unverifiable / unsupervised_settled`。运行期间，`worker-show` 另外观察到精确的 OpenCode 终端仍然存活。这些 fleet 值符合 viewer 当前 OpenCode 启动路径的设计，不能单独证明 OpenCode 钩子损坏。对此路径应核对 Task/Dispatch 的结果与精确终端观察，也不能把 `unverifiable` 当作进程已退出的证据。
+在一次性兼容路径上，viewer 用 `opencode run --auto` 启动 OpenCode，并创建 Orca Dispatch 记录任务。这条路径标记为 `unsupervised`，没有受监督的 worker 资源，也没有 `agent_status` fleet 证据。在 Orca 1.4.209 的并行只读对照中，OpenCode 通过 `worker_done` 完成了 Task，但运行时的 `worker-list` 显示 `unverifiable / missing_status`，落定后变为 `unverifiable / unsupervised_settled`。运行期间，`worker-show` 另外观察到精确的 OpenCode 终端仍然存活。这些 fleet 值符合 viewer 当前 OpenCode 启动路径的设计，不能单独证明 OpenCode 钩子损坏。对此路径应核对 Task/Dispatch 的结果与精确终端观察，也不能把 `unverifiable` 当作进程已退出的证据。
 
 在 Orca 1.4.209、OpenCode 2.0.15 上直接执行只读 `worker-start --agent opencode` 测试，任务正文仍未送达：回执显示 `input_accepted`，但 OpenCode TUI 始终停在空白初始输入框，没有 agent 回合或 `worker_done`。测试 Dispatch 已隔离，精确终端已关闭，Task 已标记失败。因此 viewer 仍保留一次性兼容路径；不能只凭 `input_accepted` 判断任务已经送达。
 

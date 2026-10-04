@@ -238,6 +238,7 @@ const zh: Dict = {
   "node.modelDefaultSuffix": " · 默认",
   "node.defaultModel": "（默认模型）",
   "node.modelPlaceholder": "模型名，例如 {example}",
+  "node.openCodeModelLaunchHint": "选定 OpenCode 模型会走一次性运行路径；清除后可在 Orca 1.4.220+ 使用受监督 TUI。",
   "node.effortKey": "推理强度（{harness}）",
   "node.defaultEffort": "（默认推理强度）",
   "node.effortHint": "所选模型的推理强度。",

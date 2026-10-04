@@ -114,6 +114,8 @@ Workspace files have distinct purposes: `.orca-dag.config.json` stores preferenc
 
 ## Known limitations
 
+The viewer's `opencode` choice runs OpenCode 2. On a running Orca 1.4.220+, a Task without a per-node model override uses native `worker-start --agent opencode2`. With OpenCode 2.0.22, that path delivered a read-only Task and autonomously wrote and verified one file in an isolated worktree; Orca accepted `worker_done`, reported `agent_status`, and released the terminal. Selecting a model or using an older/unknown Orca keeps the one-shot path below. A failed native start never launches a second worker. `worker-read --source auto` currently falls back to terminal output for OpenCode 2, so this path does not provide an exact provider transcript.
+
 Add new runtime findings here with the affected launch path, observable symptom, and tested recovery. Keep Orca fleet liveness separate from whether the Codex TUI is visible or a Task has completed.
 
 ### Codex native startup and compatibility
@@ -128,7 +130,7 @@ For a manual session on an older runtime, start a fresh Codex process in an Orca
 
 ### OpenCode's tracking Dispatch has no fleet liveness
 
-The viewer launches OpenCode with a one-shot `opencode run --auto` command and creates an Orca Dispatch for tracking. This path is `unsupervised`: it has no supervised worker resource or `agent_status` fleet evidence. In a parallel read-only comparison on Orca 1.4.209, OpenCode completed its Task with `worker_done`, while `worker-list` showed `unverifiable / missing_status` during execution and `unverifiable / unsupervised_settled` after completion. `worker-show` independently observed the exact OpenCode terminal as live while it ran. These fleet values are expected for the viewer's current OpenCode launch path; they do not by themselves establish a broken OpenCode hook. Use the Task/Dispatch outcome and exact terminal observation for this path, and do not treat `unverifiable` as proof of exit.
+On the one-shot compatibility path, the viewer launches OpenCode with `opencode run --auto` and creates an Orca Dispatch for tracking. This path is `unsupervised`: it has no supervised worker resource or `agent_status` fleet evidence. In a parallel read-only comparison on Orca 1.4.209, OpenCode completed its Task with `worker_done`, while `worker-list` showed `unverifiable / missing_status` during execution and `unverifiable / unsupervised_settled` after completion. `worker-show` independently observed the exact OpenCode terminal as live while it ran. These fleet values are expected for the viewer's current OpenCode launch path; they do not by themselves establish a broken OpenCode hook. Use the Task/Dispatch outcome and exact terminal observation for this path, and do not treat `unverifiable` as proof of exit.
 
 A direct read-only `worker-start --agent opencode` test on Orca 1.4.209 with OpenCode 2.0.15 still failed to deliver the Task: the receipt said `input_accepted`, but the OpenCode TUI stayed at its empty initial composer, with no agent turn or `worker_done`. The test Dispatch was abandoned, its exact terminal closed, and its Task marked failed. This is why the viewer keeps the one-shot compatibility path; `input_accepted` alone does not validate prompt delivery.
 
