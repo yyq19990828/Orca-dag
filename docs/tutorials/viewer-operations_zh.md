@@ -118,6 +118,18 @@ viewer 的 `opencode` 选择运行的就是 OpenCode 2。在运行中的 Orca �
 
 后续运行时发现可继续加在这里，写清受影响的启动路径、可观察的现象和已验证的处理方式。Codex TUI 可见、Task 已完成与 Orca 的 worker 存活状态是不同的证据。
 
+### Orca 1.4.222 兼容边界
+
+[Orca 1.4.222](https://github.com/stablyai/orca/releases/tag/v1.4.222) 会等到 OpenCode 确实能够提交 worker 的 Task，而不只是等输入框出现。这同时适用于原生 `opencode` 和 `opencode2` 启动；viewer 在节点未指定模型时已经使用后者。就绪检测和提交交给 Orca，viewer 不追加 Enter 重试。远程 worker 需要执行主机更新才能使用这项等待逻辑；只更新 Run 所在的主机不能证明它已经生效。
+
+新版原生模型覆盖是另一份契约。在该发布标签的源码中，[`opencode` 模型预检](https://github.com/stablyai/orca/blob/v1.4.222/src/main/opencode/opencode-model-startup-plan.ts) 只接受经过验证的 OpenCode 2.0.16，或[精确的旧版 1.18.30、1.18.32](https://github.com/stablyai/orca/blob/v1.4.222/src/main/opencode/opencode-model-version-policy.ts)，并在执行主机检查模型是否可用。它没有为 `opencode2` 增加启动模型目录。因此，通用的 `orchestration.worker-launch-preferences.v1` 声明不足以开启 viewer 原生分支的模型选择。OpenCode 模型覆盖还要求当前或已有工作区，不能创建新工作树，也不支持 effort 或复用已有终端。viewer 继续让选定模型走现有一次性路径，并保留该路径的放置限制。
+
+coordinator 回归套件覆盖 1.4.220 和 1.4.222：原生完成与释放、原生拒绝后不启动第二个 worker，以及即使声明了模型能力也保留指定模型的兼容路径。较新的 CLI 连接到旧版、预发布或版本未知的运行中应用时，仍走兼容路径。这些模拟 CLI 测试证明路由和生命周期记账，不证明真实 prompt 已提交；运行时验收必须观察到 Task 执行、获接受的 `worker_done` 和终端释放。
+
+若 Orca 拒绝启动并报告 `Agent launcher opencode2 is disabled or unavailable`，检查执行主机上的 **设置 → 智能体 → OpenCode 2**。PATH 上安装了命令并不会自动启用 Orca launcher。启用后 Stop，再 Run，或明确重试失败的 Task。viewer 会保留原始拒绝和请求 ID、补充这条恢复提示，并停住 Task，不启动替代 worker。后续“未创建资源”的清理结论也不再覆盖启动原因。
+
+2026-10-08，Orca 1.4.222 上首次真实只读验收在创建 Dispatch 前被拒绝，原因是当前 profile 禁用了 `opencode2`；PATH 上的两个命令当时已经报告 OpenCode 2.0.15。用户启用 OpenCode 2 后，同一 viewer coordinator 路径通过验收：Run `run_293bfeda1764`、Task `task_eeae01b16f77`、Dispatch `ctx_ff7d6ff78bf4`。worker 阅读 README.md 并发送 `ORCA-14222-E2E-OK`；Orca 记录了获接受的消息 `msg_eeb2e81dec48`、Task `completed` 和 worker `succeeded`。coordinator 通过 `worker_done` 结算、进入 `completed`，并释放 worker 终端。按 Dispatch 查询的 `worker-show` 确认终端资源为 `released`，没有后续动作。所有测试 coordinator 终端已关闭，没有新增终端残留，原有终端均保留。这次验收覆盖本地当前工作树、未指定模型的只读路径；worker 输出仍是有裁剪的终端归档，不是精确的 provider transcript。
+
 ### Codex 原生启动与兼容路径
 
 在 Orca 1.4.209、Codex 0.156.1 上，未显式传入 `--enable hooks` 的 Codex TUI 可以执行注入的 Task 并发送 `worker_done`，但 `worker-list` 仍显示 `unverifiable / missing_status`。同一 Run 的 GPT-6 Luna 对照测试中，用 `codex --enable hooks ...` 新启动的 TUI 在任务运行时显示 `live`，来源为 `agent_status`；本机的 `codex features list` 原本就显示 `hooks` 已启用。复用的 Codex app-server 缺少 Orca pane 环境变量是可能的原因，但尚未直接捕获钩子子进程的环境。

@@ -4427,6 +4427,12 @@ export async function listModels(harness: string): Promise<string[]> {
 /**
  * opencode workaround, verified end-to-end against Orca on 2026-08-10.
  *
+ * This is the compatibility path for explicit models and older/unknown Orca
+ * runtimes. Without a model, the coordinator uses native `opencode2` on
+ * 1.4.220+. Orca 1.4.222 fixes native submit readiness, but its model support
+ * is for the separate `opencode` agent with strictly verified CLI versions;
+ * that does not yet qualify this viewer's `opencode2` model launch.
+ *
  * `worker-start --agent opencode` opens the opencode TUI but does not reliably
  * land the injected preamble (orca #9951) — the app opens with no prompt and
  * never executes. The generic TUI-injection that `startLegacyWorker` uses is

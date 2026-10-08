@@ -182,6 +182,7 @@ npm publish ./dist-npm --access public --tag bootstrap
 ## viewer 能做什么
 
 - **OpenCode 2 原生 TUI**：已有的 `opencode` 选择，在运行中的 Orca ≥ 1.4.220 且未指定逐节点模型时，会使用 Orca 的 `opencode2` agent ID；状态、放置与终端清理由 Orca 管理，模型取自 OpenCode 自身配置。指定模型则保留 `opencode run --auto -m` 一次性路径；旧版或版本未知的运行时也保留该路径。原生启动失败后绝不再启动第二个 worker。已用 OpenCode 2.0.22 验证只读和写文件 Task。
+- **Orca 1.4.222 兼容性**：原生 OpenCode Task 会受益于 Orca 改进后的提交就绪检测。新版原生模型选择针对独立的 `opencode` agent 和经过验证的 CLI 版本，并不覆盖 viewer 的 `opencode2` 路径；选定模型仍走一次性路径。详见[兼容边界](docs/tutorials/viewer-operations_zh.md#orca-14222-兼容边界)。
 
 - **按 workspace 隔离的 Run 选择器**：Orca 的 Run 注册表是全局的，但 viewer 只显示任务创建者身份与当前 workspace 匹配的 Run（以及该 workspace 已保存/刚创建的空 Run）。紧凑选择器以稳定的 `run_*` 编号为主信息，objective 作为次级说明。**＋ Create Run** 会从当前 workspace 创建一个空 Run 并立即选中。**Load older** 沿 Orca 的游标分页注册表继续往前翻（不透明游标逐字节透传），也可以直接按精确 `run_*` id 打开 —— 精确查找会重新校验 workspace 归属，外来 id 一律按不存在处理，绝不泄露其他 workspace 的 Run。
 - **Run 健康徽标**：选中的 Run 始终报告它的归属状态 —— **viewer 自己协调**、**外部协调中**、**无绑定** 或 **内部不一致**（Orca 自身记录相互矛盾），并给出按来源的计数，读取失败时显示警告（读取失败绝不是悄悄当零处理）。任务为空但仍有消息的 Run 会被解释成这种情况，而不是看起来像渲染故障。

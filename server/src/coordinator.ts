@@ -2996,9 +2996,16 @@ async function decideTerminalOwnership(attempt: Attempt, opts: StartOpts, readyT
     }
     // Positively nothing was created — the cleanest failed start there is.
     attempt.terminalDecision = "not_needed";
-    attempt.terminalDetail = receipt?.failedStage
+    const cleanupDetail = receipt?.failedStage
       ? `start failed at ${receipt.failedStage}; nothing was created`
       : "start never created a resource";
+    // A cleanup verdict is not the launch diagnosis. Keep the original
+    // refusal (including its request id and recovery hint) visible after the
+    // next tick parks the task; otherwise "nothing was created" erases the
+    // only actionable explanation from the attempt panel.
+    attempt.terminalDetail = attempt.terminalDetail
+      ? `${attempt.terminalDetail} ${cleanupDetail}.`
+      : cleanupDetail;
     return;
   }
 
@@ -3473,6 +3480,10 @@ async function startOne(
     // id (`opencode2`). Older/unknown runtimes and explicit `-m` selections
     // keep the proven one-shot path. Do not use CLI version as a proxy for the
     // app version, and do not retry an attempted native start as legacy.
+    // Orca 1.4.222 owns the improved OpenCode submit-readiness wait. Its new
+    // model override supports the distinct `opencode` agent and verified CLI
+    // versions, not `opencode2`: even an advertised launch-preferences
+    // capability must not remove this model guard or add viewer Enter retries.
     let nativeOpenCode = false;
     if (attempt.harness === "opencode" && !model) {
       const status = await runOrca<{ runtime?: { appVersion?: string } }>(["status"]);
@@ -3932,6 +3943,20 @@ async function startOne(
     // user retries explicitly (retryWorker), and nothing is re-placed behind
     // their back.
     const startErr = err as { receipt?: WorkerStartReceipt; code?: string | null; message?: string };
+    let failureDetail = startErr.message ?? String(err);
+    // Orca checks its enabled-agent setting before creating the worker. A
+    // binary on PATH does not enable that launcher, and the viewer cannot
+    // infer this host-local setting from a generic capability declaration.
+    // Explain this specific refusal without changing the runtime receipt or
+    // bypassing a disabled launcher via a second native/legacy start. Other
+    // agent_unconfigured errors keep their own diagnosis verbatim.
+    if (attempt.harness === "opencode" && startErr.code === "agent_unconfigured" &&
+        failureDetail.includes("Agent launcher opencode2 is disabled or unavailable")) {
+      failureDetail += " In Orca Settings → Agents on the execution host, enable OpenCode 2, " +
+        "then Stop and Run again, or explicitly retry this task. " +
+        "An installed opencode2 command alone does not enable the Orca launcher. " +
+        "No automatic retry or replacement worker was started.";
+    }
     attempt.startRequestId = null; // the start's outcome IS now known: failed
     if (startErr.receipt) {
       attempt.startReceipts.push(startErr.receipt);
@@ -3947,7 +3972,7 @@ async function startOne(
     attempt.settledVia = "start_failed";
     attempt.settledAt = Date.now();
     attempt.terminalDecision = "pending"; // ownership decided from the receipt
-    attempt.terminalDetail = startErr.message ?? String(err);
+    attempt.terminalDetail = failureDetail;
     // Phase 5: close the ledger row with what the viewer actually observed.
     // A `response_lost` stage means the outcome stayed UNRESOLVED — the row
     // is exactly the audit trail for reconstructing it via request-show.
@@ -3987,7 +4012,7 @@ async function startOne(
         id: `start_failed:${attempt.taskId}:${Date.now()}`,
         type: `start_failed · receipt retained, no auto-retry`,
         from: "coordinator",
-        subject: startErr.message ?? String(err),
+        subject: failureDetail,
         createdAt: new Date().toISOString(),
       },
       ...state.recentMessages,
@@ -3995,7 +4020,7 @@ async function startOne(
     // Infrastructure-level failures (CLI missing etc.) additionally surface in
     // the global error line; receipt-bearing failures stay on the attempt.
     if (!startErr.receipt) {
-      state.error = `Failed to start task ${task.id}: ${startErr.message ?? String(err)}`;
+      state.error = `Failed to start task ${task.id}: ${failureDetail}`;
     }
   }
 }
