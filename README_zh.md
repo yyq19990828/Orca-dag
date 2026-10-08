@@ -91,6 +91,18 @@ npx orca-orchestration-launcher
 
 它会把 `orca-dag` **skill** 装进你本机所有的 coding agent（Claude Code、Codex、Cursor、OpenCode、Gemini CLI、Droid，以及共享的 `~/.agents/skills` —— 存在哪个装哪个），然后在 <http://localhost:8787> 起 **viewer**，并把当前目录当作工作区。重复执行是安全的：skill 只在内容真的变了时才重写，你自己做的 symlink 目录会被完全跳过。
 
+**工作区初始化也是这条命令的一部分：**启动时默认向工作区的 `.gitignore` 添加带管理标记的 `.orca/` 规则，并打印规划目录与忽略规则的处理结果。已有匹配规则会直接复用，其他规则保留，符号链接或非普通文件形式的 `.gitignore` 不会被修改。初始化失败会明确警告，但不阻止 viewer 启动。
+
+agent 会为每个新需求或新建 Run 的重新规划创建独立的 UTC 时间戳目录（含毫秒；重名时换时间戳或加数字后缀），不再覆盖共用文档：
+
+```text
+.orca/20261008-143012-123/
+  PRD.md
+  TECH_SPEC.md
+```
+
+继续同一个计划或向其 Run 添加 Task 时沿用原目录；agent 会在两份文档中记录 Run id，并同时告知目录与 id。文档是本地忽略的产物，**不强制加入 Git**；Task spec 自包含所需信息，隔离工作树里的 worker 不依赖这些文件。仅启动 viewer 不会创建时间戳目录。
+
 接着直接在 agent 里聊需求就行，它会按 `SKILL.md` 的规范把 DAG 建进 Orca，并提示你打开 viewer。
 
 只要 **Node.js ≥ 20** —— 包是个约 500 KB、零依赖的 bundle，`bunx orca-orchestration-launcher` 同样可用。想常驻就 `npm i -g orca-orchestration-launcher`。
@@ -103,7 +115,10 @@ tar xzf orca-dag-darwin-arm64.tar.gz && sudo mv orca-dag /usr/local/bin/ && orca
 
 开关：`PORT`（默认 8787）、`NO_OPEN=1`（不自动开浏览器）、`--no-skill` / `ORCA_DAG_NO_SKILL=1`（不碰 agent 的 skill 目录）、`WORKSPACE_DIR`（用别的工作区代替当前目录 —— 必须存在，直接作为 `path:` worktree）、`ORCA_WORKTREE`（显式 Orca worktree 选择器，覆盖 `path:` 默认值）、`ORCA_CLI_COMMAND`（要运行的 Orca CLI，带引号的 argv、不经 shell —— 见[用哪个 orca、哪个工作区](#用哪个-orca哪个工作区能不能执行)）、`ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1`（允许任意自定义 harness 命令 —— 见[安全模型](#安全模型)）。
 
+`--no-workspace-init` / `ORCA_DAG_NO_WORKSPACE_INIT=1` 跳过自动修改 `.gitignore`，规划前请自行添加 `.orca/`。它与 `--no-skill` 相互独立，后者只跳过 agent skill 安装。
+
 只想要 skill、不要 viewer，或者想用标准工具管理？`npx skills add yyq19990828/Orca-dag --skill orca-dag --global` —— 即 [open agent skills CLI](https://github.com/vercel-labs/skills)，`orca skills install` 底层调的也是它。
+仅装 skill 不会初始化项目；skill 会要求 agent 在写规划文档前确认 `.orca/` 已被忽略。
 
 ## 卸载
 
@@ -113,7 +128,9 @@ npx orca-orchestration-launcher uninstall   # 想先看清单就加 --dry-run
 
 把 skill 从所有装过的 agent 目录里删掉，并关掉 viewer 崩溃后残留的 `orca-dag coordinator` 终端，关闭前会逐个报告每个终端当时协调的工作区（目录 + hash）—— 后面这条其实最要紧，残留的 coordinator 会一直占着 Run，把你自己的 agent 挡在外面。你自己做的 symlink 只会被 unlink，不会顺着链接删，checkout 是安全的。
 
-工作区历史默认保留：`.orca-dag.config.json` 保存启动选择和布局，`.orca-dag.activity.jsonl` 保存有界的 Viewer Activity 与有意义的 coordinator check（重复的空轮询仅保留在内存中）；加 `--purge` 会同时删除两者。程序本身也会保留，因为进程不能删除正在运行的自身二进制；uninstall 会打印对应的后续命令。
+请在项目根目录卸载（或设置 `WORKSPACE_DIR`）：它还会从该工作区的 `.gitignore` 中删除**自己写入且未被修改的 `.orca/` 管理块**。用户自写规则、修改过的管理块和 `.gitignore` 文件本身都保留。`.orca/` 规划文档**始终保留，即使加了 `--purge`**；卸载后如需继续忽略它们，请自行添加 `.orca/` 规则。Orca 中的 Run/Task 历史不会被删除。
+
+工作区的 viewer 历史默认保留，包括配置、Activity/check 回执、请求审计、会话绑定、派工历史和已提交 Stage 的 Git 证据。加 `--purge` 只删除这些 viewer 自有状态，不删除规划文档。程序本身也会保留，因为进程不能删除正在运行的自身二进制；uninstall 会打印对应的后续命令。
 
 ### 自己构建和发版
 
@@ -161,7 +178,7 @@ npm publish ./dist-npm --access public --tag bootstrap
 
    > 用 orca-dag skill：把「给报表页加 CSV 导出」拆成一张任务 DAG。
 
-   agent 会先问几个澄清问题，写 `docs/PRD.md` / `docs/TECH_SPEC.md`，然后跑 `orca orchestration run-create` + `task-create --deps …`。建完会告诉你 **Run id**（形如 `run_ab12cd34ef56`）。
+   agent 会先问几个澄清问题，写 `.orca/<timestamp>/PRD.md` / `.orca/<timestamp>/TECH_SPEC.md`，然后跑 `orca orchestration run-create` + `task-create --deps …`。建完会告诉你 **Run id**（形如 `run_ab12cd34ef56`）和规划目录。
 
 4. **在顶栏下拉框选中** agent 刚报的那个 Run。DAG 出现并每 2 秒刷新 —— 你可以继续和 agent 聊着调整计划，看节点实时长出来。
 
@@ -305,7 +322,7 @@ viewer 是直通 Orca 的控制面 —— 启动 Run 会 fence 掉原本的 coor
 ```
 skill/SKILL.md            薄项目工作流：PRD → 设计 → 任务 DAG → viewer；命令语法交给与运行时匹配的编排指南（skills get orchestration）
 server/src/
-  index.ts               进程入口：子命令（--help / uninstall）、CLI+工作区解析、装 skill、回环监听
+  index.ts               进程入口：子命令（--help / uninstall）、CLI+工作区解析、skill/工作区初始化、回环监听
   app.ts                 Express 应用（createApp）：readiness / dag / session / runs / run / run-stop / run-status / activity / inbox / messages / gates / workers / requests / environments / models / config + 托管 SPA
   activity.ts            Run 作用域的可读事件解析器 + 有界 viewer Activity 日志
   requestLedger.ts       查看器发起的变更请求 id 的有界、原子账本（.orca-dag.requests.jsonl）——仅元数据，状态永远通过 request-show 实时读取
@@ -316,7 +333,8 @@ server/src/
   runHealth.ts            Run 归属/健康评估（viewer 自身协调 / 外部 / 无绑定 / 内部不一致），支撑 /api/run-health 与 /api/capabilities
   config.ts               viewer 配置持久化：workspace 下 .orca-dag.config.json 的读写（/api/config）
   skill.ts                启动时把 skill/SKILL.md 装进本机的各个 agent
-  uninstall.ts            `orca-dag uninstall`：skill.ts 的严格镜像，外加清理残留终端
+  planning.ts             .orca/ 忽略规则的管理块初始化/撤销及明确的启动提示
+  uninstall.ts            `orca-dag uninstall`：镜像撤销 skill/工作区初始化，保留规划，清理残留终端
   webAssets.ts            编译期内嵌前端资源（以及 skill）的加载器
 web/src/
   App.tsx                 全宽 DAG 主壳、每 2s 轮询、手绘 SVG filter 定义

@@ -30,9 +30,12 @@ env -u ORCA_TERMINAL_HANDLE -u ORCA_TAB_ID -u ORCA_WORKSPACE_ID -u ORCA_WORKTREE
 | `ORCA_WORKTREE` | `path:<WORKSPACE_DIR>` | coordinator 与 Current worker 的显式 Orca 选择器，可覆盖路径默认值。 |
 | `ORCA_CLI_COMMAND` | 自动选择 CLI | 指定准确的可执行文件及带引号的 argv；**不经 shell** 解析。管道、重定向、命令替换及未引用的 `$` 会被拒绝。 |
 | `--no-skill` 或 `ORCA_DAG_NO_SKILL=1` | 安装 skill | 跳过将随包提供的 `orca-dag` skill 尽力安装到已有 agent 目录。 |
+| `--no-workspace-init` 或 `ORCA_DAG_NO_WORKSPACE_INIT=1` | 初始化 `.orca/` 忽略规则 | 跳过向工作区 `.gitignore` 添加规划产物管理规则；规划前请自行确认 `.orca/` 已被忽略。 |
 | `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1` | 关闭 | 允许自定义 harness 命令。它们走兼容性本地路径，不能使用隔离放置。 |
 
 CLI 自动选择顺序为：`ORCA_CLI_COMMAND` → 设置了 `ORCA_DEV_REPO_ROOT` 时的 `orca-dev` → Linux 且不在 Orca 终端内时的 `orca-ide` → `orca`。读取和修改都使用同一个已解析的 CLI。`GET /api/readiness` 会显示 CLI、工作区、版本及不能执行的原因。Orca 1.4.160–1.4.204 可以查看 Run；执行需要 1.4.205 或更新版本。viewer 和 skill 可以通过 `npx orca-orchestration-launcher` 一起安装，也有独立发布的二进制文件。
+
+启动时还会提示 `.orca/<timestamp>/{PRD.md,TECH_SPEC.md}` 及默认 `.gitignore` 初始化是否成功。skill 为每个新计划创建独立的 UTC 时间戳目录，记录 Run id，并保留旧计划。这些忽略的文档不提交 Git，也不会自动复制到隔离工作树；Task spec 必须包含 worker 所需信息。
 
 ## 点击 Run 之前先看懂界面
 
@@ -110,7 +113,7 @@ viewer 也通过本地 HTTP API 提供同一套控制。`GET` 是回环地址上
 
 使用 Workspace lanes 的 **Changed files / Diff** 或文件审核操作，在 Orca 中打开精确的本地工作区。只有目标工作区已经包含预期代码，才解决集成门。lane 已落定，且改动和 worker 归属都已处理后，才能在明确确认下通过 `orca worktree rm` 移除工作树。
 
-几个工作区文件各有用途：`.orca-dag.config.json` 保存偏好，`.orca-dag.activity.jsonl` 保存有界的解释性活动记录，`.orca-dag.requests.jsonl` 保存可审计的修改请求 ID，`.orca-dag.sessions.json` 保存精确的提供方会话绑定。它们都不能代替 Orca 权威的 Run/Task/Dispatch 记录。`orca-dag uninstall` 会移除已安装的 skill 和残留的 viewer coordinator 终端；加 `--purge` 还会移除工作区配置和 Activity 文件。它不会替你集成或发布分支。
+几个工作区文件各有用途：`.orca-dag.config.json` 保存偏好，`.orca-dag.activity.jsonl` 保存有界的解释性活动记录，`.orca-dag.requests.jsonl` 保存可审计的修改请求 ID，`.orca-dag.sessions.json` 保存精确的提供方会话绑定。它们都不能代替 Orca 权威的 Run/Task/Dispatch 记录。`orca-dag uninstall` 会移除已安装的 skill、残留的 viewer coordinator 终端，以及所选工作区中自己写入且未被修改的 `.orca/` 忽略管理块；用户自写规则会保留。加 `--purge` 还会移除 viewer 自有历史，但**永远不删除 `.orca/` 规划文档**。卸载后如需继续忽略这些文档，请自行添加 `.orca/` 规则。它不会删除 Orca Run/Task 历史，也不会替你集成或发布分支。
 
 ## 已知局限
 

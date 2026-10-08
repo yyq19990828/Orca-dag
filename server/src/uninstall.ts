@@ -7,7 +7,9 @@
 //
 //   removed   the orca-dag skill from every agent directory
 //   removed   leftover "orca-dag coordinator" Orca terminals
+//   removed   the exact managed .orca/ block in this workspace's .gitignore
 //   removed   .orca-dag.config.json          (only with --purge)
+//   kept      .orca/ planning documents, even with --purge (real user work)
 //   reported  the npm/global install and the npx cache — a running process
 //             cannot delete its own program, so we print the command instead
 //
@@ -24,13 +26,14 @@ import { REQUESTS_FILE } from "./requestLedger";
 import { SESSIONS_FILE } from "./providerSessions";
 import { LAUNCHES_FILE } from "./launchHistory";
 import { stageGitStoreDir } from "./stageGit";
+import { PLANNING_DIR, removePlanningIgnore } from "./planning";
 
 export interface UninstallOptions {
   /** Print what would happen, change nothing. */
   dryRun: boolean;
   /** Also delete workspace-owned viewer config and activity history. */
   purge: boolean;
-  /** Directory whose `.orca-dag.config.json` --purge targets. */
+  /** Workspace whose managed ignore rule and viewer history are targeted. */
   workspace: string;
 }
 
@@ -123,6 +126,18 @@ export async function runUninstall(opts: UninstallOptions): Promise<void> {
 
   const skills = removeSkills(opts.dryRun, log);
   const terminals = await closeCoordinatorTerminals(opts.dryRun, log);
+  const ignore = removePlanningIgnore(opts.workspace, opts.dryRun);
+  if (ignore.reason) {
+    log(`${act("skipped")}${ignore.path} — ${ignore.reason}`);
+  } else if (ignore.removed) {
+    log(`${act(opts.dryRun ? "would remove" : "removed")}${ignore.path} — managed ${PLANNING_DIR}/ ignore rule only`);
+  }
+  const planningDir = join(opts.workspace, PLANNING_DIR);
+  if (existsSync(planningDir) || isBrokenLink(planningDir)) {
+    // Planning docs are authored requirements/designs, not disposable viewer
+    // history. --purge must never become permission to erase those documents.
+    log(`${act("kept")}${planningDir} — planning documents (even with --purge); add ${PLANNING_DIR}/ to .gitignore yourself to keep them ignored`);
+  }
 
   let workspaceFiles = 0;
   const persisted = [
@@ -172,6 +187,7 @@ export async function runUninstall(opts: UninstallOptions): Promise<void> {
 
   console.log(
     `\n${opts.dryRun ? "Would remove" : "Removed"}: ${skills} skill install(s), ${terminals} Orca terminal(s)` +
+      (ignore.removed ? `, ${ignore.removed} managed ignore block(s)` : "") +
       (workspaceFiles ? `, ${workspaceFiles} workspace file(s)` : "") + ".",
   );
 

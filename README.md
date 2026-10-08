@@ -92,6 +92,18 @@ npx orca-orchestration-launcher
 
 That installs the `orca-dag` **skill** into every coding agent on your machine (Claude Code, Codex, Cursor, OpenCode, Gemini CLI, Droid, and the shared `~/.agents/skills` directory — whichever of them exist), then starts the **viewer** on <http://localhost:8787> with the current directory as the workspace. It re-runs safely: the skill is only rewritten when it actually changed, and a skill directory you symlinked yourself is left untouched.
 
+**Workspace initialization is part of this command:** startup adds a marked `.orca/` rule to the workspace's `.gitignore` by default and prints the planning location and ignore result. Existing matching rules are reused, other rules are preserved, and a symlinked/non-regular `.gitignore` is never modified. A failure is reported as a warning, not a viewer startup error.
+
+The agent writes each new requirement or fresh replanning Run into its own UTC timestamp directory (milliseconds; collisions get a fresh timestamp or numeric suffix), rather than overwriting shared documents:
+
+```text
+.orca/20261008-143012-123/
+  PRD.md
+  TECH_SPEC.md
+```
+
+Continuing the same plan or adding Tasks to its Run keeps that directory; the agent records the Run id in both documents and reports the directory alongside the id. Documents are local and ignored, **not force-added to Git**. Task specs carry all required context so isolated workers do not depend on these files. Starting the viewer alone does not create a timestamp directory.
+
 Then just chat your requirement to the agent. It builds the DAG into Orca per `SKILL.md` and tells you to open the viewer.
 
 Needs only **Node.js ≥ 20** — the package is a ~500 KB dependency-free bundle, and `bunx orca-orchestration-launcher` works too. Keep it around with `npm i -g orca-orchestration-launcher`.
@@ -104,7 +116,10 @@ tar xzf orca-dag-darwin-arm64.tar.gz && sudo mv orca-dag /usr/local/bin/ && orca
 
 Switches: `PORT` (default 8787), `NO_OPEN=1` (don't open the browser), `--no-skill` / `ORCA_DAG_NO_SKILL=1` (don't touch the agent skill directories), `WORKSPACE_DIR` (use another workspace instead of the current directory — must exist, becomes the exact `path:` worktree), `ORCA_WORKTREE` (explicit Orca worktree selector, overriding the `path:` default), `ORCA_CLI_COMMAND` (exact Orca CLI to run, as quoted argv with no shell — see [CLI/workspace resolution](#which-orca-binary-which-workspace-whether-it-can-execute)), `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1` (allow arbitrary custom harness commands — see [Security](#security-model)).
 
+`--no-workspace-init` / `ORCA_DAG_NO_WORKSPACE_INIT=1` skips automatic `.gitignore` changes; add `.orca/` yourself before planning. This is independent of `--no-skill`, which only skips agent skill installation.
+
 Want the skill *without* the viewer, or managed by the standard tooling? `npx skills add yyq19990828/Orca-dag --skill orca-dag --global` — the [open agent skills CLI](https://github.com/vercel-labs/skills), the same one `orca skills install` shells out to.
+The skill-only installer does not initialize a project; the skill instructs your agent to ensure `.orca/` is ignored before writing planning documents.
 
 ## Uninstall
 
@@ -114,7 +129,9 @@ npx orca-orchestration-launcher uninstall   # add --dry-run first if you want to
 
 Removes the skill from every agent directory it was installed into and closes any `orca-dag coordinator` terminal a crashed viewer left bound to a Run, reporting the workspace (directory + hash) each terminal was coordinating before closing it (that cleanup matters — a stale coordinator keeps your own agent fenced out). A skill directory you symlinked yourself is unlinked, never followed, so your checkout is safe.
 
-Workspace history is kept by default: `.orca-dag.config.json` stores launch choices and layout, while `.orca-dag.activity.jsonl` stores bounded Viewer Activity plus meaningful coordinator-check receipts (repetitive empty polls stay memory-only). Pass `--purge` to remove both. The program itself is also retained because a running process cannot remove its own binary; uninstall prints the appropriate follow-up command.
+Run uninstall from the project root (or set `WORKSPACE_DIR`): it also removes **only its exact managed `.orca/` block** from that workspace's `.gitignore`. User-authored rules, edited blocks, and the `.gitignore` file itself are retained. `.orca/` planning documents are **always kept, even with `--purge`**; add your own `.orca/` rule if you want them to remain ignored after uninstall. No Orca Run/Task history is deleted.
+
+Workspace viewer history is kept by default: config, Activity/check receipts, request audit, session bindings, launch history, and committed-Stage Git evidence. Pass `--purge` to remove that viewer-owned state, not planning documents. The program itself is also retained because a running process cannot remove its own binary; uninstall prints the appropriate follow-up command.
 
 ### Building and releasing it yourself
 
@@ -162,7 +179,7 @@ An end-to-end pass, starting from nothing installed:
 
    > Use the orca-dag skill: break "add CSV export to the reports page" into a task DAG.
 
-   The agent will ask a few clarifying questions, write `docs/PRD.md` / `docs/TECH_SPEC.md`, then run `orca orchestration run-create` + `task-create --deps …`. When it's done it tells you the **Run id** (like `run_ab12cd34ef56`).
+   The agent will ask a few clarifying questions, write `.orca/<timestamp>/PRD.md` / `.orca/<timestamp>/TECH_SPEC.md`, then run `orca orchestration run-create` + `task-create --deps …`. When it's done it tells you the **Run id** (like `run_ab12cd34ef56`) and the planning directory.
 
 4. **Pick the Run** the agent just named in the top-bar dropdown. The DAG appears and refreshes every 2 seconds — you can keep chatting with the agent to reshape it and watch nodes pop in live.
 
@@ -306,7 +323,7 @@ Mutation routes that drive execution (`POST /api/runs`, `POST /api/run`, gate re
 ```
 skill/SKILL.md            thin project workflow: PRD → design → task DAG → viewer; delegates command syntax to the runtime-matched guide (skills get orchestration)
 server/src/
-  index.ts                process entry: subcommands (--help / uninstall), CLI+workspace resolution, skill install, loopback listener
+  index.ts                process entry: subcommands (--help / uninstall), CLI+workspace resolution, skill/workspace initialization, loopback listener
   app.ts                  the Express app (createApp): readiness / dag / session / runs / run / run-stop / run-status / activity / inbox / messages / gates / workers / requests / environments / models / config + SPA serving
   activity.ts             Run-scoped readable event parser + bounded viewer Activity journal
   requestLedger.ts        bounded, atomic ledger of viewer-originated mutation-request ids (.orca-dag.requests.jsonl) — metadata only, state always re-read live via request-show
@@ -317,7 +334,8 @@ server/src/
   runHealth.ts            Run ownership/health evaluation (viewer-owned / external / unbound / inconsistent) behind /api/run-health and /api/capabilities
   config.ts               viewer config persistence: .orca-dag.config.json in the workspace (/api/config)
   skill.ts                installs skill/SKILL.md into the agents on this machine, on startup
-  uninstall.ts            `orca-dag uninstall`: the exact mirror of skill.ts, plus stale-terminal cleanup
+  planning.ts             managed .orca/ ignore setup/removal and explicit startup reporting
+  uninstall.ts            `orca-dag uninstall`: mirrors skill/workspace setup, preserves plans, cleans stale terminals
   webAssets.ts            loader for the frontend assets (and the skill) embedded at build time
 web/src/
   App.tsx                 full-width DAG shell, 2s polling, hand-drawn SVG filter defs

@@ -75,11 +75,11 @@ jobs:
           curl -sf -X POST -H "X-Orca-Dag-Token: $TOKEN" http://127.0.0.1:8899/api/run-stop | grep -q '"ok":true'
           echo "✅ token-bearing mutation succeeds"
 
-      # Startup writes the skill into the user's agent directories, so the
-      # uninstall path has to keep taking it back — otherwise the install is a
+      # Startup writes the skill and a workspace ignore rule, so the
+      # uninstall path has to keep taking them back — otherwise the install is a
       # one-way door. Round trip against a throwaway HOME so the runner's own
       # config is never involved.
-      - name: Skill install/uninstall round trip
+      - name: Skill and planning-ignore install/uninstall round trip
         run: |
           set -euo pipefail
           mkdir -p /tmp/fakehome/.claude
@@ -89,9 +89,18 @@ jobs:
           # The freshly installed skill must be the thin workflow that loads the
           # runtime-matched orchestration guide — not a stale command copy.
           grep -q 'skills get orchestration' /tmp/fakehome/.claude/skills/orca-dag/SKILL.md
-          HOME=/tmp/fakehome ./node_modules/.bin/orca-dag uninstall | grep -q removed
+          grep -q '.orca/<timestamp>/PRD.md' /tmp/fakehome/.claude/skills/orca-dag/SKILL.md
+          grep -Fxq '# >>> orca-dag planning artifacts (managed)' .gitignore
+          mkdir -p .orca/20261008-143012-123
+          printf 'keep this plan\n' > .orca/20261008-143012-123/PRD.md
+          HOME=/tmp/fakehome ./node_modules/.bin/orca-dag uninstall --dry-run --purge >/tmp/uninstall-dry-run.log
+          grep -Fxq '# >>> orca-dag planning artifacts (managed)' .gitignore
+          test -f /tmp/fakehome/.claude/skills/orca-dag/SKILL.md
+          HOME=/tmp/fakehome ./node_modules/.bin/orca-dag uninstall --purge | grep -q removed
           test ! -e /tmp/fakehome/.claude/skills/orca-dag
-          echo "✅ install and uninstall stay symmetric"
+          ! grep -Fxq '# >>> orca-dag planning artifacts (managed)' .gitignore
+          grep -Fxq 'keep this plan' .orca/20261008-143012-123/PRD.md
+          echo "✅ install and uninstall stay symmetric; planning documents are retained"
 
   binary:
     name: Bun binary build

@@ -30,9 +30,12 @@ env -u ORCA_TERMINAL_HANDLE -u ORCA_TAB_ID -u ORCA_WORKSPACE_ID -u ORCA_WORKTREE
 | `ORCA_WORKTREE` | `path:<WORKSPACE_DIR>` | Explicit Orca selector for coordinator and Current workers; overrides the path default. |
 | `ORCA_CLI_COMMAND` | Auto-resolved CLI | Exact executable plus quoted argv; parsed **without a shell**. Pipes, redirection, substitutions, and unquoted `$` are rejected. |
 | `--no-skill` or `ORCA_DAG_NO_SKILL=1` | Skill installed | Skip best-effort installation of the bundled `orca-dag` skill into existing agent directories. |
+| `--no-workspace-init` or `ORCA_DAG_NO_WORKSPACE_INIT=1` | `.orca/` ignore initialized | Skip adding the managed planning-artifact rule to the workspace's `.gitignore`; ensure `.orca/` is ignored yourself before planning. |
 | `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1` | Off | Allow custom harness commands. Such commands use the legacy local path and cannot use an isolated placement. |
 
 CLI auto-resolution is `ORCA_CLI_COMMAND` → `orca-dev` when `ORCA_DEV_REPO_ROOT` is set → `orca-ide` on Linux outside an Orca terminal → `orca`. The resolved CLI is used for both reads and mutations. `GET /api/readiness` shows that choice, workspace, version, and any execution-disabled reason. Orca 1.4.160–1.4.204 can display a Run; execution requires 1.4.205 or newer. The viewer and skill also ship as standalone release binaries and in the `npx orca-orchestration-launcher` package.
+
+Startup also announces `.orca/<timestamp>/{PRD.md,TECH_SPEC.md}` and whether its default `.gitignore` setup succeeded. The skill creates a separate UTC timestamp directory for each new plan, records the Run id, and keeps earlier plans. These ignored docs are not committed or automatically copied to isolated worktrees; Task specs must carry the worker's required context.
 
 ## Read the interface before pressing Run
 
@@ -110,7 +113,7 @@ The viewer offers a local HTTP API for the same controls. `GET` routes are loopb
 
 Use Workspace lanes' **Changed files / Diff** or the file review actions to open an exact local workspace in Orca. Resolve integration gates only after the target workspace contains the intended code. Remove a worktree only after its lane is settled and its changes and worker ownership are accounted for; removal calls `orca worktree rm` with explicit confirmation.
 
-Workspace files have distinct purposes: `.orca-dag.config.json` stores preferences, `.orca-dag.activity.jsonl` stores bounded explanatory activity, `.orca-dag.requests.jsonl` stores mutation request IDs for audit, and `.orca-dag.sessions.json` stores exact provider session bindings. None replaces Orca's authoritative Run/Task/Dispatch records. `orca-dag uninstall` removes installed skills and stale viewer coordinator terminals; `--purge` also removes the workspace config and activity file. It does not merge or publish your branches.
+Workspace files have distinct purposes: `.orca-dag.config.json` stores preferences, `.orca-dag.activity.jsonl` stores bounded explanatory activity, `.orca-dag.requests.jsonl` stores mutation request IDs for audit, and `.orca-dag.sessions.json` stores exact provider session bindings. None replaces Orca's authoritative Run/Task/Dispatch records. `orca-dag uninstall` removes installed skills, stale viewer coordinator terminals, and only its exact managed `.orca/` ignore block in the selected workspace; user ignore rules are retained. `--purge` also removes viewer-owned history, but **never `.orca/` planning documents**. After uninstall, add your own `.orca/` rule if those retained documents should stay ignored. It does not delete Orca Run/Task history, merge, or publish your branches.
 
 ## Known limitations
 

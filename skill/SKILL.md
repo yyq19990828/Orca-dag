@@ -13,7 +13,7 @@ Every planning result **must be written into Orca's orchestration state** (by ru
 
 ## Tools you may use
 - **Bash** to run the resolved Orca CLI and read/write orchestration state.
-- **Read / Write / Edit** to write planning docs in the working directory (`docs/PRD.md`, `docs/TECH_SPEC.md`).
+- **Read / Write / Edit** to write planning docs in the working directory (`.orca/<timestamp>/PRD.md`, `.orca/<timestamp>/TECH_SPEC.md`).
 - Do not run destructive commands unrelated to this task (`rm`, `git push`, deleting files, …).
 
 ## Step 1 — resolve the Orca CLI (once, before anything else)
@@ -44,9 +44,17 @@ When you reach decision gates, also read its bundled reference (`<cli> skills ge
 ```
 
 ## Workflow (three phases, all in conversation)
-1. **Requirement clarification (PRD)**: align on the goal, MVP scope, and explicit non-goals with short questions — one key question at a time. If MVP is enough, plan only P0; don't over-design. Once agreed, write `docs/PRD.md`.
-2. **Technical design (TECH_SPEC)**: stack, data model (down to fields), module interfaces (pseudocode). Write `docs/TECH_SPEC.md`.
+1. **Requirement clarification (PRD)**: align on the goal, MVP scope, and explicit non-goals with short questions — one key question at a time. If MVP is enough, plan only P0; don't over-design. Once agreed, write `.orca/<timestamp>/PRD.md`.
+2. **Technical design (TECH_SPEC)**: stack, data model (down to fields), module interfaces (pseudocode). Write `.orca/<timestamp>/TECH_SPEC.md` in the **same** planning directory.
 3. **Decompose into a task DAG**: split the design into parallel/serial subtasks and write them into Orca (next section). **This step is the required output.**
+
+### Planning artifacts (one directory per plan)
+
+- For each **new requirement or fresh replanning Run**, create a new `.orca/<timestamp>/` directory. Use a filesystem-safe UTC timestamp with milliseconds: `YYYYMMDD-HHmmss-SSS` (e.g. `.orca/20261008-143012-123/`). Create the final directory exclusively; if it already exists, choose a new timestamp or append a numeric suffix. Never reuse another plan's directory or overwrite its documents.
+- Keep the same directory while refining that plan or adding Tasks to its existing Run. When resuming, use its explicitly recorded path, not whichever directory happens to be newest. After creating the Run, record its id in both documents and report the **Run id + planning directory** to the user.
+- `npx orca-orchestration-launcher` adds a marked `.orca/` rule to the workspace's `.gitignore` on startup and announces it. If you installed only the skill, opted out of workspace initialization, or saw an initialization warning, ensure `.orca/` is ignored before writing documents; preserve existing rules and never write through a symlinked `.gitignore` or `.orca` directory. Explain any inability to set up the ignore rule instead of silently assuming protection.
+- Planning docs are **local, ignored artifacts**, not committed source. Do not force-add them. Isolated worktrees won't automatically contain them: every Task spec must embed the requirements, interfaces, and acceptance criteria its worker needs, rather than relying on a planning-document path. Include the originating planning path for traceability, not as a required worker input.
+- `npx orca-orchestration-launcher uninstall` removes the installed skill and its managed ignore rule, but keeps planning documents even with `--purge`. User-authored ignore rules remain untouched.
 
 ## Writing the DAG into Orca (the core)
 
@@ -57,12 +65,12 @@ One Run holds one DAG — Orca only treats a Run as a namespace, so this is a co
 - **Self-check the graph after each batch** with a Run-scoped read (`task-list --run <run_id> --json`): verify the dependency arrows, because a wrong edge **cannot be fixed after creation** (see Boundaries).
 - **Write self-contained specs** — the guide's *Task-spec contract* is the floor: target, change, constraints, ownership, observable acceptance. The future executing worker must **never have to ask a question or enter plan mode**; use imperative sentences and avoid vague phrasing like "investigate" or "as appropriate".
 - **Plan workspace placement through the viewer, not the graph**: by default every task executes in the coordinator's current workspace. Tasks that must not share one working tree can be executed in isolated local workspaces — an exact existing workspace, a stacked child worktree, or an independent top-level one — and a dependency-ordered chain may share one such workspace as a serial lane. Which task goes where is **viewer-side launch configuration**, not Orca task state. Tell each worker to edit and commit in the worktree **already assigned to its Dispatch**; never tell it to create a worktree or switch branches when the viewer's placement creates one. Otherwise the worker can create a nested worktree with a different Git base, leaving the assigned Stage unchanged.
-- **For committed Stage integration, split every cross-workspace join into two Tasks**: a merge-preparation Task whose spec contains the exact marker `[orca-dag:merge-prep]`, then a development Task depending on it. The merge-preparation Task depends on every source Stage, runs in the target worktree, and its spec tells the worker to read the coordinator's Dispatch message, merge the named source commits with history-preserving Git merges, resolve conflicts, commit, and report completion. The development Task uses the **same workspace** and depends on the merge-preparation Task; give it only development work. Commit the planning docs and any other current-worktree changes **before starting the Run** so its base HEAD is clean. Every Stage worker must leave its worktree clean with its result committed before `worker_done`. Assign parallel source Stages to separate worktrees; unordered Tasks must not share a worktree, even if they edit different files. New worktrees in this mode start from the Run's captured HEAD, so leave any viewer `baseBranch` override empty. The viewer records each successful Stage's actual worktree and commit, sends the source paths/SHAs to the merge worker, and releases development only after Git verifies that all dependency SHAs are ancestors of the merge worktree's clean HEAD. Missing Git evidence parks the dependent Task. This mode is local Git only; remote and folder workspaces are unsupported.
+- **For committed Stage integration, split every cross-workspace join into two Tasks**: a merge-preparation Task whose spec contains the exact marker `[orca-dag:merge-prep]`, then a development Task depending on it. The merge-preparation Task depends on every source Stage, runs in the target worktree, and its spec tells the worker to read the coordinator's Dispatch message, merge the named source commits with history-preserving Git merges, resolve conflicts, commit, and report completion. The development Task uses the **same workspace** and depends on the merge-preparation Task; give it only development work. Commit current-worktree source changes (including a newly added `.gitignore` rule) **before starting the Run** so its base HEAD is clean; keep `.orca/` planning docs ignored, never force-add them. Every Stage worker must leave its worktree clean with its result committed before `worker_done`. Assign parallel source Stages to separate worktrees; unordered Tasks must not share a worktree, even if they edit different files. New worktrees in this mode start from the Run's captured HEAD, so leave any viewer `baseBranch` override empty. The viewer records each successful Stage's actual worktree and commit, sends the source paths/SHAs to the merge worker, and releases development only after Git verifies that all dependency SHAs are ancestors of the merge worktree's clean HEAD. Missing Git evidence parks the dependent Task. This mode is local Git only; remote and folder workspaces are unsupported.
 - **For ordinary lane Runs without that marker**, a cross-lane join retains the human `integrated` checkpoint. That resolution is a human assertion and does not prove Git ancestry.
 - **Add a decision gate** where human approval is needed (e.g. "approve the TECH_SPEC and move to execution?") — the guide's gates reference has the rules; the viewer surfaces approve/reject buttons.
 
 ## After the DAG is built: open the viewer and let it execute
-Once the graph is right, ask the user to open the viewer and **tell them the Run id**:
+Once the graph is right, ask the user to open the viewer and **tell them the Run id and `.orca/<timestamp>/` planning directory**:
 ```bash
 npx orca-orchestration-launcher    # run in the current project directory; serves http://localhost:8787 and opens the browser
 ```

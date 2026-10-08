@@ -6,11 +6,12 @@ import { loadEmbeddedAssets } from "./webAssets";
 import { describeSkillInstall, installSkill } from "./skill";
 import { createApp, listenLoopback } from "./app";
 import { createSecurityPolicy } from "./security";
+import { describePlanningSetup, setupPlanningWorkspace } from "./planning";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// Raw env value, used ONLY by `uninstall` to locate this workspace's config
-// file — uninstall must work even when the directory is gone. The serve path
+// Raw env value, used ONLY by `uninstall` to locate this workspace's files
+// — uninstall must work even when the directory is gone. The serve path
 // below resolves the real workspace via initOrcaRuntime().
 const RAW_WORKSPACE_DIR = process.env.WORKSPACE_DIR ?? process.cwd();
 
@@ -23,19 +24,22 @@ if (argv.includes("--help") || argv.includes("-h")) {
   console.log(`orca-dag — visualize and run an Orca orchestration task DAG
 
 Usage:
-  orca-dag                 install the orca-dag skill into your agents, then serve the viewer
-  orca-dag uninstall       remove the skill and close leftover Orca terminals
+  orca-dag                 install the skill, initialize planning ignores, then serve the viewer
+  orca-dag uninstall       remove the skill, managed ignore rule, and leftover Orca terminals
   orca-dag --help          show this
 
 Options:
   --no-skill               don't touch the agent skill directories on startup
-  --purge                  (uninstall) also delete this workspace's .orca-dag.config.json
+  --no-workspace-init      don't add .orca/ to the workspace's .gitignore
+  --purge                  (uninstall) also delete viewer history; planning docs are always kept
   --dry-run                (uninstall) report what would be removed, change nothing
 
 Environment:
   PORT=8787                port to serve on (always bound to loopback 127.0.0.1)
   NO_OPEN=1                don't open a browser tab
   ORCA_DAG_NO_SKILL=1      same as --no-skill
+  ORCA_DAG_NO_WORKSPACE_INIT=1
+                            same as --no-workspace-init
   WORKSPACE_DIR=<path>     workspace to use instead of the current directory
                            (must exist; used verbatim as the Orca worktree)
   ORCA_WORKTREE=<selector> explicit Orca worktree selector; default is the
@@ -45,7 +49,12 @@ Environment:
   ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1
                            allow arbitrary custom harness commands (they run as
                            shell lines inside worker terminals; the known agent
-                           ids — claude, codex, opencode, … — never need this)`);
+                           ids — claude, codex, opencode, … — never need this)
+
+Planning documents:
+  .orca/<UTC timestamp>/PRD.md and TECH_SPEC.md (one directory per plan).
+  Startup adds a marked .orca/ rule to .gitignore by default. Uninstall removes
+  only that managed rule, never your planning documents or your own ignore rules.`);
   process.exit(0);
 }
 
@@ -91,6 +100,13 @@ const { app, servingUI } = createApp({
 const skillReport = describeSkillInstall(
   await installSkill(__dirname, !argv.includes("--no-skill") && process.env.ORCA_DAG_NO_SKILL !== "1"),
 );
+const planningReport = describePlanningSetup(setupPlanningWorkspace(
+  runtime.workspace.dir,
+  !argv.includes("--no-workspace-init") && process.env.ORCA_DAG_NO_WORKSPACE_INIT !== "1",
+));
+// Announce workspace writes before listening, even if a later port bind fails.
+if (skillReport) console.log(skillReport);
+console.log(planningReport);
 
 // Loopback-only, deliberately: this API drives orchestration mutations that
 // fence real agent terminals, so it must not be reachable from the LAN. The
@@ -99,7 +115,6 @@ const server = await listenLoopback(app, Number(process.env.PORT ?? 8787));
 const addr = server.address();
 const port = typeof addr === "object" && addr ? addr.port : Number(process.env.PORT ?? 8787);
 const url = `http://localhost:${port}`;
-if (skillReport) console.log(skillReport);
 console.log(`Orca DAG viewer → ${url} (bound to 127.0.0.1)`);
 console.log(
   `Orca CLI: ${formatCommand(runtime.command)} · workspace: ${runtime.workspace.dir} ` +
