@@ -10,6 +10,9 @@ import {
   bindRun,
   checkReadiness,
   closeTerminal,
+  closeReleasedOpenCodeTui,
+  retainOpenCodeTui,
+  workerStopOperation,
   createRun,
   createTempCoordinatorTerminal,
   explainReadiness,
@@ -534,7 +537,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
    * (the durable request identity of that mutation).
    */
   const terminalMutationWithLedger = async <
-    T extends { state: string },
+    T extends { state: string; providerExecutionExited?: true },
   >(
     operation: "worker-release" | "worker-retain" | "worker-stop" | "worker-abandon",
     dispatchId: string,
@@ -576,7 +579,9 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
           // with a positively-observed `stopped` state, whichever surface
           // performed the stop.
           note:
-            operation === "worker-stop"
+            operation === "worker-abandon" && receipt.providerExecutionExited
+              ? `viewer-observed OpenCode provider stop state: ${receipt.state}`
+              : operation === "worker-stop"
               ? `viewer-observed stop state: ${receipt.state}`
               : `viewer-observed terminal state: ${receipt.state}`,
         })
@@ -1181,7 +1186,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       assertEnvironmentPlacementCompatibility(environmentByTask, placementByTask);
       // Per-task opt-out from automatic release (plan §7.3 retainByTask).
       // The request wins; the persisted config fills it in so a hand-edited
-      // `.orca-dag.config.json` works without any UI for it yet. Absent
+      // `.orca-dag/config.json` works without any UI for it yet. Absent
       // everywhere → default behavior (release after settlement).
       const retainByTask =
         validateBooleanTaskMap(req.body?.retainByTask, "retainByTask") ??
@@ -1192,17 +1197,18 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       await requireExecutionEnabled();
       // `worker-stop` parks an interrupted Task as blocked. A later Run click
       // is the user's explicit resume decision, but only Dispatches for which
-      // this viewer observed a definitive `stopped` receipt may be retried.
+      // this viewer observed a definitive native stopped receipt or a confirmed
+      // OpenCode provider exit + abandoned accounting receipt may be retried.
       // The coordinator cross-checks these identities against live fleet state
       // before changing a Task; this audit metadata is a selector, never the
       // lifecycle authority by itself.
       const resumeStoppedDispatchIds = (resumeBlocked ? [] : await requestLedger.list().catch(() => []))
         .filter(
           (record) =>
-            record.operation === "worker-stop" &&
+            ((record.operation === "worker-stop" && record.note === "viewer-observed stop state: stopped") ||
+             (record.operation === "worker-abandon" && record.note === "viewer-observed OpenCode provider stop state: abandoned")) &&
             record.runId === runId &&
             record.settledLocally === true &&
-            record.note === "viewer-observed stop state: stopped" &&
             record.dispatchId,
         )
         .map((record) => record.dispatchId!);
@@ -2437,7 +2443,10 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
    *   1. token (middleware) → 2. id validation → 3. execution gate →
    *   4. FRESH `worker-show` re-read (liveness + agentWait + workspace
    *   identity + ownership, immediately before acting — never a cached row) →
-   *   5. durable `--retry-request` mint + ledger record → 6. `worker-stop`.
+    *   5. durable `--retry-request` mint + ledger record → 6. `worker-stop`.
+    * API-preselected OpenCode TUIs interrupt their exact provider execution
+    * first, then journal/call `worker-abandon` for external-process accounting;
+    * this is selected before mutation, never fallback from unknown native stop.
    * A lost response answers 502 `response_lost` with the minted requestId so
    * the client resolves the outcome through the request-show probe instead of
    * retrying blind. Stop is deliberately allowed for every lifecycle state
@@ -2465,7 +2474,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       const detail = evidence.detail;
       try {
         const { requestId, receipt } = await terminalMutationWithLedger(
-          "worker-stop",
+          await workerStopOperation(dispatchId),
           dispatchId,
           (rid) => stopWorkerReceipt(dispatchId, { retryRequestId: rid }),
           { runId: detail.runId, taskId: detail.taskId },
@@ -2677,7 +2686,14 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       );
       // Fold the receipt into the coordinator projection — a KNOWN terminal
       // state resolves the attempt + its debt; unknown/pending keeps them.
-      noteManualRelease(dispatchId, receipt.state);
+      const tuiDecision = receipt.state === "retained" && receipt.reason === "external_terminal"
+        ? await closeReleasedOpenCodeTui(dispatchId) : null;
+      if (receipt.state === "retained" && receipt.reason === "identity_unproven") {
+        // Explicit retention is the only safe decision when cancellation
+        // fencing removed Orca's pane identity; never force a close here.
+        await retainOpenCodeTui(dispatchId);
+      }
+      noteManualRelease(dispatchId, tuiDecision ?? receipt.state);
       const live = coordinatorStatus();
       if (live.runId) {
         await recordActivity(
@@ -2712,6 +2728,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       const { requestId, receipt } = await terminalMutationWithLedger("worker-retain", dispatchId, (r) =>
         retainWorker(dispatchId, { retryRequestId: r }),
       );
+      if (receipt.state === "retained") await retainOpenCodeTui(dispatchId);
       noteManualRelease(dispatchId, receipt.state);
       const live = coordinatorStatus();
       if (live.runId) {

@@ -1,10 +1,13 @@
 import { closeSync, constants, lstatSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { WORKSPACE_DATA_DIR } from "./workspaceState";
 
-export const PLANNING_DIR = ".orca";
+export const PLANNING_DIR = WORKSPACE_DATA_DIR;
+export const LEGACY_PLANNING_DIR = ".orca";
 const BEGIN = "# >>> orca-dag planning artifacts (managed)";
 const END = "# <<< orca-dag planning artifacts (managed)";
 const RULE = `${PLANNING_DIR}/`;
+const MANAGED_RULES = new Set([RULE, `${LEGACY_PLANNING_DIR}/`]);
 
 export interface PlanningSetupResult {
   status: "added" | "present" | "disabled" | "skipped";
@@ -81,7 +84,12 @@ export interface PlanningIgnoreRemoval {
   reason?: string;
 }
 
-/** Remove only exact blocks we wrote; edited blocks and user rules stay intact. */
+/**
+ * Remove only exact blocks we wrote; edited blocks and user rules stay intact.
+ * Startup leaves the old .orca/ block alone so historical docs stay ignored.
+ * Uninstall must still recognize that block after the directory rename, or
+ * upgrading would strand a startup write its own uninstall cannot undo.
+ */
 export function removePlanningIgnore(workspace: string, dryRun: boolean): PlanningIgnoreRemoval {
   const path = join(workspace, ".gitignore");
   try {
@@ -93,7 +101,7 @@ export function removePlanningIgnore(workspace: string, dryRun: boolean): Planni
     const kept: string[] = [];
     let removed = 0;
     for (let i = 0; i < lines.length; i++) {
-      if (value(lines[i]) === BEGIN && value(lines[i + 1]) === RULE && value(lines[i + 2]) === END) {
+      if (value(lines[i]) === BEGIN && MANAGED_RULES.has(value(lines[i + 1]) ?? "") && value(lines[i + 2]) === END) {
         removed++;
         i += 2;
       } else {

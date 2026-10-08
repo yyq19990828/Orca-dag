@@ -1,9 +1,11 @@
-import { readFile, rename, writeFile } from "node:fs/promises";
+import { readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { prepareWorkspaceStateFile, workspaceStateReadPath, WORKSPACE_STATE_FILES } from "./workspaceState";
 
 /**
  * Viewer-side configuration (per-node harness, default harness, concurrency,
- * layout) persisted next to the workspace as `.orca-dag.config.json`.
+ * layout) persisted in the workspace as `.orca-dag/config.json`.
  *
  * Orca itself has no metadata field on tasks (task-create only takes
  * spec/title/display-name/deps/parent), so this file is the viewer's own
@@ -77,7 +79,7 @@ export interface ViewerConfig {
   retainByTask?: Record<string, boolean>;
 }
 
-const FILE_NAME = ".orca-dag.config.json";
+export const CONFIG_FILE = WORKSPACE_STATE_FILES.config;
 
 // --- Placement grammar (shared with security.ts / the adapter) --------------
 //
@@ -267,13 +269,13 @@ export function sanitizeWorktreeLaneSpec(v: unknown): WorktreeLaneSpec | null {
 }
 
 function configPath(workspaceDir: string): string {
-  return join(workspaceDir, FILE_NAME);
+  return join(workspaceDir, CONFIG_FILE);
 }
 
 /** Read the stored config; any failure (missing file, bad JSON) means "empty". */
 export async function loadConfig(workspaceDir: string): Promise<ViewerConfig> {
   try {
-    const raw = JSON.parse(await readFile(configPath(workspaceDir), "utf8")) as unknown;
+    const raw = JSON.parse(await readFile(workspaceStateReadPath(workspaceDir, CONFIG_FILE), "utf8")) as unknown;
     return sanitize(raw);
   } catch {
     return {};
@@ -283,10 +285,19 @@ export async function loadConfig(workspaceDir: string): Promise<ViewerConfig> {
 /** Merge a patch into the stored config and write it back (tmp + rename). */
 export async function saveConfig(workspaceDir: string, patch: unknown): Promise<ViewerConfig> {
   const next = { ...(await loadConfig(workspaceDir)), ...sanitize(patch) };
+  prepareWorkspaceStateFile(workspaceDir, CONFIG_FILE, true);
   const file = configPath(workspaceDir);
-  const tmp = `${file}.tmp`;
-  await writeFile(tmp, JSON.stringify(next, null, 2) + "\n", "utf8");
-  await rename(tmp, file);
+  // The shared directory also contains authored planning work. Reserve an
+  // exclusive temporary filename instead of overwriting a fixed .tmp path
+  // someone might have left (or symlinked) there.
+  const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(tmp, JSON.stringify(next, null, 2) + "\n", { encoding: "utf8", flag: "wx", mode: 0o600 });
+    await rename(tmp, file);
+  } catch (err) {
+    await unlink(tmp).catch(() => {});
+    throw err;
+  }
   return next;
 }
 

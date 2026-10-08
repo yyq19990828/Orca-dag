@@ -7,9 +7,9 @@
 //
 //   removed   the orca-dag skill from every agent directory
 //   removed   leftover "orca-dag coordinator" Orca terminals
-//   removed   the exact managed .orca/ block in this workspace's .gitignore
-//   removed   .orca-dag.config.json          (only with --purge)
-//   kept      .orca/ planning documents, even with --purge (real user work)
+//   removed   exact managed .orca-dag/ (and legacy .orca/) .gitignore blocks
+//   removed   .orca-dag/ state files and legacy root equivalents (--purge only)
+//   kept      current and legacy planning docs, even with --purge (real user work)
 //   reported  the npm/global install and the npx cache — a running process
 //             cannot delete its own program, so we print the command instead
 //
@@ -21,12 +21,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { AGENT_SKILL_DIRS, SKILL_NAME } from "./skill";
 import { COORDINATOR_TITLE, closeTerminal, listTerminals, parseCoordinatorTitle } from "./orca";
-import { ACTIVITY_FILE } from "./activity";
-import { REQUESTS_FILE } from "./requestLedger";
-import { SESSIONS_FILE } from "./providerSessions";
-import { LAUNCHES_FILE } from "./launchHistory";
 import { stageGitStoreDir } from "./stageGit";
-import { PLANNING_DIR, removePlanningIgnore } from "./planning";
+import { LEGACY_PLANNING_DIR, PLANNING_DIR, removePlanningIgnore } from "./planning";
+import { assertWorkspaceStateDirectory, legacyWorkspaceStatePath, WORKSPACE_STATE_FILES } from "./workspaceState";
 
 export interface UninstallOptions {
   /** Print what would happen, change nothing. */
@@ -130,37 +127,58 @@ export async function runUninstall(opts: UninstallOptions): Promise<void> {
   if (ignore.reason) {
     log(`${act("skipped")}${ignore.path} — ${ignore.reason}`);
   } else if (ignore.removed) {
-    log(`${act(opts.dryRun ? "would remove" : "removed")}${ignore.path} — managed ${PLANNING_DIR}/ ignore rule only`);
+    log(`${act(opts.dryRun ? "would remove" : "removed")}${ignore.path} — managed planning ignore block(s) only`);
   }
-  const planningDir = join(opts.workspace, PLANNING_DIR);
-  if (existsSync(planningDir) || isBrokenLink(planningDir)) {
-    // Planning docs are authored requirements/designs, not disposable viewer
-    // history. --purge must never become permission to erase those documents.
-    log(`${act("kept")}${planningDir} — planning documents (even with --purge); add ${PLANNING_DIR}/ to .gitignore yourself to keep them ignored`);
+  for (const name of [PLANNING_DIR, LEGACY_PLANNING_DIR]) {
+    const planningDir = join(opts.workspace, name);
+    if (existsSync(planningDir) || isBrokenLink(planningDir)) {
+      // Planning docs are authored requirements/designs, not disposable viewer
+      // history. --purge must never become permission to erase those documents,
+      // including the old location used before the planning directory rename.
+      log(`${act("kept")}${planningDir} — planning documents (even with --purge); add ${name}/ to .gitignore yourself to keep them ignored`);
+    }
   }
 
   let workspaceFiles = 0;
-  const persisted = [
-    { path: join(opts.workspace, ".orca-dag.config.json"), label: "harness/model/layout choices" },
-    { path: join(opts.workspace, ACTIVITY_FILE), label: "viewer activity history" },
-    { path: join(opts.workspace, REQUESTS_FILE), label: "mutation-request audit ledger" },
-    { path: join(opts.workspace, SESSIONS_FILE), label: "bound harness session identities" },
-    { path: join(opts.workspace, LAUNCHES_FILE), label: "historical Dispatch launch identities" },
-  ];
+  const labels = {
+    config: "harness/model/layout choices",
+    activity: "viewer activity history",
+    requests: "mutation-request audit ledger",
+    sessions: "bound harness session identities",
+    launches: "historical Dispatch launch identities",
+  };
+  let safeStateDir = true;
+  try { assertWorkspaceStateDirectory(opts.workspace); }
+  catch (err) {
+    safeStateDir = false;
+    log(`${act("skipped")}${String((err as Error).message ?? err)}`);
+  }
+  // Enumerate both layouts without invoking migration: --dry-run and ordinary
+  // uninstall must never move user data. Purge only known files, not the shared
+  // directory (which also holds timestamped PRDs, designs and other user work).
+  const persisted = Object.entries(WORKSPACE_STATE_FILES).flatMap(([key, file]) => [
+    ...(safeStateDir ? [{ path: join(opts.workspace, file), label: labels[key as keyof typeof labels] }] : []),
+    { path: legacyWorkspaceStatePath(opts.workspace, file), label: `${labels[key as keyof typeof labels]} (legacy location)` },
+  ]);
   for (const item of persisted) {
-    if (!existsSync(item.path)) continue;
-    if (opts.purge) {
-      try {
+    if (!existsSync(item.path) && !isBrokenLink(item.path)) continue;
+    try {
+      const info = lstatSync(item.path);
+      if (!info.isFile() && !info.isSymbolicLink()) {
+        log(`${act("skipped")}${item.path} — not a state file; left untouched`);
+        continue;
+      }
+      if (opts.purge) {
         if (!opts.dryRun) rmSync(item.path);
         log(`${act(opts.dryRun ? "would remove" : "removed")}${item.path}`);
         workspaceFiles++;
-      } catch (err) {
-        log(`${act("failed")}${item.path}: ${String((err as Error)?.message ?? err)}`);
+      } else {
+        // These files are one workspace's real user state. Deleting them by
+        // default would turn uninstall into an unexpected history eraser.
+        log(`${act("kept")}${item.path} — ${item.label} (delete with --purge)`);
       }
-    } else {
-      // These files are one workspace's real user state. Deleting them by
-      // default would turn uninstall into an unexpected history eraser.
-      log(`${act("kept")}${item.path} — ${item.label} (delete with --purge)`);
+    } catch (err) {
+      log(`${act("failed")}${item.path}: ${String((err as Error)?.message ?? err)}`);
     }
   }
   // Committed-Stage snapshots live in Git metadata (shared by this repo's

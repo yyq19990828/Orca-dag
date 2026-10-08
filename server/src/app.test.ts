@@ -9,6 +9,7 @@ import { createApp, listenLoopback, validateWorkspacePath, type CoordinatorStatu
 import { createSecurityPolicy, type SecurityPolicy } from "./security";
 import { coordinatorStatus as liveCoordinatorStatus } from "./coordinator";
 import { initOrcaRuntime, type OrcaReadiness } from "./orca";
+import { WORKSPACE_STATE_FILES } from "./workspaceState";
 
 /**
  * Security/API coverage for the control plane (Phase 1 acceptance).
@@ -242,7 +243,7 @@ describe("config API", () => {
     assert.equal(json.maxConcurrency, 3);
     assert.equal(json.runId, "run_keep");
     // the sanitizer must have kept `evilField` out of the file on disk too
-    const stored = JSON.parse(await readFile(join(workspace, ".orca-dag.config.json"), "utf8")) as Record<
+    const stored = JSON.parse(await readFile(join(workspace, WORKSPACE_STATE_FILES.config), "utf8")) as Record<
       string,
       unknown
     >;
@@ -1150,12 +1151,12 @@ process.stdout.write(JSON.stringify(out));
     assert.equal(rms.length, 1);
     assert.ok(rms[0].argv.includes("--worktree") && rms[0].argv.includes("id:repoL::/ws/lane"));
     // The removal ran through the shared core: durable ledger + Run-scoped activity.
-    const rows = (await readJsonl(".orca-dag.requests.jsonl")).filter(
+    const rows = (await readJsonl(WORKSPACE_STATE_FILES.requests)).filter(
       (r) => r.requestId === res.json.requestId,
     );
     assert.equal(rows.length, 2, "one mint line + one outcome line");
     assert.equal(rows[1].note, "removed");
-    const activity = await readJsonl(".orca-dag.activity.jsonl");
+    const activity = await readJsonl(WORKSPACE_STATE_FILES.activity);
     assert.ok(activity.some((e) => e.kind === "worktree" && String(e.summary).includes("id:repoL::/ws/lane")));
     coordinatorSnapshot = null;
   });
@@ -1200,7 +1201,7 @@ process.stdout.write(JSON.stringify(out));
     assert.ok(stops[0].argv.includes("--retry-request") && stops[0].argv.includes(requestId));
 
     // The ledger row: minted with positive Run scope, closed with the state.
-    const rows = await readJsonl(".orca-dag.requests.jsonl");
+    const rows = await readJsonl(WORKSPACE_STATE_FILES.requests);
     const mine = rows.filter((r) => r.requestId === requestId);
     assert.equal(mine.length, 2, "one mint line + one outcome line");
     assert.ok(mine.every((r) => r.operation === "worker-stop" && r.runId === "run_a"));
@@ -1208,7 +1209,7 @@ process.stdout.write(JSON.stringify(out));
     assert.equal(mine[1].settledLocally, true);
 
     // The Activity row carries the same durable request identity.
-    const activity = await readJsonl(".orca-dag.activity.jsonl");
+    const activity = await readJsonl(WORKSPACE_STATE_FILES.activity);
     const row = activity.find((e) => e.kind === "stop" && e.dispatchId === "ctx_s1");
     assert.ok(row, "a stop row is journaled");
     assert.equal((row!.technical as Record<string, unknown>).requestId, requestId);
@@ -1246,7 +1247,7 @@ process.stdout.write(JSON.stringify(out));
     const requestId = res.json.requestId as string;
     assert.ok(requestId, "the lost attempt's id is handed back for the request-show probe");
 
-    const rows = (await readJsonl(".orca-dag.requests.jsonl")).filter((r) => r.requestId === requestId);
+    const rows = (await readJsonl(WORKSPACE_STATE_FILES.requests)).filter((r) => r.requestId === requestId);
     assert.equal(rows.length, 2);
     assert.equal(rows[1].settledLocally, false);
     assert.match(String(rows[1].note), /response lost/);
@@ -1313,7 +1314,7 @@ process.stdout.write(JSON.stringify(out));
     const receipt = res.json.receipt as Record<string, unknown>;
     assert.equal(receipt.state, "abandoned");
     assert.equal(receipt.requestId, requestId, "the receipt echoes the durable id");
-    const rows = (await readJsonl(".orca-dag.requests.jsonl")).filter((r) => r.requestId === requestId);
+    const rows = (await readJsonl(WORKSPACE_STATE_FILES.requests)).filter((r) => r.requestId === requestId);
     assert.ok(rows.every((r) => r.operation === "worker-abandon"));
     assert.equal(rows[1].settledLocally, true);
   });
@@ -1327,7 +1328,7 @@ process.stdout.write(JSON.stringify(out));
     const res = await rpc("POST", "/api/workers/ctx_s1/abandon", { runId: "run_a" }, opsPolicy.token);
     assert.equal(res.status, 502);
     assert.equal(res.json.code, "response_lost");
-    const rows = (await readJsonl(".orca-dag.requests.jsonl")).filter(
+    const rows = (await readJsonl(WORKSPACE_STATE_FILES.requests)).filter(
       (r) => r.requestId === res.json.requestId,
     );
     assert.equal(rows[1].settledLocally, false);
@@ -1346,7 +1347,7 @@ process.stdout.write(JSON.stringify(out));
     // recorded spawn carries the trailing flag — the contract is "exact
     // handle, nothing else", which the slice before it proves.
     assert.deepEqual(switches[0].argv.slice(2), ["--terminal", "term_agent", "--json"]);
-    const rows = await readJsonl(".orca-dag.requests.jsonl");
+    const rows = await readJsonl(WORKSPACE_STATE_FILES.requests);
     const focus = rows.find((r) => r.operation === "terminal-focus");
     assert.equal(focus?.target, "term_agent");
   });
@@ -1404,10 +1405,10 @@ process.stdout.write(JSON.stringify(out));
     assert.deepEqual(diffCall.argv.slice(1, 4), ["diff", "src/x.ts", "--staged"]);
 
     // The durable ledger records the review with the path as target.
-    const rows = await readJsonl(".orca-dag.requests.jsonl");
+    const rows = await readJsonl(WORKSPACE_STATE_FILES.requests);
     assert.ok(rows.some((r) => r.operation === "file-open" && r.target === "src/x.ts"));
     assert.ok(rows.some((r) => r.operation === "file-diff" && r.target === "src/x.ts"));
-    const activity = await readJsonl(".orca-dag.activity.jsonl");
+    const activity = await readJsonl(WORKSPACE_STATE_FILES.activity);
     assert.ok(activity.some((e) => e.kind === "file_review" && e.runId === "run_a"));
   });
 
@@ -1456,7 +1457,7 @@ process.stdout.write(JSON.stringify(out));
     assert.equal(rms.length, 1);
     assert.ok(!rms[0].argv.includes("--run-hooks"), "no hook flags without an explicit request");
     assert.ok(!rms[0].argv.includes("--allow-failed-archive-hook"));
-    const rows = (await readJsonl(".orca-dag.requests.jsonl")).filter(
+    const rows = (await readJsonl(WORKSPACE_STATE_FILES.requests)).filter(
       (r) => r.requestId === res.json.requestId,
     );
     assert.equal(rows[1].note, "removed");
@@ -1503,7 +1504,7 @@ process.stdout.write(JSON.stringify(out));
     assert.ok(hookEvidenceId, "the blocked attempt's id comes back as waiver evidence");
     // Exactly ONE rm: nothing was removed, nothing was auto-waived.
     assert.equal(readLog().filter((c) => c.argv[1] === "rm").length, 1);
-    const rows = (await readJsonl(".orca-dag.requests.jsonl")).filter((r) => r.requestId === hookEvidenceId);
+    const rows = (await readJsonl(WORKSPACE_STATE_FILES.requests)).filter((r) => r.requestId === hookEvidenceId);
     assert.equal(rows[1].settledLocally, false);
     assert.match(String(rows[1].note), /archive hook failed/);
   });

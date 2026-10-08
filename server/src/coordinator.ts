@@ -35,8 +35,15 @@ import {
   showRun,
   showWorktree,
   startLegacyWorker,
+  startOpenCodeTuiWorker,
+  findOpenCodeTuiLaunch,
+  inspectOpenCodeTui,
+  closeReleasedOpenCodeTui,
+  retainOpenCodeTui,
+  recoverOpenCodeTuiBindings,
   startSupervisedWorker,
   stopWorkerReceipt,
+  workerStopOperation,
   taskUpdate,
   type Gate,
   type OrcaMessage,
@@ -54,6 +61,7 @@ import { ProviderSessionStore, discoverProviderSession } from "./providerSession
 import type { ProviderSessionBinding, ProviderSessionObservation, ProviderSessionStatus } from "./providerSessions";
 import { LaunchHistory } from "./launchHistory";
 import { MERGE_PREP_MARKER, StageGit, validateStagePlan } from "./stageGit";
+import type { OpenCodeEvidence } from "./openCode";
 import { realpath } from "node:fs/promises";
 
 /**
@@ -432,6 +440,9 @@ interface Attempt {
   host: { kind: string; id: string } | null;
   /** Exact provider session binding, when recovery evidence supplied one. */
   providerSession: RecoverySessionView | null;
+  openCodeTui?: boolean;
+  openCodeEvidence?: OpenCodeEvidence | null;
+  openCodeCheckedAt?: number;
 }
 
 /** A provider session observation pinned to one exact Run/Task/Dispatch. */
@@ -872,6 +883,7 @@ export function coordinatorStatus() {
       /** Execution host the fleet last reported (Phase 6) — local or environment. */
       host: a.host,
       providerSession: a.providerSession ? { ...a.providerSession } : null,
+      openCodeEvidence: a.openCodeEvidence ?? null,
       requested: a.requested,
       effective: a.effective,
       reuseOf: a.reuseOf,
@@ -1501,6 +1513,9 @@ async function captureProviderSessions(
 ): Promise<void> {
   const store = state.providerSessionStore;
   if (!store) return;
+  // Exact prepared terminal + fleet correlation repairs a crash between start
+  // and binding. It never discovers by newest session or mutates a Task.
+  await recoverOpenCodeTuiBindings(runId, rows).catch(() => {});
   const known = new Set((await listProviderSessions(runId)).map((binding) => binding.dispatchId));
   const taskIds = new Set(tasks.map((task) => task.id));
   for (const row of rows) {
@@ -1613,6 +1628,8 @@ async function recoverState(opts: StartOpts): Promise<void> {
   await captureProviderSessions(runId, tasks, rows);
   const rowByDispatch = new Map(rows.map((r) => [r.dispatchId, r]));
   const bindings = await listProviderSessions(runId);
+  const tuiLaunches = await state.providerSessionStore?.listOpenCodeLaunches(runId) ?? [];
+  const tuiByDispatch = new Map(tuiLaunches.filter(row => row.dispatchId).map(row => [row.dispatchId, row]));
   const bindingByDispatch = new Map(
     bindings
       .filter((binding) => binding.runId === runId && binding.dispatchId.length > 0)
@@ -1795,6 +1812,15 @@ async function recoverState(opts: StartOpts): Promise<void> {
    * the projection carries a launch echo — the effective launch preferences.
    */
   const seedFromRow = (attempt: Attempt, row: OrcaWorkerRow): void => {
+    const tui = tuiByDispatch.get(row.dispatchId);
+    if (tui) {
+      attempt.openCodeTui = true;
+      attempt.harness = "opencode";
+      attempt.handle = tui.terminal;
+      attempt.requested = { agent: "opencode", model: `${tui.model.providerID}/${tui.model.id}`,
+        effort: tui.model.variant ?? null, worktree: `path:${tui.workspace}`, terminal: tui.terminal, on: null };
+      if (tui.state === "closed" || tui.state === "retained") attempt.terminalDecision = tui.state;
+    }
     attempt.fleetTerminalState = row.terminalState;
     attempt.agentTerminalHandle = row.agentTerminalHandle ?? null;
     attempt.liveness = normalizeLiveness(row.projection?.liveness?.verdict ?? null);
@@ -1873,7 +1899,8 @@ async function recoverState(opts: StartOpts): Promise<void> {
       if (!row || row.workerState !== "supervised") continue;
       // Only undecided ownership needs adopting; released/retained rows are
       // exactly where previous decisions left them.
-      if (["released", "retained"].includes(row.terminalState)) {
+      const tui = tuiByDispatch.get(row.dispatchId);
+      if (["released", "retained"].includes(row.terminalState) && (!tui || ["closed", "retained"].includes(tui.state))) {
         summary.leftDecided += 1;
         continue;
       }
@@ -1884,12 +1911,58 @@ async function recoverState(opts: StartOpts): Promise<void> {
         "task_status",
       );
       seedInheritedTerminalState(attempt, row);
+      seedFromRow(attempt, row);
       // An ACTIVE terminal behind a settled task is accounting lag, not a live
       // worker to protect — but the decision still goes through the normal
       // ownership path (release), never through worker-stop.
       state.attempts.set(task.id, attempt);
       summary.settledAdopted.push(task.id);
     }
+  }
+
+  // Current Orca clears task.dispatch_id at settlement and reports the worker
+  // outcome (succeeded/failed), not "supervised", in workerState. The durable
+  // preparation is our exact historical pointer: recover caller-owned cleanup
+  // from THAT Dispatch, never from a "latest worker for Task" heuristic. Orca's
+  // own settlement still has to be positive on both the Task and fleet row.
+  for (const launch of tuiLaunches) {
+    if (!["prepared", "bound"].includes(launch.state)) continue;
+    const task = tasks.find(candidate => candidate.id === launch.taskId);
+    const row = launch.dispatchId ? rowByDispatch.get(launch.dispatchId) : undefined;
+    const inherited = state.attempts.get(launch.taskId);
+    const outcome = row ? projectionOutcome(row) : null;
+    const settled = task && (TERMINAL_TASK_STATUS.has(task.status) || task.status === "blocked") && outcome !== null;
+    // A refused external worker-stop can park the Task as blocked while its
+    // Dispatch remains dispatched/stop_unknown. Keep that exact worker held;
+    // Task parking is not cancellation settlement or provider/process exit.
+    const active = task && !TERMINAL_TASK_STATUS.has(task.status) && row?.dispatchStatus === "dispatched";
+    if (row && task && row.taskId === task.id && row.runId === runId &&
+        row.agentTerminalHandle === launch.terminal && (settled || active) &&
+        (!inherited || inherited.dispatchId === row.dispatchId)) {
+      if (!inherited) {
+        const attempt = freshAttempt(task, "opencode");
+        attempt.dispatchId = row.dispatchId;
+        if (settled) {
+          settleAttempt(attempt, outcome!, "task_status");
+          seedInheritedTerminalState(attempt, row);
+        }
+        seedFromRow(attempt, row);
+        state.attempts.set(task.id, attempt);
+        (settled ? summary.settledAdopted : summary.activeAdopted).push(task.id);
+      } else {
+        // workerState is a lifecycle stage, not process ownership. A saved
+        // preselected TUI stays supervised even when the generic recovery
+        // branch saw "working" and classified an ordinary row as legacy.
+        inherited.mode = "supervised";
+      }
+      continue;
+    }
+    if (inherited?.dispatchId && inherited.dispatchId === launch.dispatchId) continue;
+    state.cleanupDebt.push({
+      key: `opencode-preparation:${launch.requestId}`, kind: "release_unknown",
+      dispatchId: launch.dispatchId, handle: launch.terminal,
+      detail: "Unresolved OpenCode preparation has no exact adopted Dispatch; inspect its saved request/session/terminal before retry or cleanup",
+    });
   }
 
   // Stopped or otherwise historical Dispatch bindings are still useful UI
@@ -1943,7 +2016,7 @@ function seedInheritedTerminalState(attempt: Attempt, row: OrcaWorkerRow): void 
 /** The positive outcome a worker-list row claims, or null when it claims none. */
 function projectionOutcome(row: OrcaWorkerRow): "succeeded" | "failed" | null {
   const o = row.projection?.outcome ?? null;
-  if (o === "completed") return "succeeded";
+  if (o === "completed" || o === "succeeded") return "succeeded";
   if (o === "failed" || o === "stopped") return "failed";
   return null;
 }
@@ -1953,7 +2026,9 @@ function projectionOutcome(row: OrcaWorkerRow): "succeeded" | "failed" | null {
  * supervised ones, close only the terminals this viewer provably created, and
  * report EVERY outcome — stopped, already settled, fenced, closed, or unknown.
  * Never substitutes a terminal close for an uncertain supervised release, and
- * never releases on Stop: an interrupted worker is not a settled one.
+ * Native paths never release on Stop. The API-preselected OpenCode adapter
+ * first confirms provider exit, explicitly fences external-process accounting,
+ * then cleans up only after Orca positively confirms cancellation settlement.
  */
 export async function stopCoordinator(): Promise<StopReport> {
   const wasRunning = state.running;
@@ -1971,9 +2046,10 @@ export async function stopCoordinator(): Promise<StopReport> {
   const runIdAtStop = state.runId;
   const stopWithAudit = async (taskId: string, dispatchId: string) => {
     const requestId = newRequestId();
+    const operation = await workerStopOperation(dispatchId);
     await noteRequest({
       requestId,
-      operation: "worker-stop",
+      operation,
       runId: runIdAtStop,
       taskId,
       dispatchId,
@@ -1982,18 +2058,20 @@ export async function stopCoordinator(): Promise<StopReport> {
       const receipt = await stopWorkerReceipt(dispatchId, { retryRequestId: requestId });
       await noteRequest({
         requestId,
-        operation: "worker-stop",
+        operation,
         runId: runIdAtStop,
         taskId,
         dispatchId,
         settledLocally: true,
-        note: `viewer-observed stop state: ${receipt.state}`,
+        note: receipt.providerExecutionExited
+          ? `viewer-observed OpenCode provider stop state: ${receipt.state}`
+          : `viewer-observed stop state: ${receipt.state}`,
       });
       return receipt;
     } catch (err) {
       await noteRequest({
         requestId,
-        operation: "worker-stop",
+        operation,
         runId: runIdAtStop,
         taskId,
         dispatchId,
@@ -2005,14 +2083,38 @@ export async function stopCoordinator(): Promise<StopReport> {
   };
 
   for (const a of attempts) {
+    if (a.openCodeTui && !a.dispatchId &&
+        (a.handle || !a.settled || a.startReceipts.at(-1)?.failedStage === "response_lost")) {
+      results.push({ target: a.handle ?? a.taskId, kind: "supervised", result: "unknown",
+        detail: "OpenCode preparation is in flight; Stop cancels it before binding when possible. Inspect the durable preparation before retrying." });
+    }
     if (a.dispatchId && a.mode === "supervised") {
       try {
         const receipt = await stopWithAudit(a.taskId, a.dispatchId);
+        let cleanupDetail: string | null = null;
+        if (a.openCodeTui) {
+          if (state.opts?.retainByTask?.[a.taskId]) await retainOpenCodeTui(a.dispatchId);
+          else {
+            const released = await performRelease(a);
+            if (released.state === "retained" && released.reason === "identity_unproven") {
+              // Abandon revokes the pane capability. On 1.4.222 release then
+              // reports retained/identity_unproven, despite positive provider
+              // exit and cancellation settlement. This is a definite retention
+              // decision, NOT permission to substitute a terminal close.
+              await retainOpenCodeTui(a.dispatchId);
+              cleanupDetail = "TUI retained for inspection: Orca release reports identity_unproven after cancellation fencing.";
+            } else if (released.state !== "retained" || released.reason !== "external_terminal") {
+              throw new OrcaCliError("OpenCode Stop cleanup release is unconfirmed; no terminal close attempted", "release_unknown");
+            } else {
+              await closeReleasedOpenCodeTui(a.dispatchId);
+            }
+          }
+        }
         results.push({
           target: a.dispatchId,
           kind: "supervised",
-          result: receipt.alreadySettled ? "already_settled" : "stopped",
-          detail: receipt.warning ?? receipt.state,
+          result: receipt.alreadySettled ? "already_settled" : a.openCodeTui ? "provider_stopped_accounting_abandoned" : "stopped",
+          detail: cleanupDetail ?? receipt.warning ?? receipt.state,
         });
       } catch (err) {
         results.push({
@@ -2044,7 +2146,7 @@ export async function stopCoordinator(): Promise<StopReport> {
         });
       }
     }
-    if (a.handle) {
+    if (a.handle && !a.openCodeTui) {
       try {
         await closeTerminalStrict(a.handle);
         results.push({ target: a.handle, kind: "legacy_terminal", result: "closed", detail: null });
@@ -2163,11 +2265,11 @@ export function noteManualRelease(dispatchId: string, receiptState: string): boo
   const resolved =
     receiptState === "released" ||
     receiptState === "already_released" ||
-    receiptState === "retained";
+    receiptState === "retained" || receiptState === "closed";
   for (const a of state.attempts.values()) {
     if (a.dispatchId !== dispatchId) continue;
     if (resolved) {
-      a.terminalDecision = receiptState === "retained" ? "retained" : "released";
+      a.terminalDecision = receiptState === "closed" ? "closed" : receiptState === "retained" ? "retained" : "released";
       a.terminalDetail = "resolved manually via the viewer";
     } else if (receiptState === "release_pending" && a.terminalDecision === "release_unknown") {
       // A manual attempt Orca deferred is strictly better information than
@@ -2805,6 +2907,7 @@ async function reconcile(): Promise<void> {
     // terminal accounting are kept verbatim for the UI. A missing row leaves
     // the last known values in place — absence is never degraded to `exited`.
     if (row) {
+      if (!attempt.openCodeTui && await findOpenCodeTuiLaunch(row.dispatchId)) attempt.openCodeTui = true;
       attempt.fleetTerminalState = row.terminalState;
       attempt.agentTerminalHandle = row.agentTerminalHandle ?? attempt.agentTerminalHandle;
       attempt.liveness = normalizeLiveness(row.projection?.liveness?.verdict ?? null);
@@ -2848,6 +2951,10 @@ async function reconcile(): Promise<void> {
     // (local hiccup or remote disconnect) reports no action at all — absence
     // never earns an argv.
     attempt.nextAction = row?.projection?.nextAction ?? null;
+    if (attempt.openCodeTui && attempt.dispatchId && Date.now() - (attempt.openCodeCheckedAt ?? 0) > 10_000) {
+      attempt.openCodeCheckedAt = Date.now();
+      attempt.openCodeEvidence = await inspectOpenCodeTui(attempt.dispatchId).catch(() => null);
+    }
 
     if (!attempt.settled) {
       // Orca's task status is authoritative settlement evidence: the runtime
@@ -2958,6 +3065,46 @@ async function reconcile(): Promise<void> {
  * silently pass.
  */
 async function decideTerminalOwnership(attempt: Attempt, opts: StartOpts, readyTasks: OrcaTask[] = []): Promise<void> {
+  if (attempt.openCodeTui && attempt.dispatchId && ["pending", "release_pending"].includes(attempt.terminalDecision)) {
+    // These are supervised Dispatches but caller-owned processes. Orca's
+    // retained/external no-op is necessary, not sufficient, cleanup evidence.
+    // Keep automatic reuse disabled: a model-pinned session cannot safely pass
+    // through the generic reuse filter to an unpinned follow-up Task.
+    if (opts.retainByTask?.[attempt.taskId]) {
+      const receipt = await retainWorker(attempt.dispatchId);
+      applyReleaseReceipt(attempt, receipt);
+      if (receipt.state === "retained") await retainOpenCodeTui(attempt.dispatchId);
+      return;
+    }
+    if (!await findOpenCodeTuiLaunch(attempt.dispatchId)) {
+      attempt.terminalDecision = "release_unknown";
+      attempt.terminalDetail = "OpenCode Dispatch/session correlation is missing; inspect the durable preparation before cleanup";
+      recordDebt(attempt, "release_unknown", attempt.terminalDetail);
+      return;
+    }
+    const receipt = await performRelease(attempt);
+    applyReleaseReceipt(attempt, receipt);
+    if (receipt.state === "retained" && receipt.reason === "identity_unproven") {
+      await retainOpenCodeTui(attempt.dispatchId);
+      return;
+    }
+    if (receipt.state !== "retained" || receipt.reason !== "external_terminal") return;
+    try {
+      attempt.output = await readWorkerOutput(attempt.dispatchId, { limit: 40 });
+      const decision = await closeReleasedOpenCodeTui(attempt.dispatchId);
+      attempt.terminalDecision = decision ?? "retained";
+      attempt.terminalDetail = decision === "closed" ? "Viewer-owned TUI closed; history remains in OpenCode API; Orca resource is retained/external" : "TUI retained for user-owned work";
+      clearAttemptDebt(attempt);
+    } catch (err) {
+      // worker_done can precede the provider's final idle/outcome write. Retry
+      // observation/cleanup only, under the SAME release id; never input/start.
+      attempt.releaseAttempts++;
+      attempt.terminalDetail = String((err as Error).message ?? err);
+      attempt.terminalDecision = attempt.releaseAttempts <= RELEASE_RETRY_MAX ? "release_pending" : "release_unknown";
+      if (attempt.terminalDecision === "release_unknown") recordDebt(attempt, "release_unknown", attempt.terminalDetail);
+    }
+    return;
+  }
   // A deferred release re-runs here on every reconciliation until Orca
   // settles it (bounded) or it graduates to permanent debt.
   if (attempt.terminalDecision === "release_pending") {
@@ -3104,7 +3251,7 @@ async function decideTerminalOwnership(attempt: Attempt, opts: StartOpts, readyT
   // is the only one reuse considers.
   const placementCurrent = (attempt.requested?.worktree ?? "current") === "current";
   const settledLocal = !attempt.requested?.on;
-  if (handle && placementCurrent && settledLocal) {
+  if (handle && placementCurrent && settledLocal && !attempt.openCodeTui) {
     const candidate = readyTasks.find((t) => {
       if (state.attempts.has(t.id)) return false; // already attempted/parked
       const harness = opts.harnessByTask[t.id] || opts.defaultHarness;
@@ -3468,17 +3615,34 @@ async function startOne(
     on: environment,
   };
   try {
+    // This protection remains even if the experimental flag/harness changed
+    // after a crash. Disabling the adapter must not authorize a duplicate
+    // one-shot (or another harness) over an unresolved preparation.
+    const preparations = await state.providerSessionStore?.listOpenCodeLaunches(runId) ?? [];
+    if (preparations.some(row => row.taskId === task.id && ["prepared", "bound"].includes(row.state))) {
+      throw new OrcaCliError("This Task has an unresolved OpenCode TUI preparation; inspect it before any replacement", "start_unknown");
+    }
     // The viewer's `opencode` choice already means OpenCode 2. On a running
     // Orca 1.4.220+ with no per-node model override, launch its native agent
     // id (`opencode2`). Older/unknown runtimes and explicit `-m` selections
     // keep the proven one-shot path. Do not use CLI version as a proxy for the
     // app version, and do not retry an attempted native start as legacy.
     let nativeOpenCode = false;
-    if (attempt.harness === "opencode" && !model) {
+    const apiOpenCode = attempt.harness === "opencode" && Boolean(model) && process.env.ORCA_DAG_OPENCODE_TUI === "1";
+    attempt.openCodeTui = apiOpenCode;
+    if (attempt.harness === "opencode" && (!model || apiOpenCode)) {
       const status = await runOrca<{ runtime?: { appVersion?: string } }>(["status"]);
       const version = status.runtime?.appVersion;
       nativeOpenCode = typeof version === "string" && /^\d+\.\d+\.\d+$/.test(version) &&
         compareVersions(version, MIN_NATIVE_OPENCODE_VERSION) >= 0;
+      if (apiOpenCode && (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version) ||
+          compareVersions(version, "1.4.222") < 0)) {
+        throw new OrcaCliError("OpenCode API TUI requires running Orca >= 1.4.222; no one-shot fallback was attempted", "execution_disabled");
+      }
+    }
+    if (apiOpenCode && (environment || laneId || reuseTerminal || process.platform === "win32" ||
+        !["current", "existing"].includes(placement.kind))) {
+      throw new OrcaCliError("OpenCode API TUI supports only local POSIX current/existing non-lane placements; no fallback was attempted", "invalid_placement");
     }
     // --- Worktree-lane pre-flight: every refusal below happens BEFORE Orca
     // --- sees a mutation, and lands as a parked start_failed record.
@@ -3671,7 +3835,16 @@ async function startOne(
     // worktree — it can never honor a remote environment. Refuse instead of
     // silently executing "remotely requested" work locally (that would be the
     // synthetic local fallback the plan forbids).
-    if (attempt.harness === "opencode" && !nativeOpenCode) {
+    if (apiOpenCode) {
+      started = await startOpenCodeTuiWorker({
+        taskId: task.id, runId, from, worktree: wt.worktree ?? opts.worktree,
+        model: model!, effort: attempt.requested.effort,
+        retryRequestId: startRequestId, retryOf: retryOf ?? undefined,
+        onHandle: handle => { attempt.handle = handle; },
+        isCancelled: () => !state.running || state.runId !== runId || state.coordinatorHandle !== from,
+      });
+      attempt.requested = { ...attempt.requested, terminal: started.handle };
+    } else if (attempt.harness === "opencode" && !nativeOpenCode) {
       if (environment) {
         throw new OrcaCliError(
           `Cannot start task ${task.id} on environment "${environment}": the ${attempt.harness} ` +
@@ -3839,6 +4012,7 @@ async function startOne(
     // ownership. The supervised start returns no handle, but the terminal is
     // still the same exact resource recorded above.
     attempt.handle = started.handle ?? attempt.handle;
+    if (started.sessionBindingWarning) state.error = started.sessionBindingWarning;
     if (started.receipt) {
       attempt.startReceipts.push(started.receipt);
       if (attempt.startReceipts.length > START_RECEIPTS_MAX) {

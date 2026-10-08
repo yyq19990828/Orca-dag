@@ -1,5 +1,6 @@
 import { appendFile, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { prepareWorkspaceStateFile, workspaceStateReadPath, WORKSPACE_STATE_FILES } from "./workspaceState";
 
 /**
  * A Dispatch's launch choice is historical execution evidence, not a mutable
@@ -8,7 +9,7 @@ import { join } from "node:path";
  * Keep only the four bounded identity fields needed to label past launches;
  * preambles, capabilities, commands, and provider session IDs never go here.
  */
-export const LAUNCHES_FILE = ".orca-dag.launches.jsonl";
+export const LAUNCHES_FILE = WORKSPACE_STATE_FILES.launches;
 
 export interface LaunchRecord {
   runId: string;
@@ -38,7 +39,7 @@ function valid(value: unknown): value is LaunchRecord {
 export class LaunchHistory {
   private readonly path: string;
 
-  constructor(workspaceDir: string) {
+  constructor(private readonly workspaceDir: string) {
     this.path = join(workspaceDir, LAUNCHES_FILE);
   }
 
@@ -47,6 +48,7 @@ export class LaunchHistory {
     if (!valid(row)) return;
     const previous = queues.get(this.path) ?? Promise.resolve();
     const write = previous.then(async () => {
+      prepareWorkspaceStateFile(this.workspaceDir, LAUNCHES_FILE, true);
       await this.rotateIfNeeded();
       await appendFile(this.path, `${JSON.stringify(row)}\n`, "utf8");
     });
@@ -59,7 +61,7 @@ export class LaunchHistory {
     if (!ID.test(runId)) return new Map();
     let content: string;
     try {
-      content = await readFile(this.path, "utf8");
+      content = await readFile(workspaceStateReadPath(this.workspaceDir, LAUNCHES_FILE), "utf8");
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return new Map();
       throw err;

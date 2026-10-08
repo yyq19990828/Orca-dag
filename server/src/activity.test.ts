@@ -797,7 +797,8 @@ describe("viewer activity journal", () => {
         technical: { provenance: "viewer_journal" },
       };
       const journal = new ActivityJournal(dir);
-      const { appendFile } = await import("node:fs/promises");
+      const { appendFile, mkdir } = await import("node:fs/promises");
+      await mkdir(join(dir, ".orca-dag"));
       await appendFile(journal.path, `${JSON.stringify(legacy)}\n`, "utf8");
       const [event] = await journal.list("run_a");
       assert.equal(event.threadId, null);

@@ -279,7 +279,8 @@ function workerRows(runId, terminalStateFilter) {
         // transcript facts: local rows say `local`; a --on row names the
         // environment it was started on.
         host: d.on ? { kind: "environment", id: d.on } : { kind: "local", id: "local" },
-        outcome: ["completed", "failed", "stopped"].includes(d.status) ? d.status : null,
+        outcome: ["completed", "failed", "stopped"].includes(d.status)
+          ? (state.openCodeTui && d.status === "completed" ? "succeeded" : d.status) : null,
         liveness: {
           verdict: state.livenessOverride?.[d.id] ??
             (d.terminalState === "active" ? "live" : "exited"),
@@ -313,7 +314,8 @@ if (ns === "orchestration" && verb === "task-list") {
 } else if (ns === "orchestration" && verb === "worker-show") {
   const d = state.dispatches?.[flag("--dispatch")];
   if (!d) fail("dispatch_not_found", "unknown Dispatch");
-  const worktree = (state.worktrees ?? []).find((w) => w.id === d.launch?.worktree);
+  const worktree = (state.worktrees ?? []).find((w) => w.id === d.launch?.worktree ||
+    (state.openCodeTui && `path:${w.path}` === d.launch?.worktree));
   ok({
     dispatch: { id: d.id, task_id: d.task_id, runId: d.run_id, status: d.status },
     worker: { state: d.workerState, startOptions: {
@@ -324,6 +326,11 @@ if (ns === "orchestration" && verb === "task-list") {
       worktreePath: worktree?.path ?? (d.launch?.worktree ? null : process.cwd()),
       branch: worktree?.branch ?? null,
     },
+    ...(state.openCodeTui ? {
+      observation: { status: "live", exactWorker: true },
+      projection: { ...workerRows(d.run_id).find(row => row.dispatchId === d.id),
+        terminalState: undefined, resource: { state: "external", terminalState: d.terminalState } },
+    } : {}),
   });
 } else if (ns === "orchestration" && verb === "gate-list") {
   ok({ gates: state.gates ?? [] });
@@ -462,6 +469,10 @@ if (ns === "orchestration" && verb === "task-list") {
   }
   ok({});
 } else if (ns === "orchestration" && verb === "worker-start") {
+  if (state.openCodeTui && flag("--terminal")) {
+    const terminal = (state.terminals ?? []).find(t => t.handle === flag("--terminal"));
+    if (!terminal?.command?.startsWith("opencode ")) fail("agent_unconfigured", "prepared command is not a recognized agent");
+  }
   // Phase 4 idempotency: a repeated worker-start carrying an ALREADY-completed
   // retry-request id returns the recorded outcome verbatim — no second
   // Dispatch is minted. A `pending` record lands the start on the replay,
@@ -621,6 +632,9 @@ if (ns === "orchestration" && verb === "task-list") {
     // The one release outcome that exits non-zero (runtime contract).
     if (d) d.terminalState = "release_unknown";
     fail("release_unknown", "terminal ownership could not be verified");
+  } else if (state.openCodeTui) {
+    if (d) d.terminalState = "retained";
+    ok({ dispatchId, requestId, state: "retained", reason: d?.workerState === "abandoned" ? "identity_unproven" : "external_terminal", processAction: "none", archive: null });
   } else {
     if (d) d.terminalState = "released";
     ok({
@@ -664,6 +678,16 @@ if (ns === "orchestration" && verb === "task-list") {
     contentComplete: true,
     warnings: state.readWarnings?.[dispatchId] ?? [],
   });
+} else if (ns === "orchestration" && verb === "worker-abandon" && state.openCodeTui) {
+  const dispatchId = flag("--dispatch");
+  const d = state.dispatches?.[dispatchId];
+  const alreadySettled = ["completed", "failed", "stopped"].includes(d?.status ?? "");
+  if (d && !alreadySettled) {
+    d.status = "failed"; d.workerState = "abandoned"; d.terminalState = "retained";
+    const task = state.tasks?.[d.task_id];
+    if (task) { task.status = "blocked"; delete task.dispatch_id; delete task.assignee_handle; }
+  }
+  ok({ dispatchId, state: "abandoned", alreadySettled, processAction: "none", warning: null });
 } else if (ns === "orchestration" && verb === "worker-stop") {
   const dispatchId = flag("--dispatch");
   if (state.stopMode?.[dispatchId] === "fail") {
@@ -672,7 +696,7 @@ if (ns === "orchestration" && verb === "task-list") {
   const d = state.dispatches?.[dispatchId];
   const alreadySettled = ["completed", "failed", "stopped"].includes(d?.status ?? "");
   if (d && !alreadySettled) {
-    d.status = "stopped";
+    d.status = state.openCodeTui ? "failed" : "stopped";
     // The real runtime parks an interrupted Task instead of making it ready
     // for an unqualified fresh Dispatch. Resuming must carry --retry-of.
     const task = state.tasks?.[d.task_id];
@@ -737,7 +761,8 @@ if (ns === "orchestration" && verb === "task-list") {
   // Exact-selector revalidation: only a row Orca positively holds answers;
   // an unknown selector is `selector_not_found` (the refusal evidence).
   const sel = flag("--worktree");
-  const row = (state.worktrees ?? []).find((w) => w.id === sel || w.path === sel);
+  const row = (state.worktrees ?? []).find((w) => w.id === sel || w.path === sel ||
+    (state.openCodeTui && (sel === "current" || sel === `path:${w.path}`)));
   if (!row) fail("selector_not_found", `no workspace matches ${sel}`);
   ok({ worktree: row });
 } else if (ns === "project" && verb === "list") {
@@ -749,7 +774,9 @@ if (ns === "orchestration" && verb === "task-list") {
   state.seq.terminal = (state.seq.terminal ?? 0) + 1;
   const handle = `term_f${state.seq.terminal}`;
   state.terminals ??= [];
-  state.terminals.push({ handle, title: flag("--title") ?? null, connected: true });
+  state.terminals.push({ handle, title: flag("--title") ?? null, connected: true,
+    ...(state.openCodeTui ? { worktreePath: flag("--worktree")?.replace(/^path:/, ""), command: flag("--command") } : {}) });
+  if (state.terminalCreateLost) finishLostResponse("lost terminal create response");
   ok({ terminal: { handle } });
 } else if (ns === "terminal" && verb === "close") {
   const handle = flag("--terminal");
@@ -760,7 +787,7 @@ if (ns === "orchestration" && verb === "task-list") {
   if (t) t.connected = false;
   ok({});
 } else if (ns === "terminal" && verb === "wait") {
-  ok({ wait: { satisfied: true } });
+  ok({ wait: { satisfied: state.tuiWaitSatisfied !== false } });
 } else if (ns === "terminal" && verb === "read") {
   ok({ terminal: state.terminalScreens?.shift() ?? state.terminalScreen ??
     { source: "screen", tail: ["model: GPT-6-Luna", "› Ask Codex to do anything"] } });

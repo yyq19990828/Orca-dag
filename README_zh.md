@@ -46,8 +46,8 @@
 | **Run** | 命名空间 + coordinator 收件箱；同一时刻只有一个绑定的 coordinator（`consumer_generation` 做 fencing） | Orca |
 | **Task** | 工作项；`deps` 定义 DAG 边，`run_id` 归属 Run | Orca |
 | **Dispatch** | **一次尝试**（id 形如 `ctx_*`）；带 `failure_count`（3 次熔断）、心跳、pane 身份、能力凭证。重试产生新的 Dispatch | Orca |
-| 每节点启动偏好、每 Run 主阶段、画布坐标、默认值、当前 Run | viewer 自己的元数据与偏好 | `.orca-dag.config.json` |
-| Viewer Activity 记录与有意义的 coordinator check | 有界的解释性历史，包括回复、启动、清理决定、新消息、错误和 agent 状态变化；绝不作为 Task 落定依据 | `.orca-dag.activity.jsonl` |
+| 每节点启动偏好、每 Run 主阶段、画布坐标、默认值、当前 Run | viewer 自己的元数据与偏好 | `.orca-dag/config.json` |
+| Viewer Activity 记录与有意义的 coordinator check | 有界的解释性历史，包括回复、启动、清理决定、新消息、错误和 agent 状态变化；绝不作为 Task 落定依据 | `.orca-dag/activity.jsonl` |
 
 Run 是命名空间，**不等于 DAG** —— 一个 Run 里可以躺多张互不相连的图。"一个 Run 一张图"是 `skill/SKILL.md` 里的约定，不是 Orca 的约束。
 
@@ -80,6 +80,29 @@ viewer 是个普通进程，没有 Orca 会话或终端身份，所以写操作�
 - **viewer 侧只依赖 `orca` CLI** —— 不需要 `claude`、不需要 `ANTHROPIC_API_KEY`。
 - **Node.js ≥ 20** 用于跑 `npx orca-orchestration-launcher` —— 用 release 二进制的话什么都不需要。**Bun** 只在你想自己打二进制时才需要。
 
+### 支持范围与已验证版本
+
+**最低兼容版本不等于完整的实测版本矩阵。** 下表的原生 agent 和实验性 TUI 路径依据的是**运行中的 Orca app 版本**（`orca status --json` 里的 `result.runtime.appVersion`），不能只看已安装的 CLI 版本。
+
+| 能力 / 启动路径 | 最低 Orca 版本 | 条件 |
+|---|---|---|
+| 浏览 Run、Task 和 gate | **1.4.160** | 1.4.160–1.4.204 仅支持浏览。 |
+| 通过 supervised worker 执行 DAG | **1.4.205** | 通用执行基线；具体 agent 路径可能要求更新版本。 |
+| 原生 Codex 启动 | **1.4.217** | 本机 POSIX 当前/已有工作区；旧版、版本未知的运行时及新建本机工作区仍走兼容适配器。 |
+| 原生 OpenCode 2 TUI | **1.4.220** | 未设置逐节点模型；viewer 的 `opencode` 选择映射为 Orca 的 `opencode2` agent。 |
+| API 预选模型的 OpenCode 2 完整 TUI | **1.4.222** | 显式指定模型并设置 `ORCA_DAG_OPENCODE_TUI=1`；仅本机 POSIX 当前/已有、非 lane 工作区。实验性功能，默认关闭。 |
+
+**截至 2026-10-08，有记录的真实运行时验证：**
+
+| Orca app | Agent 版本 | 已验证内容 |
+|---|---|---|
+| **1.4.217** | **Codex CLI 0.159.2** | 本机只读原生 Task：提示词执行、`live / agent_status`、精确 transcript 及 Orca 接受 `worker_done`。 |
+| **1.4.222** | **OpenCode 2.0.22** | 显式启用的 API 预选模型完整 TUI：逐节点模型/variant、依赖 Task、重启恢复且不重复派工、关闭终端后读取输出、成功完成后的清理及 provider 确认退出的 Stop。Stop 在 fencing 后可能保留终端，不保证自动关窗。 |
+
+**原生 OpenCode 2 路径**也已使用 **OpenCode 2.0.22** 通过只读 Task 和隔离工作树写文件验证（该路径要求 Orca ≥ 1.4.220）。这与实验性 API 预选模型适配器的验证不同；后者在 macOS、**Node.js 22.23.0** 上实测，**尚未覆盖**长时间编码、Git Stage、新建工作区、lane、远程或 Windows 执行。
+
+Claude Code 有 Orca **1.4.209** 上的历史端到端验证，但当时未记录精确 CLI 版本。其他 harness 暂无已记录的 Orca/agent 版本组合验证；为某个 agent 安装 skill **不代表**其 worker 执行已通过验证。较早的 Orca **1.4.209** + Codex **0.156.1**（缺少 fleet 状态）及 OpenCode **2.0.15**（原生提示词未送达）属于已知限制，不作为推荐组合。详见[运行时发现与启动路径边界](docs/tutorials/viewer-operations_zh.md#已知局限)。
+
 ## 安装
 
 一条命令，两个模块一起到位：
@@ -91,17 +114,29 @@ npx orca-orchestration-launcher
 
 它会把 `orca-dag` **skill** 装进你本机所有的 coding agent（Claude Code、Codex、Cursor、OpenCode、Gemini CLI、Droid，以及共享的 `~/.agents/skills` —— 存在哪个装哪个），然后在 <http://localhost:8787> 起 **viewer**，并把当前目录当作工作区。重复执行是安全的：skill 只在内容真的变了时才重写，你自己做的 symlink 目录会被完全跳过。
 
-**工作区初始化也是这条命令的一部分：**启动时默认向工作区的 `.gitignore` 添加带管理标记的 `.orca/` 规则，并打印规划目录与忽略规则的处理结果。已有匹配规则会直接复用，其他规则保留，符号链接或非普通文件形式的 `.gitignore` 不会被修改。初始化失败会明确警告，但不阻止 viewer 启动。
+**工作区初始化也是这条命令的一部分：**启动时默认向工作区的 `.gitignore` 添加带管理标记的 `.orca-dag/` 规则，并打印规划目录与忽略规则的处理结果。已有匹配规则会直接复用，其他规则保留，符号链接或非普通文件形式的 `.gitignore` 不会被修改。初始化失败会明确警告，但不阻止 viewer 启动。
 
 agent 会为每个新需求或新建 Run 的重新规划创建独立的 UTC 时间戳目录（含毫秒；重名时换时间戳或加数字后缀），不再覆盖共用文档：
 
 ```text
-.orca/20261008-143012-123/
-  PRD.md
-  TECH_SPEC.md
+.orca-dag/
+  config.json
+  activity.jsonl
+  launches.jsonl
+  requests.jsonl
+  sessions.json
+  20261008-143012-123/
+    PRD.md
+    TECH_SPEC.md
 ```
 
 继续同一个计划或向其 Run 添加 Task 时沿用原目录；agent 会在两份文档中记录 Run id，并同时告知目录与 id。文档是本地忽略的产物，**不强制加入 Git**；Task spec 自包含所需信息，隔离工作树里的 worker 不依赖这些文件。仅启动 viewer 不会创建时间戳目录。
+
+其他文件形式的规划笔记、Task spec 草稿或本地 DAG 草稿也统一保存在同一个目录中，不代替 Orca 的权威编排状态。
+
+已有的旧版 `.orca/` 文档不会被移动或删除。启动时保留其原有忽略管理块，另外添加新的 `.orca-dag/` 规则；所有新规划产物均使用 `.orca-dag/`。
+
+**5 个 viewer 运行状态文件也统一放在 `.orca-dag/` 内。**升级前请停止旧 viewer。新版成功取得 HTTP 端口后，会将根目录的旧 `.orca-dag.*` 状态文件按原始字节迁入，并逐个报告。如果新旧位置都有文件，则使用新位置、保留旧文件并警告需人工核对，绝不覆盖或擅自合并历史。不会顺着符号链接读写目录或文件；无法写入迁移时，旧普通文件仍可读取，但新写入不会回退到根目录。文件按实际使用创建。`--no-workspace-init` 只跳过忽略规则初始化，不禁用状态保存或迁移。
 
 接着直接在 agent 里聊需求就行，它会按 `SKILL.md` 的规范把 DAG 建进 Orca，并提示你打开 viewer。
 
@@ -115,10 +150,10 @@ tar xzf orca-dag-darwin-arm64.tar.gz && sudo mv orca-dag /usr/local/bin/ && orca
 
 开关：`PORT`（默认 8787）、`NO_OPEN=1`（不自动开浏览器）、`--no-skill` / `ORCA_DAG_NO_SKILL=1`（不碰 agent 的 skill 目录）、`WORKSPACE_DIR`（用别的工作区代替当前目录 —— 必须存在，直接作为 `path:` worktree）、`ORCA_WORKTREE`（显式 Orca worktree 选择器，覆盖 `path:` 默认值）、`ORCA_CLI_COMMAND`（要运行的 Orca CLI，带引号的 argv、不经 shell —— 见[用哪个 orca、哪个工作区](#用哪个-orca哪个工作区能不能执行)）、`ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1`（允许任意自定义 harness 命令 —— 见[安全模型](#安全模型)）。
 
-`--no-workspace-init` / `ORCA_DAG_NO_WORKSPACE_INIT=1` 跳过自动修改 `.gitignore`，规划前请自行添加 `.orca/`。它与 `--no-skill` 相互独立，后者只跳过 agent skill 安装。
+`--no-workspace-init` / `ORCA_DAG_NO_WORKSPACE_INIT=1` 跳过自动修改 `.gitignore`，规划前请自行添加 `.orca-dag/`。它与 `--no-skill` 相互独立，后者只跳过 agent skill 安装。
 
 只想要 skill、不要 viewer，或者想用标准工具管理？`npx skills add yyq19990828/Orca-dag --skill orca-dag --global` —— 即 [open agent skills CLI](https://github.com/vercel-labs/skills)，`orca skills install` 底层调的也是它。
-仅装 skill 不会初始化项目；skill 会要求 agent 在写规划文档前确认 `.orca/` 已被忽略。
+仅装 skill 不会初始化项目；skill 会要求 agent 在写规划文档前确认 `.orca-dag/` 已被忽略。
 
 ## 卸载
 
@@ -128,9 +163,9 @@ npx orca-orchestration-launcher uninstall   # 想先看清单就加 --dry-run
 
 把 skill 从所有装过的 agent 目录里删掉，并关掉 viewer 崩溃后残留的 `orca-dag coordinator` 终端，关闭前会逐个报告每个终端当时协调的工作区（目录 + hash）—— 后面这条其实最要紧，残留的 coordinator 会一直占着 Run，把你自己的 agent 挡在外面。你自己做的 symlink 只会被 unlink，不会顺着链接删，checkout 是安全的。
 
-请在项目根目录卸载（或设置 `WORKSPACE_DIR`）：它还会从该工作区的 `.gitignore` 中删除**自己写入且未被修改的 `.orca/` 管理块**。用户自写规则、修改过的管理块和 `.gitignore` 文件本身都保留。`.orca/` 规划文档**始终保留，即使加了 `--purge`**；卸载后如需继续忽略它们，请自行添加 `.orca/` 规则。Orca 中的 Run/Task 历史不会被删除。
+请在项目根目录卸载（或设置 `WORKSPACE_DIR`）：它还会从该工作区的 `.gitignore` 中删除**自己写入且未被修改的 `.orca-dag/` 管理块，以及旧版 `.orca/` 管理块**。用户自写规则、修改过的管理块和 `.gitignore` 文件本身都保留。两个目录中的规划文档**始终保留，即使加了 `--purge`**；卸载后如需继续忽略它们，请自行添加相应的忽略规则。Orca 中的 Run/Task 历史不会被删除。
 
-工作区的 viewer 历史默认保留，包括配置、Activity/check 回执、请求审计、会话绑定、派工历史和已提交 Stage 的 Git 证据。加 `--purge` 只删除这些 viewer 自有状态，不删除规划文档。程序本身也会保留，因为进程不能删除正在运行的自身二进制；uninstall 会打印对应的后续命令。
+工作区的 viewer 历史默认保留，包括配置、Activity/check 回执、请求审计、会话绑定、派工历史和已提交 Stage 的 Git 证据。加 `--purge` 只删除 `.orca-dag/` 内已知的 5 个状态文件、根目录的旧版对应文件及 Git 证据，绝不删除共享目录、时间戳规划目录或其他用户文件。普通卸载和 `--dry-run` 都不会迁移状态。程序本身也会保留，因为进程不能删除正在运行的自身二进制；uninstall 会打印对应的后续命令。
 
 ### 自己构建和发版
 
@@ -178,7 +213,7 @@ npm publish ./dist-npm --access public --tag bootstrap
 
    > 用 orca-dag skill：把「给报表页加 CSV 导出」拆成一张任务 DAG。
 
-   agent 会先问几个澄清问题，写 `.orca/<timestamp>/PRD.md` / `.orca/<timestamp>/TECH_SPEC.md`，然后跑 `orca orchestration run-create` + `task-create --deps …`。建完会告诉你 **Run id**（形如 `run_ab12cd34ef56`）和规划目录。
+   agent 会先问几个澄清问题，写 `.orca-dag/<timestamp>/PRD.md` / `.orca-dag/<timestamp>/TECH_SPEC.md`，然后跑 `orca orchestration run-create` + `task-create --deps …`。建完会告诉你 **Run id**（形如 `run_ab12cd34ef56`）和规划目录。
 
 4. **在顶栏下拉框选中** agent 刚报的那个 Run。DAG 出现并每 2 秒刷新 —— 你可以继续和 agent 聊着调整计划，看节点实时长出来。
 
@@ -199,6 +234,10 @@ npm publish ./dist-npm --access public --tag bootstrap
 ## viewer 能做什么
 
 - **OpenCode 2 原生 TUI**：已有的 `opencode` 选择，在运行中的 Orca ≥ 1.4.220 且未指定逐节点模型时，会使用 Orca 的 `opencode2` agent ID；状态、放置与终端清理由 Orca 管理，模型取自 OpenCode 自身配置。指定模型则保留 `opencode run --auto -m` 一次性路径；旧版或版本未知的运行时也保留该路径。原生启动失败后绝不再启动第二个 worker。已用 OpenCode 2.0.22 验证只读和写文件 Task。
+
+- **实验性指定模型完整 TUI**：启动时设置 `ORCA_DAG_OPENCODE_TUI=1`，显式逐节点模型会使用 API 预建的 OpenCode 2 会话。要求运行中的 Orca ≥ 1.4.222，以及本机 POSIX 当前/已有、非 lane 工作区；不支持的放置或运行时在启动前拒绝，不回退一次性路径。`provider/model#variant` 与 effort 对应同一个 V2 variant，冲突值会被拒绝。准备记录与 session/terminal 身份保存到 `.orca-dag/sessions.json`，通过 `worker-start --terminal` 绑定；实际 assistant 模型/输出标为 **OpenCode API** 来源，不伪称 Orca effective 回显。未证实的输入绝不重发。清理仅在 external release 和 provider 退出已确认后关闭身份明确的自建终端；retain 或后续用户输入会保留终端。Stop 先中断精确共享服务会话，再做 Orca 编排记账；未知结果保留阻塞。首版不开放 TUI 复用、新工作树、lane、远程或 Windows。未设置开关时默认路径不变；关闭开关也不能绕过未知准备记录。
+
+  **Stop 记账：** 仅对该 external 进程适配器，确认 provider 已退出后使用 `worker-abandon` 只撤销编排权限，而不调用 1.4.222 无法停止 external 终端的原生 `worker-stop`。清理前再次读取取消落定状态。如果 release 随后返回 `retained / identity_unproven`，则明确保留终端供检查，不用强行关闭来代替未知身份。Stop 报告会与原生进程终止区分。
 
 - **按 workspace 隔离的 Run 选择器**：Orca 的 Run 注册表是全局的，但 viewer 只显示任务创建者身份与当前 workspace 匹配的 Run（以及该 workspace 已保存/刚创建的空 Run）。紧凑选择器以稳定的 `run_*` 编号为主信息，objective 作为次级说明。**＋ Create Run** 会从当前 workspace 创建一个空 Run 并立即选中。**Load older** 沿 Orca 的游标分页注册表继续往前翻（不透明游标逐字节透传），也可以直接按精确 `run_*` id 打开 —— 精确查找会重新校验 workspace 归属，外来 id 一律按不存在处理，绝不泄露其他 workspace 的 Run。
 - **Run 健康徽标**：选中的 Run 始终报告它的归属状态 —— **viewer 自己协调**、**外部协调中**、**无绑定** 或 **内部不一致**（Orca 自身记录相互矛盾），并给出按来源的计数，读取失败时显示警告（读取失败绝不是悄悄当零处理）。任务为空但仍有消息的 Run 会被解释成这种情况，而不是看起来像渲染故障。
@@ -221,15 +260,15 @@ npm publish ./dist-npm --access public --tag bootstrap
 - **跨 lane 汇合处的集成门**：当一个任务的依赖分属不同工作区 lane 时，依赖全部完成**并不等于**它们的改动已经合并。这类任务启动之前，coordinator 会先建一个幂等的 Orca 决策门（稳定的 `[orca-dag:integration]` 标记，注明来源与目标 lane），只提供 `integrated` 一种决议；任务保持阻塞，直到人工解决它。解决门记录的是一次**人工断言** —— viewer 绝不声称自己验证过 Git 合并，也永远不做 merge、rebase、cherry-pick、commit、push 或删分支。
 - **单 Dispatch 干预**：停止一个正面确认仍活跃的 Dispatch（`worker-stop`）；对一个正面已退出、或 Orca 字面指定下一步为放弃的「结果未知」尝试做显式放弃（`worker-abandon` —— 只要 Orca 能证明 worker 仍存活就会拒绝）；或聚焦一个 Orca 报告「等待人工输入」的本地 worker 终端（`terminal switch`，只认新鲜的本地 `agentWait` 证据）。证据缺失、过期、远程或不可验证时一律不给操作入口；每次干预都带持久化请求 id，且绝不波及其他 Dispatch。
 - **Orca 原生的审阅与移除**：执行结束后，改动文件和 diff 会在 Orca 编辑器里针对精确已证实的工作区打开（`file open` / `file diff` / `file open-changed`；报告/文件路径先对工作区校验再传给 Orca）；已落定 lane 的 worktree 只能通过 `orca worktree rm` 移除 —— 需要显式确认、token 保护，且只要还有任何存活、可回收、被保留、释放中或不可验证的 worker 可能占用该工作区就拒绝移除。归档钩子失败会原样浮现；Orca 文档化的豁免路径是另一次独立确认，绝不是自动的，也绝不是 `--force`。
-- **每节点选 harness**：点节点在面板里选 `claude / kimi / opencode / grok / codex` 或自定义命令（持久化到 workspace 的 `.orca-dag.config.json`；自定义命令还需要 `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1`，见[安全模型](#安全模型)）；没单独设的节点用顶栏的**默认 harness** 兜底。一条 harness 边界：一次性 opencode 与自定义命令走 viewer 的 legacy 本地终端路径，无法拥有非 current 工作区 —— 二者与任何非 current 本地放置（或 lane）组合都会在任何动作开始前被拒绝，**绝不回退到 current**。
+- **每节点选 harness**：点节点在面板里选 `claude / kimi / opencode / grok / codex` 或自定义命令（持久化到 workspace 的 `.orca-dag/config.json`；自定义命令还需要 `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1`，见[安全模型](#安全模型)）；没单独设的节点用顶栏的**默认 harness** 兜底。一条 harness 边界：一次性 opencode 与自定义命令走 viewer 的 legacy 本地终端路径，无法拥有非 current 工作区 —— 二者与任何非 current 本地放置（或 lane）组合都会在任何动作开始前被拒绝，**绝不回退到 current**。
 - **执行后启动参数不可变**：任务一旦产生首个 Dispatch，harness、模型、effort、环境和放置就永久锁定；viewer 通过完整、包含远程记录的 worker 历史在重启后继续保持这把锁，因此安全重试会沿用原启动方案。所选 Run 的 coordinator 运行期间，尚未启动的任务也会暂时冻结，因为运行中的 coordinator 已持有启动快照；停止后只有从未启动的任务会重新解锁。
 - **▶ Run with Orca / ⏹ Stop** + **Max parallel**：启动/停止 viewer 内置的自驱动 coordinator；worker 数由 DAG 并行度决定（能并行就并行，受 "Max parallel" 上限约束）—— **不用手动加 worker**。落定的 worker 先归档输出，终端默认释放；如果有立即可兼容的后续任务（同 harness、模型不变），终端通过 `worker-start --terminal` 直接交给它；也可以用 **Retain for debugging** 显式保留。执行中显示 "N workers"。
 - **审批门与集成门**：审批操作放在 Activity 可展开的 Operational details 中，不再与其他卡片叠在画布上。跨 lane 集成门会注明来源与目标 lane，说明「上游完成 ≠ 已集成」，且只提供 `integrated` 一种决议；Workspace-lanes 面板从 lane 一侧展示同一道边界（`integration_required` 状态）。
 - **节点详情（只读 spec）**：点节点看 spec / 状态 / 结果。spec 默认是更小的一行预览，并提供可访问的 Expand 控件；结构化 worker 结果会解析为结果状态、简洁报告、修改文件列表和可选报告路径，完整 payload 收进默认折叠的技术详情；改 Task 或依赖仍需让 agent 重绘 DAG。
 - **Workers 面板**：Activity 的 Operational details 内按尝试展示 fleet 视图，包括存活状态、attention、执行主机、终端记账、请求值与实际生效值（模型/effort/**放置与工作区**）、Orca 字面 nextAction，以及带**来源徽标**（`auto / terminal / transcript`、截断/完整标记）的有界输出、只过滤**已加载行**的**搜索**（绝不会抓取更多转录）、本地**下载已加载行**导出，以及与 fleet 权威状态 visibly 区分的释放**归档事实**（归档存在只是证据，不等于结算）。每行还带证据门控的**停止 / 放弃 / 聚焦**操作：正面活跃才能停止，正面已退出或 Orca 指定放弃才能放弃，只有本地精确 `agentWait` 才能聚焦 —— 证据不足时连操作入口都不渲染。
-- **后台会话恢复**：Claude 的精确 worker 进程、Codex preamble 中的 Task/Dispatch ID，或 OpenCode 启动时的 Dispatch 专属标题能唯一对应会话时，Recovery 会自动绑定 provider 提供的 session ID；证据不足时仍可手动输入已知 ID。绑定保存在 `.orca-dag.sessions.json`，并与 Orca 记录的执行位置核对。provider 探测结果与 Orca Dispatch 状态分开显示；主机不可达、终端关闭或 Codex 返回 `notLoaded` 都不证明后台任务已经退出。未知的尝试继续占用并发额度，不会自动重新派工。绑定和探测本身也不会恢复已停止的 Dispatch。
+- **后台会话恢复**：Claude 的精确 worker 进程、Codex preamble 中的 Task/Dispatch ID，或 OpenCode 启动时的 Dispatch 专属标题能唯一对应会话时，Recovery 会自动绑定 provider 提供的 session ID；证据不足时仍可手动输入已知 ID。绑定保存在 `.orca-dag/sessions.json`，并与 Orca 记录的执行位置核对。provider 探测结果与 Orca Dispatch 状态分开显示；主机不可达、终端关闭或 Codex 返回 `notLoaded` 都不证明后台任务已经退出。未知的尝试继续占用并发额度，不会自动重新派工。绑定和探测本身也不会恢复已停止的 Dispatch。
 - **阻断 Stage 的处理**：Operational details 对已失败且 fleet 确认退出的 Dispatch，提供人工核对后完成 Task 或显式重试。人工完成保留旧 Dispatch 的失败记录；重试核对精确 provider session，并沿用旧 harness、模型和工作区。provider 状态未知时，操作员必须输入 Dispatch ID 才能重试，因为后台任务仍可能在运行。
-- **变更请求审计**：查看器发起的每个变更（worker-start / release / retain / stop）都携带持久的 `--retry-request` id，并在调用 CLI **之前**写入工作区 `.orca-dag.requests.jsonl` 账本（有界、仅元数据），即使响应丢失或查看器重启之后 id 仍可检视。Operational details 新增只读**审计面板**：每个已记录请求一行（操作、Task/Dispatch 关联、作用域），行内 **Inspect** 会发起一次全新的 `request-show` 探测，并逐字渲染 Orca 自身的状态与解释——`completed`（绿）、`pending`（琥珀）、`absent`（灰，明确标注"absent 绝不证明变更没有发生"）、探测失败则显示 `unknown`。审计面绝不重放变更。
+- **变更请求审计**：查看器发起的每个变更（worker-start / release / retain / stop）都携带持久的 `--retry-request` id，并在调用 CLI **之前**写入工作区 `.orca-dag/requests.jsonl` 账本（有界、仅元数据），即使响应丢失或查看器重启之后 id 仍可检视。Operational details 新增只读**审计面板**：每个已记录请求一行（操作、Task/Dispatch 关联、作用域），行内 **Inspect** 会发起一次全新的 `request-show` 探测，并逐字渲染 Orca 自身的状态与解释——`completed`（绿）、`pending`（琥珀）、`absent`（灰，明确标注"absent 绝不证明变更没有发生"）、探测失败则显示 `unknown`。审计面绝不重放变更。
 - **手绘蜡笔风**：🖍️ SVG feTurbulence 波动描边 + 米色速写本画布。
 
 ## 界面语言
@@ -250,7 +289,7 @@ viewer 是直通 Orca 的控制面 —— 启动 Run 会 fence 掉原本的 coor
 - **只绑回环地址。** 服务只监听 `127.0.0.1`，绝不听所有网卡。局域网里任何机器都够不着它；也没有任何远程监听模式。
 - **没有 CORS。** API 不返回任何 `Access-Control-*` 响应头，其他源页面连一个字节的响应都读不到 —— 包括下面的 token。
 - **每进程一个 mutation token。** 所有改动类请求（`/api` 下的 `POST`/`PUT`）必须带上 `X-Orca-Dag-Token`，它是进程启动时铸造的 256 位随机值。web 客户端从 `GET /api/session` 取回并持有它；服务重启（token 更换）时会自动重取并重试一次。只读接口（`GET`）不需要 token。被拒绝的请求在任何路由逻辑执行之前就吃 `403` —— 不跑 Orca 命令，也没法拿校验报错当探测口。
-- **自定义 harness 命令默认关闭。** 默认只能启动已知的 viewer harness（`claude`、`codex`、`opencode`、`gemini`、`grok`、`cursor`、`droid`、`kimi`）；`opencode` 在适用原生路径时映射到 Orca 的 `opencode2` agent ID。任意命令（比如 `aider`）会被 `custom_commands_disabled` 拒绝，除非启动 viewer 时带了 `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1`；UI 会相应隐藏/禁用 "Custom…"。已存的自定义值仍会在 `.orca-dag.config.json` 里可见 —— 只是 flag 不在就不跑。
+- **自定义 harness 命令默认关闭。** 默认只能启动已知的 viewer harness（`claude`、`codex`、`opencode`、`gemini`、`grok`、`cursor`、`droid`、`kimi`）；`opencode` 在适用原生路径时映射到 Orca 的 `opencode2` agent ID。任意命令（比如 `aider`）会被 `custom_commands_disabled` 拒绝，除非启动 viewer 时带了 `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1`；UI 会相应隐藏/禁用 "Custom…"。已存的自定义值仍会在 `.orca-dag/config.json` 里可见 —— 只是 flag 不在就不跑。
 - **边界处严格校验。** Run/task/gate id、harness 名、`provider/model` 值、并发数、`{taskId: …}` 映射都在 HTTP 边界校验，之后才会变成 Orca 命令行参数。
 - **一份解析好的 CLI 规格，绝不进 shell。** Orca 可执行文件（来自 `ORCA_CLI_COMMAND` 或平台规则）启动时一次性解析成纯 argv —— `ORCA_CLI_COMMAND` 里的操作符、重定向、命令替换会被拒绝，而不是被悄悄错误地执行 —— 所有调用都以 `shell: false` 拉起。
 
@@ -311,7 +350,7 @@ viewer 是直通 Orca 的控制面 —— 启动 Run 会 fence 掉原本的 coor
 | `GET` | `/api/environments/:envId/worktrees?repo=` | 一个环境上的精确工作区 —— 放置选择器用的完整 `id:<repoId>::<path>` 选择器 |
 | `GET` | `/api/environments/:envId/repos` | 一个环境上注册的仓库（用于新建顶层 worktree） |
 | `GET` | `/api/environments/:envId/projects` | 一个环境上可见的项目分组 |
-| `GET` | `/api/config` | viewer 配置（harness/模型/effort/保留/环境/放置选择、每 Run 主阶段、最多并行、布局、上次的 Run），存在 workspace 的 `.orca-dag.config.json` |
+| `GET` | `/api/config` | viewer 配置（harness/模型/effort/保留/环境/放置选择、每 Run 主阶段、最多并行、布局、上次的 Run），存在 workspace 的 `.orca-dag/config.json` |
 | `PUT` | `/api/config` | 合并写入 viewer 配置 |
 | `GET` | `/api/health` | 健康检查（返回 workspace 目录） |
 
@@ -325,15 +364,16 @@ server/src/
   index.ts               进程入口：子命令（--help / uninstall）、CLI+工作区解析、skill/工作区初始化、回环监听
   app.ts                 Express 应用（createApp）：readiness / dag / session / runs / run / run-stop / run-status / activity / inbox / messages / gates / workers / requests / environments / models / config + 托管 SPA
   activity.ts            Run 作用域的可读事件解析器 + 有界 viewer Activity 日志
-  requestLedger.ts       查看器发起的变更请求 id 的有界、原子账本（.orca-dag.requests.jsonl）——仅元数据，状态永远通过 request-show 实时读取
+  requestLedger.ts       查看器发起的变更请求 id 的有界、原子账本（.orca-dag/requests.jsonl）——仅元数据，状态永远通过 request-show 实时读取
   security.ts            回环安全策略：每进程 mutation token、请求校验、自定义命令开关
   coordinator.ts          自驱动 coordinator 循环：轮询 DAG，用 worker-start（本机或 --on 环境）派发 ready 任务，负责放置/lane 映射、集成门、落定与终端复用/保留/释放，用 worker-list --include-remote 对账
   orca.ts                 orca CLI 封装：唯一解析的可执行/argv + 工作区、就绪/版本门、task-list→DAG、worker-start/复用/legacy/opencode worker、worktree/repo 发现 + 放置门、环境发现 + 对端能力、worker-read/stop/abandon、门、终端、模型
   orca.test.ts            解析/就绪/冲突覆盖（fake `orca` 桩）
   runHealth.ts            Run 归属/健康评估（viewer 自身协调 / 外部 / 无绑定 / 内部不一致），支撑 /api/run-health 与 /api/capabilities
-  config.ts               viewer 配置持久化：workspace 下 .orca-dag.config.json 的读写（/api/config）
+  config.ts               viewer 配置持久化：workspace 下 .orca-dag/config.json 的读写（/api/config）
+  workspaceState.ts       统一状态路径、不覆盖的旧版迁移、只读回退及启动提示
   skill.ts                启动时把 skill/SKILL.md 装进本机的各个 agent
-  planning.ts             .orca/ 忽略规则的管理块初始化/撤销及明确的启动提示
+  planning.ts             .orca-dag/ 忽略规则的管理块初始化/撤销（兼容清理旧版 .orca/）及明确的启动提示
   uninstall.ts            `orca-dag uninstall`：镜像撤销 skill/工作区初始化，保留规划，清理残留终端
   webAssets.ts            编译期内嵌前端资源（以及 skill）的加载器
 web/src/
@@ -372,5 +412,5 @@ scripts/
 - **放置要么精确、要么不发生 —— 本地与远程一视同仁**：四种本地模式与 `worker-start --worktree` 的取值一一对应（`current`、精确已有选择器、`new-child`、`new-top-level --repo <精确repo>`），创建类旗标（`--name`、`--base-branch`、`--display-name`、`--comment`、`--setup`）**只**在两种新建 worktree 模式上出现 —— current 与 existing 启动绝不带，也绝不重跑 setup。用户没给名称时，服务端在调用 Orca 前从 Run + Task/lane id 推导一个确定性的有界名称。绑定到已保存环境的节点通过 `worker-start --on <environment>` 启动 —— `--on` 只出现在这一次调用上；之后所有的读取、消息、停止、释放都只按 **Dispatch ID** 寻址（进程、文件系统、transcript、停止与清理事实都归执行主机所有）。远程只有两种放置形态 —— 该环境上发现的精确已有工作区选择器，或带精确 repo 选择器与显式名称的新顶层 worktree；远程 `current`/`new-child` 在 HTTP 边界和适配器里各被拒绝一次，都发生在任何 Orca 调用之前。任何地方都没有合成的本地回退：新建 worktree 启动失败绝不让任务跑进 current 工作区，也绝不凭缺失证据再造一个替代品；未知环境或未证实的能力会让启动失败并留下原因记录；安全重试只会重复正面证实过的选择器（放置无法再次证实时重试直接被拒）。模型/effort 转发与结构化 transcript 读取以对端**通告**的能力为准；主机断连时其 worker 显示 `unverifiable`（绝不会是 `exited`），且不会自动停止/重试/释放 —— 重连后恢复存活状态，原 Dispatch 照常落定。
 - **legacy harness 边界是「失败即关闭」**：一次性 opencode 与自定义命令走 viewer 的 legacy 本地终端路径，无法遵循精确的非 current 工作区，也无法原子地创建并拥有新 worktree。给这类 harness 选任何非 current 本地放置或 lane，都会在任何终端或 Dispatch 出现之前被拒绝 —— 绝不静默回退到 current，`agent_unconfigured` 也绝不在事后放宽放置。
 - **worktree 自始至终归 Orca 所有**：每个新 worktree 都由 `worker-start` 自己创建 —— 一份回执同时拥有 Task、Dispatch、setup、终端、worktree 效果、残留资源与恢复命令；没有单独的 `worktree create` 调用。每次移除都是对 Orca 返回或重新发现的精确选择器执行 `orca worktree rm`，前置条件是 worker 归属已落定加显式确认。产品代码里不存在任何原生 `git worktree` 命令或直接删目录，归档钩子失败会阻止移除而不是被豁免，单独一次 `worker-release` 也绝不解锁移除。
-- **每节点启动偏好、放置意图和主阶段标记存 workspace 配置文件**：Orca 的 task 没有 harness/metadata 字段（`task-create` 只有 spec/title/display-name/deps/parent），所以 viewer 把启动选择、每任务放置意图、lane 定义与成员关系、每个 Run 的一个语义主阶段、最多并行与布局存到 workspace 根的 `.orca-dag.config.json`（`server/src/config.ts`，`GET/PUT /api/config`），换浏览器 / 清 localStorage 都不丢；前端 `harness.ts` 是响应式 store，启动时从服务器加载并把旧的 localStorage 值一次性迁移上去。该文件只存**意图**：已创建的 worktree id、路径、分支、终端句柄、Dispatch id 与能力授予绝不入库；运行时身份永远从 Orca 回执与读取中重建。Run 时启动选择会被快照进 coordinator，之后由持久 worker 历史保证任务首个 Dispatch 后不能再更改启动方案。
+- **每节点启动偏好、放置意图和主阶段标记存 workspace 配置文件**：Orca 的 task 没有 harness/metadata 字段（`task-create` 只有 spec/title/display-name/deps/parent），所以 viewer 把启动选择、每任务放置意图、lane 定义与成员关系、每个 Run 的一个语义主阶段、最多并行与布局存到 workspace 的 `.orca-dag/config.json`（`server/src/config.ts`，`GET/PUT /api/config`），换浏览器 / 清 localStorage 都不丢；前端 `harness.ts` 是响应式 store，启动时从服务器加载并把旧的 localStorage 值一次性迁移上去。该文件只存**意图**：已创建的 worktree id、路径、分支、终端句柄、Dispatch id 与能力授予绝不入库；运行时身份永远从 Orca 回执与读取中重建。Run 时启动选择会被快照进 coordinator，之后由持久 worker 历史保证任务首个 Dispatch 后不能再更改启动方案。
 - **改不了已建任务**：`orca orchestration task-update` 只能改 `--status` / `--result`，**没有改 spec/标题/依赖的接口**，也没有删除单个任务的命令；viewer 也刻意不提供清空入口（`orca orchestration reset --tasks` 会一次性清空所有 Run，所以永远不会被调用）。所以"修改任务"= **让 agent 开新 Run 重绘 DAG** —— 新建 Run 是唯一安全的重绘路径。

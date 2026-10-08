@@ -7,6 +7,7 @@ import { describeSkillInstall, installSkill } from "./skill";
 import { createApp, listenLoopback } from "./app";
 import { createSecurityPolicy } from "./security";
 import { describePlanningSetup, setupPlanningWorkspace } from "./planning";
+import { initializeWorkspaceState } from "./workspaceState";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -30,7 +31,7 @@ Usage:
 
 Options:
   --no-skill               don't touch the agent skill directories on startup
-  --no-workspace-init      don't add .orca/ to the workspace's .gitignore
+  --no-workspace-init      don't add .orca-dag/ to the workspace's .gitignore
   --purge                  (uninstall) also delete viewer history; planning docs are always kept
   --dry-run                (uninstall) report what would be removed, change nothing
 
@@ -45,16 +46,24 @@ Environment:
   ORCA_WORKTREE=<selector> explicit Orca worktree selector; default is the
                            exact workspace as path:<WORKSPACE_DIR>
   ORCA_CLI_COMMAND="<cmd>" exact Orca CLI to run, quoted argv, no shell
-                           (default: orca, or orca-ide on Linux outside Orca)
+                            (default: orca, or orca-ide on Linux outside Orca)
+  ORCA_DAG_OPENCODE_TUI=1   experimental API-preselected full TUI for explicit
+                            OpenCode models; running Orca >= 1.4.222, local
+                            POSIX current/existing non-lane workspaces only
   ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1
                            allow arbitrary custom harness commands (they run as
                            shell lines inside worker terminals; the known agent
                            ids — claude, codex, opencode, … — never need this)
 
 Planning documents:
-  .orca/<UTC timestamp>/PRD.md and TECH_SPEC.md (one directory per plan).
-  Startup adds a marked .orca/ rule to .gitignore by default. Uninstall removes
-  only that managed rule, never your planning documents or your own ignore rules.`);
+  .orca-dag/<UTC timestamp>/PRD.md and TECH_SPEC.md (one directory per plan).
+Workspace state:
+  .orca-dag/{config.json,activity.jsonl,launches.jsonl,requests.jsonl,sessions.json}.
+  Legacy root .orca-dag.* files move here without overwriting existing files.
+  Stop old viewers before upgrading; uninstall --purge removes only state files.
+  Startup adds a marked .orca-dag/ rule to .gitignore by default. Uninstall
+  removes only managed rules (including legacy .orca/ blocks), never your
+  planning documents or your own ignore rules.`);
   process.exit(0);
 }
 
@@ -112,6 +121,10 @@ console.log(planningReport);
 // fence real agent terminals, so it must not be reachable from the LAN. The
 // resolved port is read back so PORT=0 picks a free one for tests.
 const server = await listenLoopback(app, Number(process.env.PORT ?? 8787));
+// Do not relocate a running older viewer's files on a failed second launch:
+// acquire our port first. Constructors only calculate paths; store access and
+// this startup migration share the same no-clobber location contract.
+for (const line of initializeWorkspaceState(runtime.workspace.dir)) console.log(line);
 const addr = server.address();
 const port = typeof addr === "object" && addr ? addr.port : Number(process.env.PORT ?? 8787);
 const url = `http://localhost:${port}`;

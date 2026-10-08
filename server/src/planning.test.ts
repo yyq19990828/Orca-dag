@@ -6,7 +6,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, sym
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createServer } from "node:net";
 import { describePlanningSetup, removePlanningIgnore, setupPlanningWorkspace } from "./planning";
+import { legacyWorkspaceStatePath, WORKSPACE_STATE_FILES } from "./workspaceState";
 
 let root: string;
 let workspace: string;
@@ -27,11 +29,12 @@ describe("planning workspace initialization", () => {
   it("adds a managed rule, really ignores plan docs, and creates no empty plan directory", () => {
     const result = setupPlanningWorkspace(workspace);
     assert.equal(result.status, "added");
-    assert.match(describePlanningSetup(result), /Planning docs: \.orca\/<UTC timestamp>/);
-    assert.match(describePlanningSetup(result), /Added \.orca\//);
+    assert.match(describePlanningSetup(result), /Planning docs: \.orca-dag\/<UTC timestamp>/);
+    assert.match(describePlanningSetup(result), /Added \.orca-dag\//);
+    assert.equal(existsSync(join(workspace, ".orca-dag")), false);
     assert.equal(existsSync(join(workspace, ".orca")), false);
     execFileSync("git", ["init", "--quiet", workspace]);
-    const doc = ".orca/20261008-143012-123/PRD.md";
+    const doc = ".orca-dag/20261008-143012-123/PRD.md";
     assert.equal(execFileSync("git", ["-C", workspace, "check-ignore", doc], { encoding: "utf8" }).trim(), doc);
   });
 
@@ -63,7 +66,7 @@ describe("planning workspace initialization", () => {
     assert.equal(readFileSync(ignore, "utf8"), "node_modules/\n");
   });
 
-  for (const rule of [".orca/", "/.orca/", ".orca", "/.orca", ".orca/**", "/.orca/**"]) {
+  for (const rule of [".orca-dag/", "/.orca-dag/", ".orca-dag", "/.orca-dag", ".orca-dag/**", "/.orca-dag/**"]) {
     it(`leaves the existing user-owned ${rule} rule untouched, including on uninstall`, () => {
       const original = `# user-owned\n${rule}\nnode_modules/\n`;
       writeFileSync(ignore, original);
@@ -74,11 +77,11 @@ describe("planning workspace initialization", () => {
   }
 
   it("appends protection after a negation and restores the user's original choices", () => {
-    const original = ".orca/\n!.orca/\n";
+    const original = ".orca-dag/\n!.orca-dag/\n";
     writeFileSync(ignore, original);
     assert.equal(setupPlanningWorkspace(workspace).status, "added");
     execFileSync("git", ["init", "--quiet", workspace]);
-    assert.equal(execFileSync("git", ["-C", workspace, "check-ignore", ".orca/plan/PRD.md"], { encoding: "utf8" }).trim(), ".orca/plan/PRD.md");
+    assert.equal(execFileSync("git", ["-C", workspace, "check-ignore", ".orca-dag/plan/PRD.md"], { encoding: "utf8" }).trim(), ".orca-dag/plan/PRD.md");
     removePlanningIgnore(workspace, false);
     assert.equal(readFileSync(ignore, "utf8"), original);
   });
@@ -87,7 +90,7 @@ describe("planning workspace initialization", () => {
     const result = setupPlanningWorkspace(workspace, false);
     assert.equal(result.status, "disabled");
     assert.equal(existsSync(ignore), false);
-    assert.match(describePlanningSetup(result), /add \.orca\/ to \.gitignore yourself/);
+    assert.match(describePlanningSetup(result), /add \.orca-dag\/ to \.gitignore yourself/);
   });
 
   for (const dangling of [false, true]) {
@@ -125,10 +128,34 @@ describe("planning workspace initialization", () => {
 
   it("keeps a managed block the user edited rather than guessing ownership", () => {
     setupPlanningWorkspace(workspace);
-    const edited = readFileSync(ignore, "utf8").replace("\n.orca/\n", "\n.orca/private/\n");
+    const edited = readFileSync(ignore, "utf8").replace("\n.orca-dag/\n", "\n.orca-dag/private/\n");
     writeFileSync(ignore, edited);
     assert.equal(removePlanningIgnore(workspace, false).removed, 0);
     assert.equal(readFileSync(ignore, "utf8"), edited);
+  });
+
+  it("keeps legacy managed protection at startup and removes both exact blocks on uninstall", () => {
+    setupPlanningWorkspace(workspace);
+    const legacy = readFileSync(ignore, "utf8").replace("\n.orca-dag/\n", "\n.orca/\n");
+    writeFileSync(ignore, legacy);
+    assert.equal(setupPlanningWorkspace(workspace).status, "added");
+    const both = readFileSync(ignore, "utf8");
+    assert.ok(both.startsWith(legacy));
+    assert.equal(setupPlanningWorkspace(workspace).status, "present");
+    assert.equal(removePlanningIgnore(workspace, true).removed, 2);
+    assert.equal(readFileSync(ignore, "utf8"), both);
+    assert.equal(removePlanningIgnore(workspace, false).removed, 2);
+    assert.equal(readFileSync(ignore, "utf8"), "");
+  });
+
+  it("preserves user-owned and edited legacy rules on uninstall", () => {
+    setupPlanningWorkspace(workspace);
+    const edited = readFileSync(ignore, "utf8").replace("\n.orca-dag/\n", "\n.orca/private/\n");
+    const original = `.orca/\n${edited}`;
+    writeFileSync(ignore, original);
+    assert.equal(setupPlanningWorkspace(workspace).status, "added");
+    assert.equal(removePlanningIgnore(workspace, false).removed, 1);
+    assert.equal(readFileSync(ignore, "utf8"), original);
   });
 });
 
@@ -181,25 +208,25 @@ async function startup(args: string[] = [], overrides: NodeJS.ProcessEnv = {}): 
 describe("planning startup/uninstall lifecycle", () => {
   it("announces initialization and uninstalls symmetrically while keeping all plan docs, even with --purge", async () => {
     writeFileSync(ignore, "node_modules/\n");
-    const plan = join(workspace, ".orca", "20261008-143012-123");
+    const plan = join(workspace, ".orca-dag", "20261008-143012-123");
     mkdirSync(plan, { recursive: true });
     writeFileSync(join(plan, "PRD.md"), "original requirements\n");
     writeFileSync(join(plan, "TECH_SPEC.md"), "original design\n");
     const output = await startup();
-    assert.match(output, /Planning docs: \.orca\/<UTC timestamp>/);
-    assert.match(output, /Added \.orca\//);
+    assert.match(output, /Planning docs: \.orca-dag\/<UTC timestamp>/);
+    assert.match(output, /Added \.orca-dag\//);
     const skill = join(home, ".claude", "skills", "orca-dag", "SKILL.md");
-    assert.match(readFileSync(skill, "utf8"), /\.orca\/<timestamp>\/PRD\.md/);
+    assert.match(readFileSync(skill, "utf8"), /\.orca-dag\/<timestamp>\/PRD\.md/);
     const managed = readFileSync(ignore, "utf8");
     writeFileSync(join(workspace, ".orca-dag.config.json"), "{}\n");
 
-    assert.match(command(["uninstall", "--dry-run", "--purge"]), /would remove.*managed \.orca\/ ignore rule only/);
+    assert.match(command(["uninstall", "--dry-run", "--purge"]), /would remove.*managed planning ignore block\(s\) only/);
     assert.equal(readFileSync(ignore, "utf8"), managed);
     assert.ok(existsSync(skill));
     assert.ok(existsSync(join(workspace, ".orca-dag.config.json")));
 
     const report = command(["uninstall", "--purge"]);
-    assert.match(report, /removed.*managed \.orca\/ ignore rule only/);
+    assert.match(report, /removed.*managed planning ignore block\(s\) only/);
     assert.match(report, /planning documents \(even with --purge\)/);
     assert.equal(readFileSync(ignore, "utf8"), "node_modules/\n");
     assert.equal(existsSync(skill), false);
@@ -209,7 +236,7 @@ describe("planning startup/uninstall lifecycle", () => {
   });
 
   it("keeps --help and uninstall from initializing the workspace or installing a skill", () => {
-    assert.match(command(["--help"]), /Startup adds a marked \.orca\/ rule/);
+    assert.match(command(["--help"]), /Startup adds a marked \.orca-dag\/ rule/);
     assert.equal(existsSync(ignore), false);
     command(["uninstall"]);
     assert.equal(existsSync(ignore), false);
@@ -217,7 +244,7 @@ describe("planning startup/uninstall lifecycle", () => {
   });
 
   it("does not let --no-skill disable the default workspace initialization", async () => {
-    assert.match(await startup(["--no-skill"]), /Added \.orca\//);
+    assert.match(await startup(["--no-skill"]), /Added \.orca-dag\//);
     assert.equal(existsSync(join(home, ".claude", "skills")), false);
     assert.ok(existsSync(ignore));
   });
@@ -227,5 +254,89 @@ describe("planning startup/uninstall lifecycle", () => {
     assert.equal(existsSync(ignore), false);
     assert.match(await startup(["--no-skill"], { ORCA_DAG_NO_WORKSPACE_INIT: "1" }), /Workspace initialization disabled/);
     assert.equal(existsSync(ignore), false);
+  });
+
+  it("never relocates or purges legacy planning documents after upgrading", async () => {
+    setupPlanningWorkspace(workspace);
+    const legacyRule = readFileSync(ignore, "utf8").replace("\n.orca-dag/\n", "\n.orca/\n");
+    writeFileSync(ignore, legacyRule);
+    const legacyPlan = join(workspace, ".orca", "20261008-143012-123");
+    mkdirSync(legacyPlan, { recursive: true });
+    writeFileSync(join(legacyPlan, "PRD.md"), "keep legacy requirements\n");
+    assert.match(await startup(["--no-skill"]), /Added \.orca-dag\//);
+    assert.equal(existsSync(join(workspace, ".orca-dag")), false);
+    const report = command(["uninstall", "--purge"]);
+    assert.match(report, /2 managed ignore block\(s\)/);
+    assert.match(report, /\.orca — planning documents \(even with --purge\)/);
+    assert.equal(readFileSync(join(legacyPlan, "PRD.md"), "utf8"), "keep legacy requirements\n");
+    assert.equal(readFileSync(ignore, "utf8"), "");
+  });
+
+  it("moves all five legacy state files at startup and announces the new shared directory", async () => {
+    for (const file of Object.values(WORKSPACE_STATE_FILES)) {
+      writeFileSync(legacyWorkspaceStatePath(workspace, file), `original ${file}\n`);
+    }
+    const output = await startup(["--no-skill"]);
+    assert.match(output, /Workspace state: \.orca-dag\/\{config.json,activity.jsonl,launches.jsonl,requests.jsonl,sessions.json\}/);
+    assert.equal(output.match(/Moved workspace state:/g)?.length, 5);
+    for (const file of Object.values(WORKSPACE_STATE_FILES)) {
+      assert.equal(readFileSync(join(workspace, file), "utf8"), `original ${file}\n`);
+      assert.equal(existsSync(legacyWorkspaceStatePath(workspace, file)), false);
+    }
+  });
+
+  it("does not move an older viewer's state when its port is already in use", async () => {
+    const occupied = createServer();
+    await new Promise<void>((resolve) => { occupied.listen(0, "127.0.0.1", resolve); });
+    const addr = occupied.address();
+    assert.ok(addr && typeof addr !== "string");
+    const legacy = legacyWorkspaceStatePath(workspace, WORKSPACE_STATE_FILES.config);
+    writeFileSync(legacy, '{"runId":"run_old"}\n');
+    try {
+      const result = spawnSync(process.execPath, ["--import", loader, entry, "--no-skill"], {
+        cwd: root, env: environment({ PORT: String(addr.port) }), encoding: "utf8", timeout: 15_000,
+      });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /EADDRINUSE/);
+      assert.equal(readFileSync(legacy, "utf8"), '{"runId":"run_old"}\n');
+      assert.equal(existsSync(join(workspace, WORKSPACE_STATE_FILES.config)), false);
+    } finally {
+      await new Promise<void>((resolve) => { occupied.close(() => resolve()); });
+    }
+  });
+
+  it("keeps state by default and purges only known files in both layouts, never plans or extra files", () => {
+    const plan = join(workspace, ".orca-dag", "20261008-143012-123");
+    mkdirSync(plan, { recursive: true });
+    writeFileSync(join(plan, "PRD.md"), "keep requirements\n");
+    const extra = join(workspace, ".orca-dag", "notes.md");
+    writeFileSync(extra, "keep notes\n");
+    for (const file of Object.values(WORKSPACE_STATE_FILES)) {
+      writeFileSync(join(workspace, file), `current ${file}\n`);
+      writeFileSync(legacyWorkspaceStatePath(workspace, file), `legacy ${file}\n`);
+    }
+    command(["uninstall"]);
+    command(["uninstall", "--dry-run", "--purge"]);
+    for (const file of Object.values(WORKSPACE_STATE_FILES)) {
+      assert.equal(readFileSync(join(workspace, file), "utf8"), `current ${file}\n`);
+      assert.equal(readFileSync(legacyWorkspaceStatePath(workspace, file), "utf8"), `legacy ${file}\n`);
+    }
+    command(["uninstall", "--purge"]);
+    for (const file of Object.values(WORKSPACE_STATE_FILES)) {
+      assert.equal(existsSync(join(workspace, file)), false);
+      assert.equal(existsSync(legacyWorkspaceStatePath(workspace, file)), false);
+    }
+    assert.equal(readFileSync(join(plan, "PRD.md"), "utf8"), "keep requirements\n");
+    assert.equal(readFileSync(extra, "utf8"), "keep notes\n");
+  });
+
+  it("never follows a symlinked shared directory during uninstall --purge", () => {
+    const external = join(root, "external");
+    mkdirSync(external);
+    const target = join(external, "config.json");
+    writeFileSync(target, "keep external config\n");
+    symlinkSync(external, join(workspace, ".orca-dag"));
+    assert.match(command(["uninstall", "--purge"]), /must be a real directory; left untouched/);
+    assert.equal(readFileSync(target, "utf8"), "keep external config\n");
   });
 });

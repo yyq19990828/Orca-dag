@@ -30,12 +30,12 @@ env -u ORCA_TERMINAL_HANDLE -u ORCA_TAB_ID -u ORCA_WORKSPACE_ID -u ORCA_WORKTREE
 | `ORCA_WORKTREE` | `path:<WORKSPACE_DIR>` | Explicit Orca selector for coordinator and Current workers; overrides the path default. |
 | `ORCA_CLI_COMMAND` | Auto-resolved CLI | Exact executable plus quoted argv; parsed **without a shell**. Pipes, redirection, substitutions, and unquoted `$` are rejected. |
 | `--no-skill` or `ORCA_DAG_NO_SKILL=1` | Skill installed | Skip best-effort installation of the bundled `orca-dag` skill into existing agent directories. |
-| `--no-workspace-init` or `ORCA_DAG_NO_WORKSPACE_INIT=1` | `.orca/` ignore initialized | Skip adding the managed planning-artifact rule to the workspace's `.gitignore`; ensure `.orca/` is ignored yourself before planning. |
+| `--no-workspace-init` or `ORCA_DAG_NO_WORKSPACE_INIT=1` | `.orca-dag/` ignore initialized | Skip adding the managed planning-artifact rule to the workspace's `.gitignore`; ensure `.orca-dag/` is ignored yourself before planning. |
 | `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1` | Off | Allow custom harness commands. Such commands use the legacy local path and cannot use an isolated placement. |
 
 CLI auto-resolution is `ORCA_CLI_COMMAND` → `orca-dev` when `ORCA_DEV_REPO_ROOT` is set → `orca-ide` on Linux outside an Orca terminal → `orca`. The resolved CLI is used for both reads and mutations. `GET /api/readiness` shows that choice, workspace, version, and any execution-disabled reason. Orca 1.4.160–1.4.204 can display a Run; execution requires 1.4.205 or newer. The viewer and skill also ship as standalone release binaries and in the `npx orca-orchestration-launcher` package.
 
-Startup also announces `.orca/<timestamp>/{PRD.md,TECH_SPEC.md}` and whether its default `.gitignore` setup succeeded. The skill creates a separate UTC timestamp directory for each new plan, records the Run id, and keeps earlier plans. These ignored docs are not committed or automatically copied to isolated worktrees; Task specs must carry the worker's required context.
+Startup also announces `.orca-dag/<timestamp>/{PRD.md,TECH_SPEC.md}` and whether its default `.gitignore` setup succeeded. The skill creates a separate UTC timestamp directory for each new plan, records the Run id, and keeps earlier plans. These ignored docs are not committed or automatically copied to isolated worktrees; Task specs must carry the worker's required context. Legacy `.orca/` documents and their managed ignore block stay in place; new planning output uses only `.orca-dag/`.
 
 ## Read the interface before pressing Run
 
@@ -51,7 +51,7 @@ The DAG refreshes every two seconds. Moving a node changes only canvas position;
 
 ## Launch settings and their design
 
-Orca Tasks have no fields for harness, model, placement, or canvas layout. The viewer stores those choices in `.orca-dag.config.json` in the workspace; browser localStorage is only a migration source and write-through mirror. That file stores **intent**, not runtime IDs. The actual Dispatch, worktree, host, and terminal must come from Orca receipts and fresh reads.
+Orca Tasks have no fields for harness, model, placement, or canvas layout. The viewer stores those choices in `.orca-dag/config.json` in the workspace; browser localStorage is only a migration source and write-through mirror. That file stores **intent**, not runtime IDs. The actual Dispatch, worktree, host, and terminal must come from Orca receipts and fresh reads.
 
 | Setting | Default / allowed value | Effect and limit |
 | --- | --- | --- |
@@ -113,7 +113,9 @@ The viewer offers a local HTTP API for the same controls. `GET` routes are loopb
 
 Use Workspace lanes' **Changed files / Diff** or the file review actions to open an exact local workspace in Orca. Resolve integration gates only after the target workspace contains the intended code. Remove a worktree only after its lane is settled and its changes and worker ownership are accounted for; removal calls `orca worktree rm` with explicit confirmation.
 
-Workspace files have distinct purposes: `.orca-dag.config.json` stores preferences, `.orca-dag.activity.jsonl` stores bounded explanatory activity, `.orca-dag.requests.jsonl` stores mutation request IDs for audit, and `.orca-dag.sessions.json` stores exact provider session bindings. None replaces Orca's authoritative Run/Task/Dispatch records. `orca-dag uninstall` removes installed skills, stale viewer coordinator terminals, and only its exact managed `.orca/` ignore block in the selected workspace; user ignore rules are retained. `--purge` also removes viewer-owned history, but **never `.orca/` planning documents**. After uninstall, add your own `.orca/` rule if those retained documents should stay ignored. It does not delete Orca Run/Task history, merge, or publish your branches.
+All five state files live inside `.orca-dag/`: `config.json` stores preferences, `activity.jsonl` stores bounded explanatory activity, `requests.jsonl` stores mutation request IDs for audit, `sessions.json` stores exact provider session bindings, and `launches.jsonl` stores historical launch identities. None replaces Orca's authoritative Run/Task/Dispatch records. Stop older viewers before upgrading: startup moves legacy root `.orca-dag.*` files without overwriting destinations and prints the result. A conflict retains both files, uses the new one, and requires manual reconciliation. Unwritable migration leaves legacy regular files readable; writes never fall back to the root. Symlinked data directories/files are never followed.
+
+`orca-dag uninstall` removes installed skills, stale viewer coordinator terminals, and only its exact managed `.orca-dag/` and legacy `.orca/` ignore blocks in the selected workspace; user ignore rules are retained. `--purge` removes known viewer-owned state files in both layouts and committed-Stage Git evidence, but **never the shared directory, timestamp planning folders, or other user files**. Neither ordinary uninstall nor `--dry-run` relocates state. After uninstall, add your own ignore rules if retained files should stay ignored. It does not delete Orca Run/Task history, merge, or publish your branches.
 
 ## Known limitations
 
@@ -132,6 +134,12 @@ Older or unknown runtimes keep prestart-and-bind compatibility with explicit `--
 For a manual session on an older runtime, start a fresh Codex process in an Orca-managed terminal with `codex --enable hooks` (or `codex --enable hooks resume`). Check `worker-list` for `liveness.source: agent_status` during an active Dispatch. Do not infer process exit or retry permission from `missing_status` alone. `worker-release` may retain a terminal attributed to `user_takeover`; that ownership verdict is separate from whether progress and completion were supervised successfully.
 
 ### OpenCode's tracking Dispatch has no fleet liveness
+
+For the opt-in full-TUI adapter below, Stop confirms API execution exit and uses `worker-abandon` for Orca-only cancellation accounting, instead of native `worker-stop` (external processes are outside its ownership). It re-reads settlement. If fencing causes `retained / identity_unproven`, the pane stays retained for inspection; the viewer does not force-close it or label it as native process termination.
+
+**Experimental alternative:** `ORCA_DAG_OPENCODE_TUI=1` sends explicit OpenCode models through an API-preselected full TUI on running Orca ≥ 1.4.222. Only local POSIX current/existing non-lane placements are supported, with no fallback on refusal or ambiguity. Its Dispatch is supervised, but the precreated process remains external to Orca ownership. Preparation/session/terminal identity is durable in `.orca-dag/sessions.json`; API assistant turns prove execution, not Task settlement. Orca model/effort echoes may remain null.
+
+The Output view labels bounded assistant text as `opencode-api`, still readable after terminal close; it excludes tool inputs and reasoning. Default cleanup requires accepted settlement, confirmed external release, exact pane identity and provider execution exit. Retain or subsequent user prompts preserve the pane. Stop interrupts the exact shared-service session before Orca accounting; service failure, changed identity or unknown exit never counts as success. Unresolved preparations block replacement even after disabling the flag: inspect the saved request/session/terminal and request audit, not another launch. Automatic reuse, newly created workspaces, lanes, remote and Windows remain disabled in this increment. The default one-shot path described below remains unchanged when the flag is unset.
 
 On the one-shot compatibility path, the viewer launches OpenCode with `opencode run --auto` and creates an Orca Dispatch for tracking. This path is `unsupervised`: it has no supervised worker resource or `agent_status` fleet evidence. In a parallel read-only comparison on Orca 1.4.209, OpenCode completed its Task with `worker_done`, while `worker-list` showed `unverifiable / missing_status` during execution and `unverifiable / unsupervised_settled` after completion. `worker-show` independently observed the exact OpenCode terminal as live while it ran. These fleet values are expected for the viewer's current OpenCode launch path; they do not by themselves establish a broken OpenCode hook. Use the Task/Dispatch outcome and exact terminal observation for this path, and do not treat `unverifiable` as proof of exit.
 

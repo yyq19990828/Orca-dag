@@ -67,12 +67,15 @@ if (!/1\.4\.205/.test(docBody)) {
 // Planning output must stay isolated by plan, rather than silently overwriting
 // the old fixed docs/ files. These local artifacts never belong in Stage commits.
 for (const file of ["PRD.md", "TECH_SPEC.md"]) {
-  if (!docBody.includes(`.orca/<timestamp>/${file}`)) {
-    errors.push(`body must write ${file} under .orca/<timestamp>/`);
+  if (!docBody.includes(`.orca-dag/<timestamp>/${file}`)) {
+    errors.push(`body must write ${file} under .orca-dag/<timestamp>/`);
   }
 }
 if (/docs\/(PRD|TECH_SPEC)\.md/.test(docBody)) {
   errors.push("body still references shared docs/ planning files; use per-plan timestamp directories");
+}
+if (docBody.includes(".orca/<timestamp>/")) {
+  errors.push("body still writes planning output under .orca/; use .orca-dag/<timestamp>/");
 }
 if (!docBody.includes(".gitignore") || !docBody.includes("uninstall")) {
   errors.push("body must explain planning ignore setup and uninstall behavior");

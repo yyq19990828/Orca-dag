@@ -5,7 +5,14 @@ import { realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { openCodeSessionTitle } from "./providerSessions";
+import { openCodeSessionTitle, ProviderSessionStore } from "./providerSessions";
+import {
+  openCodeApi, parseOpenCodeModel, verifyOpenCodeModel, verifyOpenCodeSession,
+  openCodeTuiTitle,
+  validateOpenCodeModel,
+  readOpenCodeExecution, interruptOpenCodeExecution,
+  type OpenCodeLaunch, type OpenCodeEvidence,
+} from "./openCode";
 // The audience allowlist is a security-boundary concept, so the adapter
 // consumes it from security.ts (which never imports this module — no cycle).
 import { KNOWN_HARNESSES, WORKTREE_AUDIENCE_PREFIX } from "./security";
@@ -2124,7 +2131,10 @@ export async function showWorkerDetail(dispatchId: string): Promise<WorkerDetail
           stringOrNull(worker.agentTerminalHandle) ??
           stringOrNull(terminal?.handle) ??
           null,
-        terminalState: stringOrNull(fleet.terminalState) ?? "unknown",
+        // worker-list has a top-level terminalState; worker-show's normalized
+        // projection keeps it under resource on current runtimes. Preserve the
+        // same authority instead of treating every real external row unknown.
+        terminalState: stringOrNull(fleet.terminalState) ?? stringOrNull(asRecordOrNull(fleet.resource)?.terminalState) ?? "unknown",
         projection: fleet as unknown as OrcaWorkerRow["projection"],
       }
     : null;
@@ -2471,6 +2481,43 @@ export async function readWorkerOutput(
   dispatchId: string,
   opts: { limit?: number; source?: string; cursor?: string } = {},
 ): Promise<WorkerOutputReceipt> {
+  const launch = opts.source !== "terminal" ? await findOpenCodeTuiLaunch(dispatchId) : null;
+  if (launch) {
+    // Orca 1.4.222 cannot report this precreated session's transcript. Keep the
+    // API source labeled and cursor-pinned; never pass our cursor to Orca.
+    const execution = await readOpenCodeExecution(launch);
+    let textClipped = false;
+    const rawLines = execution.messages.flatMap(message => {
+      if (message.type !== "assistant" || !Array.isArray(message.content)) return [];
+      const model = asRecord(message.model);
+      const label = `[OpenCode API ${String(message.id)} · ${String(model.providerID)}/${String(model.id)}${model.variant ? `#${model.variant}` : ""}]`;
+      return message.content.flatMap(value => {
+        const part = asRecord(value);
+        if (part.type !== "text" || typeof part.text !== "string") return [];
+        if (part.text.length > 16_000) textClipped = true;
+        return [label, ...part.text.slice(0, 16_000).split("\n")];
+      });
+    });
+    const lines = rawLines.slice(0, 10_000);
+    const budgetClipped = textClipped || rawLines.length > lines.length;
+    const prefix = `ocapi1:${dispatchId}:${launch.sessionId}:`;
+    const offset = opts.cursor?.startsWith(prefix) ? Number(opts.cursor.slice(prefix.length)) : 0;
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new OrcaCliError("Invalid OpenCode API cursor", "invalid_cursor");
+    const limit = Math.max(1, Math.min(200, opts.limit ?? 40));
+    const page = lines.slice(offset, offset + limit);
+    return {
+      dispatchId, source: "opencode-api", cursor: `${prefix}${offset + page.length}`,
+      lines: page, contentComplete: !budgetClipped && execution.complete && execution.exited && offset + page.length >= lines.length,
+      clipped: budgetClipped || !execution.complete || offset + page.length < lines.length,
+      sourceChanged: Boolean(opts.cursor && !opts.cursor.startsWith(prefix)),
+      warnings: [
+        `OpenCode API: ${execution.evidence.state}; model evidence comes from assistant turns, not Orca launch.effective`,
+        ...(!execution.complete ? ["OpenCode history reached the bounded read budget; absence is not proof"] : []),
+        ...(budgetClipped ? ["OpenCode assistant text reached the viewer output budget; this page is not a complete transcript"] : []),
+        ...(execution.evidence.userOwned ? ["Later user-owned work is excluded; automatic terminal cleanup is disabled"] : []),
+      ],
+    };
+  }
   const buildArgs = (cursor?: string): string[] => {
     const args = ["orchestration", "worker-read", "--dispatch", dispatchId];
     if (opts.source) args.push("--source", opts.source);
@@ -2527,6 +2574,13 @@ export interface WorkerStopReceipt {
   alreadySettled: boolean;
   processAction: string | null;
   warning: string | null;
+  /** Positive provider exit, not inferred from Orca fencing or pane closure. */
+  providerExecutionExited?: true;
+}
+
+/** Stop intent uses fencing accounting for viewer-owned external TUIs. */
+export async function workerStopOperation(dispatchId: string): Promise<"worker-stop" | "worker-abandon"> {
+  return await findOpenCodeTuiLaunch(dispatchId) ? "worker-abandon" : "worker-stop";
 }
 
 /**
@@ -2539,21 +2593,51 @@ export async function stopWorkerReceipt(
   dispatchId: string,
   opts: { retryRequestId?: string } = {},
 ): Promise<WorkerStopReceipt> {
+  const launch = await findOpenCodeTuiLaunch(dispatchId);
+  let providerExecutionExited = false;
+  if (launch?.state === "retained") {
+    const detail = await showWorkerDetail(dispatchId);
+    if (detail?.dispatch?.status === "dispatched") {
+      throw new OrcaCliError("The OpenCode session is retained/user-owned; refusing automatic Stop", "session_binding_mismatch");
+    }
+  }
+  if (launch && launch.state === "bound") {
+    await verifyOpenCodeTuiTerminal(launch);
+    // Closing a full TUI leaves its shared-service execution running. Interrupt
+    // the exact owned session first; uncertainty refuses accounting and close.
+    await interruptOpenCodeExecution(launch);
+    providerExecutionExited = true;
+  }
   const requestId = opts.retryRequestId ?? newRequestId();
   const result = await runOrca<Partial<WorkerStopReceipt>>([
     "orchestration",
-    "worker-stop",
+    // 1.4.222 worker-stop cannot stop external terminals: it revokes the
+    // capability but leaves the Dispatch dispatched/stop_unknown. Choose this
+    // adapter's accounting BEFORE acting, never as fallback on unknown stop.
+    // Provider exit above is positive; abandon then fences ONLY orchestration.
+    // Orca still owns the cancellation outcome; API evidence never settles it.
+    launch ? "worker-abandon" : "worker-stop",
     "--dispatch",
     dispatchId,
     "--retry-request",
     requestId,
   ]);
+  if (launch) {
+    const after = await showWorkerDetail(dispatchId);
+    if (after?.runId !== launch.runId || after.taskId !== launch.taskId ||
+        !["completed", "failed", "stopped"].includes(after.dispatch?.status ?? "")) {
+      throw new OrcaCliError("OpenCode provider was interrupted but Orca cancellation settlement is unknown; no cleanup attempted", "stop_unknown");
+    }
+  }
   return {
     dispatchId: String(result.dispatchId ?? dispatchId),
     state: String(result.state ?? "unknown"),
     alreadySettled: Boolean(result.alreadySettled),
     processAction: result.processAction ?? null,
-    warning: result.warning ?? null,
+    warning: result.warning ?? (providerExecutionExited
+      ? "OpenCode provider exit confirmed; Orca accounting fenced through worker-abandon (no Orca process action)."
+      : launch ? "Previously decided OpenCode session; Orca-only accounting inspected without provider interruption." : null),
+    ...(providerExecutionExited ? { providerExecutionExited: true as const } : {}),
   };
 }
 
@@ -3893,6 +3977,232 @@ export interface StartedWorker {
    * starting a second worker.
    */
   adopted: boolean;
+  /** Viewer-owned process, supervised Dispatch, external to Orca ownership. */
+  openCodeLaunch?: OpenCodeLaunch;
+  sessionBindingWarning?: string;
+}
+
+export async function findOpenCodeTuiLaunch(dispatchId: string): Promise<OpenCodeLaunch | null> {
+  const rows = await new ProviderSessionStore(currentWorkspace().dir).listOpenCodeLaunches();
+  const matches = rows.filter(row => row.dispatchId === dispatchId);
+  if (matches.length > 1) throw new OrcaCliError("Ambiguous OpenCode launch identity", "session_binding_mismatch");
+  return matches[0] ?? null;
+}
+
+/** Complete the crash window after worker-start, without starting anything. */
+export async function recoverOpenCodeTuiBindings(runId: string, rows: OrcaWorkerRow[]): Promise<void> {
+  const store = new ProviderSessionStore(currentWorkspace().dir);
+  for (const saved of await store.listOpenCodeLaunches(runId)) {
+    if (!saved.terminal || saved.state === "closed") continue;
+    if (saved.dispatchId && await store.get({ runId, taskId: saved.taskId, dispatchId: saved.dispatchId })) continue;
+    const candidates = rows.filter(row => row.taskId === saved.taskId && row.runId === saved.runId &&
+      row.agentTerminalHandle === saved.terminal && (!saved.dispatchId || row.dispatchId === saved.dispatchId));
+    if (candidates.length !== 1) continue;
+    const launch: OpenCodeLaunch = { ...saved, dispatchId: candidates[0].dispatchId,
+      state: saved.state === "retained" ? "retained" : "bound" };
+    await verifyOpenCodeTuiTerminal(launch);
+    await verifyOpenCodeSession(launch);
+    await store.recordOpenCodeLaunch(launch);
+    await store.bind({ runId, taskId: launch.taskId, dispatchId: launch.dispatchId!,
+      harness: "opencode", sessionId: launch.sessionId, workspace: launch.workspace,
+      host: "local:local", source: "launch-receipt" });
+  }
+}
+
+/** Check current pane identity, not a stale title from its creation receipt. */
+export async function verifyOpenCodeTuiTerminal(launch: OpenCodeLaunch): Promise<void> {
+  const terminals = await listTerminals();
+  const terminal = terminals.find(row => row.handle === launch.terminal);
+  if (!terminal || terminal.worktreePath !== launch.workspace ||
+      ![launch.terminalTitle, `OC | ${launch.terminalTitle}`].includes(terminal.title)) {
+    throw new OrcaCliError("OpenCode terminal identity changed or is unavailable; inspect manually", "session_binding_mismatch");
+  }
+  if (launch.dispatchId) {
+    const detail = await showWorkerDetail(launch.dispatchId);
+    if (detail?.runId !== launch.runId || detail.taskId !== launch.taskId ||
+        detail.terminal?.handle !== launch.terminal || detail.observation?.exactWorker !== true ||
+        detail.terminal.worktreePath !== launch.workspace) {
+      throw new OrcaCliError("OpenCode Dispatch no longer owns the exact prepared terminal", "session_binding_mismatch");
+    }
+    const rows = await listWorkers(launch.runId, { includeRemote: true });
+    if (rows.some(row => row.dispatchId !== launch.dispatchId && row.agentTerminalHandle === launch.terminal && row.dispatchStatus === "dispatched")) {
+      throw new OrcaCliError("OpenCode terminal was transferred to another Dispatch", "session_binding_mismatch");
+    }
+  }
+}
+
+export async function inspectOpenCodeTui(dispatchId: string): Promise<OpenCodeEvidence | null> {
+  const launch = await findOpenCodeTuiLaunch(dispatchId);
+  return launch ? (await readOpenCodeExecution(launch)).evidence : null;
+}
+
+/** Call only AFTER a definitive external-terminal release, never on unknown. */
+export async function closeReleasedOpenCodeTui(dispatchId: string): Promise<"closed" | "retained" | null> {
+  const launch = await findOpenCodeTuiLaunch(dispatchId);
+  if (!launch) return null;
+  if (launch.state === "closed" || launch.state === "retained") return launch.state;
+  const detail = await showWorkerDetail(dispatchId);
+  if (!["completed", "failed"].includes(detail?.dispatch?.status ?? "") || detail?.fleet?.terminalState !== "retained") {
+    throw new OrcaCliError("OpenCode cleanup requires a settled Dispatch and confirmed external release", "release_unknown");
+  }
+  await verifyOpenCodeTuiTerminal(launch);
+  const execution = await readOpenCodeExecution(launch);
+  if (execution.evidence.userOwned) {
+    await new ProviderSessionStore(currentWorkspace().dir).recordOpenCodeLaunch({ ...launch, state: "retained" });
+    return "retained";
+  }
+  if (!execution.complete || !execution.exited || execution.evidence.state === "input_unproven") {
+    throw new OrcaCliError("OpenCode execution exit/ownership not confirmed; terminal retained for inspection", "release_unknown");
+  }
+  // Output remains in the exact provider session and the binding is durable.
+  // Do not claim Orca archived it: retained/external is still its real state.
+  await closeTerminalStrict(launch.terminal!);
+  await new ProviderSessionStore(currentWorkspace().dir).recordOpenCodeLaunch({ ...launch, state: "closed" });
+  return "closed";
+}
+
+export async function retainOpenCodeTui(dispatchId: string): Promise<void> {
+  const launch = await findOpenCodeTuiLaunch(dispatchId);
+  if (launch && launch.state !== "closed") {
+    await new ProviderSessionStore(currentWorkspace().dir).recordOpenCodeLaunch({ ...launch, state: "retained" });
+  }
+}
+
+/** API-preselected full TUI, deliberately separate from the one-shot adapter. */
+export async function startOpenCodeTuiWorker(opts: {
+  taskId: string; runId: string; from: string; worktree: string;
+  model: string; effort?: string | null; retryRequestId: string; retryOf?: string;
+  onHandle: (handle: string | null) => void;
+  isCancelled?: () => boolean;
+}): Promise<StartedWorker> {
+  if (process.platform === "win32" || ["new-child", "new-top-level"].includes(opts.worktree)) {
+    throw new OrcaCliError("OpenCode TUI supports only local POSIX existing workspaces", "invalid_placement");
+  }
+  const row = await showWorktree(opts.worktree);
+  if (!row?.path || row.hostId && row.hostId !== "local") {
+    throw new OrcaCliError("OpenCode TUI workspace must be positively local and registered", "workspace_unverifiable");
+  }
+  const workspace = realpathSync(row.path);
+  const model = parseOpenCodeModel(opts.model, opts.effort);
+  await verifyOpenCodeModel(workspace, model);
+  const store = new ProviderSessionStore(currentWorkspace().dir);
+  const previous = await store.listOpenCodeLaunches(opts.runId);
+  if (previous.some(v => v.taskId === opts.taskId && ["prepared", "bound"].includes(v.state))) {
+    throw new OrcaCliError("An unresolved OpenCode preparation already exists for this Task; inspect it before replacement", "start_unknown");
+  }
+  let launch: OpenCodeLaunch = {
+    requestId: opts.retryRequestId, runId: opts.runId, taskId: opts.taskId,
+    // V2 session.create accepts an explicit id. Journal it BEFORE POST so a
+    // lost create response cannot result in another session on retry/restart.
+    sessionId: `ses_${randomUUID().replaceAll("-", "")}`, workspace, model,
+    terminal: null, terminalTitle: openCodeTuiTitle(opts.retryRequestId),
+    dispatchId: null, state: "prepared",
+  };
+  await store.recordOpenCodeLaunch(launch);
+  let started: StartedWorker | null = null;
+  let createAttempted = false;
+  let createConfirmed = false;
+  let terminalAttempted = false;
+  const checkCancellation = () => {
+    if (opts.isCancelled?.()) throw new OrcaCliError("OpenCode TUI start cancelled before Dispatch input", "start_cancelled");
+  };
+  try {
+    checkCancellation();
+    createAttempted = true;
+    const created = asRecord(await openCodeApi(workspace, "POST", "/api/session", {
+      id: launch.sessionId, title: launch.terminalTitle, agent: "build", model,
+      location: { directory: workspace },
+    }));
+    if (asRecord(created.data).id !== launch.sessionId) throw new Error("OpenCode did not confirm the journaled session ID");
+    createConfirmed = true;
+    const session = await verifyOpenCodeSession(launch);
+    if (JSON.stringify(parseOpenCodeModel(`${asRecord(session.model).providerID}/${asRecord(session.model).id}`,
+        asRecord(session.model).variant as string | undefined)) !== JSON.stringify(model)) {
+      throw new Error("OpenCode did not preserve the requested session model/variant");
+    }
+    checkCancellation();
+    terminalAttempted = true;
+    const terminal = await runOrca<{ terminal?: { handle?: string } }>([
+      "terminal", "create", "--worktree", `path:${workspace}`, "--title", launch.terminalTitle,
+      // Orca identifies a prestarted agent from the command's first word.
+      // Prefixing `exec` leaves a visible working TUI but worker-start rejects
+      // it as unrecognized (verified on 1.4.222). Unlike the one-shot shell
+      // workaround, a full TUI stays interactive after its assigned turn.
+      "--command", `opencode --auto --session ${quoteLocalShellArg(launch.sessionId)}`,
+    ]);
+    if (!terminal.terminal?.handle) throw new Error("OpenCode terminal creation returned no handle");
+    launch = { ...launch, terminal: terminal.terminal.handle };
+    opts.onHandle(launch.terminal!);
+    await store.recordOpenCodeLaunch(launch);
+    const wait = await runOrca<{ wait?: { satisfied?: boolean } }>([
+      "terminal", "wait", "--terminal", launch.terminal!, "--for", "tui-idle", "--timeout-ms", "60000",
+    ]);
+    if (wait.wait?.satisfied !== true) throw new OrcaCliError("OpenCode TUI did not become ready; no Task input was sent", "opencode_not_ready");
+    checkCancellation();
+    await verifyOpenCodeTuiTerminal(launch);
+    const beforeInput = await readOpenCodeExecution(launch);
+    if (beforeInput.evidence.userOwned || !beforeInput.complete) {
+      await store.recordOpenCodeLaunch({ ...launch, state: "retained" });
+      opts.onHandle(null);
+      throw new OrcaCliError("Prepared OpenCode session has user-owned or unproven work; no Task input was sent", "preparation_retained");
+    }
+    const current = await verifyOpenCodeSession(launch);
+    if (JSON.stringify(validateOpenCodeModel(current.model)) !== JSON.stringify(model)) {
+      await store.recordOpenCodeLaunch({ ...launch, state: "retained" });
+      opts.onHandle(null);
+      throw new OrcaCliError("Prepared OpenCode model changed before binding; terminal retained, no input sent", "preparation_retained");
+    }
+    checkCancellation();
+    started = await startSupervisedWorker({
+      taskId: opts.taskId, runId: opts.runId, from: opts.from, agent: "opencode",
+      worktree: `path:${workspace}`, terminal: launch.terminal!,
+      retryRequestId: opts.retryRequestId, retryOf: opts.retryOf,
+    });
+    if (!started.dispatchId) throw new Error("OpenCode start carried no Dispatch ID; do not retry");
+    launch = { ...launch, dispatchId: started.dispatchId, state: "bound" };
+    await store.recordOpenCodeLaunch(launch);
+    await store.bind({ runId: opts.runId, taskId: opts.taskId, dispatchId: started.dispatchId,
+      harness: "opencode", sessionId: launch.sessionId, workspace, host: "local:local", source: "launch-receipt" });
+    return { ...started, handle: launch.terminal, openCodeLaunch: launch };
+  } catch (error) {
+    // Preserve a Dispatch even when a post-start local write fails. Neither
+    // missing input proof nor metadata failure authorizes a second worker.
+    const err = error as WorkerStartError;
+    if (started?.dispatchId) {
+      // A local metadata write cannot retroactively fail a launched worker.
+      // The pre-effect journal still names its exact terminal/session; recovery
+      // can finish the binding, otherwise cleanup stays unknown (never retry).
+      return { ...started, handle: launch.terminal, openCodeLaunch: launch,
+        sessionBindingWarning: "OpenCode Dispatch started but session binding persistence failed; inspect the saved preparation" };
+    }
+    if (started) throw new WorkerStartError({ ...started.receipt!, failedStage: "response_lost", residualResources: true },
+      "OpenCode start accepted input without a Dispatch identity; inspect before cleanup or retry", RESPONSE_LOST);
+    if (err.code === "preparation_retained") throw error;
+    if (err.receipt?.dispatchId || err.receipt?.failedStage === "response_lost") throw error;
+    if ((createAttempted && !createConfirmed) || (terminalAttempted && !launch.terminal) ||
+        (error instanceof OrcaCliError && error.code === RESPONSE_LOST)) {
+      throw new WorkerStartError({ ...parseWorkerStartReceipt(undefined, false), failedStage: "response_lost", residualResources: true },
+        "OpenCode preparation outcome is unknown; no replacement was started", RESPONSE_LOST);
+    }
+    // Definitive pre-bind failure: our exact terminal contains no Task input.
+    // Keep the provider session as history; only close the pane we created.
+    if (launch.terminal) {
+      try {
+        await verifyOpenCodeTuiTerminal(launch);
+        const execution = await readOpenCodeExecution(launch);
+        if (execution.evidence.userOwned || !execution.complete) {
+          await store.recordOpenCodeLaunch({ ...launch, state: "retained" }); opts.onHandle(null); throw error;
+        }
+      } catch (inspectionError) {
+        if (inspectionError === error) throw error;
+        throw new WorkerStartError({ ...parseWorkerStartReceipt(undefined, false), failedStage: "response_lost", residualResources: true },
+          "OpenCode preparation ownership is unproven; terminal retained for inspection", RESPONSE_LOST);
+      }
+      await closeTerminalStrict(launch.terminal); opts.onHandle(null);
+    }
+    await store.recordOpenCodeLaunch({ ...launch, state: "closed" });
+    throw error;
+  }
 }
 
 /** Dig the dispatch id out of a `worker-start` receipt, whatever its shape. */

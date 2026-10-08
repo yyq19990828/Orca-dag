@@ -50,6 +50,12 @@ jobs:
           npm init -y >/dev/null
           # The tarball is named after the published package (`npm pack`), not the bin.
           npm install /tmp/orca-orchestration-launcher-*.tgz >/dev/null
+          # A packed upgrade must retain and relocate all five root sidecars.
+          printf '{"runId":"run_kept"}\n' > .orca-dag.config.json
+          printf '\n' > .orca-dag.activity.jsonl
+          printf '\n' > .orca-dag.launches.jsonl
+          printf '\n' > .orca-dag.requests.jsonl
+          printf '{"version":1,"bindings":[]}\n' > .orca-dag.sessions.json
           NO_OPEN=1 PORT=8899 npx orca-dag &
           for i in $(seq 1 30); do
             curl -sf http://127.0.0.1:8899/api/health >/dev/null && break
@@ -57,6 +63,11 @@ jobs:
           done
           curl -sf http://127.0.0.1:8899/api/health | tee /dev/stderr | grep -q '"ok":true'
           curl -sf http://127.0.0.1:8899/ | grep -qi '<div id="root">'
+          grep -Fq 'run_kept' .orca-dag/config.json
+          for file in config.json activity.jsonl launches.jsonl requests.jsonl sessions.json; do
+            test -f ".orca-dag/$file"
+            test ! -e ".orca-dag.$file"
+          done
           echo "✅ npx orca-dag boots and serves the SPA"
 
           # Security contract of the packed artifact: loopback-only binding,
@@ -89,17 +100,21 @@ jobs:
           # The freshly installed skill must be the thin workflow that loads the
           # runtime-matched orchestration guide — not a stale command copy.
           grep -q 'skills get orchestration' /tmp/fakehome/.claude/skills/orca-dag/SKILL.md
-          grep -q '.orca/<timestamp>/PRD.md' /tmp/fakehome/.claude/skills/orca-dag/SKILL.md
+          grep -Fq '.orca-dag/<timestamp>/PRD.md' /tmp/fakehome/.claude/skills/orca-dag/SKILL.md
           grep -Fxq '# >>> orca-dag planning artifacts (managed)' .gitignore
-          mkdir -p .orca/20261008-143012-123
-          printf 'keep this plan\n' > .orca/20261008-143012-123/PRD.md
+          grep -Fxq '.orca-dag/' .gitignore
+          mkdir -p .orca-dag/20261008-143012-123
+          printf 'keep this plan\n' > .orca-dag/20261008-143012-123/PRD.md
           HOME=/tmp/fakehome ./node_modules/.bin/orca-dag uninstall --dry-run --purge >/tmp/uninstall-dry-run.log
           grep -Fxq '# >>> orca-dag planning artifacts (managed)' .gitignore
           test -f /tmp/fakehome/.claude/skills/orca-dag/SKILL.md
           HOME=/tmp/fakehome ./node_modules/.bin/orca-dag uninstall --purge | grep -q removed
           test ! -e /tmp/fakehome/.claude/skills/orca-dag
           ! grep -Fxq '# >>> orca-dag planning artifacts (managed)' .gitignore
-          grep -Fxq 'keep this plan' .orca/20261008-143012-123/PRD.md
+          grep -Fxq 'keep this plan' .orca-dag/20261008-143012-123/PRD.md
+          for file in config.json activity.jsonl launches.jsonl requests.jsonl sessions.json; do
+            test ! -e ".orca-dag/$file"
+          done
           echo "✅ install and uninstall stay symmetric; planning documents are retained"
 
   binary:
