@@ -1,5 +1,5 @@
 // Viewer configuration store: per-node harness, default harness, concurrency
-// cap, and layout choice. Persisted server-side in `.orca-dag.config.json`
+// cap, and layout choice. Persisted server-side in `.orca-dag/config.json`
 // (workspace root) via /api/config — Orca's task has no harness/metadata
 // field, and browser localStorage was lost on browser/profile changes.
 // Legacy localStorage keys are read once as a migration source and mirrored

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RequestLedger, REQUESTS_FILE } from "./requestLedger";
@@ -15,7 +15,9 @@ import { RequestLedger, REQUESTS_FILE } from "./requestLedger";
  */
 
 async function tempWorkspace(): Promise<string> {
-  return mkdtemp(join(tmpdir(), "orca-dag-ledger-test-"));
+  const workspace = await mkdtemp(join(tmpdir(), "orca-dag-ledger-test-"));
+  await mkdir(join(workspace, ".orca-dag"));
+  return workspace;
 }
 
 describe("request ledger", () => {

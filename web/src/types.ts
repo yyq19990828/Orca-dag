@@ -789,7 +789,7 @@ export interface RunStatus {
 }
 
 /**
- * Viewer configuration persisted server-side in `.orca-dag.config.json`
+ * Viewer configuration persisted server-side in `.orca-dag/config.json`
  * (workspace root) — Orca tasks have no metadata field for harness choices,
  * so the viewer keeps its own store instead of browser localStorage.
  */
@@ -908,7 +908,7 @@ export type PlacementSpec =
 export type LaneSeedPlacement = Exclude<PlacementSpec, { kind: "current" }>;
 
 /**
- * One workspace lane (launch intent, stored in `.orca-dag.config.json`):
+ * One workspace lane (launch intent, stored in `.orca-dag/config.json`):
  * ONE shared non-current workspace for a dependency-ordered task chain. The
  * seed is exact existing, `new-child`, or `new-top-level` — never `current`.
  * Runtime worktree ids/paths/handles NEVER live here; positive Orca receipts

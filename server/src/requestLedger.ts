@@ -26,8 +26,9 @@
 
 import { appendFile, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { prepareWorkspaceStateFile, workspaceStateReadPath, WORKSPACE_STATE_FILES } from "./workspaceState";
 
-export const REQUESTS_FILE = ".orca-dag.requests.jsonl";
+export const REQUESTS_FILE = WORKSPACE_STATE_FILES.requests;
 
 /**
  * Every viewer-originated mutation this ledger records. Operations Orca runs
@@ -141,7 +142,7 @@ export class RequestLedger {
   /** Serialize append+rotation so concurrent mutations cannot race a rotate. */
   private appendChain: Promise<void> = Promise.resolve();
 
-  constructor(workspaceDir: string) {
+  constructor(private readonly workspaceDir: string) {
     this.path = join(workspaceDir, REQUESTS_FILE);
   }
 
@@ -171,6 +172,7 @@ export class RequestLedger {
       updatedAt: now,
     };
     const write = this.appendChain.then(async () => {
+      prepareWorkspaceStateFile(this.workspaceDir, REQUESTS_FILE, true);
       await this.rotateIfNeeded();
       await appendFile(this.path, `${JSON.stringify(record)}\n`, "utf8");
     });
@@ -188,7 +190,7 @@ export class RequestLedger {
   async list(): Promise<RequestLedgerRecord[]> {
     let text: string;
     try {
-      text = await readFile(this.path, "utf8");
+      text = await readFile(workspaceStateReadPath(this.workspaceDir, REQUESTS_FILE), "utf8");
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw err;

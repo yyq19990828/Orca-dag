@@ -1,9 +1,9 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, saveConfig } from "./config";
+import { CONFIG_FILE, loadConfig, saveConfig } from "./config";
 
 /**
  * Config sanitization coverage (plan §9.1) for the Phase 5 field. The shape
@@ -17,6 +17,7 @@ import { loadConfig, saveConfig } from "./config";
 let dir: string;
 before(() => {
   dir = mkdtempSync(join(tmpdir(), "orca-dag-config-test-"));
+  mkdirSync(join(dir, ".orca-dag"));
 });
 after(() => {
   rmSync(dir, { recursive: true, force: true });
@@ -39,7 +40,7 @@ describe("config: effortByTask (Phase 5)", () => {
     // A file written by an older viewer: no effortByTask at all, plus a
     // unknown key the allowlist sanitizer must keep dropping.
     writeFileSync(
-      join(dir, ".orca-dag.config.json"),
+      join(dir, CONFIG_FILE),
       JSON.stringify({
         defaultHarness: "claude",
         modelByTask: { task_1: "opus" },
@@ -55,7 +56,7 @@ describe("config: effortByTask (Phase 5)", () => {
 
   it("ignores a non-object effortByTask instead of poisoning the config", async () => {
     writeFileSync(
-      join(dir, ".orca-dag.config.json"),
+      join(dir, CONFIG_FILE),
       JSON.stringify({ effortByTask: ["high"], defaultHarness: "codex" }),
     );
     const loaded = await loadConfig(dir);
@@ -193,7 +194,7 @@ describe("config: environmentByTask + placementByTask (Phase 6)", () => {
 
   it("hydrates a pre-Phase-6 file without inventing the new maps", async () => {
     writeFileSync(
-      join(dir, ".orca-dag.config.json"),
+      join(dir, CONFIG_FILE),
       JSON.stringify({ defaultHarness: "claude", modelByTask: { task_1: "opus" } }),
     );
     const loaded = await loadConfig(dir);
@@ -204,7 +205,7 @@ describe("config: environmentByTask + placementByTask (Phase 6)", () => {
 
   it("ignores a non-object placementByTask instead of poisoning the config", async () => {
     writeFileSync(
-      join(dir, ".orca-dag.config.json"),
+      join(dir, CONFIG_FILE),
       JSON.stringify({ placementByTask: [{ kind: "current" }], runId: "run_1" }),
     );
     const loaded = await loadConfig(dir);
@@ -237,7 +238,7 @@ describe("config: leadTaskByRun", () => {
 
   it("loads an older config without inventing lead-stage metadata", async () => {
     writeFileSync(
-      join(dir, ".orca-dag.config.json"),
+      join(dir, CONFIG_FILE),
       JSON.stringify({ defaultHarness: "claude", runId: "run_old" }),
     );
     const loaded = await loadConfig(dir);
@@ -247,7 +248,7 @@ describe("config: leadTaskByRun", () => {
 
   it("drops malformed lead entries while keeping valid Run-to-Task pairs", async () => {
     writeFileSync(
-      join(dir, ".orca-dag.config.json"),
+      join(dir, CONFIG_FILE),
       JSON.stringify({
         leadTaskByRun: {
           run_ok: " task_ok ",

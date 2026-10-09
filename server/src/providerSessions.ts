@@ -6,9 +6,11 @@ import { promisify } from "node:util";
 import { lstat, open, readFile, realpath, rename, stat, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
+import { prepareWorkspaceStateFile, workspaceStateReadPath, WORKSPACE_STATE_FILES } from "./workspaceState";
+import { validateOpenCodeLaunch, type OpenCodeLaunch } from "./openCode";
 
 const pExecFile = promisify(execFile);
-export const SESSIONS_FILE = ".orca-dag.sessions.json";
+export const SESSIONS_FILE = WORKSPACE_STATE_FILES.sessions;
 const STORE_VERSION = 1;
 const MAX_STORE_BYTES = 2 * 1024 * 1024;
 const MAX_BINDINGS = 10_000;
@@ -70,6 +72,7 @@ export interface ProbeRecoverySessionInput {
 interface SessionStoreFile {
   version: typeof STORE_VERSION;
   bindings: ProviderSessionBinding[];
+  openCodeLaunches?: OpenCodeLaunch[];
 }
 
 type SessionKey = Pick<ProviderSessionBinding, "runId" | "taskId" | "dispatchId">;
@@ -282,7 +285,7 @@ async function readStore(path: string): Promise<SessionStoreFile> {
   ) {
     throw new Error("session binding store has an unsupported format");
   }
-  if (Object.keys(parsed as Record<string, unknown>).some((key) => key !== "version" && key !== "bindings")) {
+  if (Object.keys(parsed as Record<string, unknown>).some((key) => !["version", "bindings", "openCodeLaunches"].includes(key))) {
     throw new Error("session binding store contains unknown fields");
   }
   const bindings = ((parsed as Record<string, unknown>).bindings as unknown[]).map(validateBinding);
@@ -293,10 +296,20 @@ async function readStore(path: string): Promise<SessionStoreFile> {
     if (seen.has(key)) throw new Error("session binding store contains duplicate identities");
     seen.add(key);
   }
-  return { version: STORE_VERSION, bindings };
+  const launches = (parsed as Record<string, unknown>).openCodeLaunches;
+  if (launches !== undefined && (!Array.isArray(launches) || launches.length > MAX_BINDINGS)) {
+    throw new Error("Invalid OpenCode launch inventory");
+  }
+  const openCodeLaunches = (launches as unknown[] | undefined)?.map(validateOpenCodeLaunch);
+  if (openCodeLaunches && new Set(openCodeLaunches.map(row => row.requestId)).size !== openCodeLaunches.length) {
+    throw new Error("Duplicate OpenCode launch request identities");
+  }
+  return { version: STORE_VERSION, bindings, ...(openCodeLaunches ? { openCodeLaunches } : {}) };
 }
 
 async function writeStore(path: string, file: SessionStoreFile): Promise<void> {
+  const encoded = `${JSON.stringify(file, null, 2)}\n`;
+  if (Buffer.byteLength(encoded) > MAX_STORE_BYTES) throw new Error("session binding store is full");
   try {
     const info = await lstat(path);
     if (!info.isFile() || info.isSymbolicLink()) {
@@ -310,7 +323,7 @@ async function writeStore(path: string, file: SessionStoreFile): Promise<void> {
   try {
     const handle = await open(temporary, "wx", 0o600);
     try {
-      await handle.writeFile(`${JSON.stringify(file, null, 2)}\n`, "utf8");
+      await handle.writeFile(encoded, "utf8");
       await handle.sync();
     } finally {
       await handle.close();
@@ -330,20 +343,20 @@ async function writeStore(path: string, file: SessionStoreFile): Promise<void> {
 export class ProviderSessionStore {
   private readonly path: string;
 
-  constructor(workspaceDir: string) {
+  constructor(private readonly workspaceDir: string) {
     if (!isAbsolute(workspaceDir)) throw new Error("workspaceDir must be absolute");
     this.path = join(resolve(workspaceDir), SESSIONS_FILE);
   }
 
   async list(runId?: string): Promise<ProviderSessionBinding[]> {
     if (runId !== undefined) assertId(runId, "runId");
-    const { bindings } = await readStore(this.path);
+    const { bindings } = await readStore(workspaceStateReadPath(this.workspaceDir, SESSIONS_FILE));
     return runId === undefined ? bindings : bindings.filter((binding) => binding.runId === runId);
   }
 
   async get(key: SessionKey): Promise<ProviderSessionBinding | null> {
     const identity = keyOf(key);
-    const { bindings } = await readStore(this.path);
+    const { bindings } = await readStore(workspaceStateReadPath(this.workspaceDir, SESSIONS_FILE));
     return bindings.find((binding) => keyOf(binding) === identity) ?? null;
   }
 
@@ -351,6 +364,7 @@ export class ProviderSessionStore {
     const normalized = validateInput(input);
     const identity = keyOf(normalized);
     return withFileLock(this.path, async () => {
+      prepareWorkspaceStateFile(this.workspaceDir, SESSIONS_FILE, true);
       const file = await readStore(this.path);
       const current = file.bindings.find((binding) => keyOf(binding) === identity);
       if (current) {
@@ -369,10 +383,48 @@ export class ProviderSessionStore {
         updatedAt: timestamp,
       });
       await writeStore(this.path, {
+        ...file,
         version: STORE_VERSION,
         bindings: [...file.bindings, binding],
       });
       return binding;
+    });
+  }
+
+  async listOpenCodeLaunches(runId?: string): Promise<OpenCodeLaunch[]> {
+    if (runId !== undefined) assertId(runId, "runId");
+    const file = await readStore(workspaceStateReadPath(this.workspaceDir, SESSIONS_FILE));
+    return (file.openCodeLaunches ?? []).filter(row => !runId || row.runId === runId);
+  }
+
+  /** Critical identity journal: unlike presentational history this fails closed. */
+  async recordOpenCodeLaunch(input: OpenCodeLaunch): Promise<void> {
+    const row = validateOpenCodeLaunch(input);
+    assertWorkspace(row.workspace);
+    await withFileLock(this.path, async () => {
+      prepareWorkspaceStateFile(this.workspaceDir, SESSIONS_FILE, true);
+      const file = await readStore(this.path);
+      const launches = file.openCodeLaunches ?? [];
+      const existing = launches.find(v => v.requestId === row.requestId);
+      if (existing) {
+        for (const key of ["runId", "taskId", "sessionId", "workspace", "terminalTitle", "model"] as const) {
+          if (JSON.stringify(existing[key]) !== JSON.stringify(row[key])) throw new Error("OpenCode launch identity cannot change");
+        }
+        if ((existing.terminal && existing.terminal !== row.terminal) ||
+            (existing.dispatchId && existing.dispatchId !== row.dispatchId) ||
+            (existing.state === "closed" && row.state !== "closed") ||
+            (existing.state === "retained" && !["retained", "closed"].includes(row.state))) {
+          throw new Error("OpenCode launch ownership cannot be replaced");
+        }
+      } else {
+        if (launches.length >= MAX_BINDINGS) throw new Error("OpenCode launch inventory is full");
+        // Check inside the shared write lock, not just before preparation:
+        // concurrent callers must never reserve two live sessions for one Task.
+        if (launches.some(v => v.runId === row.runId && v.taskId === row.taskId && ["prepared", "bound"].includes(v.state))) {
+          throw new Error("An unresolved OpenCode preparation already exists for this Task");
+        }
+      }
+      await writeStore(this.path, { ...file, openCodeLaunches: [...launches.filter(v => v.requestId !== row.requestId), row] });
     });
   }
 
@@ -843,7 +895,7 @@ async function probeOpenCode(
     const outcome = typeof sessionRecord.outcome === "string"
       ? sessionRecord.outcome.toLowerCase()
       : "";
-    if (outcome === "succeeded" || outcome === "failed" || outcome === "cancelled") {
+    if (outcome === "succeeded" || outcome === "failed" || outcome === "cancelled" || outcome === "interrupted") {
       return observation("exited", `OpenCode reports the exact session execution as ${outcome}.`);
     }
     return observation(

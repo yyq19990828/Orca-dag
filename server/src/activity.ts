@@ -8,8 +8,9 @@ import type {
 } from "./coordinator";
 import type { OrcaInboxWindow, OrcaMessage, OrcaTask, OrcaWorkerRow, WorkerObservation } from "./orca";
 import { presentWorkerLiveness } from "./orca";
+import { prepareWorkspaceStateFile, workspaceStateReadPath, WORKSPACE_STATE_FILES } from "./workspaceState";
 
-export const ACTIVITY_FILE = ".orca-dag.activity.jsonl";
+export const ACTIVITY_FILE = WORKSPACE_STATE_FILES.activity;
 const JOURNAL_MAX_BYTES = 5 * 1024 * 1024;
 const JOURNAL_KEEP_BYTES = 2 * 1024 * 1024;
 const MAX_HISTORY_MESSAGES = 500;
@@ -955,7 +956,7 @@ export class ActivityJournal {
   /** Serialize append+rotation so parallel worker starts cannot race a rotate. */
   private appendChain: Promise<void> = Promise.resolve();
 
-  constructor(workspaceDir: string) {
+  constructor(private readonly workspaceDir: string) {
     this.path = join(workspaceDir, ACTIVITY_FILE);
   }
 
@@ -976,6 +977,7 @@ export class ActivityJournal {
 
   private async appendRecord(record: ActivityEvent | PersistedCheckRecord): Promise<void> {
     const write = this.appendChain.then(async () => {
+      prepareWorkspaceStateFile(this.workspaceDir, ACTIVITY_FILE, true);
       await this.rotateIfNeeded();
       await appendFile(this.path, `${JSON.stringify(record)}\n`, "utf8");
     });
@@ -992,7 +994,7 @@ export class ActivityJournal {
   async listHistory(runId: string): Promise<ActivityHistory> {
     let text: string;
     try {
-      text = await readFile(this.path, "utf8");
+      text = await readFile(workspaceStateReadPath(this.workspaceDir, ACTIVITY_FILE), "utf8");
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return { events: [], checks: [] };
       throw err;
