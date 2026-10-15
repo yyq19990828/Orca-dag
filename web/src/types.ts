@@ -177,6 +177,25 @@ export interface WorkerOutputView {
   sourceChanged: boolean;
 }
 
+/** Terminal custody is independent of supervised lifecycle and agent liveness. */
+export interface WorkerTerminalResourceView {
+  id: string | null;
+  ownershipState: string | null;
+  releaseState: string | null;
+  retainedReason: string | null;
+  terminalHandle: string | null;
+  worktreeId: string | null;
+  endpointId: string | null;
+  endpointIncarnation: string | null;
+  originDispatchId: string | null;
+  ownerDispatchId: string | null;
+  releaseRequestedAt: string | null;
+  releaseCompletedAt: string | null;
+  releaseError: string | null;
+  recoveryAttemptCount: number | null;
+  lastRecoveryAt: string | null;
+}
+
 /**
  * One durable `worker-list` row (GET /api/workers). This is the Run-scoped,
  * fully paginated fleet inventory: it renders historical and active workers
@@ -187,13 +206,14 @@ export interface WorkerRowView {
   dispatchId: string;
   taskId: string;
   runId: string;
-  /** "supervised" for worker-start attempts, "unsupervised" for tracking dispatches. */
+  /** Raw worker-record lifecycle, not the projection's worker/lead role. */
   workerState: string;
+  supervision: "supervised" | "unsupervised" | "unknown";
   dispatchStatus: string;
   agentTerminalHandle: string | null;
   /** active | reclaimable | retained | release_pending | release_unknown | released */
   terminalState: string;
-  resource?: { state: string; reason: string | null } | null;
+  resource?: WorkerTerminalResourceView | null;
   /** Dispatch-scoped launch identity from Orca or the viewer's durable log. */
   launchEvidence?: {
     agent: string;
@@ -285,9 +305,22 @@ export interface WorkerDetailView {
   dispatchId: string;
   runId: string | null;
   taskId: string | null;
-  launch?: { agent: string; model: string | null } | null;
+  launch: {
+    agent: string | null;
+    model: string | null;
+    effort: string | null;
+    resolvedWorktreeId: string | null;
+  } | null;
+  requestedLaunch: { agent: string | null; model: string | null; effort: string | null } | null;
+  terminalResource: WorkerTerminalResourceView | null;
+  /** Provider-specific Stop is selected from the server's exact durable binding. */
+  stopOperation: "worker-stop" | "worker-abandon";
   fleet: WorkerRowView | null;
   dispatch: {
+    /** Raw identities from the exact worker-show Dispatch record. */
+    id: string | null;
+    runId: string | null;
+    taskId: string | null;
     status: string | null;
     failureCount: number | null;
     lastFailure: string | null;
@@ -335,8 +368,10 @@ export interface RunAttempt {
   dispatchId: string | null;
   handle: string | null;
   startedAt: number;
-  /** Orca fails the task after 3 consecutive attempt failures. */
-  failureCount: number;
+  /** Orca's retry-chain counter; null means no exact counter evidence. */
+  failureCount: number | null;
+  /** Exact Dispatch status; null means no exact status evidence. */
+  dispatchStatus: string | null;
   lastHeartbeatAt: string | null;
   /** Liveness verdict from the last worker-list reconciliation. */
   liveness: string | null;
@@ -413,6 +448,13 @@ export interface RunAttempt {
    * invented.
    */
   nextAction: { kind: string; argv: string[] } | null;
+}
+
+/** A retry API response is success only when Orca returned its new Dispatch. */
+export interface RetryWorkerResult {
+  taskId: string;
+  dispatchId: string;
+  retriedFrom: string | null;
 }
 
 /** Full worker-start receipt (Phase 4 item 1), preserved for the UI. */

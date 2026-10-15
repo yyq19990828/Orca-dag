@@ -153,8 +153,6 @@ export function ExecControls({
       : historyLockReason;
   const launchLocked = running || starting || Boolean(historyLockReason);
   const resolvedDefault = defHarness === CUSTOM ? custom.trim() : defHarness;
-  // Dispatch.failure_count > 0 means Orca already retried this attempt.
-  const retrying = (ownStatus?.attempts ?? []).filter((a) => !a.settled && a.failureCount > 0).length;
   // Settlement/ownership bookkeeping worth surfacing while the loop runs.
   const settled = (ownStatus?.attempts ?? []).filter((a) => a.settled).length;
   const released = (ownStatus?.attempts ?? []).filter((a) =>
@@ -384,8 +382,6 @@ export function ExecControls({
                 {t("exec.settledCount", { released, settled })}
               </b>
             )}
-            {/* Orca circuit-breaks a task after 3 failed attempts — surface it early */}
-            {retrying > 0 && <b className="exec__retry">{t("exec.retrying", { n: retrying })}</b>}
           </span>
         </div>
       ) : starting ? (

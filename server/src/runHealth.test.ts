@@ -221,6 +221,7 @@ function workerRow(over: Partial<OrcaWorkerRow> = {}): OrcaWorkerRow {
     taskId: "task_local1",
     runId: "run_h",
     workerState: "supervised",
+    supervision: "supervised",
     dispatchStatus: "dispatched",
     agentTerminalHandle: "term_w",
     terminalState: "active",

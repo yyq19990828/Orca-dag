@@ -102,6 +102,8 @@ function landSupervised(taskId, runId) {
   state.seq ??= {};
   state.seq.dispatch = (state.seq.dispatch ?? 0) + 1;
   const id = `ctx_s${state.seq.dispatch}`;
+  const retryOf = flag("--retry-of");
+  const inheritedFailureCount = retryOf ? state.dispatches?.[retryOf]?.failureCount : undefined;
   state.dispatches ??= {};
   const reuseHandle = flag("--terminal");
   if (reuseHandle) {
@@ -127,13 +129,13 @@ function landSupervised(taskId, runId) {
     status: "dispatched",
     workerState: "supervised",
     terminalState: "active",
-    retryOf: flag("--retry-of") ?? null,
+    retryOf: retryOf ?? null,
+    ...(inheritedFailureCount === undefined ? {} : { failureCount: inheritedFailureCount }),
     // The runtime always starts a worker on a terminal and reports its handle
     // in worker-list rows (`agentTerminalHandle`). A fresh start mints one; a
     // REUSE start takes over the given handle, so the new Dispatch's row
     // carries the SAME handle — the identity reuse tests assert with.
     agentTerminal: reuseHandle ?? `term_w${state.seq.dispatch}`,
-    retryOf: flag("--retry-of") ?? null,
     launch: {
       agent: flag("--agent") ?? null,
       model: flag("--model") ?? null,
@@ -308,16 +310,30 @@ function workerRows(runId, terminalStateFilter) {
 
 const [ns, verb] = args;
 
-if (ns === "orchestration" && verb === "task-list") {
+if (ns === "orchestration" && verb === "run-list") {
+  const runs = Object.values(state.runs ?? {});
+  const limit = Number(flag("--limit") ?? 100);
+  ok({
+    runs: runs.slice(0, Number.isSafeInteger(limit) && limit > 0 ? limit : 100),
+    nextCursor: null,
+    page: { total: runs.length, hasMore: false, nextCursor: null },
+  });
+} else if (ns === "orchestration" && verb === "task-list") {
   deriveReadiness();
   ok({ tasks: Object.values(state.tasks ?? {}) });
 } else if (ns === "orchestration" && verb === "worker-show") {
+  const failure = state.workerShowFailure?.[flag("--dispatch")];
+  if (failure) fail(failure.code ?? "worker_detail_unavailable", failure.message ?? "scripted worker-show failure");
+  const scripted = state.workerShow?.[flag("--dispatch")];
+  if (scripted) ok(scripted);
   const d = state.dispatches?.[flag("--dispatch")];
   if (!d) fail("dispatch_not_found", "unknown Dispatch");
   const worktree = (state.worktrees ?? []).find((w) => w.id === d.launch?.worktree ||
     (state.openCodeTui && `path:${w.path}` === d.launch?.worktree));
+  const dispatch = { id: d.id, task_id: d.task_id, runId: d.run_id, status: d.status };
+  if (Object.hasOwn(d, "failureCount")) dispatch.failureCount = d.failureCount;
   ok({
-    dispatch: { id: d.id, task_id: d.task_id, runId: d.run_id, status: d.status },
+    dispatch,
     worker: { state: d.workerState, startOptions: {
       agent: d.launch?.agent, resolvedWorktreeId: d.launch?.worktree,
     } },
@@ -505,6 +521,44 @@ if (ns === "orchestration" && verb === "task-list") {
       );
     }
     fail(f.code ?? "start_failed", f.message ?? "start failed");
+  } else if (state.workerStartRetryFailure && flag("--retry-of")) {
+    const f = state.workerStartRetryFailure;
+    const taskId = flag("--task");
+    let dispatchId = null;
+    if (f.landDispatch) {
+      const landed = landSupervised(taskId, flag("--run"));
+      dispatchId = landed.dispatchId;
+      const task = state.tasks?.[taskId];
+      if (task) task.status = "failed";
+      const dispatch = state.dispatches?.[dispatchId];
+      if (dispatch) {
+        dispatch.status = "failed";
+        dispatch.terminalState = "reclaimable";
+      }
+    }
+    const receipt = {
+      ...(f.receipt ?? {}),
+      taskId,
+      dispatchId,
+      requestId,
+      stage: f.stage ?? "worker_start",
+      failedStage: f.failedStage ?? "task_not_startable",
+      residualResources: f.residualResources ?? null,
+      recoveryCommands: f.recoveryCommands ?? [],
+    };
+    const error = {
+      code: f.code ?? "task_not_startable",
+      message: f.message ?? "Task cannot be started after the retry limit was reached",
+      data: { receipt },
+    };
+    if (requestId) {
+      state.requests[requestId] = {
+        state: "completed",
+        interpretation: "worker-start rejected with a failure receipt",
+        outcome: { ok: false, error },
+      };
+    }
+    finish({ ok: false, error }, 1);
   } else if (state.workerStartAmbiguous) {
     // Lost-response modes. "lost": the mutation LANDS (dispatch created, request
     // recorded completed) but the response is garbage — the caller must recover
@@ -692,6 +746,15 @@ if (ns === "orchestration" && verb === "task-list") {
   const dispatchId = flag("--dispatch");
   if (state.stopMode?.[dispatchId] === "fail") {
     fail("stop_failed", "worker contact lost; outcome unknown");
+  }
+  if (["stop_unknown", "unknown"].includes(state.stopMode?.[dispatchId])) {
+    ok({
+      dispatchId,
+      state: state.stopMode[dispatchId],
+      alreadySettled: false,
+      processAction: "none",
+      warning: "worker stop is unconfirmed",
+    });
   }
   const d = state.dispatches?.[dispatchId];
   const alreadySettled = ["completed", "failed", "stopped"].includes(d?.status ?? "");

@@ -247,28 +247,59 @@ export const WorkerPanel = memo(function WorkerPanel({
   };
 
   function evidenceFor(row: WorkerRowView, detail: WorkerDetailView | null): Evidence {
-    const liveness = detail?.liveness;
+    const scoped = detail?.dispatchId === row.dispatchId &&
+      detail.runId === runId && detail.taskId === row.taskId ? detail : null;
+    const liveness = scoped?.liveness;
     const fleetLive = liveness?.verdict === "live" || (liveness?.qualifiedWorking ?? false);
     const fleetExited = liveness?.verdict === "exited";
-    const prescribed = detail?.fleet?.projection?.nextAction;
+    const prescribed = scoped?.fleet?.projection?.nextAction;
     const hasPrescribed = Boolean(prescribed && prescribed.argv.length > 0);
-    const local = detail?.fleet?.projection?.host?.kind === "local";
-    // Tri-state: an OBJECT is positive wait evidence; null = looked, none;
-    // undefined = this host never looked (unknown — never "waiting").
-    const wait = detail?.observation?.agentWait;
+    const local = scoped?.fleet?.projection?.host?.kind === "local";
+    const snapshot = scoped?.terminalResource;
+    const resource = row.resource ?? snapshot;
+    // Polling can observe a custody handoff while worker-show stays expanded.
+    // Show polled fleet facts, but never let conflicting snapshots restore
+    // process control without refreshing the exact detail evidence.
+    const custodyAgrees = !snapshot || !resource ||
+      (snapshot.id === resource.id && snapshot.ownershipState === resource.ownershipState &&
+        snapshot.ownerDispatchId === resource.ownerDispatchId &&
+        snapshot.terminalHandle === resource.terminalHandle);
+    const providerStop = scoped?.stopOperation === "worker-abandon";
+    // Lifecycle, live observation and process custody are separate proofs.
+    // A user-owned live Codex still has a supervised record, but native Stop
+    // must not claim control over its terminal. The exact provider adapter
+    // keeps its own Stop path and revalidates provider execution separately.
+    const nativeLifecycle = ["ready", "start_unknown", "supervised"].includes(row.workerState);
+    const nativeOwned = custodyAgrees && Boolean(resource?.id) && resource?.ownershipState === "owned" &&
+      resource.ownerDispatchId === row.dispatchId &&
+      Boolean(resource.terminalHandle && resource.terminalHandle === row.agentTerminalHandle &&
+        resource.terminalHandle === scoped?.terminal?.handle);
+    // Tri-state: null means looked/no wait, undefined means never observed.
+    const wait = scoped?.observation?.agentWait;
     const waitPositive = wait != null;
-    const notSettled = !(attemptSettledFor(row));
+    const notSettled = !attemptSettledFor(row);
     return {
-      canStop: fleetLive && notSettled,
+      canStop: fleetLive && notSettled && (providerStop || (nativeLifecycle && nativeOwned)),
       canAbandon: fleetExited || hasPrescribed,
       canFocus: Boolean(local && waitPositive && row.agentTerminalHandle),
-      stopWhy: notSettled
-        ? fleetLive
-          ? liveness?.fleetReason
-            ? t("worker.evidenceLiveReason", { reason: liveness.fleetReason })
-            : t("worker.evidenceLive")
-          : t("worker.evidenceNoLive")
-        : t("worker.evidenceSettled"),
+      stopWhy: !notSettled
+        ? t("worker.evidenceSettled")
+        : !fleetLive
+          ? t("worker.evidenceNoLive")
+          : providerStop
+            ? t("worker.evidenceProviderStop")
+            : !nativeLifecycle
+              ? t("worker.evidenceLifecycleHeld", { state: row.workerState })
+              : !nativeOwned
+                ? !custodyAgrees
+                  ? t("worker.evidenceOwnershipChanged")
+                  : t("worker.evidenceNoOwnership", {
+                      state: resource?.ownershipState ?? t("worker.unknown"),
+                      owner: resource?.ownerDispatchId ?? t("worker.unknown"),
+                    })
+                : liveness?.fleetReason
+                  ? t("worker.evidenceLiveReason", { reason: liveness.fleetReason })
+                  : t("worker.evidenceLive"),
       abandonWhy: hasPrescribed
         ? t("worker.evidencePrescribed")
         : fleetExited
@@ -288,10 +319,8 @@ export const WorkerPanel = memo(function WorkerPanel({
   }
 
   function attemptSettledFor(row: WorkerRowView): boolean {
-    const attempt = attempts.find(
-      (candidate) =>
-        (row.dispatchId && candidate.dispatchId === row.dispatchId) || candidate.taskId === row.taskId,
-    );
+    const attempt = attempts.find((candidate) =>
+      candidate.dispatchId === row.dispatchId && candidate.taskId === row.taskId);
     return attempt?.settled ?? false;
   }
 
@@ -407,14 +436,16 @@ export const WorkerPanel = memo(function WorkerPanel({
           const detailWorkspace = workerWorkspaceLabel(detail?.fleet?.projection?.workspace);
           const liveness = projection?.liveness ?? null;
           const verdict = liveness?.verdict === "live" || liveness?.verdict === "exited" ? liveness.verdict : "unverifiable";
-          const attempt = attempts.find(
-            (candidate) =>
-              (row.dispatchId && candidate.dispatchId === row.dispatchId) ||
-              candidate.taskId === row.taskId,
-          );
+          // A retry's preferences belong to its Dispatch, not every historical
+          // row for the same Task. Otherwise a newer model would rewrite the
+          // old attempt's requested launch alongside its actual effective echo.
+          const attempt = attempts.find((candidate) =>
+            candidate.dispatchId === row.dispatchId && candidate.taskId === row.taskId);
           // Evidence gates only matter on the expanded row — the one whose
           // worker-show detail is on screen.
           const evidence = open ? evidenceFor(row, detail) : null;
+          const resource = row.resource ?? (open ? detail?.terminalResource : null);
+          const requested = attempt && !attempt.adopted ? attempt.requested : detail?.requestedLaunch;
           const host = projection?.host ?? null;
           const hostLabel =
             host == null
@@ -480,6 +511,7 @@ export const WorkerPanel = memo(function WorkerPanel({
                     <dt>{t("record.task")}</dt><dd><code>{row.taskId}</code></dd>
                     <dt>{t("record.dispatch")}</dt><dd><code>{row.dispatchId || t("worker.noDispatch")}</code></dd>
                     <dt>{t("record.workerState")}</dt><dd>{row.workerState}</dd>
+                    <dt>{t("worker.supervision")}</dt><dd>{t(`worker.supervision.${row.supervision}`)}</dd>
                     {projection?.outcome && <><dt>{t("record.outcome")}</dt><dd>{projection.outcome}</dd></>}
                   </dl>
                   {/* --- Liveness: both evidence layers, never merged away --- */}
@@ -533,6 +565,27 @@ export const WorkerPanel = memo(function WorkerPanel({
                       ? t("worker.viewerDecision", { decision: attempt.terminalDecision })
                       : t("worker.viewerNotCoordinated")}
                   </div>
+                  {resource && (
+                    <div data-testid="worker-ownership">
+                      <dl className="record-facts">
+                        <dt>{t("worker.ownership")}</dt><dd><code>{resource.ownershipState ?? t("worker.unknown")}</code></dd>
+                        <dt>{t("worker.ownershipRelease")}</dt><dd>{resource.releaseState ?? t("worker.unknown")}</dd>
+                        <dt>{t("worker.ownershipReason")}</dt><dd>{resource.retainedReason ?? t("worker.unknown")}</dd>
+                        <dt>{t("worker.ownershipOrigin")}</dt><dd><code>{resource.originDispatchId ?? t("worker.unknown")}</code></dd>
+                        <dt>{t("worker.ownershipOwner")}</dt><dd><code>{resource.ownerDispatchId ?? t("worker.unknown")}</code></dd>
+                        <dt>{t("worker.ownershipHandle")}</dt><dd><code>{resource.terminalHandle ?? t("worker.unknown")}</code></dd>
+                      </dl>
+                      {resource.retainedReason === "user_takeover" && (
+                        <div className="exec__hint">{t("worker.ownershipUserTakeover")}</div>
+                      )}
+                      {resource.ownerDispatchId && resource.ownerDispatchId !== row.dispatchId && (
+                        <div className="exec__hint">{t("worker.ownershipTransferred", { owner: resource.ownerDispatchId })}</div>
+                      )}
+                      {resource.terminalHandle && row.agentTerminalHandle && resource.terminalHandle !== row.agentTerminalHandle && (
+                        <div className="exec__hint">{t("worker.ownershipHandleMismatch")}</div>
+                      )}
+                    </div>
+                  )}
                   {attempt?.terminalArchive && (
                     <div className="inbox__body">
                       {t("worker.releaseArchive")} <code>{attempt.terminalArchive}</code>
@@ -596,26 +649,30 @@ export const WorkerPanel = memo(function WorkerPanel({
                             : ""}
                         </div>
                       )}
-                      {/* Requested vs effective launch preferences: requested
-                          only exists when this viewer started the attempt;
-                          effective comes only from the runtime echo. */}
-                      {((attempt && !attempt.adopted) || detail.launch || detail.fleet?.projection?.launch) && (
+                      {/* Orca's durable startOptions can restore requested
+                          preferences after a viewer restart. They never fill
+                          missing effective preferences. */}
+                      {(requested || detail.launch || detail.fleet?.projection?.launch) && (
                         <div className="inbox__body">
                           {t("worker.launch")}{" "}
-                          {attempt && !attempt.adopted
-                            ? t("worker.launchRequested", { agent: attempt.requested.agent ?? "?" }) +
-                              (attempt.requested.model
-                                ? t("worker.launchRequestedModel", { model: attempt.requested.model })
+                          {requested
+                            ? t("worker.launchRequested", { agent: requested.agent ?? t("worker.unknownAgent") }) +
+                              (requested.model
+                                ? t("worker.launchRequestedModel", { model: requested.model })
                                 : "") +
-                              (attempt.requested.effort
-                                ? t("worker.launchRequestedEffort", {
-                                    effort: attempt.requested.effort,
-                                  })
+                              (requested.effort
+                                ? t("worker.launchRequestedEffort", { effort: requested.effort })
                                 : "")
                             : t("worker.launchRequestedUnknown")}
                           {t("worker.launchEffective")}
                           {detail.launch
-                            ? [detail.launch.agent, detail.launch.model].filter(Boolean).join(" · ")
+                            ? [
+                                detail.launch.agent ?? t("worker.unknownAgent"),
+                                detail.launch.model ?? t("worker.unknownModel"),
+                                ...(detail.launch.effort
+                                  ? [t("worker.effortTag", { effort: detail.launch.effort })]
+                                  : []),
+                              ].join(" · ")
                             : detail.fleet?.projection?.launch
                             ? [
                                 detail.fleet.projection.launch.agent ?? t("worker.unknownAgent"),
@@ -672,6 +729,11 @@ export const WorkerPanel = memo(function WorkerPanel({
                         <pre className="workers__rawpre">
                           {JSON.stringify(
                             {
+                              supervision: detail.fleet?.supervision ?? row.supervision,
+                              terminalResource: detail.terminalResource,
+                              requestedLaunch: detail.requestedLaunch,
+                              effectiveLaunch: detail.launch,
+                              stopOperation: detail.stopOperation,
                               dispatch: detail.dispatch,
                               worker: detail.worker,
                               terminal: detail.terminal,

@@ -45,11 +45,13 @@
 |---|---|---|
 | **Run** | 命名空间 + coordinator 收件箱；同一时刻只有一个绑定的 coordinator（`consumer_generation` 做 fencing） | Orca |
 | **Task** | 工作项；`deps` 定义 DAG 边，`run_id` 归属 Run | Orca |
-| **Dispatch** | **一次尝试**（id 形如 `ctx_*`）；带 `failure_count`（3 次熔断）、心跳、pane 身份、能力凭证。重试产生新的 Dispatch | Orca |
+| **Dispatch** | **一次尝试**（id 形如 `ctx_*`）；带 Orca 沿 `--retry-of` 链累计的失败 `worker-start` 次数（3 次熔断）、心跳、pane 身份、能力凭证。重试产生新的 Dispatch | Orca |
 | 每节点启动偏好、每 Run 主阶段、画布坐标、默认值、当前 Run | viewer 自己的元数据与偏好 | `.orca-dag/config.json` |
 | Viewer Activity 记录与有意义的 coordinator check | 有界的解释性历史，包括回复、启动、清理决定、新消息、错误和 agent 状态变化；绝不作为 Task 落定依据 | `.orca-dag/activity.jsonl` |
 
 Run 是命名空间，**不等于 DAG** —— 一个 Run 里可以躺多张互不相连的图。"一个 Run 一张图"是 `skill/SKILL.md` 里的约定，不是 Orca 的约束。
+
+Orca 1.4.226 会沿确切的 `--retry-of` 链累计失败的 `worker-start`：第三次失败将状态设为 `circuit_broken`，之后的启动会以 `task_not_startable` 拒绝。worker 成功就绪后自报 `failed` 不会增加此计数。Stop/Run 和 viewer 重启都不会重置该链；应在同一 Run 中对同一 Task 重试确切的上一 Dispatch，并重新指定目标放置位置，因为 `--retry-of` 不继承放置。不要新建 Task 或 Run 来绕过熔断。标准恢复会在 Orca 允许时释放旧的、归 viewer 所有的失败终端；用户接管、显式归属的终端和结构化会话继续遵守原有 retain/release 保护。释放后仍可通过确切 Dispatch 读取归档输出。
 
 ### 权限模型（为什么 viewer 要占一个终端）
 

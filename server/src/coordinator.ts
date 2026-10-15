@@ -44,6 +44,8 @@ import {
   startSupervisedWorker,
   stopWorkerReceipt,
   workerStopOperation,
+  workerSupervision,
+  RESPONSE_LOST,
   taskUpdate,
   type Gate,
   type OrcaMessage,
@@ -53,7 +55,9 @@ import {
   type StartedWorker,
   type WorkerOutputReceipt,
   type WorkerStartReceipt,
+  type WorkerDetailView,
   type WorkerTerminalReceipt,
+  FLEET_CAPABILITY_GAP_REASONS,
 } from "./orca";
 import type { MutationRequestMeta } from "./requestLedger";
 import type { LaneSeedPlacement, PlacementSpec, WorktreeLaneSpec } from "./config";
@@ -356,8 +360,11 @@ interface Attempt {
   /** Worker terminal, ONLY when this viewer created it (legacy lane). */
   handle: string | null;
   startedAt: number;
-  // --- liveness (never completion evidence) ---
-  failureCount: number;
+  // --- exact Orca accounting and liveness (neither is local completion evidence) ---
+  /** Failed worker-start count along this Dispatch's exact --retry-of chain; null means unknown. */
+  failureCount: number | null;
+  /** Exact Orca Dispatch status; absent worker-list/detail evidence stays null. */
+  dispatchStatus: string | null;
   lastHeartbeatAt: string | null;
   /** Liveness verdict as reported by the last worker-list reconciliation. */
   liveness: string | null;
@@ -443,6 +450,15 @@ interface Attempt {
   openCodeTui?: boolean;
   openCodeEvidence?: OpenCodeEvidence | null;
   openCodeCheckedAt?: number;
+}
+
+/** A retry stays separate from the last authoritative attempt until it resolves. */
+interface RetryReservation {
+  original: Attempt;
+  attempt: Attempt;
+  runId: string;
+  coordinatorHandle: string;
+  generation: number;
 }
 
 /** A provider session observation pinned to one exact Run/Task/Dispatch. */
@@ -698,6 +714,8 @@ interface State {
   coordinatorHandle: string | null;
   opts: StartOpts | null;
   attempts: Map<string, Attempt>;
+  /** In-flight retries reserve worker budget without replacing the old attempt. */
+  retryCandidates: Map<string, RetryReservation>;
   startedAt: number;
   lastTick: number;
   lastReconciledAt: number;
@@ -788,6 +806,7 @@ const state: State = {
   coordinatorHandle: null,
   opts: null,
   attempts: new Map(),
+  retryCandidates: new Map(),
   startedAt: 0,
   lastTick: 0,
   lastReconciledAt: 0,
@@ -824,6 +843,7 @@ export function resetCoordinatorForTests(): void {
   state.coordinatorHandle = null;
   state.opts = null;
   state.attempts = new Map();
+  state.retryCandidates = new Map();
   state.startedAt = 0;
   state.lastTick = 0;
   state.lastReconciledAt = 0;
@@ -871,6 +891,7 @@ export function coordinatorStatus() {
       handle: a.handle,
       startedAt: a.startedAt,
       failureCount: a.failureCount,
+      dispatchStatus: a.dispatchStatus,
       lastHeartbeatAt: a.lastHeartbeatAt,
       liveness: a.liveness,
       // Phase 5 fleet projection: verdict reason, attention, agent-wait
@@ -913,7 +934,10 @@ export function coordinatorStatus() {
           }
         : null,
     })),
-    busy: [...state.attempts.values()].filter((a) => !a.settled).length,
+    busy:
+      [...state.attempts.values()].filter((a) => !a.settled).length +
+      [...state.retryCandidates.values()].filter((r) => !r.attempt.settled).length +
+      state.unownedDispatches.length,
     /**
      * The configured worker-slot budget (Phase 4 scheduler surface). null while
      * no coordinator is running: capacity is then UNKNOWN, never zero — the
@@ -970,6 +994,7 @@ export async function startCoordinator(opts: StartOpts): Promise<void> {
   state.phase = "binding";
   state.opts = opts;
   state.attempts = new Map();
+  state.retryCandidates = new Map();
   state.error = null;
   state.runId = null;
   state.completedAt = null;
@@ -1530,6 +1555,8 @@ async function captureProviderSessions(
     state.providerSessionDiscoveryAt.set(row.dispatchId, Date.now());
     try {
       const detail = await showWorkerDetail(row.dispatchId);
+      const attempt = state.attempts.get(row.taskId);
+      if (attempt?.dispatchId === row.dispatchId) applyAttemptDispatchDetail(attempt, runId, detail);
       if (detail?.runId !== runId || detail.taskId !== row.taskId ||
           detail.observation?.exactWorker !== true || !detail.terminal?.worktreePath) continue;
       const reported = [
@@ -1588,21 +1615,23 @@ async function refreshRecoverySessions(
     const task = taskById.get(binding.taskId);
     if (!task) continue;
     const row = rowByDispatch.get(binding.dispatchId);
-    const isCurrentDispatch = task.dispatch_id === binding.dispatchId;
+    const isCurrentDispatch = taskDispatchEvidence(task, rows, runId).row?.dispatchId === binding.dispatchId;
     const isRequestedStop = stopIds.has(binding.dispatchId);
     const isDispatched = task.status === "dispatched" && isCurrentDispatch;
     // Historical bindings are omitted once the Task has moved to a newer
     // Dispatch, unless this coordinator is explicitly reconciling that Stop.
-    if (!isCurrentDispatch && !isRequestedStop && row?.dispatchStatus !== "dispatched") continue;
+    if (!isCurrentDispatch && !isRequestedStop && (!row || !activeDispatch(row))) continue;
     const observation = force
       ? await readProviderSession(binding, true)
       : await readProviderSession(binding);
     let decision: RecoverySessionView["decision"];
-    if (isDispatched) {
+    if (row?.dispatchStatus === "pending") {
+      decision = "retry_blocked";
+    } else if (isDispatched) {
       decision = observation.status === "active" ? "adopted" : "held";
     } else if (
       (isRequestedStop || task.status === "blocked") &&
-      (observation.status !== "exited" || row?.workerState !== "supervised")
+      (observation.status !== "exited" || workerSupervision(row) !== "supervised")
     ) {
       decision = "retry_blocked";
     } else {
@@ -1665,7 +1694,7 @@ async function recoverState(opts: StartOpts): Promise<void> {
   const explicitResume = opts.resumeBlocked;
   let selectedRequeued = false;
   const activeTaskIds = new Set(
-    rows.filter((row) => row.dispatchStatus === "dispatched").map((row) => row.taskId),
+    rows.filter((row) => row.runId === runId && activeDispatch(row)).map((row) => row.taskId),
   );
   for (const task of tasks) {
     if (task.status !== "blocked" || activeTaskIds.has(task.id)) continue;
@@ -1679,18 +1708,32 @@ async function recoverState(opts: StartOpts): Promise<void> {
     const selectedByOperator = explicitResume?.dispatchId === stopped.dispatchId;
     if (selectedByOperator) {
       // A previously abandoned worker is absent from the viewer's stop ledger.
-      // The operator may select it directly, but fleet exit, exact historical
-      // launch and workspace identity must all be re-read before task-update.
-      if (stopped.projection?.liveness?.verdict !== "exited") {
-        throw new OrcaCliError("The selected Dispatch has no positive fleet exit evidence.", "resume_not_allowed");
+      // A bootstrap failure can leave no agent-status row even after the user
+      // closes its exact terminal. For documented client capability gaps only,
+      // accept fresh, exact exit evidence without rewriting fleet liveness.
+      // Detached provider work still needs the separate decision below.
+      const detail = await showWorkerDetail(stopped.dispatchId);
+      const exactTerminalExited =
+        detail?.runId === runId && detail.taskId === task.id &&
+        detail.observation?.exactWorker === true && detail.observation.status === "exited" &&
+        Boolean(stopped.agentTerminalHandle) &&
+        detail.terminal?.handle === stopped.agentTerminalHandle &&
+        detail.terminal.connected === false;
+      const gapExit =
+        stopped.projection?.liveness?.verdict === "unverifiable" &&
+        FLEET_CAPABILITY_GAP_REASONS.has(stopped.projection.liveness.reason ?? "") &&
+        detail?.liveness.verdict === "unverifiable" &&
+        FLEET_CAPABILITY_GAP_REASONS.has(detail.liveness.fleetReason ?? "") &&
+        exactTerminalExited;
+      if (stopped.projection?.liveness?.verdict !== "exited" && !gapExit) {
+        throw new OrcaCliError("The selected Dispatch has no positive exact exit evidence.", "resume_not_allowed");
       }
       const gates = await listGates(runId);
       if (gates.some((gate) => gate.taskId === task.id && gate.status === "pending")) {
         throw new OrcaCliError("The selected Stage still has an unresolved gate.", "resume_not_allowed");
       }
-      const detail = await showWorkerDetail(stopped.dispatchId);
       const launch = detail?.launch;
-      if (detail?.runId !== runId || detail.taskId !== task.id || !launch?.resolvedWorktreeId) {
+      if (detail?.runId !== runId || detail.taskId !== task.id || !launch?.agent || !launch.resolvedWorktreeId) {
         throw new OrcaCliError("The selected Dispatch has no exact historical launch identity.", "resume_not_allowed");
       }
       const selectedAt = Date.parse(detail.dispatch?.dispatchedAt ?? "");
@@ -1760,7 +1803,6 @@ async function recoverState(opts: StartOpts): Promise<void> {
       });
       continue;
     }
-    await taskUpdate(task.id, "ready", runId, state.coordinatorHandle!);
     state.retryOfByTask.set(task.id, stopped.dispatchId);
     if (selectedByOperator) selectedRequeued = true;
   }
@@ -1775,7 +1817,8 @@ async function recoverState(opts: StartOpts): Promise<void> {
     dispatchId: task.dispatch_id ?? null,
     handle: null,
     startedAt: Date.now(),
-    failureCount: 0,
+    failureCount: null,
+    dispatchStatus: null,
     lastHeartbeatAt: null,
     liveness: null,
     livenessReason: null,
@@ -1822,6 +1865,7 @@ async function recoverState(opts: StartOpts): Promise<void> {
       if (tui.state === "closed" || tui.state === "retained") attempt.terminalDecision = tui.state;
     }
     attempt.fleetTerminalState = row.terminalState;
+    attempt.dispatchStatus = row.dispatchStatus === "unknown" ? null : row.dispatchStatus;
     attempt.agentTerminalHandle = row.agentTerminalHandle ?? null;
     attempt.liveness = normalizeLiveness(row.projection?.liveness?.verdict ?? null);
     attempt.livenessReason = row.projection?.liveness?.reason ?? null;
@@ -1843,18 +1887,21 @@ async function recoverState(opts: StartOpts): Promise<void> {
   };
 
   for (const task of tasks) {
-    const row = task.dispatch_id ? rowByDispatch.get(task.dispatch_id) ?? null : null;
-    if (task.status === "dispatched") {
-      if (!row || row.workerState !== "supervised") {
+    const evidence = taskDispatchEvidence(task, rows, runId);
+    const row = evidence.row;
+    if (task.status === "dispatched" || evidence.active.length > 0) {
+      if (!row || evidence.uncertain || workerSupervision(row) !== "supervised") {
         // Legacy Dispatches do not gain Orca process ownership on adoption.
         // If the user supplied an exact provider session binding, observe and
         // adopt that session into a budget-counted attempt; otherwise leave it
         // as an unowned Dispatch which still consumes a slot below.
-        const binding = task.dispatch_id ? bindingByDispatch.get(task.dispatch_id) : undefined;
-        if (binding) {
+        const binding = row && !evidence.uncertain && workerSupervision(row) === "unsupervised"
+          ? bindingByDispatch.get(row.dispatchId) : undefined;
+        if (binding && row) {
           const observation = await observeBinding(binding);
           const view = sessionView(binding, observation, observation.status === "active" ? "adopted" : "held");
           const attempt = freshAttempt(task, binding.harness, "legacy");
+          attempt.dispatchId = row.dispatchId;
           attempt.providerSession = view;
           if (row) seedFromRow(attempt, row);
           state.attempts.set(task.id, attempt);
@@ -1862,14 +1909,25 @@ async function recoverState(opts: StartOpts): Promise<void> {
           summary.providerSessions.push(view);
         } else {
           summary.unverifiable.push(task.id);
+          if (evidence.active.length > 0) {
+            summary.retryBlocked.push(...evidence.active.map((candidate) => candidate.dispatchId));
+            summary.retryBlockedDetails.push({
+              taskId: task.id,
+              dispatchId: row?.dispatchId ?? evidence.active[0]!.dispatchId,
+              reason: evidence.uncertain
+                ? "multiple active Dispatches have no unique current Task association; held without choosing latest"
+                : "active Dispatch has no proven supervision or exact provider binding; held without cleanup or retry",
+            });
+          }
         }
         continue;
       }
-      const outcome = projectionOutcome(row);
+      const outcome = row.dispatchStatus === "pending" ? null : projectionOutcome(row);
       if (outcome !== null) {
         // The row positively knows the attempt settled — the task row is the
         // stale one. Trust worker-list (plan §6.3) and settle the projection.
         const attempt = freshAttempt(task, opts.harnessByTask[task.id] || opts.defaultHarness);
+        attempt.dispatchId = row.dispatchId;
         settleAttempt(attempt, outcome, "task_status");
         seedInheritedTerminalState(attempt, row);
         seedFromRow(attempt, row);
@@ -1884,6 +1942,7 @@ async function recoverState(opts: StartOpts): Promise<void> {
         summary.settledAdopted.push(task.id);
       } else {
         const attempt = freshAttempt(task, opts.harnessByTask[task.id] || opts.defaultHarness);
+        attempt.dispatchId = row.dispatchId;
         seedFromRow(attempt, row);
         const binding = bindingByDispatch.get(row.dispatchId);
         if (binding) {
@@ -1896,7 +1955,7 @@ async function recoverState(opts: StartOpts): Promise<void> {
         summary.activeAdopted.push(task.id);
       }
     } else if (task.status === "completed" || task.status === "failed") {
-      if (!row || row.workerState !== "supervised") continue;
+      if (!row || workerSupervision(row) !== "supervised") continue;
       // Only undecided ownership needs adopting; released/retained rows are
       // exactly where previous decisions left them.
       const tui = tuiByDispatch.get(row.dispatchId);
@@ -1905,6 +1964,7 @@ async function recoverState(opts: StartOpts): Promise<void> {
         continue;
       }
       const attempt = freshAttempt(task, opts.harnessByTask[task.id] || opts.defaultHarness);
+      attempt.dispatchId = row.dispatchId;
       settleAttempt(
         attempt,
         task.status === "completed" ? "succeeded" : "failed",
@@ -1931,11 +1991,12 @@ async function recoverState(opts: StartOpts): Promise<void> {
     const row = launch.dispatchId ? rowByDispatch.get(launch.dispatchId) : undefined;
     const inherited = state.attempts.get(launch.taskId);
     const outcome = row ? projectionOutcome(row) : null;
-    const settled = task && (TERMINAL_TASK_STATUS.has(task.status) || task.status === "blocked") && outcome !== null;
+    const settled = task && row?.dispatchStatus !== "pending" &&
+      (TERMINAL_TASK_STATUS.has(task.status) || task.status === "blocked") && outcome !== null;
     // A refused external worker-stop can park the Task as blocked while its
     // Dispatch remains dispatched/stop_unknown. Keep that exact worker held;
     // Task parking is not cancellation settlement or provider/process exit.
-    const active = task && !TERMINAL_TASK_STATUS.has(task.status) && row?.dispatchStatus === "dispatched";
+    const active = task && !TERMINAL_TASK_STATUS.has(task.status) && row && activeDispatch(row);
     if (row && task && row.taskId === task.id && row.runId === runId &&
         row.agentTerminalHandle === launch.terminal && (settled || active) &&
         (!inherited || inherited.dispatchId === row.dispatchId)) {
@@ -1950,9 +2011,8 @@ async function recoverState(opts: StartOpts): Promise<void> {
         state.attempts.set(task.id, attempt);
         (settled ? summary.settledAdopted : summary.activeAdopted).push(task.id);
       } else {
-        // workerState is a lifecycle stage, not process ownership. A saved
-        // preselected TUI stays supervised even when the generic recovery
-        // branch saw "working" and classified an ordinary row as legacy.
+        // Durable preselected-TUI preparation proves this adapter's exact
+        // worker-start independently of generic lifecycle classification.
         inherited.mode = "supervised";
       }
       continue;
@@ -1990,6 +2050,15 @@ async function recoverState(opts: StartOpts): Promise<void> {
   // restart adoption is what makes a lane durable across viewer restarts.
   await recoverLaneIdentity(opts, rows);
 
+  // Recovery adopts one current Dispatch per known Task. Read detail only at
+  // this boundary; periodic reconciliation stays on worker-list and never
+  // fans out over historical Dispatches.
+  await Promise.all(
+    [...state.attempts.values()]
+      .filter((attempt) => attempt.dispatchId)
+      .map((attempt) => refreshAttemptDispatchDetail(attempt, runId)),
+  );
+
   state.recovery = summary;
   state.recoverySessions = summary.providerSessions.map((session) => ({ ...session }));
 }
@@ -2011,6 +2080,36 @@ function seedInheritedTerminalState(attempt: Attempt, row: OrcaWorkerRow): void 
     attempt.terminalDecision = "release_pending";
     attempt.terminalDetail = "inherited release_pending from the previous coordinator";
   }
+}
+
+/** Pending starts reserve the same slot as dispatched workers, irrespective of liveness. */
+function activeDispatch(row: OrcaWorkerRow): boolean {
+  return row.dispatchStatus === "pending" || row.dispatchStatus === "dispatched";
+}
+
+/**
+ * A Task pointer or one exact Task/Run history row is positive identity.
+ * Multiple candidates are occupancy evidence only, never permission to pick latest.
+ */
+function taskDispatchEvidence(task: OrcaTask, rows: OrcaWorkerRow[], runId: string): {
+  row: OrcaWorkerRow | null;
+  active: OrcaWorkerRow[];
+  uncertain: boolean;
+} {
+  const exact = rows.filter((row) => row.runId === runId && row.taskId === task.id);
+  const active = exact.filter(activeDispatch);
+  const pointed = task.dispatch_id
+    ? exact.find((row) => row.dispatchId === task.dispatch_id) ?? null : null;
+  if (pointed && (active.length === 0 || active.every((row) => row.dispatchId === pointed.dispatchId))) {
+    return { row: pointed, active, uncertain: false };
+  }
+  if (!task.dispatch_id && active.length === 1) return { row: active[0]!, active, uncertain: false };
+  if (!task.dispatch_id && active.length === 0 && exact.length === 1 &&
+      TERMINAL_TASK_STATUS.has(task.status) &&
+      projectionOutcome(exact[0]!) === (task.status === "completed" ? "succeeded" : "failed")) {
+    return { row: exact[0]!, active, uncertain: false };
+  }
+  return { row: null, active, uncertain: active.length > 0 };
 }
 
 /** The positive outcome a worker-list row claims, or null when it claims none. */
@@ -2035,7 +2134,10 @@ export async function stopCoordinator(): Promise<StopReport> {
   state.running = false;
   if (wasRunning) state.phase = "stopping";
 
-  const attempts = [...state.attempts.values()];
+  const attempts = [
+    ...state.attempts.values(),
+    ...[...state.retryCandidates.values()].map((reservation) => reservation.attempt),
+  ];
   const coordinator = state.coordinatorHandle;
   const results: StopResultEntry[] = [];
 
@@ -2062,7 +2164,8 @@ export async function stopCoordinator(): Promise<StopReport> {
         runId: runIdAtStop,
         taskId,
         dispatchId,
-        settledLocally: true,
+        settledLocally: receipt.state === "stopped" || receipt.alreadySettled ||
+          (operation === "worker-abandon" && receipt.providerExecutionExited === true),
         note: receipt.providerExecutionExited
           ? `viewer-observed OpenCode provider stop state: ${receipt.state}`
           : `viewer-observed stop state: ${receipt.state}`,
@@ -2092,7 +2195,11 @@ export async function stopCoordinator(): Promise<StopReport> {
       try {
         const receipt = await stopWithAudit(a.taskId, a.dispatchId);
         let cleanupDetail: string | null = null;
-        if (a.openCodeTui) {
+        // The OpenCode adapter returns provider exit only after separately
+        // verifying Orca accepted cancellation settlement (worker-abandon).
+        const stopConfirmed = receipt.state === "stopped" || receipt.alreadySettled ||
+          (a.openCodeTui && receipt.providerExecutionExited === true);
+        if (a.openCodeTui && stopConfirmed) {
           if (state.opts?.retainByTask?.[a.taskId]) await retainOpenCodeTui(a.dispatchId);
           else {
             const released = await performRelease(a);
@@ -2113,7 +2220,8 @@ export async function stopCoordinator(): Promise<StopReport> {
         results.push({
           target: a.dispatchId,
           kind: "supervised",
-          result: receipt.alreadySettled ? "already_settled" : a.openCodeTui ? "provider_stopped_accounting_abandoned" : "stopped",
+          result: !stopConfirmed ? "unknown" : receipt.alreadySettled ? "already_settled" :
+            a.openCodeTui && receipt.providerExecutionExited ? "provider_stopped_accounting_abandoned" : "stopped",
           detail: cleanupDetail ?? receipt.warning ?? receipt.state,
         });
       } catch (err) {
@@ -2134,7 +2242,7 @@ export async function stopCoordinator(): Promise<StopReport> {
         results.push({
           target: a.dispatchId,
           kind: "tracking_dispatch",
-          result: receipt.alreadySettled ? "already_settled" : "fenced",
+          result: receipt.alreadySettled ? "already_settled" : receipt.state === "stopped" ? "fenced" : "unknown",
           detail: receipt.warning ?? receipt.state,
         });
       } catch (err) {
@@ -2146,7 +2254,7 @@ export async function stopCoordinator(): Promise<StopReport> {
         });
       }
     }
-    if (a.handle && !a.openCodeTui) {
+    if (a.handle && !a.openCodeTui && a.mode === "legacy" && !a.adopted) {
       try {
         await closeTerminalStrict(a.handle);
         results.push({ target: a.handle, kind: "legacy_terminal", result: "closed", detail: null });
@@ -2200,21 +2308,30 @@ export async function stopCoordinator(): Promise<StopReport> {
   }
 
   state.attempts = new Map();
+  state.retryCandidates = new Map();
   state.coordinatorHandle = null;
   state.pendingDeliveryId = null;
   state.inbox = [];
   state.pendingOwnership = new Set();
   state.lanes = new Map();
   state.integrationParked = new Set();
+  const stoppedDispatches = new Set(
+    results
+      .filter((r) => (r.kind === "supervised" || r.kind === "tracking_dispatch") && r.result !== "unknown")
+      .map((r) => r.target),
+  );
+  state.cleanupDebt = state.cleanupDebt.filter(
+    (debt) => !(debt.kind === "stop_unknown" && debt.dispatchId && stoppedDispatches.has(debt.dispatchId)),
+  );
   state.lastStopReport = {
     results,
     clean: results.every((r) => r.result !== "unknown"),
   };
   state.phase = "idle";
-  if (wasRunning && !state.lastStopReport.clean) {
+  if (!state.lastStopReport.clean) {
     // The loop is down and workers are accounted for; surface uncertainty via
     // cleanup debt so the UI keeps showing it after the phase resets.
-    state.cleanupDebt = results
+    const stopDebts = results
       .filter((r) => r.result === "unknown")
       .map((r, i) => ({
         key: `stop-${r.target}-${i}`,
@@ -2223,6 +2340,9 @@ export async function stopCoordinator(): Promise<StopReport> {
         handle: r.kind === "legacy_terminal" || r.kind === "coordinator_terminal" ? r.target : null,
         detail: r.detail,
       }));
+    const byKey = new Map(state.cleanupDebt.map((debt) => [debt.key, debt]));
+    for (const debt of stopDebts) byKey.set(debt.key, debt);
+    state.cleanupDebt = [...byKey.values()];
   }
   return state.lastStopReport;
 }
@@ -2523,7 +2643,7 @@ async function processDelivery(delivery: {
     if (markProcessed(message.id)) continue;
     switch (message.type) {
       case "worker_done": {
-        const settledTaskId = handleWorkerDone(message, tasks);
+        const settledTaskId = await handleWorkerDone(message, tasks);
         if (settledTaskId && delivery.deliveryId) {
           // The batch may not be acknowledged until the ownership decision for
           // this worker has actually executed (plan §Phase 3 item 6) — an ack
@@ -2645,7 +2765,7 @@ function acknowledgePendingDeliveryIfResolved(): Promise<void> {
  * Returns the taskId whose attempt settled (for Delivery-ack deferral), or
  * null when the row was recorded but did not settle anything.
  */
-function handleWorkerDone(message: OrcaMessage, tasks: OrcaTask[]): string | null {
+async function handleWorkerDone(message: OrcaMessage, tasks: OrcaTask[]): Promise<string | null> {
   const payload = parseWorkerDonePayload(message);
   const payloadTask = payload?.taskId ?? null;
   const payloadDispatch = payload?.dispatchId ?? null;
@@ -2689,6 +2809,9 @@ function handleWorkerDone(message: OrcaMessage, tasks: OrcaTask[]): string | nul
     return null;
   }
   settleAttempt(attempt, outcome, "worker_done");
+  if (outcome === "failed" && state.runId) {
+    await refreshAttemptDispatchDetail(attempt, state.runId);
+  }
   return attempt.taskId;
 }
 
@@ -2725,10 +2848,57 @@ function settleAttempt(attempt: Attempt, outcome: "succeeded" | "failed", via: "
   attempt.terminalDecision = "pending";
 }
 
+/** A new Dispatch starts with unknown accounting; never carry its predecessor's count. */
+function bindAttemptDispatch(attempt: Attempt, dispatchId: string): void {
+  if (attempt.dispatchId !== dispatchId) {
+    attempt.failureCount = null;
+    attempt.dispatchStatus = null;
+    attempt.dispatchId = dispatchId;
+  }
+}
+
+/** Fold one exact worker-show receipt. Projection fallbacks do not prove identity. */
+function applyAttemptDispatchDetail(
+  attempt: Attempt,
+  runId: string,
+  detail: WorkerDetailView | null,
+): detail is WorkerDetailView {
+  const dispatchId = attempt.dispatchId;
+  const dispatch = detail?.dispatch;
+  if (
+    !dispatchId || !detail || !dispatch || state.runId !== runId ||
+    detail.dispatchId !== dispatchId || dispatch.id !== dispatchId ||
+    dispatch.runId !== runId || dispatch.taskId !== attempt.taskId ||
+    attempt.dispatchId !== dispatchId
+  ) return false;
+
+  const count = dispatch.failureCount;
+  if (typeof count === "number" && Number.isFinite(count) && Number.isInteger(count) && count >= 0) {
+    attempt.failureCount = count;
+  }
+  if (typeof dispatch.status === "string" && dispatch.status.trim()) {
+    attempt.dispatchStatus = dispatch.status;
+  }
+  return true;
+}
+
+/** Best-effort boundary read. A failed or incomplete read preserves same-ID evidence. */
+async function refreshAttemptDispatchDetail(attempt: Attempt, runId: string): Promise<WorkerDetailView | null> {
+  const dispatchId = attempt.dispatchId;
+  if (!dispatchId) return null;
+  try {
+    const detail = await showWorkerDetail(dispatchId);
+    return applyAttemptDispatchDetail(attempt, runId, detail) ? detail : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Git reads use the actual worker workspace, never a requested placement. */
 async function stageWorkerPath(attempt: Attempt): Promise<string> {
   if (!attempt.dispatchId) throw new Error(`Task ${attempt.taskId} has no exact Dispatch identity`);
   const detail = await showWorkerDetail(attempt.dispatchId);
+  applyAttemptDispatchDetail(attempt, state.runId ?? "", detail);
   if (detail?.terminal?.worktreePath) return detail.terminal.worktreePath;
   const selector = detail?.launch?.resolvedWorktreeId ?? attempt.effective?.worktree;
   if (selector && !RESERVED_WORKTREE_ECHOES.has(selector)) {
@@ -2756,7 +2926,7 @@ async function stageStartPath(worktree: string | undefined): Promise<string | nu
  * so the next tick can never over-dispatch. `requested` launch preferences
  * are filled in by `startOne`, which knows the effective opts + reuse target.
  */
-function reserveAttempt(task: OrcaTask, harness: string): Attempt {
+function reserveAttempt(task: Pick<OrcaTask, "id">, harness: string): Attempt {
   return {
     taskId: task.id,
     harness,
@@ -2764,7 +2934,8 @@ function reserveAttempt(task: OrcaTask, harness: string): Attempt {
     dispatchId: null,
     handle: null,
     startedAt: Date.now(),
-    failureCount: 0,
+    failureCount: null,
+    dispatchStatus: null,
     lastHeartbeatAt: null,
     liveness: null,
     livenessReason: null,
@@ -2807,6 +2978,10 @@ async function reconcile(): Promise<void> {
 
   let tasks = await listTasks(runId);
   const byId = new Map(tasks.map((t) => [t.id, t]));
+  const workerRows = await listWorkers(runId, { includeRemote: true });
+  const occupiedTaskIds = new Set(
+    workerRows.filter((row) => row.runId === runId && activeDispatch(row)).map((row) => row.taskId),
+  );
 
   // Gate state is read when ANY task is blocked (entry or integration gates)
   // or ANY ready task is a cross-lane join — the join's gate must exist before
@@ -2841,7 +3016,7 @@ async function reconcile(): Promise<void> {
         })
         .map((g) => g.taskId!),
     );
-    const toRelease = blocked.filter((t) => approvedTaskIds.has(t.id));
+    const toRelease = blocked.filter((t) => approvedTaskIds.has(t.id) && !occupiedTaskIds.has(t.id));
     if (toRelease.length > 0) {
       await Promise.all(
         toRelease.map((t) => taskUpdate(t.id, "ready", runId, state.coordinatorHandle!)),
@@ -2879,34 +3054,59 @@ async function reconcile(): Promise<void> {
   // degrade into a synthetic local substitute or a guessed outcome. All later
   // operations (reads, stop, release) address the Dispatch ID; Orca relays
   // them to the execution host.
-  const workerRows = await listWorkers(runId, { includeRemote: true });
   const rowsByDispatch = new Map(workerRows.map((r) => [r.dispatchId, r]));
   await refreshRecoverySessions(runId, tasks, workerRows);
 
-  // Dispatched tasks we never started — pre-existing Dispatches from a crashed
-  // viewer (Phase 4 adopts these; until then they must visibly block both the
-  // budget and completion instead of being silently ignored).
-  state.unownedDispatches = tasks
-    .filter((t) => t.status === "dispatched" && !state.attempts.has(t.id))
-    .map((t) => `${t.id}${t.dispatch_id ? ` (${t.dispatch_id})` : ""}`);
+  // Each unowned active Dispatch consumes a slot, even when several rows
+  // ambiguously refer to one Task. Keep one exact id per entry so recovery
+  // navigation never mistakes a comma-joined history for a Dispatch id.
+  state.unownedDispatches = tasks.flatMap((task) => {
+    const attempt = state.attempts.get(task.id);
+    const evidence = taskDispatchEvidence(task, workerRows, runId);
+    const unowned = evidence.active.filter((row) =>
+      !attempt || attempt.settled || attempt.dispatchId !== row.dispatchId);
+    if (unowned.length > 0) return unowned.map((row) => `${task.id} (${row.dispatchId})`);
+    if (task.status === "dispatched" && !attempt) {
+      return [`${task.id}${task.dispatch_id ? ` (${task.dispatch_id})` : ""}`];
+    }
+    return [];
+  });
 
   // Unowned Dispatches still consume concurrency budget: count them so a
   // pre-existing worker cannot be double-placed over.
-  const unownedCount = tasks.filter(
-    (t) => t.status === "dispatched" && !state.attempts.has(t.id),
-  ).length;
+  const unownedCount = state.unownedDispatches.length;
 
   // Refresh + settle + decide, one pass per attempt.
   for (const attempt of [...state.attempts.values()]) {
     const task = byId.get(attempt.taskId);
-    if (!attempt.dispatchId && task?.dispatch_id) attempt.dispatchId = task.dispatch_id;
-    const row = attempt.dispatchId ? rowsByDispatch.get(attempt.dispatchId) : undefined;
+    // A Task pointer can still name the failed predecessor while a new start
+    // request is unresolved. Only that request's receipt can bind its identity.
+    if (!attempt.dispatchId && !attempt.startRequestId && task?.dispatch_id) {
+      bindAttemptDispatch(attempt, task.dispatch_id);
+      await refreshAttemptDispatchDetail(attempt, runId);
+    }
+    const candidateRow = attempt.dispatchId ? rowsByDispatch.get(attempt.dispatchId) : undefined;
+    const row = candidateRow && candidateRow.runId === runId &&
+      candidateRow.taskId === attempt.taskId && candidateRow.dispatchId === attempt.dispatchId
+      ? candidateRow
+      : undefined;
     // Phase 5 fleet projection refresh: liveness is NORMALIZED to the three
     // renderable verdicts (anything unknown reads unverifiable, never exited)
     // and its reason, attention, agent-wait stage, terminal handle, and
     // terminal accounting are kept verbatim for the UI. A missing row leaves
     // the last known values in place — absence is never degraded to `exited`.
     if (row) {
+      if (row.dispatchStatus !== "unknown") attempt.dispatchStatus = row.dispatchStatus;
+      // Orca can advance a failed Dispatch's retry-chain accounting outside
+      // this viewer (for example, another client exhausted the chain). The
+      // fleet row carries the authoritative circuit status, but only an exact
+      // worker-show receipt carries its failureCount. Refresh that read-only
+      // detail so Recovery does not keep presenting an obsolete count beside
+      // the newly observed circuit_broken status; a failed read retains the
+      // same-Dispatch value and never infers a count from the status string.
+      if (attempt.settled && attempt.dispatchStatus === "circuit_broken" && attempt.failureCount !== 3) {
+        await refreshAttemptDispatchDetail(attempt, runId);
+      }
       if (!attempt.openCodeTui && await findOpenCodeTuiLaunch(row.dispatchId)) attempt.openCodeTui = true;
       attempt.fleetTerminalState = row.terminalState;
       attempt.agentTerminalHandle = row.agentTerminalHandle ?? attempt.agentTerminalHandle;
@@ -2957,11 +3157,16 @@ async function reconcile(): Promise<void> {
     }
 
     if (!attempt.settled) {
-      // Orca's task status is authoritative settlement evidence: the runtime
-      // only moves a task to completed/failed from an accepted worker_done or
-      // its own failure handling. Missing rows/absent statuses never settle.
-      if (task && TERMINAL_TASK_STATUS.has(task.status)) {
-        settleAttempt(attempt, task.status === "completed" ? "succeeded" : "failed", "task_status");
+      const outcome = task?.status === "completed" ? "succeeded" : "failed";
+      // Task terminal status alone can belong to the predecessor of a lost
+      // retry. An unresolved start needs this new Dispatch's exact scoped row
+      // to positively confirm the same outcome; absence never settles it.
+      const currentDispatchProvesOutcome = row !== undefined &&
+        row.dispatchId !== attempt.retriedFrom && projectionOutcome(row) === outcome;
+      if (task && TERMINAL_TASK_STATUS.has(task.status) && row?.dispatchStatus !== "pending" &&
+          (!attempt.startRequestId || currentDispatchProvesOutcome)) {
+        settleAttempt(attempt, outcome, "task_status");
+        if (task.status === "failed") await refreshAttemptDispatchDetail(attempt, runId);
       }
     }
 
@@ -2989,7 +3194,7 @@ async function reconcile(): Promise<void> {
         // pass's Stage artifact checks and parking have run. In committed
         // Stage mode, release the settled terminal first; the later dispatch
         // batch is the only path that may start verified downstream work.
-        state.stageGit ? [] : tasks.filter((t) => t.status === "ready"),
+        state.stageGit ? [] : tasks.filter((t) => t.status === "ready" && !occupiedTaskIds.has(t.id)),
       );
     }
   }
@@ -3010,8 +3215,13 @@ async function reconcile(): Promise<void> {
   // receipts but no longer hold a worker. Unowned dispatched tasks count
   // against the budget too (a pre-existing worker must not be double-placed
   // over), then the completion boundary is evaluated.
-  const ready = tasks.filter((t) => t.status === "ready");
-  const activeAttempts = [...state.attempts.values()].filter((a) => !a.settled).length;
+  // An explicitly approved retry stays blocked in Orca until worker-start
+  // accepts --retry-of. Reopening it as ready first invalidates that lineage.
+  const ready = tasks.filter((t) => t.status === "ready" ||
+    (t.status === "blocked" && state.retryOfByTask.has(t.id)));
+  const activeAttempts =
+    [...state.attempts.values()].filter((a) => !a.settled).length +
+    [...state.retryCandidates.values()].filter((r) => !r.attempt.settled).length;
   const budget = Math.max(0, opts.maxConcurrency - activeAttempts - unownedCount);
   // One unsettled Dispatch per lane (worktree-lanes epic): a lane with an
   // in-flight attempt — ours, or a dispatched task we never started (pending
@@ -3021,13 +3231,16 @@ async function reconcile(): Promise<void> {
   const busyLanes = new Set<string>();
   for (const [taskId, laneId] of Object.entries(opts.laneByTask ?? {})) {
     const attempt = state.attempts.get(taskId);
+    const retry = state.retryCandidates.get(taskId)?.attempt;
     const taskRow = byId.get(taskId);
-    if ((attempt && !attempt.settled) || (!attempt && taskRow?.status === "dispatched")) {
+    if ((attempt && !attempt.settled) || (retry && !retry.settled) ||
+        occupiedTaskIds.has(taskId) || (!attempt && taskRow?.status === "dispatched")) {
       busyLanes.add(laneId);
     }
   }
   const batch = ready
     .filter((t) => !state.attempts.has(t.id))
+    .filter((t) => !occupiedTaskIds.has(t.id))
     // A join behind an unresolved integration gate is unstartable, whatever
     // the budget says. (Orca has it `blocked`; the ready snapshot above can
     // still carry the pass the gate was created in.)
@@ -3284,25 +3497,21 @@ async function decideTerminalOwnership(attempt: Attempt, opts: StartOpts, readyT
       next.reuseOf = attempt.dispatchId;
       next.agentTerminalHandle = handle;
       state.attempts.set(candidate.id, next);
-      await startOne(candidate, next, opts, state.runId!, null, handle);
-      if (next.settledVia === "start_failed") {
-        const receipt = next.startReceipts[next.startReceipts.length - 1] ?? null;
-        if (receipt?.failedStage === "response_lost") {
-          // Ambiguous reuse start: whether the terminal changed hands is
-          // UNKNOWN. Releasing it could kill a landed worker — Phase 4's
-          // rule stands: surface debt, decide by hand, never guess.
-          attempt.terminalDecision = "release_unknown";
-          attempt.terminalDetail =
-            "reuse start outcome unknown — the terminal may belong to the new Dispatch; resolve manually";
-          recordDebt(attempt, "release_unknown", attempt.terminalDetail);
-        } else {
-          // Definite failed start: the terminal was never consumed, so the
-          // normal default (release) applies to the still-settled worker.
-          applyReleaseReceipt(attempt, await performRelease(attempt));
-        }
-      } else {
+      const startResult = await startOne(candidate, next, opts, state.runId!, null, handle);
+      if (startResult.kind === "unknown" || startResult.kind === "failed") {
+        // Whether the terminal changed hands is UNKNOWN. Releasing it could
+        // kill a Dispatch Orca did record — surface debt, decide by hand, never guess.
+        attempt.terminalDecision = "release_unknown";
+        attempt.terminalDetail =
+          `reuse start ${startResult.kind === "unknown" ? "outcome is unknown" : `created Dispatch ${startResult.dispatchId} before failing`} — ` +
+          "the terminal may belong to the new Dispatch; resolve manually";
+        recordDebt(attempt, "release_unknown", attempt.terminalDetail);
+      } else if (startResult.kind === "started") {
         attempt.terminalDecision = "reused";
         attempt.terminalDetail = `terminal transferred to dispatch ${next.dispatchId ?? "?"} (task ${candidate.id}) before delivery ack`;
+      } else {
+        // A definite refusal did not transfer this settled worker's terminal.
+        applyReleaseReceipt(attempt, await performRelease(attempt));
       }
       return;
     }
@@ -3440,16 +3649,21 @@ function recordDebt(
  */
 async function evaluateCompletionBoundary(tasks: OrcaTask[]): Promise<void> {
   const runId = state.runId!;
-  const unsettled = [...state.attempts.values()].filter((a) => !a.settled);
+  const unsettled = [
+    ...[...state.attempts.values()].filter((a) => !a.settled),
+    ...[...state.retryCandidates.values()].map((reservation) => reservation.attempt).filter((a) => !a.settled),
+  ];
   const undecided = [...state.attempts.values()].filter(
     (a) =>
       a.settled &&
       !["released", "retained", "closed", "not_needed", "reused"].includes(a.terminalDecision),
   );
-  // A start that failed before ready leaves its task `ready` in Orca — but the
-  // plan removes auto-retry, so that task is PARKED pending an explicit user
-  // decision (retry or rebuild). It must not read as work the loop can still
-  // place, or the boundary would wait on a dispatch that can never happen.
+  // A failed start may leave Orca's Task in a runtime-specific state, and a
+  // Task that still reads `ready` does not prove another start is permitted.
+  // The viewer parks every failed-before-ready attempt until an explicit
+  // retry rechecks Orca's exact Task and Dispatch evidence. It must not read
+  // as work the loop can still place, or the boundary would wait on an
+  // attempt that can never be started automatically.
   const parked = new Set(
     [...state.attempts.values()].filter((a) => a.settledVia === "start_failed").map((a) => a.taskId),
   );
@@ -3487,7 +3701,7 @@ async function evaluateCompletionBoundary(tasks: OrcaTask[]): Promise<void> {
     state.phase = "awaiting_input";
     return;
   }
-  if (readyOrDispatched.length > 0 || unsettled.length > 0) {
+  if (readyOrDispatched.length > 0 || unsettled.length > 0 || state.unownedDispatches.length > 0) {
     state.phase = "running";
     return;
   }
@@ -3559,6 +3773,38 @@ async function evaluateCompletionBoundary(tasks: OrcaTask[]): Promise<void> {
   }
 }
 
+type StartOneResult =
+  | {
+      kind: "started";
+      dispatchId: string;
+      requestId: string;
+      receipt: WorkerStartReceipt | null;
+    }
+  | {
+      kind: "rejected";
+      dispatchId: null;
+      requestId: string;
+      code: string | null;
+      receipt: WorkerStartReceipt | null;
+      error: unknown;
+    }
+  | {
+      kind: "failed";
+      dispatchId: string;
+      requestId: string;
+      code: string | null;
+      receipt: WorkerStartReceipt | null;
+      error: unknown;
+    }
+  | {
+      kind: "unknown";
+      dispatchId: string | null;
+      requestId: string;
+      code: string | null;
+      receipt: WorkerStartReceipt | null;
+      error: unknown;
+    };
+
 async function startOne(
   task: OrcaTask,
   attempt: Attempt,
@@ -3566,8 +3812,14 @@ async function startOne(
   runId: string,
   retryOf: string | null = null,
   reuseTerminal?: string,
-): Promise<void> {
+): Promise<StartOneResult> {
   const from = state.coordinatorHandle!;
+  const startGeneration = coordinatorLoopGeneration;
+  const isCurrent = () =>
+    state.running &&
+    state.runId === runId &&
+    state.coordinatorHandle === from &&
+    coordinatorLoopGeneration === startGeneration;
   // Phase 4 item 2: one durable retry-request id per mutation, retained on the
   // attempt until the outcome is known — a lost response is resolved through
   // request-show with this exact id (never a blind second start).
@@ -3585,6 +3837,20 @@ async function startOne(
     taskId: task.id,
     dispatchId: null,
   });
+  if (!isCurrent()) {
+    attempt.startRequestId = null;
+    await noteRequest({
+      requestId: startRequestId,
+      operation: "worker-start",
+      runId,
+      taskId: task.id,
+      dispatchId: null,
+      settledLocally: true,
+      note: "not issued because the coordinator stopped before worker-start",
+    });
+    const error = new OrcaCliError("Coordinator stopped before worker-start was issued.", "not_running");
+    return { kind: "rejected", dispatchId: null, requestId: startRequestId, code: error.code, receipt: null, error };
+  }
   // Phase 6: resolve placement BEFORE touching Orca. A task with a saved
   // environment starts on that connected server (`--on`, worker-start only);
   // its exact placement is an existing workspace selector or a new-top-level
@@ -3838,6 +4104,9 @@ async function startOne(
       }
     }
     let started: StartedWorker;
+    if (!isCurrent()) {
+      throw new OrcaCliError("Coordinator stopped before worker-start was issued.", "not_running");
+    }
     // `opencode` is the viewer's stable harness name for OpenCode 2. Orca's
     // older `--agent opencode` can lose the preamble (orca #9951), while
     // `--agent opencode2` delivered read-only and writing Tasks on 1.4.220.
@@ -3852,7 +4121,7 @@ async function startOne(
         model: model!, effort: attempt.requested.effort,
         retryRequestId: startRequestId, retryOf: retryOf ?? undefined,
         onHandle: handle => { attempt.handle = handle; },
-        isCancelled: () => !state.running || state.runId !== runId || state.coordinatorHandle !== from,
+        isCancelled: () => !isCurrent(),
       });
       attempt.requested = { ...attempt.requested, terminal: started.handle };
     } else if (attempt.harness === "opencode" && !nativeOpenCode) {
@@ -3863,6 +4132,9 @@ async function startOne(
             `Pick a supervised harness (claude/codex/…) for remote nodes.`,
           "remote_legacy_unsupported",
         );
+      }
+      if (!isCurrent()) {
+        throw new OrcaCliError("Coordinator stopped before the legacy worker could start.", "not_running");
       }
       started = await startLegacyWorker({
         taskId: task.id,
@@ -3938,6 +4210,9 @@ async function startOne(
           });
           attempt.requested = { ...attempt.requested, terminal: preparedCodexHandle };
         }
+        if (!isCurrent()) {
+          throw new OrcaCliError("Coordinator stopped before worker-start was issued.", "not_running");
+        }
         started = await startSupervisedWorker({
           taskId: task.id,
           agent: nativeOpenCode ? "opencode2" : attempt.harness,
@@ -3980,6 +4255,9 @@ async function startOne(
         // Never launch a second one-shot worker after that attempt.
         if (nativeOpenCode || environment || lane || attempt.handle ||
             !code || !UNCONFIGURED_AGENT_CODES.has(code)) throw err;
+        if (!isCurrent()) {
+          throw new OrcaCliError("Coordinator stopped before the legacy worker could start.", "not_running");
+        }
         started = await startLegacyWorker({
           taskId: task.id,
           harness: attempt.harness,
@@ -3994,8 +4272,10 @@ async function startOne(
       }
     }
     attempt.mode = started.mode;
-    attempt.dispatchId = started.dispatchId;
-    if (state.stageGit && task.spec?.includes(MERGE_PREP_MARKER) && started.dispatchId) {
+    if (started.dispatchId) {
+      bindAttemptDispatch(attempt, started.dispatchId);
+    }
+    if (isCurrent() && state.stageGit && task.spec?.includes(MERGE_PREP_MARKER) && started.dispatchId) {
       const inputs = state.stageGit.mergeInputs(task);
       const lines = inputs.map((dep) =>
         `${dep.taskId}: ${dep.path} (branch ${dep.branch || "detached"}, commit ${dep.sha})`,
@@ -4016,23 +4296,28 @@ async function startOne(
         // Enqueue failure is not proof the worker never saw its Task. Keep the
         // Dispatch and the missing-guidance evidence; the Task spec remains
         // authoritative and Git verification still blocks downstream work.
-        state.stageGitErrors.set(task.id, `Merge input delivery failed: ${String((err as Error).message ?? err)}`);
+        if (isCurrent()) {
+          state.stageGitErrors.set(task.id, `Merge input delivery failed: ${String((err as Error).message ?? err)}`);
+        }
       }
     }
     // A prewarmed Codex terminal was created by this viewer before Orca took
     // ownership. The supervised start returns no handle, but the terminal is
     // still the same exact resource recorded above.
     attempt.handle = started.handle ?? attempt.handle;
-    if (started.sessionBindingWarning) state.error = started.sessionBindingWarning;
-    if (started.receipt) {
-      attempt.startReceipts.push(started.receipt);
+    if (started.sessionBindingWarning && isCurrent()) state.error = started.sessionBindingWarning;
+    const successReceipt = started.receipt
+      ? { ...started.receipt, requestId: started.receipt.requestId ?? startRequestId }
+      : null;
+    if (successReceipt) {
+      attempt.startReceipts.push(successReceipt);
       if (attempt.startReceipts.length > START_RECEIPTS_MAX) {
         attempt.startReceipts = attempt.startReceipts.slice(-START_RECEIPTS_MAX);
       }
       // Phase 5: the receipt's echo is the only honest source for the
       // "effective" launch preferences — a preference the runtime did not
       // echo stays unknown rather than being assumed applied.
-      const e = started.receipt.effective;
+      const e = successReceipt.effective;
       attempt.effective = {
         agent: e.agent,
         model: e.model,
@@ -4040,6 +4325,44 @@ async function startOne(
         worktree: e.worktree,
         terminal: e.terminal,
         on: e.on,
+      };
+    }
+    if (!started.dispatchId) {
+      // A resolved CLI promise is not proof a worker exists. Keep the durable
+      // request pointer and the unsettled slot until Orca can resolve identity.
+      attempt.startRequestId = startRequestId;
+      await noteRequest({
+        requestId: startRequestId,
+        operation: "worker-start",
+        runId,
+        taskId: task.id,
+        dispatchId: null,
+        settledLocally: false,
+        note: "worker-start returned without a Dispatch id — outcome unresolved; inspect with request-show",
+      });
+      if (isCurrent()) {
+        state.recentMessages = [
+          {
+            id: `start_unknown:${attempt.taskId}:${Date.now()}`,
+            type: "start_unknown · receipt retained, no auto-retry",
+            from: "coordinator",
+            subject: `worker-start for ${task.id} returned without a Dispatch id; inspect request ${startRequestId}`,
+            createdAt: new Date().toISOString(),
+          },
+          ...state.recentMessages,
+        ].slice(0, RECENT_MESSAGES_MAX);
+      }
+      const error = new OrcaCliError(
+        `worker-start for task ${task.id} returned without a Dispatch id; outcome is unresolved.`,
+        RESPONSE_LOST,
+      );
+      return {
+        kind: "unknown",
+        dispatchId: null,
+        requestId: startRequestId,
+        code: error.code,
+        receipt: successReceipt,
+        error,
       };
     }
     // The process-local Attempt vanishes on a viewer restart. Save the
@@ -4072,10 +4395,10 @@ async function startOne(
     // is untouched, but later lane tasks refuse to start — absence of
     // evidence never authorizes a guessed selector, a replacement worktree,
     // or a fallback to current.
-    if (lane) {
+    if (lane && isCurrent()) {
       const creationStart = wt.worktree === "new-child" || wt.worktree === "new-top-level";
       if (creationStart) lane.creationDispatchId = started.dispatchId ?? lane.creationDispatchId;
-      const echo = started.receipt?.effective?.worktree ?? null;
+      const echo = successReceipt?.effective?.worktree ?? null;
       if (positiveSelector(echo)) {
         adoptLaneSelector(lane, echo, "worker_start_receipt");
       } else if (!lane.selector && lane.seed.kind !== "existing") {
@@ -4095,23 +4418,68 @@ async function startOne(
       operation: "worker-start",
       runId,
       taskId: task.id,
-      dispatchId: attempt.dispatchId,
+      dispatchId: started.dispatchId,
       settledLocally: true,
       note: attempt.dispatchId
         ? `landed as dispatch ${attempt.dispatchId}`
         : "start outcome recorded without a dispatch id",
     });
-    const taskSpec = typeof task.spec === "string" ? task.spec : "";
-    await emitCoordinatorActivity({
-      kind: "dispatch_started",
-      runId,
-      taskId: task.id,
-      dispatchId: attempt.dispatchId,
-      title: "Assigned this stage",
-      summary: briefTaskSpec(taskSpec),
-      detail: taskSpec,
-    });
+    if (isCurrent() && attempt.dispatchId) {
+      const taskSpec = typeof task.spec === "string" ? task.spec : "";
+      await emitCoordinatorActivity({
+        kind: "dispatch_started",
+        runId,
+        taskId: task.id,
+        dispatchId: attempt.dispatchId,
+        title: "Assigned this stage",
+        summary: briefTaskSpec(taskSpec),
+        detail: taskSpec,
+      });
+    }
+    // The start request and its Activity are already durably linked; this
+    // best-effort detail read must not delay either record or change their
+    // outcome. It supplies only exact Dispatch accounting for the projection.
+    if (started.dispatchId) await refreshAttemptDispatchDetail(attempt, runId);
+    return {
+      kind: "started",
+      dispatchId: started.dispatchId,
+      requestId: startRequestId,
+      receipt: successReceipt,
+    };
   } catch (err) {
+    const alreadyStartedReceipt = attempt.startReceipts.at(-1) ?? null;
+    if (attempt.dispatchId && (alreadyStartedReceipt?.ok || attempt.mode === "legacy")) {
+      // The Dispatch is positive evidence. A later local journaling or lane
+      // projection error cannot turn it into a failed start or invite a retry.
+      attempt.startRequestId = null;
+      await noteRequest({
+        requestId: startRequestId,
+        operation: "worker-start",
+        runId,
+        taskId: task.id,
+        dispatchId: attempt.dispatchId,
+        settledLocally: true,
+        note: `landed as dispatch ${attempt.dispatchId}`,
+      });
+      if (isCurrent()) {
+        const taskSpec = typeof task.spec === "string" ? task.spec : "";
+        await emitCoordinatorActivity({
+          kind: "dispatch_started",
+          runId,
+          taskId: task.id,
+          dispatchId: attempt.dispatchId,
+          title: "Assigned this stage",
+          summary: briefTaskSpec(taskSpec),
+          detail: taskSpec,
+        });
+      }
+      return {
+        kind: "started",
+        dispatchId: attempt.dispatchId,
+        requestId: startRequestId,
+        receipt: alreadyStartedReceipt,
+      };
+    }
     // Phase 4 item 8: the old "delete the attempt and retry next tick" behavior
     // is GONE. A failed start stays in the projection with its receipt — the
     // user retries explicitly (retryWorker), and nothing is re-placed behind
@@ -4131,40 +4499,45 @@ async function startOne(
         "An installed opencode2 command alone does not enable the Orca launcher. " +
         "No automatic retry or replacement worker was started.";
     }
-    attempt.startRequestId = null; // the start's outcome IS now known: failed
-    if (startErr.receipt) {
-      attempt.startReceipts.push(startErr.receipt);
+    const receipt = startErr.receipt
+      ? { ...startErr.receipt, requestId: startErr.receipt.requestId ?? startRequestId }
+      : null;
+    if (receipt) {
+      attempt.startReceipts.push(receipt);
       if (attempt.startReceipts.length > START_RECEIPTS_MAX) {
         attempt.startReceipts = attempt.startReceipts.slice(-START_RECEIPTS_MAX);
       }
-      if (startErr.receipt.dispatchId && !attempt.dispatchId) {
-        attempt.dispatchId = startErr.receipt.dispatchId;
-      }
+      if (receipt.dispatchId && !attempt.dispatchId) bindAttemptDispatch(attempt, receipt.dispatchId);
     }
-    attempt.settled = true;
-    attempt.outcome = "failed";
-    attempt.settledVia = "start_failed";
-    attempt.settledAt = Date.now();
+    const responseLost = receipt?.failedStage === "response_lost" || startErr.code === RESPONSE_LOST || startErr.code === "start_unknown";
+    const dispatchId = attempt.dispatchId ?? receipt?.dispatchId ?? null;
+    if (dispatchId && attempt.dispatchId !== dispatchId) bindAttemptDispatch(attempt, dispatchId);
+    const kind: "rejected" | "failed" | "unknown" = responseLost ? "unknown" : dispatchId ? "failed" : "rejected";
+    attempt.startRequestId = responseLost ? startRequestId : null;
+    attempt.settled = !responseLost;
+    attempt.outcome = responseLost ? null : "failed";
+    attempt.settledVia = responseLost ? null : "start_failed";
+    attempt.settledAt = responseLost ? null : Date.now();
     attempt.terminalDecision = "pending"; // ownership decided from the receipt
     attempt.terminalDetail = failureDetail;
+    if (dispatchId) await refreshAttemptDispatchDetail(attempt, runId);
     // Phase 5: close the ledger row with what the viewer actually observed.
     // A `response_lost` stage means the outcome stayed UNRESOLVED — the row
     // is exactly the audit trail for reconstructing it via request-show.
-    const responseLost = startErr.receipt?.failedStage === "response_lost";
     await noteRequest({
       requestId: startRequestId,
       operation: "worker-start",
       runId,
       taskId: task.id,
-      dispatchId: attempt.dispatchId ?? startErr.receipt?.dispatchId ?? null,
+      dispatchId,
       settledLocally: !responseLost,
       note: responseLost
         ? "response lost — outcome unresolved; inspect with request-show"
         : `failed before ready${
-            startErr.receipt?.failedStage ? ` at ${startErr.receipt.failedStage}` : ""
+            receipt?.failedStage ? ` at ${receipt.failedStage}` : ""
           } — receipt retained`,
     });
-    if (attempt.handle && !responseLost && !attempt.dispatchId) {
+    if (attempt.handle && !responseLost && !dispatchId) {
       // A legacy-lane start can fail after creating its terminal. The pane is
       // provably ours — close it. A prewarmed terminal is likewise ours only
       // BEFORE worker-start has minted a Dispatch. Unknown responses and
@@ -4181,21 +4554,33 @@ async function startOne(
         recordDebt(attempt, "close_failed", attempt.terminalDetail);
       }
     }
-    state.recentMessages = [
-      {
-        id: `start_failed:${attempt.taskId}:${Date.now()}`,
-        type: `start_failed · receipt retained, no auto-retry`,
-        from: "coordinator",
-        subject: failureDetail,
-        createdAt: new Date().toISOString(),
-      },
-      ...state.recentMessages,
-    ].slice(0, RECENT_MESSAGES_MAX);
+    if (isCurrent()) {
+      state.recentMessages = [
+        {
+          id: `${kind}:${attempt.taskId}:${Date.now()}`,
+          type: kind === "unknown" ? "start_unknown · receipt retained, no auto-retry" :
+            "start_failed · receipt retained, no auto-retry",
+          from: "coordinator",
+          subject: failureDetail,
+          createdAt: new Date().toISOString(),
+        },
+        ...state.recentMessages,
+      ].slice(0, RECENT_MESSAGES_MAX);
+    }
     // Infrastructure-level failures (CLI missing etc.) additionally surface in
     // the global error line; receipt-bearing failures stay on the attempt.
-    if (!startErr.receipt) {
+    if (!receipt && isCurrent()) {
       state.error = `Failed to start task ${task.id}: ${failureDetail}`;
     }
+    const failure = {
+      requestId: receipt?.requestId ?? startRequestId,
+      code: startErr.code ?? null,
+      receipt,
+      error: err,
+    };
+    if (kind === "unknown") return { kind, dispatchId, ...failure };
+    if (kind === "failed") return { kind, dispatchId: dispatchId!, ...failure };
+    return { kind, dispatchId: null, ...failure };
   }
 }
 
@@ -4214,9 +4599,47 @@ async function startOne(
  * placement, carries `--retry-of <old dispatch>` lineage when a Dispatch
  * exists, and runs under a fresh durable retry-request id.
  */
+function retryReservationIsCurrent(reservation: RetryReservation): boolean {
+  return (
+    state.running &&
+    state.runId === reservation.runId &&
+    state.coordinatorHandle === reservation.coordinatorHandle &&
+    coordinatorLoopGeneration === reservation.generation &&
+    state.attempts.get(reservation.original.taskId) === reservation.original &&
+    state.retryCandidates.get(reservation.original.taskId) === reservation
+  );
+}
+
+function appendRetryDiagnostic(attempt: Attempt, detail: string): void {
+  const combined = [attempt.terminalDetail, detail].filter(Boolean).join("\n");
+  attempt.terminalDetail = combined.length <= 1200 ? combined : combined.slice(-1200);
+}
+
+function recordLateRetryOutcome(reservation: RetryReservation, result: StartOneResult): void {
+  if (result.kind === "rejected") return;
+  const dispatchId = result.dispatchId;
+  const stopConfirmed = dispatchId && state.lastStopReport?.results.some(
+    (row) => row.target === dispatchId && row.result !== "unknown",
+  );
+  if (stopConfirmed) return;
+  const key = `retry-stop-unknown:${reservation.runId}:${result.requestId}`;
+  state.cleanupDebt = [
+    ...state.cleanupDebt.filter((debt) => debt.key !== key),
+    {
+      key,
+      kind: "stop_unknown",
+      dispatchId,
+      handle: reservation.attempt.handle,
+      detail: dispatchId
+        ? `Retry for stopped Run ${reservation.runId} returned Dispatch ${dispatchId} after Stop; inspect its ownership before acting.`
+        : `Retry for stopped Run ${reservation.runId} has unresolved request ${result.requestId}; inspect with request-show before retrying.`,
+    },
+  ];
+}
+
 export async function retryWorker(idOrTask: string): Promise<{
   taskId: string;
-  dispatchId: string | null;
+  dispatchId: string;
   retriedFrom: string | null;
 }> {
   if (!state.running || !state.coordinatorHandle || !state.opts || !state.runId) {
@@ -4241,6 +4664,12 @@ export async function retryWorker(idOrTask: string): Promise<{
     throw new OrcaCliError(
       `No attempt matching ${idOrTask} in this coordinator's projection.`,
       "retry_target_not_found",
+    );
+  }
+  if (state.retryCandidates.has(attempt.taskId)) {
+    throw new OrcaCliError(
+      `Refusing to retry ${attempt.taskId}: another retry request is already in progress.`,
+      "retry_not_allowed",
     );
   }
 
@@ -4268,63 +4697,101 @@ export async function retryWorker(idOrTask: string): Promise<{
     );
   }
 
-  // Orca-side verification: worker-list is authoritative. A live Dispatch for
-  // this task (ours or otherwise — local or on a connected server) must never
-  // be double-placed over.
-  const rows = await listWorkers(runId, { includeRemote: true });
-  const liveRow = rows.find(
-    (r) =>
-      r.taskId === attempt.taskId &&
-      r.dispatchStatus === "dispatched" &&
-      r.workerState === "supervised",
-  );
-  if (liveRow) {
-    throw new OrcaCliError(
-      `Refusing to retry ${attempt.taskId}: worker-list reports a live Dispatch ` +
-        `(${liveRow.dispatchId}) for the task.`,
-      "retry_not_allowed",
-    );
-  }
-
-  const tasks = await listTasks(runId);
-  const task = tasks.find((t) => t.id === attempt.taskId);
-  if (!task) {
-    throw new OrcaCliError(`Task ${attempt.taskId} no longer exists in Run ${runId}.`, "task_not_found");
-  }
-  if (task.status === "dispatched") {
-    throw new OrcaCliError(
-      `Refusing to retry ${attempt.taskId}: Orca reports the task as dispatched.`,
-      "retry_not_allowed",
-    );
-  }
-
-  // Reset the attempt in place: receipts are RETAINED (bounded history), the
-  // attempt goes back to active, and the start re-runs with --retry-of lineage.
   const retryOf = attempt.dispatchId;
-  attempt.settled = false;
-  attempt.outcome = null;
-  attempt.settledVia = null;
-  attempt.settledAt = null;
-  attempt.terminalDecision = "pending";
-  attempt.terminalDetail = null;
-  attempt.releaseAttempts = 0;
-  attempt.output = null;
-  attempt.nextAction = null;
-  attempt.releaseRequestId = null;
-  attempt.terminalArchive = null;
-  attempt.dispatchId = null;
-  // Phase 5: a retry is a FRESH start — the old launch echo, reuse lineage,
-  // and fleet projection of the dead attempt do not carry over. `requested`
-  // is rebuilt by startOne from the (unchanged) opts.
-  attempt.effective = null;
-  attempt.reuseOf = null;
-  attempt.agentTerminalHandle = null;
-  attempt.fleetTerminalState = null;
-  attempt.host = null;
-  attempt.livenessReason = null;
-  attempt.liveness = null;
-  attempt.attention = null;
-  attempt.stage = null;
-  await startOne(task, attempt, opts, runId, retryOf);
-  return { taskId: attempt.taskId, dispatchId: attempt.dispatchId, retriedFrom: retryOf };
+  const coordinatorHandle = state.coordinatorHandle!;
+  const candidate = reserveAttempt({ id: attempt.taskId }, attempt.harness);
+  candidate.startReceipts = attempt.startReceipts.slice();
+  candidate.retriedFrom = retryOf;
+  const reservation: RetryReservation = {
+    original: attempt,
+    attempt: candidate,
+    runId,
+    coordinatorHandle,
+    generation: coordinatorLoopGeneration,
+  };
+  // Reserve the candidate synchronously before the first read await. A second
+  // click cannot pass the same snapshot and issue another worker-start.
+  state.retryCandidates.set(attempt.taskId, reservation);
+
+  try {
+    // This is an Orca-authoritative preflight, not a local inference from the
+    // retry count. Only the exact Dispatch status can confirm a circuit break;
+    // a missing/failed read leaves the runtime worker-start refusal in charge.
+    const exactDetail = await refreshAttemptDispatchDetail(attempt, runId);
+    if (!retryReservationIsCurrent(reservation)) {
+      throw new OrcaCliError("Coordinator stopped or changed while retry was being verified.", "not_running");
+    }
+    if (exactDetail?.dispatch?.status === "circuit_broken") {
+      throw new OrcaCliError(
+        `Refusing to retry ${attempt.taskId}: Orca reports Dispatch ${attempt.dispatchId} as circuit_broken.`,
+        "task_not_startable",
+      );
+    }
+
+    // Orca-side verification: worker-list is authoritative. A live Dispatch
+    // for this task (local or connected) must never be double-placed over.
+    const rows = await listWorkers(runId, { includeRemote: true });
+    if (!retryReservationIsCurrent(reservation)) {
+      throw new OrcaCliError("Coordinator stopped or changed while retry was being verified.", "not_running");
+    }
+    const liveRow = rows.find(
+      (r) =>
+        r.runId === runId &&
+        r.taskId === attempt!.taskId &&
+        activeDispatch(r),
+    );
+    if (liveRow) {
+      throw new OrcaCliError(
+        `Refusing to retry ${attempt.taskId}: worker-list reports a live Dispatch ` +
+          `(${liveRow.dispatchId}) for the task.`,
+        "retry_not_allowed",
+      );
+    }
+
+    const tasks = await listTasks(runId);
+    if (!retryReservationIsCurrent(reservation)) {
+      throw new OrcaCliError("Coordinator stopped or changed while retry was being verified.", "not_running");
+    }
+    const task = tasks.find((t) => t.id === attempt!.taskId);
+    if (!task) {
+      throw new OrcaCliError(`Task ${attempt.taskId} no longer exists in Run ${runId}.`, "task_not_found");
+    }
+    if (task.status === "dispatched") {
+      throw new OrcaCliError(
+        `Refusing to retry ${attempt.taskId}: Orca reports the task as dispatched.`,
+        "retry_not_allowed",
+      );
+    }
+
+    const result = await startOne(task, candidate, opts, runId, retryOf);
+    const current = retryReservationIsCurrent(reservation);
+    if (!current) {
+      recordLateRetryOutcome(reservation, result);
+      throw new OrcaCliError(
+        `Retry for ${attempt.taskId} returned after its Run stopped or changed; inspect the recorded request before acting.`,
+        "not_running",
+      );
+    }
+
+    if (result.kind === "rejected") {
+      // A definite refusal with no new Dispatch leaves the old attempt as the
+      // authority. Keep its identity, launch preferences, cleanup decision,
+      // and prior lineage; append only bounded receipt/diagnostic evidence.
+      attempt.startReceipts = candidate.startReceipts.slice(-START_RECEIPTS_MAX);
+      const code = result.code ?? "start_rejected";
+      const message = result.error instanceof Error ? result.error.message : String(result.error);
+      appendRetryDiagnostic(attempt, `Retry rejected (${code}): ${message}`);
+      throw result.error;
+    }
+
+    // A failed start with a Dispatch, or an unresolved response, is now the
+    // authoritative candidate. Rolling back would hide possible side effects.
+    state.attempts.set(attempt.taskId, candidate);
+    if (result.kind === "failed" || result.kind === "unknown") throw result.error;
+    return { taskId: attempt.taskId, dispatchId: result.dispatchId, retriedFrom: retryOf };
+  } finally {
+    if (state.retryCandidates.get(attempt.taskId) === reservation) {
+      state.retryCandidates.delete(attempt.taskId);
+    }
+  }
 }

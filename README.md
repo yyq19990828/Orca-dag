@@ -46,11 +46,13 @@ Split "planning by chatting with an agent" from "visualizing + executing" into t
 |---|---|---|
 | **Run** | Namespace + coordinator inbox; only one coordinator is bound at a time (`consumer_generation` does the fencing) | Orca |
 | **Task** | A unit of work; `deps` define the DAG edges, `run_id` scopes it to a Run | Orca |
-| **Dispatch** | **One attempt** (id shaped like `ctx_*`); carries `failure_count` (circuit-breaks at 3), heartbeats, pane identity, capability credentials. A retry mints a new Dispatch | Orca |
+| **Dispatch** | **One attempt** (id shaped like `ctx_*`); carries Orca's failed `worker-start` count along its `--retry-of` chain (circuit-breaks at 3), heartbeats, pane identity, capability credentials. A retry mints a new Dispatch | Orca |
 | Per-node launch preferences, lead stage per Run, canvas positions, defaults, current Run | The viewer's own metadata and preferences | `.orca-dag/config.json` |
 | Viewer Activity records and meaningful coordinator checks | Bounded explanatory history for replies, starts, cleanup decisions, deliveries, errors, and agent-state changes; never Task-settlement authority | `.orca-dag/activity.jsonl` |
 
 A Run is a namespace, **not a DAG** — several unrelated graphs can live in one Run. "One Run = one DAG" is a convention from `skill/SKILL.md`, not an Orca constraint.
+
+Orca 1.4.226 counts failed `worker-start` calls along the exact `--retry-of` chain: the third failed start sets `circuit_broken`, and later starts are refused with `task_not_startable`. A worker reporting `failed` after it became ready does not increment this count. Stop/Run and a viewer restart do not reset the chain; retry the same Task in the same Run from its exact prior Dispatch, and repeat the intended placement because `--retry-of` does not inherit it. Do not create another Task or Run to bypass a circuit refusal. Standard recovery releases the old viewer-owned failed terminal through Orca when ownership permits; user takeover, an explicitly owned terminal, and structured sessions keep their existing retain/release protections. Archived output remains readable through the exact Dispatch after release.
 
 ### The authority model (why the viewer occupies a terminal)
 

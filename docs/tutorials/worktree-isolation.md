@@ -29,6 +29,12 @@ For CLI operators, the current `worker-start` contract has these relevant parame
 
 Read `orca skills get orchestration` and `worker-start --help` on the selected CLI before driving a worker directly. The viewer handles authority, placement, and recovery receipts during normal DAG execution.
 
+### Retry a failed start in the same workspace
+
+On Orca 1.4.226, failed `worker-start` calls accumulate along the exact `--retry-of` Dispatch chain. The third failed start marks it `circuit_broken`; later starts are refused with `task_not_startable`. A worker that became ready and then reports `failed` does not increment this counter. Stop/Run and viewer restarts do not reset the chain, so keep the retry on the same Task and Run and never create a replacement Task or Run to bypass a refusal.
+
+`--retry-of` requires the exact prior Dispatch and does not inherit its placement. Repeat the original `--worktree` selector (and intended agent/model/effort) explicitly; the new Dispatch carries Orca's chain count. Standard recovery releases the old viewer-owned failed terminal when Orca confirms that ownership permits it, while archived output remains readable by Dispatch ID after release. A `user_takeover`, explicitly selected terminal, or structured/external session can follow a retain path; do not force-close it or treat it as viewer-owned.
+
 ### Creation fields and limits
 
 Only `new-child` and `new-top-level` accept these fields. The viewer checks them at the HTTP boundary and the Orca adapter checks again before launch.

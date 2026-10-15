@@ -109,6 +109,39 @@ viewer 也通过本地 HTTP API 提供同一套控制。`GET` 是回环地址上
 
 **Stop Run** 停止 viewer coordinator，并按 Dispatch 报告清理结果，包括未知结果。**Stop worker** 只针对一个经证实的 Dispatch。**Abandon** 只隔离编排权限，不声称进程或文件已停止。Task 完成后终端仍可能存活，因此释放或移除工作树前须核对归属。Recovery 面板把提供方会话观察与 Orca Task/Dispatch 权限分开显示。
 
+启动阶段被放弃的尝试，即使精确终端已经退出，也可能继续显示 `unverifiable / missing_status`，因为 agent 从未建立状态记录。显式恢复受阻 Stage（`POST /api/run` 携带 `resumeBlocked`）只在新鲜的 `worker-show` 观察证明该 Dispatch 所记录的精确终端已退出且断开连接，并且两次读取均明确报告客户端证据缺口（`missing_status` 或 `capability_unsupported`）时接受该退出证据；不会改写 fleet 判定。仍存活、仍连接、身份不符或仅失联的终端不符合条件。独立的 provider session 检查仍然保留：没有精确绑定的 provider 退出证据时，操作员必须通过 `allowUnknownProvider` 明确接受未知后台工作的风险。单独 Abandon 或关闭任意 pane 都不能授权替代执行。
+
+### 失败的 worker-start 重试链
+
+在 Orca 1.4.226 中，失败的 `worker-start` 会沿确切的 `--retry-of` 链累计。第三次启动失败会把 Dispatch 设为 `circuit_broken`；之后的启动会以 `task_not_startable` 拒绝。worker 成功就绪后再自报 `failed` 不会增加此计数。viewer 会暂停启动前失败的尝试，不会把 Orca 当前 Task 状态当成允许再次启动的证据；显式重试时会让 Orca 重新核验确切 Task 与 Dispatch。
+
+结果未明的重试会保留自己的 request ID 和未结算槽位。Task 上一次 Dispatch 的指针或终态，不能用于识别或结算这个新请求。只有精确匹配当前新 Dispatch、且不是上一尝试的记录明确确认相同结果时，才接受基于 Task 的结算；否则应检查 Request audit，不得启动替代尝试。
+
+Stop/Run 和重启 viewer 都不会重置该链。重试须沿用同一 Task、Run 和确切的上一 Dispatch；还要重新指定目标放置位置，因为 `--retry-of` 不继承它。不要新建 Task 或 Run 来绕过熔断。标准恢复会在归属证据允许时请求 Orca 释放旧的、归 viewer 所有的失败终端；`user_takeover`、显式选择的终端或结构化/外部会话继续遵守原有 retain/release 保护，绝不强制关闭。释放后仍可通过确切 Dispatch 读取归档输出。
+
+若 Codex 在 TUI 初始化时因 `account/read ... workspace routing discovery timed out` 退出并留下未发送草稿，应检查原 Dispatch 和终端，不要补发 Enter。`codex login status` 有效不代表账号/workspace 初始化已成功。先撤销失败尝试的执行权限；关闭用户拥有的终端前须获得许可；仅在满足上述退出证据和 provider 风险门后，对同一个 Task 显式恢复，并保留原启动参数和 `--retry-of` 关系。
+
+### 分开读取监督、终端 ownership 与实际启动参数
+
+Workers 分层展示证据，任何一层都不能替另一层授予权限：
+
+| 字段 | 含义 |
+| --- | --- |
+| `workerState` / worker 记录 | 保留原始生命周期（如 `starting`、`ready`、`start_unknown`、`succeeded`），不是 `projection.role: worker`。已知 worker 生命周期表示存在受监督记录；`unsupervised` 只是跟踪 Dispatch，未知值仍按未知处理。 |
+| 存活 / 确切观察 | Orca 当前是否能观察 worker 或其精确终端。仅凭终端存活，不能证明 agent 正在执行、Task 已落定或拥有进程控制权。 |
+| `ownershipState` / `releaseState` / `retainedReason` | 终端归属和清理记账，独立于生命周期。在线且有受监督记录的 Codex，仍可能是 `user_owned / retained / user_takeover`。 |
+| 请求 / 实际启动参数 | 意图与 Orca 的实际生效回显分开展示，包含 model 和 effort。结构化 `launch.effective` 优先；缺少、部分缺失或显式 null 的字段，绝不用请求值填补。重启后通过持久化的 `worker.startOptions` 恢复这一区分。 |
+
+ownership 区域对照最初、当前 owner 的 Dispatch ID，以及 worker 和资源的终端 handle。诊断回执保留 endpoint 身份、释放错误及释放/恢复时间。owner 或 handle 不符，不能授权夺回终端。Orca 公开的 custody 回执**没有**提供是哪次输入、哪个操作者触发了 `user_takeover`，也没有专门的接管时间戳；没有额外证据，不能归因于键盘用户或 viewer。参见 [1.4.226 ownership 实现](https://github.com/stablyai/orca/blob/v1.4.226/src/main/runtime/orchestration/db/worker-terminal/worker-terminal-user-takeover.ts)与[资源回执](https://github.com/stablyai/orca/blob/v1.4.226/src/main/runtime/rpc/methods/orchestration/worker/worker-terminal-resource-presentation.ts)。
+
+worker 保持展开时，fleet 轮询仍会更新 ownership。若 fleet 与详情的 custody 读取不一致，原生 Stop 保持禁用，须重新展开该 worker 刷新精确详情；旧的 `owned` 快照不能掩盖新观察到的 ownership 转移。
+
+恢复时，`pending` 和 `dispatched` 都占用并发与 lane 槽位，包括 Task 为 blocked、worker 为 `start_unknown` 的情况。只使用精确 Task 指针或唯一的 Task/Run 历史关联；有歧义就保留占位，不猜最新 worker。每个状态不明的活跃 Dispatch 单独占一个槽。即使 Orca 已清空 `task.dispatch_id`，已落定的 worker 生命周期记录仍可恢复清理。
+
+原生 **Stop worker** 要求生命周期允许，并有正面的存活证据及匹配的 `owned` 终端。`user_owned`、ownership 已转移、缺少 custody 或 handle 不符，都不能授权强行关闭。API 预选模型的 OpenCode 适配器继续使用由服务端选择的 provider 专用 Stop，并独立核实执行和身份。原生 `stop_unknown` 或未知回执，在 Stop 报告、请求审计和清理债务中仍保留为未知；已知终端 handle 不能代替已确认的 Stop。
+
+一次 Orca 1.4.226 只读验收在 API 和中英文 Workers 界面同时确认了 `ready`、有受监督 worker 记录、`user_owned / retained / user_takeover`，以及实际生效的 `codex / gpt-6-luna / max`。这证明解析和诊断有效，不证明终端 ownership 已归还或进程已成功停止。
+
 ## 审核、持久化与清理
 
 使用 Workspace lanes 的 **Changed files / Diff** 或文件审核操作，在 Orca 中打开精确的本地工作区。只有目标工作区已经包含预期代码，才解决集成门。lane 已落定，且改动和 worker 归属都已处理后，才能在明确确认下通过 `orca worktree rm` 移除工作树。

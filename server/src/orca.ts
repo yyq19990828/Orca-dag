@@ -401,7 +401,7 @@ export interface OrcaDispatch {
   run_id: string;
   status: string;
   assignee_handle: string | null;
-  /** Circuit breaker: Orca fails the task after 3 consecutive attempt failures. */
+  /** Orca's failed worker-start count along this retry chain; circuit breaks at 3. */
   failure_count: number;
   last_failure: string | null;
   last_heartbeat_at: string | null;
@@ -1788,18 +1788,72 @@ export type TerminalState =
   | "release_unknown"
   | "released";
 
+/**
+ * Terminal custody, not worker liveness. A retained, user-owned terminal can
+ * still contain a live supervised agent; it no longer grants native Stop or
+ * release authority. Keep the Dispatch lineage and endpoint identity visible
+ * rather than inferring who typed from Orca's `user_takeover` reason.
+ */
+export interface WorkerTerminalResource {
+  id: string | null;
+  ownershipState: string | null;
+  releaseState: string | null;
+  retainedReason: string | null;
+  terminalHandle: string | null;
+  worktreeId: string | null;
+  endpointId: string | null;
+  endpointIncarnation: string | null;
+  originDispatchId: string | null;
+  ownerDispatchId: string | null;
+  releaseRequestedAt: string | null;
+  releaseCompletedAt: string | null;
+  releaseError: string | null;
+  recoveryAttemptCount: number | null;
+  lastRecoveryAt: string | null;
+}
+
+/**
+ * worker-list derives these lifecycle values from worker_dispatches.state;
+ * only a missing worker record becomes `unsupervised` (Orca 1.4.226).
+ * `projection.role=worker` is just a role, never supervision evidence.
+ * Keep the original lifecycle intact, including held/uncertain start or stop.
+ */
+export function workerSupervision(
+  row: Pick<OrcaWorkerRow, "workerState"> | null | undefined,
+): "supervised" | "unsupervised" | "unknown" {
+  switch (row?.workerState) {
+    case "supervised": // Supported older runtime receipt.
+    case "starting":
+    case "ready":
+    case "start_unknown":
+    case "failed":
+    case "succeeded":
+    case "stopping":
+    case "stop_unknown":
+    case "stopped":
+    case "abandoned":
+      return "supervised";
+    case "unsupervised":
+      return "unsupervised";
+    default:
+      return "unknown";
+  }
+}
+
 /** One row of `orchestration worker-list` (fleet-level worker accounting). */
 export interface OrcaWorkerRow {
   dispatchId: string;
   taskId: string;
   runId: string;
-  /** "supervised" for worker-start attempts, "unsupervised" for tracking dispatches. */
+  /** Raw worker-record lifecycle; older runtimes report supervised/unsupervised. */
   workerState: string;
+  /** Worker-record evidence only; independent of terminal custody and liveness. */
+  supervision: "supervised" | "unsupervised" | "unknown";
   dispatchStatus: string;
   agentTerminalHandle: string | null;
   terminalState: TerminalState | string;
-  /** Terminal resource the row still holds (Phase 2); absent = unknown. */
-  resource?: { state: string; reason: string | null } | null;
+  /** Terminal resource the row still holds; absent = unknown. */
+  resource?: WorkerTerminalResource | null;
   projection: {
     id?: string | null;
     /** "worker" | "lead" | ... — presentation hint, absent on older runtimes. */
@@ -1991,19 +2045,31 @@ export interface WorkerDetailView {
   dispatchId: string;
   runId: string | null;
   taskId: string | null;
-  /** Exact worker-start options, when Orca retained them for this Dispatch. */
+  /** Effective launch preferences only; requested values never fill an unknown. */
   launch: {
-    agent: string;
+    agent: string | null;
     model: string | null;
     effort: string | null;
     /** Orca's resolved identity, never the relative `current` launch input. */
     resolvedWorktreeId: string | null;
   } | null;
+  requestedLaunch: {
+    agent: string | null;
+    model: string | null;
+    effort: string | null;
+  } | null;
+  /** Full custody receipt when available; projection fallback retains unknowns. */
+  terminalResource: WorkerTerminalResource | null;
   /** Durable accounting row — the same shape `worker-list` emits for this Dispatch. */
   fleet: OrcaWorkerRow | null;
   /** Dispatch record facts (attempt bookkeeping). */
   dispatch: {
+    /** Raw identity from worker-show's dispatch record; never filled from projection. */
+    id: string | null;
+    runId: string | null;
+    taskId: string | null;
     status: string | null;
+    /** Exact Orca failed worker-start count for this chain; null stays unknown. */
     failureCount: number | null;
     lastFailure: string | null;
     terminationReason: string | null;
@@ -2044,8 +2110,36 @@ function numberOrNull(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function nonNegativeIntegerOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= 0
+    ? value
+    : null;
+}
+
 function booleanOrNull(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null;
+}
+
+function parseTerminalResource(value: unknown): WorkerTerminalResource | null {
+  const resource = asRecordOrNull(value);
+  if (!resource) return null;
+  return {
+    id: stringOrNull(resource.id),
+    ownershipState: stringOrNull(resource.ownershipState) ?? stringOrNull(resource.state),
+    releaseState: stringOrNull(resource.releaseState),
+    retainedReason: stringOrNull(resource.retainedReason) ?? stringOrNull(resource.reason),
+    terminalHandle: stringOrNull(resource.terminalHandle),
+    worktreeId: stringOrNull(resource.worktreeId),
+    endpointId: stringOrNull(resource.endpointId),
+    endpointIncarnation: stringOrNull(resource.endpointIncarnation),
+    originDispatchId: stringOrNull(resource.originDispatchId),
+    ownerDispatchId: stringOrNull(resource.ownerDispatchId),
+    releaseRequestedAt: stringOrNull(resource.releaseRequestedAt),
+    releaseCompletedAt: stringOrNull(resource.releaseCompletedAt),
+    releaseError: stringOrNull(resource.releaseError),
+    recoveryAttemptCount: numberOrNull(resource.recoveryAttemptCount),
+    lastRecoveryAt: stringOrNull(resource.lastRecoveryAt),
+  };
 }
 
 /** Parse `observation.agentWait` tolerantly; preserves the tri-state contract. */
@@ -2104,10 +2198,13 @@ export async function showWorkerDetail(dispatchId: string): Promise<WorkerDetail
   const startOptions = asRecordOrNull(worker.startOptions);
   const launchOptions = asRecordOrNull(startOptions?.launch);
   const effectiveLaunch = asRecordOrNull(launchOptions?.effective);
-  const launchAgent = stringOrNull(effectiveLaunch?.agent) ?? stringOrNull(startOptions?.agent);
+  const requestedLaunch = asRecordOrNull(launchOptions?.requested);
   const terminal = asRecordOrNull(result.terminal);
   const observationRaw = asRecordOrNull(result.observation);
   const fleet = asRecordOrNull(result.projection);
+  const terminalResource =
+    parseTerminalResource(result.terminalResource) ?? parseTerminalResource(fleet?.resource);
+  const workerState = stringOrNull(worker.state) ?? "unknown";
   const observation: WorkerObservation | null = observationRaw
     ? {
         status: stringOrNull(observationRaw.status),
@@ -2122,9 +2219,10 @@ export async function showWorkerDetail(dispatchId: string): Promise<WorkerDetail
   const normalizedFleet: OrcaWorkerRow | null = fleet
     ? {
         dispatchId: stringOrNull(fleet.dispatchId) ?? dispatchId,
-        taskId: stringOrNull(fleet.taskId) ?? stringOrNull(dispatch.task_id) ?? "",
-        runId: stringOrNull(fleet.runId) ?? "",
-        workerState: stringOrNull(fleet.role) ?? stringOrNull(worker.state) ?? "unknown",
+        taskId: stringOrNull(fleet.taskId) ?? stringOrNull(dispatch.taskId) ?? stringOrNull(dispatch.task_id) ?? "",
+        runId: stringOrNull(fleet.runId) ?? stringOrNull(dispatch.runId) ?? "",
+        workerState,
+        supervision: workerSupervision({ workerState }),
         dispatchStatus: stringOrNull(dispatch.status) ?? "unknown",
         agentTerminalHandle:
           stringOrNull(fleet.agentTerminalHandle) ??
@@ -2135,6 +2233,7 @@ export async function showWorkerDetail(dispatchId: string): Promise<WorkerDetail
         // projection keeps it under resource on current runtimes. Preserve the
         // same authority instead of treating every real external row unknown.
         terminalState: stringOrNull(fleet.terminalState) ?? stringOrNull(asRecordOrNull(fleet.resource)?.terminalState) ?? "unknown",
+        resource: terminalResource,
         projection: fleet as unknown as OrcaWorkerRow["projection"],
       }
     : null;
@@ -2146,19 +2245,30 @@ export async function showWorkerDetail(dispatchId: string): Promise<WorkerDetail
   return {
     dispatchId,
     runId: stringOrNull(fleet?.runId) ?? stringOrNull(dispatch.runId),
-    taskId: stringOrNull(fleet?.taskId) ?? stringOrNull(dispatch.task_id),
-    launch: launchAgent
+    taskId: stringOrNull(fleet?.taskId) ?? stringOrNull(dispatch.taskId) ?? stringOrNull(dispatch.task_id),
+    launch: startOptions
       ? {
-          agent: launchAgent,
+          agent: stringOrNull(effectiveLaunch?.agent),
           model: stringOrNull(effectiveLaunch?.model),
           effort: stringOrNull(effectiveLaunch?.effort),
           resolvedWorktreeId: stringOrNull(startOptions?.resolvedWorktreeId),
         }
       : null,
+    requestedLaunch: requestedLaunch || startOptions?.agent
+      ? {
+          agent: stringOrNull(requestedLaunch?.agent) ?? stringOrNull(startOptions?.agent),
+          model: stringOrNull(requestedLaunch?.model),
+          effort: stringOrNull(requestedLaunch?.effort),
+        }
+      : null,
+    terminalResource,
     fleet: normalizedFleet,
     dispatch: {
+      id: stringOrNull(dispatch.id),
+      runId: stringOrNull(dispatch.runId) ?? stringOrNull(dispatch.run_id),
+      taskId: stringOrNull(dispatch.taskId) ?? stringOrNull(dispatch.task_id),
       status: stringOrNull(dispatch.status),
-      failureCount: numberOrNull(dispatch.failureCount),
+      failureCount: nonNegativeIntegerOrNull(dispatch.failureCount),
       lastFailure: stringOrNull(dispatch.lastFailure),
       terminationReason: stringOrNull(dispatch.terminationReason),
       dispatchedAt: stringOrNull(dispatch.dispatchedAt),
@@ -2278,7 +2388,12 @@ export async function listWorkers(
       if (worker.runId !== runId) {
         invalidReceipt(`workers[${index}].runId ${JSON.stringify(worker.runId)} does not match ${JSON.stringify(runId)}`);
       }
-      workers.push(worker as unknown as OrcaWorkerRow);
+      const row = worker as unknown as OrcaWorkerRow;
+      workers.push({
+        ...row,
+        supervision: workerSupervision(row),
+        resource: parseTerminalResource(worker.resource) ?? parseTerminalResource(asRecordOrNull(worker.projection)?.resource),
+      });
     }
 
     if (!hasMore) {
@@ -2890,15 +3005,19 @@ export function parseWorkerStartReceipt(payload: unknown, ok: boolean): WorkerSt
     ...raw,
   };
   const recovery = nested.recoveryCommands ?? nested.recovery_commands ?? nested.recovery;
-  // Effective launch preferences (Phase 5): dig tolerantly — the runtime may
-  // echo them at the top level, inside a `launch` object, or inside `effects`.
-  // Only a present, non-empty string counts; absence stays null (the UI's
-  // "unknown"), because an unechoed preference was never confirmed applied.
+  // Before structured preferences, supported runtimes echoed flat fields.
+  // Once launch.requested/effective exists, ONLY effective proves application:
+  // an explicit null, partial object, or missing effective must not fall back
+  // to a requested/top-level model. Placement metadata keeps its own echoes.
   const launchRecord: Record<string, unknown> = {
     ...asRecord(nested.effects),
     ...asRecord(nested.launch),
     ...nested,
   };
+  const launch = asRecord(nested.launch);
+  const structuredLaunch = Object.prototype.hasOwnProperty.call(launch, "effective") ||
+    Object.prototype.hasOwnProperty.call(launch, "requested");
+  const preferences = structuredLaunch ? asRecord(launch.effective) : launchRecord;
   return {
     ok,
     taskId: pickString(nested, "taskId", "task_id"),
@@ -2912,9 +3031,9 @@ export function parseWorkerStartReceipt(payload: unknown, ok: boolean): WorkerSt
     residualResources: nested.residualResources ?? nested.residual_resources ?? null,
     recoveryCommands: Array.isArray(recovery) ? recovery.map(String) : [],
     effective: {
-      agent: pickString(launchRecord, "agent", "agentId", "agent_id"),
-      model: pickString(launchRecord, "model"),
-      effort: pickString(launchRecord, "effort"),
+      agent: pickString(preferences, "agent", "agentId", "agent_id"),
+      model: pickString(preferences, "model"),
+      effort: pickString(preferences, "effort"),
       worktree: pickString(launchRecord, "worktree", "worktreeSelector", "worktree_selector"),
       terminal: pickString(launchRecord, "terminal", "terminalHandle", "terminal_handle"),
       // Phase 6: which execution server the receipt names ("on", an

@@ -29,6 +29,12 @@ viewer 将这些选择映射到 Orca 受监督的 `worker-start`。Orca 回执�
 
 手动驱动 worker 前，应在选定的 CLI 上查看 `orca skills get orchestration` 和 `worker-start --help`。正常执行 DAG 时，viewer 会处理权限、放置与恢复回执。
 
+### 在同一工作区重试启动失败
+
+在 Orca 1.4.226 中，失败的 `worker-start` 会沿确切的 `--retry-of` Dispatch 链累计。第三次失败会将其标为 `circuit_broken`；之后的启动会以 `task_not_startable` 拒绝。worker 成功就绪后再自报 `failed` 不会增加此计数。Stop/Run 和重启 viewer 都不会重置该链，因此重试须使用同一 Task 和 Run，不能新建替代 Task 或 Run 来绕过拒绝。
+
+`--retry-of` 要求确切的上一 Dispatch，且不继承它的放置位置。必须显式重复原来的 `--worktree` 选择器（以及预期的 agent/model/effort）；新 Dispatch 沿用 Orca 的链计数。标准恢复会在 Orca 确认归属允许时释放旧的、归 viewer 所有的失败终端；释放后仍可按 Dispatch ID 读取归档输出。`user_takeover`、显式选择的终端或结构化/外部会话可能沿用 retain 路径；不要强制关闭，也不要把它们当作归 viewer 所有。
+
 ### 创建字段及限制
 
 只有 `new-child` 和 `new-top-level` 可使用以下字段。viewer 在 HTTP 入口校验一次，Orca 适配层在启动前再校验一次。

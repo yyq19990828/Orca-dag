@@ -109,6 +109,39 @@ The viewer offers a local HTTP API for the same controls. `GET` routes are loopb
 
 **Stop Run** stops the viewer coordinator and reports per-Dispatch cleanup, including unknown results. **Stop worker** targets one positively identified Dispatch. **Abandon** fences orchestration without claiming the process or files were stopped. A terminal can outlive a completed Task, so inspect ownership before release or worktree removal. The viewer's Recovery panel keeps provider session observations separate from Orca's Task/Dispatch authority.
 
+An abandoned bootstrap attempt can remain `unverifiable / missing_status` after its exact terminal exits, because the agent never created a status row. Explicit blocked-Stage recovery (`POST /api/run` with `resumeBlocked`) accepts a fresh `worker-show` observation only when it proves that exact Dispatch's recorded terminal exited and is disconnected, and both reads name a documented client gap (`missing_status` or `capability_unsupported`). The fleet verdict is not rewritten. A live, still-connected, mismatched, or merely unreachable terminal does not qualify. The separate provider-session check remains: without an exact exited provider binding, an operator must explicitly accept the unknown-provider risk through `allowUnknownProvider`. Abandon alone and closing an arbitrary pane never authorize a replacement.
+
+### Failed worker-start retry chains
+
+On Orca 1.4.226, failed `worker-start` calls accumulate along the exact `--retry-of` chain. The third failed start sets the Dispatch to `circuit_broken`; later starts are refused with `task_not_startable`. A worker that reaches readiness and then reports `failed` does not increment this counter. The viewer parks a failed-before-ready attempt instead of assuming Orca's current Task status makes another start legal; an explicit retry rechecks the exact Task and Dispatch with Orca.
+
+An unresolved retry keeps its own request ID and an unsettled slot. The Task's previous Dispatch pointer or terminal status cannot identify or settle that new request. Task-based settlement is accepted only when the exact current, non-predecessor Dispatch row positively confirms the same outcome; otherwise inspect Request audit and do not start a replacement.
+
+Stop/Run and restarting the viewer do not reset the chain. Keep a retry on the same Task and Run, use the exact prior Dispatch, and repeat the intended placement because `--retry-of` does not inherit it. Do not create another Task or Run to bypass the circuit breaker. Standard recovery asks Orca to release the old viewer-owned failed terminal when its ownership evidence permits; `user_takeover`, an explicitly selected terminal, or a structured/external session keeps its existing retain/release protections and is never force-closed. Archived output remains readable by the exact Dispatch after release.
+
+If Codex exits during TUI bootstrap with `account/read ... workspace routing discovery timed out` and leaves an unsent draft, inspect the original Dispatch and terminal rather than resubmitting Enter. A valid `codex login status` does not prove account/workspace initialization succeeded. Fence the failed attempt, obtain permission before closing a user-owned terminal, and use explicit recovery of the same Task only after the exit and provider-risk gates above are satisfied; preserve its original launch preferences and `--retry-of` lineage.
+
+### Supervision, terminal ownership, and effective launch
+
+Workers shows separate evidence layers; none grants the authority of another:
+
+| Field | Meaning |
+| --- | --- |
+| `workerState` / worker record | The original lifecycle (`starting`, `ready`, `start_unknown`, `succeeded`, etc.), not `projection.role: worker`. Known worker lifecycles are supervised records; `unsupervised` is tracking-only and unknown values remain unknown. |
+| Liveness / exact observation | Whether Orca can observe the worker or its exact terminal now. A live terminal alone does not establish an active agent, settlement, or process ownership. |
+| `ownershipState` / `releaseState` / `retainedReason` | Terminal custody and cleanup accounting, independent of lifecycle. A live supervised Codex can still be `user_owned / retained / user_takeover`. |
+| Requested / effective launch | Intent and Orca's applied-preference echo are displayed separately, including model and effort. Structured `launch.effective` takes precedence; missing, partial, or explicit-null values never borrow requested preferences. Durable `worker.startOptions` restores the distinction after restart. |
+
+The ownership section compares the original and current owner Dispatch IDs with the worker/resource terminal handles. Diagnostic receipts retain endpoint identity, release errors and release/recovery times. An owner or handle mismatch is not permission to reclaim a terminal. Orca's public custody receipt does **not** identify which input or actor triggered `user_takeover`, or expose a dedicated takeover timestamp; do not attribute it to a keyboard user or the viewer without additional evidence. See the [1.4.226 ownership implementation](https://github.com/stablyai/orca/blob/v1.4.226/src/main/runtime/orchestration/db/worker-terminal/worker-terminal-user-takeover.ts) and [resource presentation](https://github.com/stablyai/orca/blob/v1.4.226/src/main/runtime/rpc/methods/orchestration/worker/worker-terminal-resource-presentation.ts).
+
+Fleet polling updates ownership while a worker stays expanded. If fleet and detail custody disagree, native Stop remains disabled until the exact detail is refreshed by reopening that worker; an old `owned` snapshot cannot conceal a newly observed handoff.
+
+Recovery holds both `pending` and `dispatched` attempts against concurrency and lane budgets, including a blocked Task with `start_unknown`. It follows the exact Task pointer or a unique Task/Run history association; ambiguous history is held, not reduced to a guessed latest worker. Each uncertain active Dispatch consumes its own slot. Settled worker lifecycle records can recover cleanup even when Orca has cleared `task.dispatch_id`.
+
+Native **Stop worker** requires an eligible lifecycle plus positive live and matching `owned` terminal evidence. `user_owned`, transferred ownership, missing custody, or a mismatched handle does not authorize forced closure. The API-preselected OpenCode adapter keeps its separate, server-selected provider Stop with its own execution/identity checks. A native `stop_unknown`/unknown receipt remains unknown in the Stop report, request audit, and cleanup debt; a known terminal handle is never a substitute for confirmed Stop.
+
+A read-only Orca 1.4.226 acceptance check observed `ready`, a supervised worker record, `user_owned / retained / user_takeover`, and effective `codex / gpt-6-luna / max` together in the API and bilingual Workers UI. This verifies parsing and diagnostics, not a return of terminal ownership or a successful process stop.
+
 ## Review, persistence, and cleanup
 
 Use Workspace lanes' **Changed files / Diff** or the file review actions to open an exact local workspace in Orca. Resolve integration gates only after the target workspace contains the intended code. Remove a worktree only after its lane is settled and its changes and worker ownership are accounted for; removal calls `orca worktree rm` with explicit confirmation.

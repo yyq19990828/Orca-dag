@@ -27,6 +27,7 @@ import type {
   WorktreeLanesResponse,
   WorktreeRemovalReceiptView,
   RuntimeCapabilitiesResponse,
+  RetryWorkerResult,
 } from "./types";
 
 /** An /api error that carries Orca's machine-readable error code. */
@@ -407,14 +408,35 @@ export async function retainWorker(dispatchId: string): Promise<WorkerTerminalRe
   return receipt;
 }
 
+type RetryWorkerResponse = RetryWorkerResult & { ok: true };
+
+function isRetryWorkerResponse(value: unknown): value is RetryWorkerResponse {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const response = value as Record<string, unknown>;
+  return (
+    response.ok === true &&
+    typeof response.taskId === "string" && response.taskId.trim().length > 0 &&
+    typeof response.dispatchId === "string" && response.dispatchId.trim().length > 0 &&
+    (response.retriedFrom === null ||
+      (typeof response.retriedFrom === "string" && response.retriedFrom.trim().length > 0))
+  );
+}
+
 /**
- * Explicit safe retry (Phase 4): re-place ONE attempt that positively failed —
- * a failed-before-ready start (receipt on file) or a Dispatch Orca reports
- * failed/stopped. The server refuses anything ambiguous with 409
- * retry_not_allowed; the harness/model/placement choice is repeated verbatim.
+ * Explicit safe retry (Phase 4): this promise resolves only for a started
+ * worker whose new Dispatch is present in the response. Rejections, failed
+ * starts, and unresolved starts remain on the normal ApiError path.
  */
-export async function retryWorker(id: string): Promise<{ taskId: string; dispatchId: string | null; retriedFrom: string | null }> {
-  return post(`/api/workers/${encodeURIComponent(id)}/retry`, {});
+export async function retryWorker(id: string): Promise<RetryWorkerResult> {
+  const value = await post<unknown>(`/api/workers/${encodeURIComponent(id)}/retry`, {});
+  if (!isRetryWorkerResponse(value)) {
+    throw new ApiError("retry_response_invalid", "retry_response_invalid", 502);
+  }
+  return {
+    taskId: value.taskId,
+    dispatchId: value.dispatchId,
+    retriedFrom: value.retriedFrom,
+  };
 }
 
 export async function resolveGate(id: string, resolution: string, runId: string): Promise<void> {

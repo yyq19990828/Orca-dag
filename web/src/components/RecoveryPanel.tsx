@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ApiError,
   fetchProviderSessionBindings,
   fetchWorkers,
   probeProviderSession,
@@ -17,11 +18,31 @@ import { useDecisionDialog } from "./DecisionDialog";
 import type {
   ProviderSessionBindingView,
   ProviderSessionObservationView,
+  RetryWorkerResult,
   RunAttempt,
   RunStatus,
   WorkerRowView,
 } from "../types";
 import { workerWorkspaceLabel } from "../workerWorkspace";
+
+function failedStartKey(runId: string, attempt: RunAttempt): string {
+  const identity =
+    attempt.startReceipt?.requestId ??
+    attempt.startReceipt?.dispatchId ??
+    attempt.dispatchId ??
+    String(attempt.startedAt);
+  return `${runId}:${attempt.taskId}:${identity}`;
+}
+
+function retryErrorMessage(error: unknown, translate: (key: "retry.apiError" | "retry.invalidResponse", values?: Record<string, string>) => string): string {
+  if (error instanceof ApiError && error.code === "retry_response_invalid") {
+    return translate("retry.invalidResponse");
+  }
+  if (error instanceof ApiError && error.code) {
+    return translate("retry.apiError", { code: error.code, message: error.message });
+  }
+  return String((error as Error)?.message ?? error);
+}
 
 /**
  * Restart-recovery surface (Phase 4): what the coordinator found when it bound
@@ -79,6 +100,19 @@ export const RecoveryPanel = memo(function RecoveryPanel({
   const [sessionLoading, setSessionLoading] = useState(false);
   const [showActiveSessionCandidates, setShowActiveSessionCandidates] = useState(false);
   const sessionLoadSequence = useRef(0);
+  const retryGeneration = useRef(0);
+
+  // A retry can outlive a Run switch or this panel. Its completion must not
+  // dismiss evidence or paint an error into the newly selected Run.
+  useEffect(() => {
+    const generation = ++retryGeneration.current;
+    setDismissed(new Set());
+    setErr(null);
+    setBusyId(null);
+    return () => {
+      if (retryGeneration.current === generation) retryGeneration.current += 1;
+    };
+  }, [runId]);
 
   const loadSessionRecovery = useCallback(async () => {
     if (!runId) return;
@@ -145,9 +179,11 @@ export const RecoveryPanel = memo(function RecoveryPanel({
     if (discoveredSessionIds) void loadSessionRecovery();
   }, [discoveredSessionIds, loadSessionRecovery]);
 
-  // Failed starts whose receipt is the release/retry evidence.
+  // Failed starts need their receipt for cleanup; a confirmed circuit breaker
+  // is also a recovery item even when it was adopted without a local receipt.
   const failedStarts = attempts.filter(
-    (a) => a.settledVia === "start_failed" && a.startReceipt && !dismissed.has(a.taskId),
+    (a) => ((a.settledVia === "start_failed" && a.startReceipt) || a.dispatchStatus === "circuit_broken") &&
+      !dismissed.has(failedStartKey(runId, a)),
   );
   // Starts still carrying a durable retry-request id — the outcome is not
   // known yet and the id is what makes the eventual replay safe.
@@ -225,7 +261,7 @@ export const RecoveryPanel = memo(function RecoveryPanel({
       .map((attempt) => attempt.dispatchId!),
     ...workerRows
       .filter((row) => row.dispatchStatus === "dispatched" && (
-        row.workerState === "unsupervised" ||
+        row.supervision === "unsupervised" ||
         row.projection?.liveness?.verdict === "unverifiable" ||
         unownedDispatchIds.has(row.dispatchId)
       ))
@@ -251,7 +287,7 @@ export const RecoveryPanel = memo(function RecoveryPanel({
       .map((attempt) => attempt.dispatchId!);
     const workerRecoveryIds = workerRows
       .filter((row) => row.dispatchStatus === "dispatched" && (
-        row.workerState === "unsupervised" ||
+        row.supervision === "unsupervised" ||
         row.projection?.liveness?.verdict === "unverifiable" ||
         unownedDispatchIds.has(row.dispatchId) ||
         retryBlockedIds.has(row.dispatchId)
@@ -321,16 +357,25 @@ export const RecoveryPanel = memo(function RecoveryPanel({
 
   async function retry(attempt: RunAttempt) {
     if (disabled || busy(attempt.taskId)) return;
+    const generation = retryGeneration.current;
+    const oldAttemptKey = failedStartKey(runId, attempt);
     setBusyId(attempt.taskId);
     setErr(null);
     try {
-      await retryWorker(attempt.startReceipt?.dispatchId ?? attempt.dispatchId ?? attempt.taskId);
-      setDismissed((d) => new Set(d).add(attempt.taskId));
+      const result: RetryWorkerResult = await retryWorker(
+        attempt.startReceipt?.dispatchId ?? attempt.dispatchId ?? attempt.taskId,
+      );
+      if (generation !== retryGeneration.current) return;
+      if (result.taskId !== attempt.taskId || !result.dispatchId.trim()) {
+        throw new ApiError("retry_response_invalid", "retry_response_invalid", 502);
+      }
+      setDismissed((d) => new Set(d).add(oldAttemptKey));
       onRetried();
     } catch (e) {
-      setErr(String((e as Error).message ?? e));
+      if (generation !== retryGeneration.current) return;
+      setErr(retryErrorMessage(e, t));
     } finally {
-      setBusyId(null);
+      if (generation === retryGeneration.current) setBusyId(null);
     }
   }
 
@@ -738,19 +783,30 @@ export const RecoveryPanel = memo(function RecoveryPanel({
             <code>{a.startRequestId}</code>
             {t("recovery.startPendingBodyAfter")}
           </div>
+          {(a.startReceipt?.dispatchId ?? a.dispatchId) && (
+            <div className="inbox__body">
+              {t("recovery.dispatchLabel")} <code>{a.startReceipt?.dispatchId ?? a.dispatchId}</code>
+            </div>
+          )}
+          {a.startReceipt?.failedStage && (
+            <div className="inbox__body">{t("recovery.startFailedAt", { stage: a.startReceipt.failedStage })}</div>
+          )}
+          {a.terminalDetail && <div className="inbox__body">{a.terminalDetail}</div>}
         </div>
       ))}
 
-      {failedStarts.map((a) => (
+      {failedStarts.map((a) => {
+        const circuitBroken = a.dispatchStatus === "circuit_broken";
+        return (
         <div
-          key={`failed-${a.taskId}`}
+          key={`failed-${failedStartKey(runId, a)}`}
           className="gate inbox__item inbox__debt"
           data-operation-kind="recovery"
           data-operation-id={a.taskId}
           tabIndex={-1}
         >
           <div className="gate__badge">
-            {t("recovery.startFailed")}
+            {circuitBroken ? t("recovery.circuitBrokenBadge") : t("recovery.startFailed")}
             {a.startReceipt?.failedStage
               ? t("recovery.startFailedAt", { stage: a.startReceipt.failedStage })
               : ""}
@@ -758,9 +814,23 @@ export const RecoveryPanel = memo(function RecoveryPanel({
           <div className="gate__question">
             <code>{a.taskId}</code>
             {a.startReceipt?.requestId
-              ? t("recovery.requestSuffix", { id: a.startReceipt.requestId.slice(0, 8) })
+              ? <span> · {t("recovery.requestIdLabel")} <code>{a.startReceipt.requestId}</code></span>
               : ""}
           </div>
+          {(a.startReceipt?.dispatchId ?? a.dispatchId) && (
+            <div className="inbox__body">
+              {t("recovery.dispatchLabel")} <code>{a.startReceipt?.dispatchId ?? a.dispatchId}</code>
+            </div>
+          )}
+          <div className="inbox__body">
+            {t("recovery.dispatchStatus", { status: a.dispatchStatus ?? t("recovery.unknown") })}
+          </div>
+          <div className="inbox__body">
+            {t("recovery.failureCount", {
+              count: a.failureCount === null ? t("recovery.failureCountUnknown") : String(a.failureCount),
+            })}
+          </div>
+          {circuitBroken && <div className="inbox__body">{t("recovery.circuitBrokenBlocked")}</div>}
           {a.terminalDetail && <div className="inbox__body">{a.terminalDetail}</div>}
           {a.startReceipt && a.startReceipt.recoveryCommands.length > 0 && (
             <div className="inbox__body">
@@ -771,9 +841,11 @@ export const RecoveryPanel = memo(function RecoveryPanel({
           <div className="gate__actions">
             <button
               className="btn btn--gate btn--ok"
-              disabled={disabled || busy(a.taskId) || !status?.running}
+              disabled={disabled || busy(a.taskId) || !status?.running || circuitBroken}
               title={
-                !status?.running
+                circuitBroken
+                  ? t("recovery.circuitBrokenBlocked")
+                  : !status?.running
                   ? t("recovery.retryNeedCoordinator")
                   : t("recovery.retryTitle")
               }
@@ -783,7 +855,8 @@ export const RecoveryPanel = memo(function RecoveryPanel({
             </button>
           </div>
         </div>
-      ))}
+        );
+      })}
 
       {prescribed.map((a) => (
         <div key={`next-${a.taskId}`} className="gate inbox__item">

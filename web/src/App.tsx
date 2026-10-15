@@ -921,7 +921,10 @@ export default function App() {
                           blockedTaskIds={visibleDag.nodes.filter((node) => node.status === "blocked").map((node) => node.id)}
                           onRunStarting={onRunStarting}
                           onRunStartFinished={onRunStartFinished}
-                          onRetried={refresh}
+                          onRetried={() => {
+                            void refresh();
+                            void refreshExecutionState();
+                          }}
                           disabled={execOff}
                           disabledReason={readiness?.reason}
                         />

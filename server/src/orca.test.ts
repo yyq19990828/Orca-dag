@@ -77,6 +77,7 @@ import {
   type OrcaWorkerRow,
   type WorkerStartRequest,
   type WorkspaceChangedMode,
+  workerSupervision,
 } from "./orca";
 import { closeCoordinatorTerminals } from "./uninstall";
 import { createApp, listenLoopback } from "./app";
@@ -1134,6 +1135,58 @@ describe("parseWorkerStartReceipt effective launch preferences", () => {
       baseBranch: null,
       displayName: null,
     });
+  });
+
+  it("uses launch.effective ahead of conflicting requested and flat preferences", () => {
+    const receipt = parseWorkerStartReceipt({
+      dispatchId: "ctx_native_codex",
+      status: "ready",
+      agent: "claude",
+      model: "not-applied",
+      effort: "low",
+      launch: {
+        requested: { agent: "codex", model: "requested-model", effort: "high" },
+        effective: { agent: "codex", model: "gpt-6-luna", effort: "max" },
+      },
+    }, true);
+    assert.equal(receipt.effective.agent, "codex");
+    assert.equal(receipt.effective.model, "gpt-6-luna");
+    assert.equal(receipt.effective.effort, "max");
+  });
+
+  it("does not fill a partial effective launch from requested preferences", () => {
+    const receipt = parseWorkerStartReceipt({
+      agent: "claude", model: "flat-model", effort: "low",
+      launch: {
+        requested: { agent: "codex", model: "requested-model", effort: "max" },
+        effective: { agent: "codex", model: null },
+      },
+    }, true);
+    assert.equal(receipt.effective.agent, "codex");
+    assert.equal(receipt.effective.model, null);
+    assert.equal(receipt.effective.effort, null);
+  });
+
+  it("keeps an explicitly unknown effective launch unknown in a failed receipt", () => {
+    const receipt = parseWorkerStartReceipt({
+      error: { data: { receipt: {
+        model: "not-applied", effort: "max",
+        launch: { requested: { agent: "codex", model: "gpt-6-luna" }, effective: null },
+      } } },
+    }, false);
+    assert.equal(receipt.effective.agent, null);
+    assert.equal(receipt.effective.model, null);
+    assert.equal(receipt.effective.effort, null);
+  });
+
+  it("does not mistake a requested-only structured launch for application", () => {
+    const receipt = parseWorkerStartReceipt({
+      model: "flat-request", effort: "max",
+      launch: { requested: { agent: "codex", model: "gpt-6-luna", effort: "max" } },
+    }, false);
+    assert.equal(receipt.effective.agent, null);
+    assert.equal(receipt.effective.model, null);
+    assert.equal(receipt.effective.effort, null);
   });
 
   it("keeps unechoed preferences null — never claims a value was applied", () => {
@@ -2334,6 +2387,8 @@ function workerShowReceipt(overrides: {
   taskId?: string;
   liveness?: { verdict: string; reason: string | null } | null;
   dispatchStatus?: string;
+  failureCount?: unknown;
+  omitFailureCount?: boolean;
   observation?: Record<string, unknown> | null;
   omitObservation?: boolean;
   terminal?: Record<string, unknown> | null;
@@ -2350,7 +2405,9 @@ function workerShowReceipt(overrides: {
       taskId,
       task_id: taskId,
       status: overrides.dispatchStatus ?? "dispatched",
-      failureCount: 0,
+      ...(overrides.omitFailureCount
+        ? {}
+        : { failureCount: Object.hasOwn(overrides, "failureCount") ? overrides.failureCount : 0 }),
       lastFailure: null,
       terminationReason: null,
       dispatchedAt: "2026-09-21 10:25:47",
@@ -2505,6 +2562,78 @@ describe("showWorkerDetail (Phase 2, fake CLI)", () => {
     assert.equal(detail.liveness.qualifiedWorking, true);
     const call = readLog().find((c) => c.argv[1] === "worker-show")!;
     assert.deepEqual(call.argv.slice(0, 4), ["orchestration", "worker-show", "--dispatch", "ctx_show"]);
+  });
+
+  it("keeps raw Dispatch identities and only accepts finite non-negative integer failure counts", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      workerShow: {
+        ctx_count_one: workerShowReceipt({ dispatchId: "ctx_count_one", runId: "run_count", taskId: "task_count", failureCount: 1 }),
+        ctx_count_three: workerShowReceipt({ dispatchId: "ctx_count_three", runId: "run_count", taskId: "task_count", failureCount: 3 }),
+        ctx_count_missing: workerShowReceipt({ dispatchId: "ctx_count_missing", runId: "run_count", taskId: "task_count", omitFailureCount: true }),
+        ctx_count_null: workerShowReceipt({ dispatchId: "ctx_count_null", runId: "run_count", taskId: "task_count", failureCount: null }),
+        ctx_count_negative: workerShowReceipt({ dispatchId: "ctx_count_negative", runId: "run_count", taskId: "task_count", failureCount: -1 }),
+        ctx_count_fractional: workerShowReceipt({ dispatchId: "ctx_count_fractional", runId: "run_count", taskId: "task_count", failureCount: 1.5 }),
+        ctx_wrong_id: workerShowReceipt({ dispatchId: "ctx_other", runId: "run_count", taskId: "task_count", failureCount: 9 }),
+        ctx_wrong_run: workerShowReceipt({ dispatchId: "ctx_wrong_run", runId: "run_other", taskId: "task_count", failureCount: 9 }),
+        ctx_wrong_task: workerShowReceipt({ dispatchId: "ctx_wrong_task", runId: "run_count", taskId: "task_other", failureCount: 9 }),
+      },
+    });
+
+    const first = await showWorkerDetail("ctx_count_one");
+    assert.equal(first?.dispatch?.failureCount, 1);
+    assert.deepEqual(
+      [first?.dispatch?.id, first?.dispatch?.runId, first?.dispatch?.taskId],
+      ["ctx_count_one", "run_count", "task_count"],
+    );
+    assert.equal((await showWorkerDetail("ctx_count_three"))?.dispatch?.failureCount, 3);
+    for (const id of ["ctx_count_missing", "ctx_count_null", "ctx_count_negative", "ctx_count_fractional"]) {
+      assert.equal((await showWorkerDetail(id))?.dispatch?.failureCount, null, `${id} stays unknown`);
+    }
+    const wrongId = await showWorkerDetail("ctx_wrong_id");
+    const wrongRun = await showWorkerDetail("ctx_wrong_run");
+    const wrongTask = await showWorkerDetail("ctx_wrong_task");
+    assert.notEqual(wrongId?.dispatch?.id, wrongId?.dispatchId);
+    assert.notEqual(wrongRun?.dispatch?.runId, "run_count");
+    assert.notEqual(wrongTask?.dispatch?.taskId, "task_count");
+  });
+
+  it("recognizes a modern worker lifecycle without treating its projection role as state", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      workerShow: {
+        ctx_ready: workerShowReceipt({ dispatchId: "ctx_ready", workerState: "ready" }),
+        ctx_role_only: {
+          dispatch: { id: "ctx_role_only", runId: "run_show", taskId: "task_show", status: "pending" },
+          projection: { dispatchId: "ctx_role_only", runId: "run_show", taskId: "task_show", role: "worker" },
+        },
+      },
+    });
+    const ready = await showWorkerDetail("ctx_ready");
+    assert.equal(workerSupervision(ready?.fleet), "supervised");
+    assert.equal(ready?.fleet?.workerState, "ready");
+    const roleOnly = await showWorkerDetail("ctx_role_only");
+    assert.equal(workerSupervision(roleOnly?.fleet), "unknown", "a role cannot grant worker control");
+  });
+
+  it("keeps durable requested preferences separate from unknown effective preferences after restart", async () => {
+    useRuntime({ workspace: root });
+    const receipt = workerShowReceipt({ dispatchId: "ctx_launch", workerState: "start_unknown" });
+    (receipt.worker as Record<string, unknown>).startOptions = {
+      agent: "codex",
+      resolvedWorktreeId: "repo::/workspace",
+      launch: {
+        requested: { agent: "codex", model: "gpt-6-luna", effort: "max" },
+        effective: { agent: "codex", model: null, effort: null },
+      },
+    };
+    writeScript({ workerShow: { ctx_launch: receipt } });
+    const detail = await showWorkerDetail("ctx_launch");
+    assert.equal(detail?.requestedLaunch?.model, "gpt-6-luna");
+    assert.equal(detail?.requestedLaunch?.effort, "max");
+    assert.equal(detail?.launch?.model, null);
+    assert.equal(detail?.launch?.effort, null);
+    assert.equal(detail?.launch?.resolvedWorktreeId, "repo::/workspace");
   });
 
   it("keeps agent-wait tri-state: present object, explicit null, absent = unknown", async () => {

@@ -65,6 +65,7 @@ import {
   type WorkspaceChangedMode,
   type WorktreeRemovalReceipt,
   type WorkerObservation,
+  workerSupervision,
 } from "./orca";
 import { buildRunHealth, type RunHealthView } from "./runHealth";
 import { loadConfig, saveConfig } from "./config";
@@ -182,6 +183,7 @@ function fail(res: express.Response, err: unknown): void {
               code === "dispatch_not_active" ||
               code === "inbox_item_not_found" ||
               code === "message_not_found" ||
+              code === "task_not_startable" ||
               code === "retry_not_allowed" ||
               code === "retry_target_not_found" ||
               code === "session_binding_mismatch" ||
@@ -1849,7 +1851,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         };
       });
       const needsDetail = enriched.filter((row) =>
-        row.dispatchId && row.workerState !== "unsupervised" &&
+        row.dispatchId && workerSupervision(row) === "supervised" &&
         row.launchEvidence?.source !== "fleet" &&
         row.launchEvidence?.source !== "worker-show"
       );
@@ -1922,7 +1924,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         });
         return;
       }
-      res.json({ detail });
+      res.json({ detail: { ...detail, stopOperation: await workerStopOperation(dispatchId) } });
     }),
   );
 
@@ -2485,11 +2487,21 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
             kind: "stop",
             taskId: detail.taskId,
             dispatchId,
-            title: receipt.alreadySettled ? "Stop found the Dispatch already settled" : "Coordinator stopped a worker",
+            title: receipt.alreadySettled
+              ? "Stop found the Dispatch already settled"
+              : receipt.state === "stopped"
+                ? "Coordinator stopped a worker"
+                : "Worker Stop is unconfirmed",
             summary: `Stop state: ${receipt.state}.`,
             detail: receipt.warning ?? null,
             severity: receipt.state === "stopped" || receipt.alreadySettled ? "info" : "warning",
             requestId,
+            payload: {
+              state: receipt.state,
+              processAction: receipt.processAction,
+              supervision: detail.fleet?.supervision ?? "unknown",
+              terminalResource: detail.terminalResource,
+            },
           }),
         );
         res.json({
@@ -2500,6 +2512,8 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
           // read that gated it, returned so the UI can show its basis.
           evidence: {
             liveness: detail.liveness,
+            supervision: detail.fleet?.supervision ?? "unknown",
+            terminalResource: detail.terminalResource,
             agentWait: detail.observation?.agentWait ?? null,
             workspace: detail.terminal
               ? { worktreePath: detail.terminal.worktreePath, branch: detail.terminal.branch }

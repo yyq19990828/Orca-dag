@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ApiError,
   fetchActivity,
   releaseWorker,
   replyToMessage,
@@ -242,7 +243,17 @@ export const ActivityPanel = memo(function ActivityPanel({
       await refresh();
       onResolved();
     } catch (err) {
-      setError(String((err as Error).message ?? err));
+      if (action === "retry" && err instanceof ApiError) {
+        setError(
+          err.code === "retry_response_invalid"
+            ? t("retry.invalidResponse")
+            : err.code
+              ? t("retry.apiError", { code: err.code, message: err.message })
+              : err.message,
+        );
+      } else {
+        setError(String((err as Error).message ?? err));
+      }
     } finally {
       setBusyId(null);
     }

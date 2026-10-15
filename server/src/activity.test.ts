@@ -51,6 +51,7 @@ const worker = (): OrcaWorkerRow => ({
   taskId: "task_stage",
   runId: "run_a",
   workerState: "supervised",
+  supervision: "supervised",
   dispatchStatus: "dispatched",
   agentTerminalHandle: "term_worker",
   terminalState: "active",
