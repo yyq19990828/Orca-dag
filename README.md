@@ -115,7 +115,9 @@ cd ~/any/orca-managed/project
 npx orca-orchestration-launcher
 ```
 
-That installs the `orca-dag` **skill** into every coding agent on your machine (Claude Code, Codex, Cursor, OpenCode, Gemini CLI, Droid, and the shared `~/.agents/skills` directory — whichever of them exist), then starts the **viewer** on <http://localhost:8787> with the current directory as the workspace. It re-runs safely: the skill is only rewritten when it actually changed, and a skill directory you symlinked yourself is left untouched.
+That installs the bundled `orca-dag` **skill** for detected agents, then starts the **viewer** on <http://localhost:8787> with the current directory as the workspace. Claude Code, Cursor, Gemini CLI, Droid, Grok, Kiro, Qoder and CodeBuddy use their own skill directories. Codex, OpenCode, Pi, OMP and Kimi share one `~/.agents/skills` copy; the installer detects their config directories even when `.agents` does not exist yet. No agent config directories are created on an otherwise agent-free machine.
+
+`CLAUDE_CONFIG_DIR`, `GROK_HOME` and `KIRO_HOME` select existing absolute agent-specific homes; relative paths, HOME itself and its ancestors are ignored. `CODEX_HOME` also participates in Codex detection, while its installed skill stays canonical. Unchanged payloads keep their mtimes. Linked config ancestors, skill directories and skill files are never followed; relocated external homes must use real-directory paths. A previous single-file Codex/OpenCode or relocated-home installation moves only when the new destination is absent; folders with extra files or links are preserved. Uninstall discovers current and legacy locations through the same resolver—use the same home overrides when uninstalling.
 
 **Workspace initialization is part of this command:** startup adds a marked `.orca-dag/` rule to the workspace's `.gitignore` by default and prints the planning location and ignore result. Existing matching rules are reused, other rules are preserved, and a symlinked/non-regular `.gitignore` is never modified. A failure is reported as a warning, not a viewer startup error.
 
@@ -155,7 +157,7 @@ Switches: `PORT` (default 8787), `NO_OPEN=1` (don't open the browser), `--no-ski
 
 `--no-workspace-init` / `ORCA_DAG_NO_WORKSPACE_INIT=1` skips automatic `.gitignore` changes; add `.orca-dag/` yourself before planning. This is independent of `--no-skill`, which only skips agent skill installation.
 
-Want the skill *without* the viewer, or managed by the standard tooling? `npx skills add yyq19990828/Orca-dag --skill orca-dag --global` — the [open agent skills CLI](https://github.com/vercel-labs/skills), the same one `orca skills install` shells out to.
+Want the skill *without* the viewer, or managed by standard community tooling? `npx skills add yyq19990828/Orca-dag --skill orca-dag --global` uses the [open agent skills CLI](https://github.com/vercel-labs/skills).
 The skill-only installer does not initialize a project; the skill instructs your agent to ensure `.orca-dag/` is ignored before writing planning documents.
 
 ## Uninstall
@@ -299,7 +301,9 @@ The viewer is a control plane into Orca — starting a Run fences whoever was co
 
 ## Readiness and view-only mode
 
-`GET /api/readiness` reports `{ cli, workspace, worktree, version, executionEnabled, reason }`. Execution — Run start, gate resolution, Run creation — is enabled only on **Orca ≥ 1.4.205**; on 1.4.160–1.4.204 the UI disables those controls (Run button reads "View-only", gate buttons dim with the reason, the top-bar badge turns amber) and the server answers `503 execution_disabled` to any mutation that slips through. Reads (DAG, runs, terminals, config) always stay available.
+`GET /api/readiness` reports `{ cli, workspace, worktree, cliVersion, version, runtimeState, executionEnabled, reason }`. `cliVersion` comes from the resolved executable's `--version`; `version` is the selected runtime's `status.runtime.appVersion`, never a substitute copied from the CLI. Execution — Run start, gate resolution, Run creation — requires CLI **≥ 1.4.205**, a positively **ready** runtime, and a stable runtime version **≥ 1.4.205**. An old, unreachable, starting, or unreported runtime stays view-only even with a newer CLI. The UI disables those controls and the server answers `503 execution_disabled` to execution requests that slip through; read routes remain available. Probes are cached briefly, not permanently, so fixing the selected runtime can restore execution.
+
+Refresh the viewer page after reconnecting the selected runtime to reload its UI verdict; execution routes independently recheck the short-lived server probe.
 
 ## HTTP API
 
@@ -308,7 +312,7 @@ All `POST`/`PUT` routes require the `X-Orca-Dag-Token` header (see the security 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/session` | Hand the same-origin client its per-process mutation token + the custom-command flag (`Cache-Control: no-store`) |
-| `GET` | `/api/readiness` | Resolved CLI, Orca version, and whether execution is enabled (with the actionable reason when not) |
+| `GET` | `/api/readiness` | Resolved CLI/build version, selected runtime version/state, and execution permission with an actionable disabled reason |
 | `GET` | `/api/capabilities` | The runtime capability matrix: runtime facts plus per-capability `supported / alias / absent` — unknown names stay listed and gated off |
 | `GET` | `/api/run-health?run=<id>` | Ownership + health of one Run: state (`viewer-owned / external / unbound / inconsistent`), coordinator handle, counts, and per-source warnings |
 | `GET` | `/api/dag?run=<id>` | The Run's DAG: `{ runId, nodes, edges, hierarchy, gates, readyWave, readiness, generatedAt }` |

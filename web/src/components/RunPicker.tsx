@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { createRun, fetchRunById, fetchRunsPage } from "../api";
 import { useT } from "../i18n";
+import { useReadiness } from "../harness";
 import type { OrcaRun } from "../types";
 import { usePageVisible } from "../visibility";
 import { DoodleSelect } from "./DoodleSelect";
@@ -41,6 +42,9 @@ export function RunPicker({
 }) {
   const dialog = useDecisionDialog();
   const t = useT();
+  // Browsing Runs remains read-only; only creating one needs runtime readiness.
+  const readiness = useReadiness();
+  const execOff = readiness !== null && !readiness.executionEnabled;
   // Newest page (polled) + accumulated older pages + exact-ID pins, deduped
   // for display. The ref mirrors the combined list so the poll's newest-Run
   // fallback can see Runs that only exist on an older page or via a pin —
@@ -183,8 +187,8 @@ export function RunPicker({
             type="button"
             className="btn btn--ghost"
             onClick={onCreate}
-            disabled={disabled || creating}
-            title={t("picker.newRunTitle")}
+            disabled={disabled || creating || execOff}
+            title={(execOff && readiness?.reason) || t("picker.newRunTitle")}
           >
             {t("picker.newRun")}
           </button>

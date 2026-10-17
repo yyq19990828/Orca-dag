@@ -16,6 +16,7 @@ if (path === "/api/session" && method === "POST") {
   const journal = JSON.parse(readFileSync(process.env.FAKE_OPENCODE_JOURNAL, "utf8"));
   if (!journal.openCodeLaunches?.some(row => row.sessionId === body.id)) process.exit(2);
   state.sessions ??= {};
+  if (state.sessionModel) body.model = state.sessionModel;
   state.sessions[body.id] = body;
   writeFileSync(file, JSON.stringify(state));
   if (state.createResponseLost) process.exit(1);

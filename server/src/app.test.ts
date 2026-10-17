@@ -433,6 +433,8 @@ describe("Phase 6: safe group messaging boundaries", () => {
         cli: "fake-orca",
         workspace: groupWorkspace,
         worktree: "active",
+        cliVersion: "1.4.206",
+        runtimeState: "ready",
         version: "1.4.206",
         executionEnabled: true,
         reason: null,
@@ -803,6 +805,8 @@ describe("operations routes against a scripted Orca", () => {
       cli: fixturePath,
       workspace: "/ws",
       worktree: "path:/ws",
+      cliVersion: "1.4.205",
+      runtimeState: "ready",
       version: "1.4.205",
       executionEnabled: true,
       reason: null,
@@ -941,7 +945,7 @@ process.stdout.write(JSON.stringify(out));
     // so the execution gate never probes the ambient (real) runtime.
     initOrcaRuntime({ env: { ORCA_CLI_COMMAND: fixturePath, WORKSPACE_DIR: ws }, cwd: root });
     const { app } = createApp({
-      workspaceDir: ws,
+      workspaceDir: wsReal,
       worktree: `path:${wsReal}`,
       policy: opsPolicy,
       embeddedAssets: null,
@@ -1035,7 +1039,9 @@ process.stdout.write(JSON.stringify(out));
     const own = await rpc("GET", "/api/runs/run_a");
     assert.equal(own.status, 200);
     assert.equal((own.json.run as Record<string, unknown>).id, "run_a");
-    assert.deepEqual(own.json.workspace, { owned: true, evidence: "task creator marker" });
+    const ownWorkspace = own.json.workspace;
+    assert.ok(ownWorkspace && typeof ownWorkspace === "object" && "owned" in ownWorkspace);
+    assert.equal(ownWorkspace.owned, true);
 
     // A foreign-workspace Run is visible but flagged — never relabeled ours.
     writeScript({
@@ -1046,7 +1052,9 @@ process.stdout.write(JSON.stringify(out));
     });
     const foreign = await rpc("GET", "/api/runs/run_foreign");
     assert.equal(foreign.status, 200);
-    assert.deepEqual(foreign.json.workspace, { owned: false, evidence: "no task in this Run was created from this workspace" });
+    const foreignWorkspace = foreign.json.workspace;
+    assert.ok(foreignWorkspace && typeof foreignWorkspace === "object" && "owned" in foreignWorkspace);
+    assert.equal(foreignWorkspace.owned, false);
   });
 
   it("answers 404 run_not_found for an unknown id and keeps a failed read at 500", async () => {

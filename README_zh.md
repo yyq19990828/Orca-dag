@@ -114,7 +114,9 @@ cd ~/any/orca-managed/project
 npx orca-orchestration-launcher
 ```
 
-它会把 `orca-dag` **skill** 装进你本机所有的 coding agent（Claude Code、Codex、Cursor、OpenCode、Gemini CLI、Droid，以及共享的 `~/.agents/skills` —— 存在哪个装哪个），然后在 <http://localhost:8787> 起 **viewer**，并把当前目录当作工作区。重复执行是安全的：skill 只在内容真的变了时才重写，你自己做的 symlink 目录会被完全跳过。
+它会为检测到的 agent 安装随包提供的 `orca-dag` **skill**，然后在 <http://localhost:8787> 起 **viewer**，把当前目录当作工作区。Claude Code、Cursor、Gemini CLI、Droid、Grok、Kiro、Qoder 和 CodeBuddy 使用各自的 skill 目录。Codex、OpenCode、Pi、OMP 和 Kimi 共用一份 `~/.agents/skills`；即使 `.agents` 尚不存在，也会通过这些 agent 的配置目录识别安装。没有任何已知 agent 配置的环境不会被创建空配置目录。
+
+`CLAUDE_CONFIG_DIR`、`GROK_HOME` 和 `KIRO_HOME` 可指定已存在的绝对 agent 配置目录；相对路径、HOME 本身及其上级目录会被忽略。`CODEX_HOME` 也参与 Codex 发现，但 skill 仍安装到共享位置。内容不变时保留 mtime；配置路径、skill 目录或文件中的符号链接不会被跟随，外置配置目录须使用真实目录路径。旧 Codex/OpenCode 或迁移前配置位置中只有单个文件的安装目录，仅在新目标不存在时迁移；带额外文件或链接的目录会保留。卸载与安装使用同一解析器查找新旧位置；卸载迁移后的配置目录时应使用相同的 home 环境变量。
 
 **工作区初始化也是这条命令的一部分：**启动时默认向工作区的 `.gitignore` 添加带管理标记的 `.orca-dag/` 规则，并打印规划目录与忽略规则的处理结果。已有匹配规则会直接复用，其他规则保留，符号链接或非普通文件形式的 `.gitignore` 不会被修改。初始化失败会明确警告，但不阻止 viewer 启动。
 
@@ -154,7 +156,7 @@ tar xzf orca-dag-darwin-arm64.tar.gz && sudo mv orca-dag /usr/local/bin/ && orca
 
 `--no-workspace-init` / `ORCA_DAG_NO_WORKSPACE_INIT=1` 跳过自动修改 `.gitignore`，规划前请自行添加 `.orca-dag/`。它与 `--no-skill` 相互独立，后者只跳过 agent skill 安装。
 
-只想要 skill、不要 viewer，或者想用标准工具管理？`npx skills add yyq19990828/Orca-dag --skill orca-dag --global` —— 即 [open agent skills CLI](https://github.com/vercel-labs/skills)，`orca skills install` 底层调的也是它。
+只想要 skill、不要 viewer，或者想用标准社区工具管理？`npx skills add yyq19990828/Orca-dag --skill orca-dag --global` 使用 [open agent skills CLI](https://github.com/vercel-labs/skills)。
 仅装 skill 不会初始化项目；skill 会要求 agent 在写规划文档前确认 `.orca-dag/` 已被忽略。
 
 ## 卸载
@@ -298,7 +300,9 @@ viewer 是直通 Orca 的控制面 —— 启动 Run 会 fence 掉原本的 coor
 
 ## 就绪探测与只读模式
 
-`GET /api/readiness` 返回 `{ cli, workspace, worktree, version, executionEnabled, reason }`。执行类操作 —— 启动 Run、解决审批门、新建 Run —— 只在 **Orca ≥ 1.4.205** 上启用；1.4.160–1.4.204 上 UI 会禁用这些控件（Run 按钮显示 "View-only"、gate 按钮带原因置灰、顶栏徽标变黄），绕过 UI 的改动类请求会得到 `503 execution_disabled`。读操作（DAG、Run 列表、终端、配置）始终可用。
+`GET /api/readiness` 返回 `{ cli, workspace, worktree, cliVersion, version, runtimeState, executionEnabled, reason }`。`cliVersion` 来自已解析可执行文件的 `--version`；`version` 来自所选运行时的 `status.runtime.appVersion`，绝不拿 CLI 版本补齐。执行类操作 —— 启动 Run、解决审批门、新建 Run —— 要求 CLI **≥ 1.4.205**、运行时明确处于 **ready** 状态，且运行时的稳定版本 **≥ 1.4.205**。即使 CLI 较新，旧版、不可达、启动中或状态未知的运行时仍保持只读。UI 会禁用执行控件，绕过 UI 的执行请求会得到 `503 execution_disabled`；读取路由仍可访问。探测结果只短暂缓存，不是永久缓存，修复目标运行时后可恢复执行。
+
+重新连接目标运行时后，刷新 viewer 页面以重新加载界面的就绪判定；执行路由也会独立重新检查短暂缓存的服务端探测。
 
 ## HTTP 接口
 
@@ -307,7 +311,7 @@ viewer 是直通 Orca 的控制面 —— 启动 Run 会 fence 掉原本的 coor
 | 方法 | 路径 | 作用 |
 | --- | --- | --- |
 | `GET` | `/api/session` | 把本进程的 mutation token + 自定义命令开关交给同源客户端（`Cache-Control: no-store`） |
-| `GET` | `/api/readiness` | 解析出的 CLI、Orca 版本，以及是否允许执行（不允许时附上可操作的原因） |
+| `GET` | `/api/readiness` | 已解析的 CLI 及其构建版本、目标运行时版本/状态，以及执行权限和不可执行时的恢复原因 |
 | `GET` | `/api/capabilities` | 运行时能力矩阵：运行时信息加每个能力的 `supported / alias / absent` 状态 —— 未知能力照样列出并保持关闭 |
 | `GET` | `/api/run-health?run=<id>` | 单个 Run 的归属与健康：状态（`viewer-owned / external / unbound / inconsistent`）、协调者句柄、计数与按来源的警告 |
 | `GET` | `/api/dag?run=<id>` | 该 Run 的 DAG：`{ runId, nodes, edges, hierarchy, gates, readyWave, readiness, generatedAt }` |

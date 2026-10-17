@@ -92,6 +92,8 @@ before(async () => {
       cli: fixturePath,
       workspace,
       worktree: "path:" + workspace,
+      cliVersion: "1.4.205",
+      runtimeState: "ready",
       version: "1.4.205",
       executionEnabled: true,
       reason: null,

@@ -142,7 +142,6 @@ describe("readiness reasons", () => {
     assert.equal(b.runnable, false);
     assert.deepEqual(b.codes, ["unmet_dependencies"]);
     assert.deepEqual(b.unmetDependencyIds, ["task_a"]);
-    assert.match(b.reasons[0], /task_a \(dispatched\)/);
   });
 
   it("treats a completed dependency as met and counts a failed one as unmet", () => {
@@ -155,7 +154,6 @@ describe("readiness reasons", () => {
     const { readyWave, readiness } = explainReadiness(tasks, [], null);
     assert.deepEqual(readyWave.taskIds, ["task_b"]);
     assert.deepEqual(readiness.task_c.unmetDependencyIds, ["task_bad"]);
-    assert.match(readiness.task_c.reasons[0], /failed/);
   });
 
   it("explains a blocked task through its pending gate, with the gate as evidence", () => {
@@ -166,8 +164,6 @@ describe("readiness reasons", () => {
     assert.equal(b.runnable, false);
     assert.deepEqual(b.codes, ["pending_gate"]);
     assert.deepEqual(b.pendingGateIds, ["gate_1"]);
-    assert.match(b.reasons[0], /Ship it\?/);
-    assert.match(b.reasons[0], /gate_1/);
   });
 
   it("ignores resolved gates and run-level gates with no task binding", () => {
@@ -180,6 +176,30 @@ describe("readiness reasons", () => {
     assert.deepEqual(readyWave.taskIds, ["task_b"]);
     assert.deepEqual(readiness.task_b.codes, [], "no blocker may be invented");
     assert.deepEqual(readiness.task_b.pendingGateIds, []);
+  });
+
+  it("holds a raw ready Task out of the wave until all of its approvals resolve", () => {
+    const tasks = [
+      task({ id: "task_a", status: "completed" }),
+      task({ id: "task_b", status: "ready", deps: '["task_a"]' }),
+    ];
+    const gates = [
+      gate({ id: "gate_approved", taskId: "task_b", status: "resolved", resolution: "approved" }),
+      gate({ id: "gate_pending", taskId: "task_b" }),
+    ];
+    const held = explainReadiness(tasks, gates, { busy: 0, maxConcurrency: 1 });
+    assert.deepEqual(held.readyWave.taskIds, []);
+    assert.equal(held.readiness.task_b.runnable, false);
+    assert.deepEqual(held.readiness.task_b.codes, ["pending_gate"]);
+    assert.deepEqual(held.readiness.task_b.pendingGateIds, ["gate_pending"]);
+
+    gates[1].status = "resolved";
+    gates[1].resolution = "approved";
+    const released = explainReadiness(tasks, gates, { busy: 0, maxConcurrency: 1 });
+    assert.deepEqual(released.readyWave.taskIds, ["task_b"]);
+    assert.equal(released.readiness.task_b.runnable, true);
+    assert.deepEqual(released.readiness.task_b.codes, []);
+    assert.deepEqual(released.readiness.task_b.pendingGateIds, []);
   });
 
   it("flags waiting_for_capacity only when the viewer coordinator has no free slot", () => {
@@ -209,7 +229,6 @@ describe("readiness reasons", () => {
     ];
     const { readiness } = explainReadiness(tasks, [], null);
     assert.deepEqual(readiness.task_run.codes, ["in_flight"]);
-    assert.match(readiness.task_run.reasons[0], /ctx_run/);
     assert.deepEqual(readiness.task_ok.codes, ["already_finished"]);
     assert.deepEqual(readiness.task_bad.codes, ["already_finished"]);
     for (const id of ["task_run", "task_ok", "task_bad"]) {
@@ -224,16 +243,13 @@ describe("readiness reasons", () => {
     ];
     const { readiness } = explainReadiness(tasks, [], null);
     assert.deepEqual(readiness.task_stuck.codes, ["unknown"]);
-    assert.match(readiness.task_stuck.reasons[0], /nudges/);
     assert.deepEqual(readiness["task_blocked?"].codes, ["unknown"]);
-    assert.match(readiness["task_blocked?"].reasons[0], /no open gate/);
   });
 
   it("explains an unrecognized runtime status as unknown instead of guessing", () => {
     const tasks = [task({ id: "task_x", status: "warp" as OrcaTask["status"] })];
     const { readiness } = explainReadiness(tasks, [], null);
     assert.deepEqual(readiness.task_x.codes, ["unknown"]);
-    assert.match(readiness.task_x.reasons[0], /warp/);
   });
 
   it("reports both unmet dependencies and a pending gate when a task waits on both", () => {

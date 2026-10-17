@@ -123,6 +123,8 @@ function readLog(): FakeCall[] {
 function writeScript(
   conf: {
     version?: string;
+    runtime?: { appVersion?: unknown; state?: unknown; reachable?: boolean } | null;
+    statusError?: { code: string; message: string };
     terminals?: unknown[];
     newHandle?: string;
     /** Phase 5: scripted worker-read page + optional source_changed refusal. */
@@ -192,6 +194,17 @@ if (args[0] === "--version") {
   process.exit(0);
 }
 const out = { ok: true, result: {} };
+if (args[0] === "status") {
+  if (conf.statusError) {
+    process.stdout.write(JSON.stringify({ ok: false, error: conf.statusError }));
+    process.exit(1);
+  }
+  out.result = {
+    runtime: Object.hasOwn(conf, "runtime")
+      ? conf.runtime
+      : { appVersion: conf.version ?? "1.4.205", state: "ready", reachable: true },
+  };
+}
 if (args[0] === "terminal" && args[1] === "list") out.result = { terminals: conf.terminals ?? [] };
 if (args[0] === "terminal" && args[1] === "create") out.result = { terminal: { handle: conf.newHandle ?? "term_fake_new" } };
 // Phase 6 discovery surface: scripted rows from conf, plus the exact-selector
@@ -645,30 +658,21 @@ describe("uninstall coordinator sweep", () => {
 // --- readiness --------------------------------------------------------------
 
 describe("evaluateReadiness", () => {
-  it("reports a missing/unrunnable CLI with an actionable reason", () => {
-    const r = evaluateReadiness(null, 'no executable "orca" on PATH');
-    assert.equal(r.executionEnabled, false);
-    assert.match(r.reason!, /ORCA_CLI_COMMAND|Install Orca/);
-  });
-
-  it("reports unparseable version output as unusable", () => {
-    const r = evaluateReadiness(null, null);
-    assert.equal(r.executionEnabled, false);
-    assert.match(r.reason!, /unparseable/);
+  it("keeps missing, malformed, and prerelease runtime versions view-only", () => {
+    for (const version of [null, "", "unknown", "1.4.229-beta.1"]) {
+      assert.equal(evaluateReadiness(version, null).executionEnabled, false, String(version));
+    }
   });
 
   it(`marks < ${MIN_VIEW_VERSION} as too old even for viewing`, () => {
     const r = evaluateReadiness("1.4.159", null);
     assert.equal(r.executionEnabled, false);
-    assert.match(r.reason!, /too old/);
   });
 
-  it(`marks ${MIN_VIEW_VERSION}–1.4.204 as view-only with an upgrade pointer`, () => {
+  it(`keeps ${MIN_VIEW_VERSION}–1.4.204 view-only`, () => {
     for (const v of [MIN_VIEW_VERSION, "1.4.180", "1.4.204"]) {
       const r = evaluateReadiness(v, null);
       assert.equal(r.executionEnabled, false, v);
-      assert.match(r.reason!, /view-only/);
-      assert.match(r.reason!, new RegExp(MIN_EXECUTION_VERSION.replace(/\./g, "\\.")));
     }
   });
 
@@ -820,21 +824,103 @@ describe("CLI spawning through the resolved spec (fake orca)", () => {
     assert.equal(readLog().length, 1); // list only — never silently reused or closed
   });
 
-  it("checkReadiness parses the fake version and gates execution on it", async () => {
-    const a = wsA();
-    useRuntime({ workspace: a });
-    writeScript({ version: "1.4.204" });
-    const old = await checkReadiness(true);
-    assert.equal(old.executionEnabled, false);
-    assert.equal(old.version, "1.4.204");
-    assert.match(old.reason!, /view-only/);
-    assert.equal(old.workspace, a);
+  it("a newer CLI cannot enable execution against an older running runtime", async () => {
+    const workspace = wsA();
+    useRuntime({ workspace });
+    writeScript({ version: "1.4.229", runtime: { appVersion: "1.4.204", state: "ready" } });
+    const result = await checkReadiness(true);
+    assert.equal(result.executionEnabled, false);
+    assert.equal(result.cliVersion, "1.4.229");
+    assert.equal(result.version, "1.4.204");
+    assert.equal(result.runtimeState, "ready");
+    assert.equal(result.workspace, workspace);
+  });
 
-    writeScript({ version: "1.4.205" });
-    const current = await checkReadiness(true);
-    assert.equal(current.executionEnabled, true);
-    assert.equal(current.reason, null);
-    assert.match(current.cli, /fake-orca\.mjs/);
+  it("requires positive runtime readiness even when both versions support execution", async () => {
+    useRuntime({ workspace: wsA() });
+    for (const state of ["starting", "disconnected", undefined]) {
+      writeScript({ version: "1.4.229", runtime: { appVersion: "1.4.229", state } });
+      const result = await checkReadiness(true);
+      assert.equal(result.executionEnabled, false, String(state));
+      assert.equal(result.runtimeState, state ?? null);
+    }
+    writeScript({ version: "1.4.229", runtime: { appVersion: "1.4.229", state: "ready", reachable: false } });
+    assert.equal((await checkReadiness(true)).executionEnabled, false);
+  });
+
+  it("does not substitute the CLI version for absent or unverified runtime versions", async () => {
+    useRuntime({ workspace: wsA() });
+    for (const appVersion of [undefined, "unreported", "1.4.229-beta.1"]) {
+      writeScript({ version: "1.4.229", runtime: { appVersion, state: "ready" } });
+      const result = await checkReadiness(true);
+      assert.equal(result.executionEnabled, false, String(appVersion));
+      assert.equal(result.cliVersion, "1.4.229");
+      assert.equal(result.version, appVersion ?? null);
+    }
+  });
+
+  it("keeps an unreachable selected environment view-only despite a usable CLI", async () => {
+    useRuntime({ workspace: wsA() });
+    writeScript({
+      version: "1.4.229",
+      statusError: { code: "invalid_argument", message: "Unknown environment: disconnected-host" },
+    });
+    const result = await checkReadiness(true);
+    assert.equal(result.executionEnabled, false);
+    assert.equal(result.cliVersion, "1.4.229");
+    assert.equal(result.version, null);
+    assert.equal(result.runtimeState, null);
+  });
+
+  it("enables execution only when the selected runtime and CLI both support it", async () => {
+    useRuntime({ workspace: wsA() });
+    writeScript({ version: "1.4.205", runtime: { appVersion: "1.4.229", state: "ready" } });
+    const result = await checkReadiness(true);
+    assert.equal(result.executionEnabled, true);
+    assert.equal(result.cliVersion, "1.4.205");
+    assert.equal(result.version, "1.4.229");
+    assert.equal(result.reason, null);
+
+    writeScript({ version: "1.4.204", runtime: { appVersion: "1.4.229", state: "ready" } });
+    assert.equal((await checkReadiness(true)).executionEnabled, false);
+  });
+
+  it("does not reuse another resolved runtime's cached execution permission", async () => {
+    useRuntime({ workspace: wsA() });
+    writeScript({ version: "1.4.229" });
+    assert.equal((await checkReadiness(true)).executionEnabled, true);
+    useRuntime({ workspace: wsB() });
+    writeScript({ version: "1.4.229", runtime: { appVersion: "1.4.204", state: "ready" } });
+    assert.equal((await checkReadiness()).executionEnabled, false);
+  });
+
+  it("refuses Run creation before creating a terminal when the selected runtime is unavailable", async () => {
+    const workspace = wsA();
+    useRuntime({ workspace });
+    writeScript({
+      version: "1.4.229",
+      statusError: { code: "runtime_unavailable", message: "Selected execution host is disconnected" },
+    });
+    const policy = createSecurityPolicy({});
+    const { app } = createApp({ workspaceDir: workspace, worktree: `path:${workspace}`, policy });
+    const server = await listenLoopback(app, 0);
+    try {
+      const address = server.address();
+      assert.ok(address && typeof address === "object");
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/runs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Orca-Dag-Token": policy.token },
+        body: JSON.stringify({ objective: "Must not start on a disconnected host" }),
+      });
+      assert.equal(response.status, 503);
+      const failure: unknown = await response.json();
+      assert.ok(failure && typeof failure === "object" && "code" in failure);
+      assert.equal(failure.code, "execution_disabled");
+      assert.equal(readLog().some((call) => call.argv[0] === "terminal" && call.argv[1] === "create"), false);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("checkReadiness reports a missing CLI honestly (view-only, actionable)", async () => {
@@ -843,7 +929,6 @@ describe("CLI spawning through the resolved spec (fake orca)", () => {
     const r = await checkReadiness(true);
     assert.equal(r.executionEnabled, false);
     assert.equal(r.version, null);
-    assert.match(r.reason!, /not usable/);
     assert.match(formatCommand(getOrcaRuntime().command), /no-such-orca/);
   });
 });
@@ -856,6 +941,8 @@ describe("execution gate over HTTP", () => {
     cli: "orca-fake",
     workspace: "/x",
     worktree: "path:/x",
+    cliVersion: "1.4.229",
+    runtimeState: "ready",
     version: "1.4.160",
     executionEnabled: false,
     reason: "Orca 1.4.160 is view-only here: execution needs the supervised-worker contract from Orca 1.4.205+.",

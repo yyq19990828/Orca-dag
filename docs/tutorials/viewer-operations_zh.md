@@ -33,7 +33,7 @@ env -u ORCA_TERMINAL_HANDLE -u ORCA_TAB_ID -u ORCA_WORKSPACE_ID -u ORCA_WORKTREE
 | `--no-workspace-init` 或 `ORCA_DAG_NO_WORKSPACE_INIT=1` | 初始化 `.orca-dag/` 忽略规则 | 跳过向工作区 `.gitignore` 添加规划产物管理规则；规划前请自行确认 `.orca-dag/` 已被忽略。 |
 | `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1` | 关闭 | 允许自定义 harness 命令。它们走兼容性本地路径，不能使用隔离放置。 |
 
-CLI 自动选择顺序为：`ORCA_CLI_COMMAND` → 设置了 `ORCA_DEV_REPO_ROOT` 时的 `orca-dev` → Linux 且不在 Orca 终端内时的 `orca-ide` → `orca`。读取和修改都使用同一个已解析的 CLI。`GET /api/readiness` 会显示 CLI、工作区、版本及不能执行的原因。Orca 1.4.160–1.4.204 可以查看 Run；执行需要 1.4.205 或更新版本。viewer 和 skill 可以通过 `npx orca-orchestration-launcher` 一起安装，也有独立发布的二进制文件。
+CLI 自动选择顺序为：`ORCA_CLI_COMMAND` → 设置了 `ORCA_DEV_REPO_ROOT` 时的 `orca-dev` → Linux 且不在 Orca 终端内时的 `orca-ide` → `orca`。读取和修改都使用同一个已解析的 CLI。`GET /api/readiness` 分别报告 `cliVersion`、所选运行时的 `version` 与 `runtimeState`；较新的可执行文件不能证明目标正在运行或已升级。执行要求 CLI 1.4.205+，以及明确处于 ready 状态、稳定 appVersion 为 1.4.205+ 的运行时；状态未知、断连或启动中的运行时保持只读。Orca 1.4.160–1.4.204 仍可查看 Run。viewer 和 skill 可以通过 `npx orca-orchestration-launcher` 一起安装，也有独立发布的二进制文件。
 
 启动时还会提示 `.orca-dag/<timestamp>/{PRD.md,TECH_SPEC.md}` 及默认 `.gitignore` 初始化是否成功。skill 为每个新计划创建独立的 UTC 时间戳目录，记录 Run id，并保留旧计划。这些忽略的文档不提交 Git，也不会自动复制到隔离工作树；Task spec 必须包含 worker 所需信息。旧版 `.orca/` 文档及其忽略管理块原样保留；新规划产物只使用 `.orca-dag/`。
 
@@ -156,6 +156,24 @@ viewer 的 `opencode` 选择运行的就是 OpenCode 2。在运行中的 Orca �
 
 后续运行时发现可继续加在这里，写清受影响的启动路径、可观察的现象和已验证的处理方式。Codex TUI 可见、Task 已完成与 Orca 的 worker 存活状态是不同的证据。
 
+### Orca 1.4.229 兼容边界
+
+[Orca 1.4.229](https://github.com/stablyai/orca/releases/tag/v1.4.229) 扩大了原生聊天 worker 的范围，但不能据此认定 viewer 单独使用的 `opencode2` 路径已支持原生模型选择。现有 OpenCode 模型适配器，以及 Codex 创建工作区后验证基准再启动的顺序保持不变。
+
+- **原生拒绝不代表可以降级。** 不支持的 model/effort、无效参数或已知 agent 的 launcher 被禁用时，保留原尝试及回执并停车，绝不启动第二个 legacy worker。显式启用的自定义命令会在任何原生启动之前选择本地 legacy 路径。
+- **所有已处理 FIFO 批次都按归属约束确认**，包括只有被拒绝或重复报告的批次。ack 返回的下一批消息也会在 Run 完成前处理；未回答问题和未落定的终端归属仍阻止确认。
+- **未决 gate 会阻止完成**，包括没有关联阻塞 Task 的 Run 级 gate。同一 Task 的全部审批都必须明确通过后才会放行。Orca 可能在仅通过一个审批后就报告 `ready`；只要还有未决 gate，该 Task 就不能进入就绪波，其原因仍列入等待清单，且没有其他活动工作时 Run 保持等待输入。
+- **Orca 可以纠正暂定启动失败。** Orca 接受精确同一 Run/Task/Dispatch 的迟到成功后，viewer 更新尝试结果，同时保留原启动回执和已执行的 release/retain 决策。旧报告、被拒绝报告或其他 Dispatch 都不能清除失败。
+
+本机 Orca 1.4.229 的只读 smoke 确认了 runtime readiness 与能力发现；所选环境不可达时保持只读，新建 Run 返回 `503 execution_disabled`。构建后页面的浏览器 smoke 还确认：该状态下执行和 **New Run** 均被禁用，而精确 ID 输入仍可编辑。原生拒绝、FIFO 消息、gate 推进和迟到纠正则使用隔离 CLI fixture 运行真实 coordinator 验证，没有启动真实付费 agent；这不代表全部 agent 都通过了 1.4.229 端到端验收。
+
+**真实 agent 认证（2026-10-17）。** Run `run_e78451d88bc7` 在 Orca 1.4.229 上，通过默认的显式模型 one-shot 适配器，使用 OpenCode 2.0.28 和 `deepseek/deepseek-flash` 完成两个依赖任务。两个 OpenCode 会话导出均记录 provider `deepseek`、model `deepseek-flash`，并以 `idle / succeeded` 事件结束；模型使用情况不只是根据请求 argv 推断。
+
+构建后的 viewer 完成了 worker 的阻塞 ask/reply 和第二次审批。第一个 gate 已通过、另一个仍未决时，依赖任务没有被放行。在该检查点暂停并恢复同一 Run，也没有重新启动已完成的生产任务。两个 Dispatch 均经已接受的 `worker_done` 完成；独立重算的 JSON 产物与输入 nonce、整数计算结果、回复 token 和 SHA-256 一致。最终没有未确认 Delivery、清理债务、待回收 worker 或仍存在的实验自有终端。Orca 的跟踪记录仍报告 `terminalState: retained`，而 viewer 对实际 pane 的处置是 `closed`；这不代表原生 `worker-release` 回执。
+
+工作区本地证据保留在 `.orca-dag/e2e-20261017T162611Z-b1d3a6/certificate.json`。本次只认证本地 POSIX 当前工作区的显式模型 one-shot 路径，不代表原生 `opencode2` 模型选择、实验性 API 预选 TUI、远程/Windows 放置或其他 agent 已通过认证。无 Task 绑定的 Run 级 gate，以及原生拒绝、无效/重复报告批次和暂定启动失败后迟到纠正等故障场景，仍由隔离 fixture 验证。
+
+
 ### Orca 1.4.222 兼容边界
 
 [Orca 1.4.222](https://github.com/stablyai/orca/releases/tag/v1.4.222) 会等到 OpenCode 确实能够提交 worker 的 Task，而不只是等输入框出现。这同时适用于原生 `opencode` 和 `opencode2` 启动；viewer 在节点未指定模型时已经使用后者。就绪检测和提交交给 Orca，viewer 不追加 Enter 重试。远程 worker 需要执行主机更新才能使用这项等待逻辑；只更新 Run 所在的主机不能证明它已经生效。
@@ -183,6 +201,8 @@ Orca 1.4.217 修复了 Codex 就绪检测，并默认隔离每个新终端的后
 对下述显式启用的完整 TUI 适配器，Stop 会确认 API execution 退出后，通过 `worker-abandon` 只做 Orca 取消记账，而非使用不拥有 external 进程的原生 `worker-stop`。随后再次读取落定。如果撤销权限后 release 返回 `retained / identity_unproven`，终端会保留供检查，不强行关闭或伪称原生进程终止。
 
 **实验性替代路径：** `ORCA_DAG_OPENCODE_TUI=1` 会让显式 OpenCode 模型在运行中的 Orca ≥ 1.4.222 上使用 API 预选模型完整 TUI。首版仅支持本机 POSIX 当前/已有、非 lane 工作区；拒绝或回执未知后不回退。Dispatch 属于 supervised，但预建进程对 Orca 仍是 external。准备记录与 session/terminal 身份持久化到 `.orca-dag/sessions.json`；API assistant turn 证明执行，不替代 Task 落定。Orca model/effort 回显仍可能为空。
+
+完整 TUI 准备使用请求独立的 `OPENCODE_TUI_CHANNEL`，避免共享 tab 恢复选中旧会话。它只隔离 TUI 持久化，不改变后端服务发现，也不重写 OpenCode 全局配置。绑定前，viewer 先等待会话生成的精确 `OC | odag:<request>` 标题，再检查 TUI idle；启动 shell 的空闲不算就绪。OpenCode V2 可能把未指定的模型 variant 回显为 `default`：这两种形式等价，但 provider、模型 ID 和显式选择的 variant 仍必须精确匹配。
 
 Output 将有限 assistant 文本标为 `opencode-api` 来源，关闭终端后仍可读取，不复制工具输入或推理。默认清理要求有效落定、明确 external release、精确终端身份和 provider execution 退出；retain 或后续用户输入会保留终端。Stop 先中断精确共享服务会话，再做 Orca 编排记账；服务失败、身份变化或退出未知都不算成功。即使关闭开关，未知准备记录仍会阻止重新派工：应检查保存的 request/session/terminal 与请求审计，不是再次启动。首版仍禁用自动复用、新工作区、lane、远程与 Windows；未设置开关时，下述默认一次性路径不变。
 

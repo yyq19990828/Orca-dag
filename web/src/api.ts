@@ -248,9 +248,9 @@ export async function fetchWorkerDetail(runId: string, dispatchId: string): Prom
 }
 
 /**
- * Resolved Orca CLI + version + whether execution is allowed. The server
- * resolves both once at startup, so this is fetched once per page load — a
- * runtime upgrade needs a viewer restart anyway.
+ * Resolved CLI plus selected runtime execution readiness. The CLI identity is
+ * fixed at startup; the server briefly caches status probes and rechecks them
+ * at mutation boundaries. The UI loads its initial verdict with the page.
  */
 export async function fetchReadiness(): Promise<OrcaReadiness> {
   return get<OrcaReadiness>("/api/readiness");
