@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   assertDiscoveredWorktreeAudience,
   assertEnvironmentPlacementCompatibility,
+  assertOpenCodeUiPlacement,
   assertLanePlacementDisjoint,
   assertLaneReferences,
   createSecurityPolicy,
@@ -17,6 +18,8 @@ import {
   validateId,
   validateLaneTaskMap,
   validateModel,
+  validateOpenCodeUi,
+  validateOpenCodeUiTaskMap,
   validatePlacementSpec,
   validateSetupPolicy,
   validateTaskValueMap,
@@ -28,6 +31,32 @@ import type { WorktreeLaneSpec } from "./config";
 
 const FLAG_OFF = createSecurityPolicy({});
 const FLAG_ON = createSecurityPolicy({ ORCA_DAG_ALLOW_CUSTOM_COMMANDS: "1" });
+
+describe("OpenCode interface boundary", () => {
+  it("accepts only the three modes, bounded maps, and real inheritance by absence", () => {
+    for (const mode of ["auto", "mini", "tui"]) assert.equal(validateOpenCodeUi(mode), mode);
+    for (const bad of ["full", "", null, false, {}, "mini; echo bad"]) assert.throws(() => validateOpenCodeUi(bad), ValidationError);
+    assert.equal(validateOpenCodeUiTaskMap(undefined), null);
+    assert.deepEqual(validateOpenCodeUiTaskMap({ task_a: "mini" }), { task_a: "mini" });
+    assert.deepEqual(validateOpenCodeUiTaskMap({}), {});
+    for (const bad of [null, [], { task_a: null }, { task_a: "" }, { "task/bad": "mini" },
+      Object.fromEntries(Array.from({ length: 501 }, (_, i) => [`task_${i}`, "mini"]))]) {
+      assert.throws(() => validateOpenCodeUiTaskMap(bad), ValidationError);
+    }
+  });
+  it("refuses unsupported explicit placements while preserving auto's existing matrix", () => {
+    assert.doesNotThrow(() => assertOpenCodeUiPlacement("mini", null, null, { kind: "existing" }, "linux"));
+    for (const platform of ["win32", "darwin"] as const) {
+      assert.throws(() => assertOpenCodeUiPlacement("mini", null, null, undefined, platform), ValidationError);
+      assert.doesNotThrow(() => assertOpenCodeUiPlacement("auto", null, null, undefined, platform));
+    }
+    for (const [environment, lane, kind] of [["env_remote", null, "existing"], [null, "lane_a", "existing"],
+      [null, null, "new-child"], [null, null, "new-top-level"]] as const) {
+      assert.throws(() => assertOpenCodeUiPlacement("tui", environment, lane, { kind }, "linux"), ValidationError);
+      assert.doesNotThrow(() => assertOpenCodeUiPlacement("auto", environment, lane, { kind }, "linux"));
+    }
+  });
+});
 
 function assertThrowsWith(fn: () => unknown, code?: string): ValidationError {
   try {

@@ -12,7 +12,15 @@ import { prepareWorkspaceStateFile, workspaceStateReadPath, WORKSPACE_STATE_FILE
  * store — it survives browser restarts and localStorage wipes, and travels
  * with the project directory.
  */
+export const OPEN_CODE_UIS = ["auto", "mini", "tui"] as const;
+export type OpenCodeUi = typeof OPEN_CODE_UIS[number];
+export function isOpenCodeUi(value: unknown): value is OpenCodeUi {
+  return typeof value === "string" && (OPEN_CODE_UIS as readonly string[]).includes(value);
+}
+
 export interface ViewerConfig {
+  defaultOpenCodeUi?: OpenCodeUi;
+  openCodeUiByTask?: Record<string, OpenCodeUi>;
   defaultHarness?: string;
   harnessByTask?: Record<string, string>;
   /** Per-task model override. Only set for tasks whose harness supports one;
@@ -316,6 +324,10 @@ function sanitize(raw: unknown): ViewerConfig {
   if (!raw || typeof raw !== "object") return {};
   const r = raw as Record<string, unknown>;
   const out: ViewerConfig = {};
+  if (isOpenCodeUi(r.defaultOpenCodeUi)) out.defaultOpenCodeUi = r.defaultOpenCodeUi;
+  if (r.openCodeUiByTask && typeof r.openCodeUiByTask === "object" && !Array.isArray(r.openCodeUiByTask)) {
+    out.openCodeUiByTask = Object.fromEntries(Object.entries(r.openCodeUiByTask).filter(([, v]) => isOpenCodeUi(v))) as Record<string, OpenCodeUi>;
+  }
   if (typeof r.defaultHarness === "string" && r.defaultHarness.trim()) {
     out.defaultHarness = r.defaultHarness.trim();
   }

@@ -92,14 +92,16 @@ viewer 是个普通进程，没有 Orca 会话或终端身份，所以写操作�
 | 通过 supervised worker 执行 DAG | **1.4.205** | 通用执行基线；具体 agent 路径可能要求更新版本。 |
 | 原生 Codex 启动 | **1.4.217** | 本机 POSIX 当前/已有工作区；旧版、版本未知的运行时及新建本机工作区仍走兼容适配器。 |
 | 原生 OpenCode 2 TUI | **1.4.220** | 未设置逐节点模型；viewer 的 `opencode` 选择映射为 Orca 的 `opencode2` agent。 |
+| 显式选择 Mini / 完整 TUI | **1.4.222** | OpenCode ≥ **2.1.2**；本机 Linux 当前/已有、非 lane 工作区。默认仍为自动。 |
 | API 预选模型的 OpenCode 2 完整 TUI | **1.4.222** | 显式指定模型并设置 `ORCA_DAG_OPENCODE_TUI=1`；仅本机 POSIX 当前/已有、非 lane 工作区。实验性功能，默认关闭。 |
 
-**截至 2026-10-08，有记录的真实运行时验证：**
+**截至 2026-10-21，有记录的真实运行时验证：**
 
 | Orca app | Agent 版本 | 已验证内容 |
 |---|---|---|
 | **1.4.217** | **Codex CLI 0.159.2** | 本机只读原生 Task：提示词执行、`live / agent_status`、精确 transcript 及 Orca 接受 `worker_done`。 |
 | **1.4.222** | **OpenCode 2.0.22** | 显式启用的 API 预选模型完整 TUI：逐节点模型/variant、依赖 Task、重启恢复且不重复派工、关闭终端后读取输出、成功完成后的清理及 provider 确认退出的 Stop。Stop 在 fencing 后可能保留终端，不保证自动关窗。 |
+| **1.4.235** | **OpenCode 2.1.2** | Linux viewer 选择 Mini / 完整 TUI，指定模型与配置默认模型、写文件及获接受的 `worker_done`；Mini 前台等待 400.027 秒并确认后续消息、显式保留及活动 Stop。Mini fleet 仍可能为 `missing_status`；配置的 provider 必须可用（首次免费默认 provider 返回 403）。 |
 
 **原生 OpenCode 2 路径**也已使用 **OpenCode 2.0.22** 通过只读 Task 和隔离工作树写文件验证（该路径要求 Orca ≥ 1.4.220）。这与实验性 API 预选模型适配器的验证不同；后者在 macOS、**Node.js 22.23.0** 上实测，**尚未覆盖**长时间编码、Git Stage、新建工作区、lane、远程或 Windows 执行。
 
@@ -235,8 +237,10 @@ npm publish ./dist-npm --access public --tag bootstrap
 
 ## viewer 能做什么
 
-- **OpenCode 2 原生 TUI**：已有的 `opencode` 选择，在运行中的 Orca ≥ 1.4.220 且未指定逐节点模型时，会使用 Orca 的 `opencode2` agent ID；状态、放置与终端清理由 Orca 管理，模型取自 OpenCode 自身配置。指定模型则保留 `opencode run --auto -m` 一次性路径；旧版或版本未知的运行时也保留该路径。原生启动失败后绝不再启动第二个 worker。已用 OpenCode 2.0.22 验证只读和写文件 Task。
-- **Orca 1.4.222 兼容性**：原生 OpenCode Task 会受益于 Orca 改进后的提交就绪检测。新版原生模型选择针对独立的 `opencode` agent 和经过验证的 CLI 版本，并不覆盖 viewer 的 `opencode2` 路径；选定模型仍走一次性路径。详见[兼容边界](docs/tutorials/viewer-operations_zh.md#orca-14222-兼容边界)。
+- **OpenCode 启动界面选择**：在运行设置选择 **自动（兼容现有行为）**、**Mini TUI** 或 **完整 TUI**，节点可覆盖或继承。设置通过 `defaultOpenCodeUi` / `openCodeUiByTask` 保存到 `.orca-dag/config.json`，旧配置缺字段时仍为自动。显式 Mini/完整 TUI 要求本机 Linux 当前/已有、非 lane 工作区，运行中的 Orca ≥ 1.4.222、经核实的 OpenCode ≥ 2.1.2；拒绝后不换模式或启动替代 worker。两者共用现有 session 适配器，支持显式模型或 OpenCode 配置的默认模型。Mini 遵守当前权限设置，可能需要确认，不能传 `--auto`。API 模型/执行证据与 Orca 回显分开。自动模式保留现有路由及旧环境变量行为，切换设置不能绕过未决 preparation。新 journal 字段需要兼容读取器；软件降级前先将未来启动切回自动，并结算、备份新准备记录。
+
+- **自动模式下的 OpenCode 2 原生 TUI**：已有的 `opencode` 选择，在运行中的 Orca ≥ 1.4.220 且未指定逐节点模型时，会使用 Orca 的 `opencode2` agent ID；状态、放置与终端清理由 Orca 管理，模型取自 OpenCode 自身配置。指定模型则保留 `opencode run --auto -m` 一次性路径；旧版或版本未知的运行时也保留该路径。原生启动失败后绝不再启动第二个 worker。已用 OpenCode 2.0.22 验证只读和写文件 Task。
+- **Orca 1.4.222 兼容性**：原生 OpenCode Task 会受益于 Orca 改进后的提交就绪检测。新版原生模型选择针对独立的 `opencode` agent 和经过验证的 CLI 版本，并不覆盖 viewer 的 `opencode2` 路径；自动模式下选定模型仍走一次性路径。详见[兼容边界](docs/tutorials/viewer-operations_zh.md#orca-14222-兼容边界)。
 
 - **实验性指定模型完整 TUI**：启动时设置 `ORCA_DAG_OPENCODE_TUI=1`，显式逐节点模型会使用 API 预建的 OpenCode 2 会话。要求运行中的 Orca ≥ 1.4.222，以及本机 POSIX 当前/已有、非 lane 工作区；不支持的放置或运行时在启动前拒绝，不回退一次性路径。`provider/model#variant` 与 effort 对应同一个 V2 variant，冲突值会被拒绝。准备记录与 session/terminal 身份保存到 `.orca-dag/sessions.json`，通过 `worker-start --terminal` 绑定；实际 assistant 模型/输出标为 **OpenCode API** 来源，不伪称 Orca effective 回显。未证实的输入绝不重发。清理仅在 external release 和 provider 退出已确认后关闭身份明确的自建终端；retain 或后续用户输入会保留终端。Stop 先中断精确共享服务会话，再做 Orca 编排记账；未知结果保留阻塞。首版不开放 TUI 复用、新工作树、lane、远程或 Windows。未设置开关时默认路径不变；关闭开关也不能绕过未知准备记录。
 

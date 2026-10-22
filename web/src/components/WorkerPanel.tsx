@@ -652,6 +652,14 @@ export const WorkerPanel = memo(function WorkerPanel({
                       {/* Orca's durable startOptions can restore requested
                           preferences after a viewer restart. They never fill
                           missing effective preferences. */}
+                      {(attempt?.openCodeUiRequested || attempt?.openCodeUiLaunched) && (
+                        <div className="inbox__body">
+                          {t("openCode.uiRequested")}{" "}
+                          {attempt.openCodeUiRequested ? t(`openCode.ui.${attempt.openCodeUiRequested}`) : t("worker.unknown")}
+                          {" · "}{t("openCode.uiLaunched")}{" "}
+                          {attempt.openCodeUiLaunched ? t(`openCode.ui.${attempt.openCodeUiLaunched}`) : t("worker.unknown")}
+                        </div>
+                      )}
                       {(requested || detail.launch || detail.fleet?.projection?.launch) && (
                         <div className="inbox__body">
                           {t("worker.launch")}{" "}

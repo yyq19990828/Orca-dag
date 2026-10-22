@@ -55,6 +55,7 @@ Orca Task 没有 harness、模型、放置位置或画布布局字段。viewer �
 
 | 设置 | 默认值或允许值 | 效果和限制 |
 | --- | --- | --- |
+| OpenCode 启动界面 | `auto` | 自动保留当前路由；可显式选择 Mini TUI / 完整 TUI，节点支持覆盖或继承。 |
 | 默认 harness | `claude` | Stage 没有单独覆盖时使用。已知选项包括 Claude、Codex、OpenCode、Gemini、Grok、Cursor、Droid、Kimi。 |
 | Stage harness | 继承默认值 | 选择启动适配器；自定义命令需要 `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1`。 |
 | Stage 模型 | agent 默认值 | OpenCode 列举 `provider/model` ID（可带 `#variant`）；Claude、Codex 和 Cursor 可填写模型名。其他 harness 不显示模型选择器。 |
@@ -150,9 +151,17 @@ worker 保持展开时，fleet 轮询仍会更新 ownership。若 fleet 与详�
 
 `orca-dag uninstall` 会移除已安装的 skill、残留的 viewer coordinator 终端，以及所选工作区中自己写入且未被修改的 `.orca-dag/` 和旧版 `.orca/` 忽略管理块；用户自写规则会保留。加 `--purge` 只删除新旧位置已知的 viewer 状态文件和已提交 Stage 的 Git 证据，**永远不删除共享目录、时间戳规划目录或其他用户文件**。普通卸载与 `--dry-run` 都不会迁移状态。卸载后如需继续忽略保留的文件，请自行添加相应的忽略规则。它不会删除 Orca Run/Task 历史，也不会替你集成或发布分支。
 
+### OpenCode 启动界面选择
+
+运行设置及 OpenCode 节点面板提供自动、Mini TUI 和完整 TUI。节点覆盖优先于工作区默认；继承会删除覆盖。自动模式保留下文的现有路由，包括 `ORCA_DAG_OPENCODE_TUI=1`；显式选择不需要该开关。选择在 Run 内冻结，Retry 也保持该快照；Recovery 启动新循环前会刷新保存的选择。
+
+显式界面当前要求本机 Linux 当前/已有工作区、无 lane 或通用终端复用，运行中的 Orca ≥ 1.4.222，以及工作区内的 OpenCode ≥ 2.1.2。不支持的放置或未知版本在 worker preparation 前拒绝，不自动换模式。官方工作区默认模型接口解析配置默认值，再通过精确新 session 回读验证；显式 variant 仍严格校验。Mini 使用不带 `--auto` 的 `opencode mini --session`，遵守当前权限并可能等待确认。
+
+两种界面都在 `sessions.json` 保存精确 API/session/terminal 身份；viewer 的界面记录不是 Orca effective launch 回显。接受 Task 结算且确认 provider 退出后才允许关闭自建终端。后续用户输入或来源不明的消息保留终端，不能仅凭熟悉的 nudge 文案豁免。Stop 先中断精确 provider execution，再沿用 external `worker-abandon` 记账。当前版本能兼容旧 journal，但旧二进制可能拒绝新字段；软件降级前应结算新 preparation 并备份历史，通常只需把未来启动改回自动来回退本功能。
+
 ## 已知局限
 
-viewer 的 `opencode` 选择运行的就是 OpenCode 2。在运行中的 Orca ≥ 1.4.220 且未设置逐节点模型时，Task 使用原生 `worker-start --agent opencode2`。在 OpenCode 2.0.22 上，这条路径已送达只读 Task，并在隔离工作树中自主写入、读回一个文件；Orca 接受 `worker_done`、报告 `agent_status` 并释放终端。选择模型或使用旧版、版本未知的 Orca 时，保留下文的一次性路径。原生启动失败后绝不再启动第二个 worker。当前 `worker-read --source auto` 对 OpenCode 2 会回退到终端输出，无法得到精确的 provider transcript。
+在自动模式下，viewer 的 `opencode` 选择运行的就是 OpenCode 2。在运行中的 Orca ≥ 1.4.220 且未设置逐节点模型时，Task 使用原生 `worker-start --agent opencode2`。在 OpenCode 2.0.22 上，这条路径已送达只读 Task，并在隔离工作树中自主写入、读回一个文件；Orca 接受 `worker_done`、报告 `agent_status` 并释放终端。选择模型或使用旧版、版本未知的 Orca 时，保留下文的一次性路径。原生启动失败后绝不再启动第二个 worker。当前 `worker-read --source auto` 对 OpenCode 2 会回退到终端输出，无法得到精确的 provider transcript。
 
 后续运行时发现可继续加在这里，写清受影响的启动路径、可观察的现象和已验证的处理方式。Codex TUI 可见、Task 已完成与 Orca 的 worker 存活状态是不同的证据。
 

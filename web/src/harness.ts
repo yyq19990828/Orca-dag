@@ -23,7 +23,7 @@ import type {
   ViewerConfig,
   WorktreeLaneSpec,
 } from "./types";
-import { SETUP_POLICIES } from "./types";
+import { SETUP_POLICIES, isOpenCodeUi, type OpenCodeUi } from "./types";
 
 const NODE_PREFIX = "orca-dag:harness:";
 const MODEL_PREFIX = "orca-dag:model:";
@@ -32,6 +32,8 @@ const LAYOUT_KEY = "orca-dag:layout";
 const RUN_KEY = "orca-dag:run-id";
 
 const DEFAULTS: ViewerConfig = {
+  defaultOpenCodeUi: "auto",
+  openCodeUiByTask: {},
   defaultHarness: "claude",
   harnessByTask: {},
   modelByTask: {},
@@ -54,7 +56,7 @@ let configRefreshTimer: number | null = null;
 // Server-side policy flags, from GET /api/session (see api.ts). Not config —
 // the server owns them — but the UI needs them reactively, and this store is
 // the natural place to expose them alongside the harness choices they gate.
-let flags = { customCommandsAllowed: false };
+let flags: { customCommandsAllowed: boolean; platform: string | null } = { customCommandsAllowed: false, platform: null };
 
 // Readiness probe (GET /api/readiness): null until the first fetch resolves.
 // Like the flags, this is server-owned state the UI only renders; execution
@@ -81,12 +83,12 @@ export function useConfig(): ViewerConfig {
   return useSyncExternalStore(subscribe, getSnapshot);
 }
 
-function getFlags(): { customCommandsAllowed: boolean } {
+function getFlags() {
   return flags;
 }
 
 /** Reactive access to server policy flags (custom harness commands allowed?). */
-export function useFlags(): { customCommandsAllowed: boolean } {
+export function useFlags() {
   return useSyncExternalStore(subscribe, getFlags);
 }
 
@@ -115,7 +117,7 @@ export async function initConfig(): Promise<void> {
   // the "Custom…" UI. Never fails initConfig — reads work without a session.
   initSession()
     .then((s) => {
-      flags = { customCommandsAllowed: s.allowCustomCommands };
+      flags = { customCommandsAllowed: s.allowCustomCommands, platform: s.platform ?? null };
       emit();
     })
     .catch(() => {
@@ -162,6 +164,8 @@ export async function initConfig(): Promise<void> {
 
 function hydratedConfig(server: Partial<ViewerConfig>, legacy: boolean): ViewerConfig {
   return {
+    defaultOpenCodeUi: isOpenCodeUi(server.defaultOpenCodeUi) ? server.defaultOpenCodeUi : "auto",
+    openCodeUiByTask: Object.fromEntries(Object.entries(server.openCodeUiByTask ?? {}).filter(([, value]) => isOpenCodeUi(value))) as Record<string, OpenCodeUi>,
     defaultHarness:
       asString(server.defaultHarness) || (legacy ? localStorage.getItem(DEFAULT_KEY) : "") || DEFAULTS.defaultHarness,
     harnessByTask: asHarnessMap(server.harnessByTask) ?? (legacy ? readLegacyNodeHarnesses() : {}),
@@ -412,6 +416,21 @@ function asLaneMembership(
 }
 
 // --- field accessors (kept compatible with the old localStorage API) -------
+
+export function setDefaultOpenCodeUi(ui: OpenCodeUi): void {
+  update({ defaultOpenCodeUi: ui });
+}
+
+export function setNodeOpenCodeUi(taskId: string, ui: OpenCodeUi | null): void {
+  const openCodeUiByTask = { ...config.openCodeUiByTask };
+  if (ui) openCodeUiByTask[taskId] = ui;
+  else delete openCodeUiByTask[taskId];
+  update({ openCodeUiByTask });
+}
+
+export function openCodeUiMap(taskIds: string[]): Record<string, OpenCodeUi> {
+  return Object.fromEntries(taskIds.filter(id => config.openCodeUiByTask[id]).map(id => [id, config.openCodeUiByTask[id]]));
+}
 
 export function getNodeHarness(taskId: string): string | null {
   return config.harnessByTask[taskId] ?? null;

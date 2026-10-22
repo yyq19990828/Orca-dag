@@ -17,6 +17,7 @@ import {
   getTaskLane,
   setLaneSpec,
   setNodeHarness,
+  setNodeOpenCodeUi,
   setNodeModel,
   setNodeEffort,
   setNodeRetain,
@@ -28,6 +29,8 @@ import {
 } from "../harness";
 import {
   HARNESSES,
+  OPEN_CODE_UIS,
+  isOpenCodeUi,
   EFFORT_LEVELS,
   EFFORT_SUPPORTED,
   MODEL_PICKER,
@@ -118,8 +121,8 @@ export function NodePanel({
   // Status copy is translated; STATUS_META keeps owning only the palette.
   const t = useT();
   const meta = STATUS_META[node.status];
-  useConfig(); // re-render when the default harness (or this node's) changes
-  const { customCommandsAllowed: customOk } = useFlags(); // gates the "Custom…" option
+  const config = useConfig();
+  const { customCommandsAllowed: customOk, platform } = useFlags();
   // A current Dispatch, completed Task, or failed Task is a conservative
   // session-local fallback while worker-list is loading. The durable worker
   // set supplied by App covers settled history after a viewer restart.
@@ -182,7 +185,6 @@ export function NodePanel({
       alive = false;
     };
   }, []);
-  const config = useConfig();
   const envId = getNodeEnvironment(node.id);
   const placement = getNodePlacement(node.id);
   const selectedEnv = envs?.find((e) => e.id === envId) ?? null;
@@ -439,6 +441,24 @@ export function NodePanel({
 
       <section className="node-panel__group" aria-label={t("node.agentGroupAria")}>
         <h4 className="node-panel__group-title">{t("node.agentGroup")}</h4>
+        {effHarness === "opencode" && (
+          <div className="node-panel__field">
+            <span className="node-panel__key">{t("openCode.uiLabel")}</span>
+            <DoodleSelect value={config.openCodeUiByTask[node.id] ?? INHERIT} disabled={launchLocked}
+              onChange={value => { if (!launchLocked) setNodeOpenCodeUi(node.id, isOpenCodeUi(value) ? value : null); }}
+              options={[
+                { value: INHERIT, label: t("openCode.uiInherit", { mode: t(`openCode.ui.${config.defaultOpenCodeUi}`) }) },
+                ...OPEN_CODE_UIS.map(value => ({ value, label: t(`openCode.ui.${value}`),
+                  disabled: value !== "auto" && Boolean(platform && platform !== "linux" || config.environmentByTask[node.id] ||
+                    config.laneByTask[node.id] || ["new-child", "new-top-level"].includes(config.placementByTask[node.id]?.kind ?? "current")),
+                  hint: value === "auto" ? undefined : t("openCode.uiRequirements") })),
+              ]} />
+            <span className="node-panel__hint">{t("openCode.uiRequirements")}</span>
+            {(config.openCodeUiByTask[node.id] ?? config.defaultOpenCodeUi) === "mini" && (
+              <span className="node-panel__hint">{t("openCode.miniPermissions")}</span>
+            )}
+          </div>
+        )}
         <div className="node-panel__field">
           <span className="node-panel__key">{t("node.harnessKey")}</span>
           <DoodleSelect

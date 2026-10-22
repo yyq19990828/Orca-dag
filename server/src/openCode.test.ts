@@ -10,10 +10,11 @@ import { coordinatorStatus, resetCoordinatorForTests, startCoordinator, stopCoor
 import { createApp, listenLoopback } from "./app";
 import { createSecurityPolicy } from "./security";
 import { RequestLedger } from "./requestLedger";
+import { saveConfig } from "./config";
 import {
   closeReleasedOpenCodeTui, initOrcaRuntime, inspectOpenCodeTui, listWorkers,
   readWorkerOutput, recoverOpenCodeTuiBindings, releaseWorker, retainOpenCodeTui,
-  startOpenCodeTuiWorker, stopWorkerReceipt,
+  startOpenCodeTuiWorker, startOpenCodeInteractiveWorker, stopWorkerReceipt,
 } from "./orca";
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), "orca-dag-tui-test-")));
@@ -40,6 +41,9 @@ const calls = (file: string, verb: string) => readFileSync(file, "utf8").trim().
   .map(line => JSON.parse(line)).filter(row => row.argv[1] === verb);
 const start = () => startOpenCodeTuiWorker({ taskId: "task_test", runId: "run_test", from: "term_coordinator",
   worktree: `path:${root}`, model: "provider/model#high", retryRequestId: randomUUID(), onHandle: () => {} });
+const interactive = (frontend: "mini" | "tui" = "mini", model: string | null = "provider/model#high") =>
+  startOpenCodeInteractiveWorker({ frontend, taskId: "task_test", runId: "run_test", from: "term_coordinator",
+    worktree: `path:${root}`, model, retryRequestId: randomUUID(), onHandle: () => {} });
 const settle = () => {
   const data = load(orcaFile);
   const dispatch = Object.values(data.dispatches)[0] as Record<string, unknown>;
@@ -78,6 +82,194 @@ after(() => {
 });
 
 describe("API-preselected OpenCode full TUI", () => {
+  for (const [defaultUi, override, expected] of [["mini", undefined, "mini"], ["mini", "tui", "tui"], ["tui", "mini", "mini"]] as const) {
+    it(`routes workspace ${defaultUi} / node ${override ?? "inherit"} through the selected frontend`, async () => {
+      const oldFlag = process.env.ORCA_DAG_OPENCODE_TUI;
+      process.env.ORCA_DAG_OPENCODE_TUI = "1"; resetCoordinatorForTests();
+      try {
+        await startCoordinator({ ...coordinatorOpts(), defaultOpenCodeUi: defaultUi,
+          openCodeUiByTask: override ? { task_test: override } : {} });
+        await waitFor(() => Boolean(coordinatorStatus().attempts[0]?.dispatchId));
+        assert.equal((await store.listOpenCodeLaunches())[0].frontend, expected);
+        assert.equal(coordinatorStatus().attempts[0].openCodeUiRequested, override ?? defaultUi);
+        assert.equal(coordinatorStatus().attempts[0].openCodeUiLaunched, expected);
+        await settleWithLock(); await waitFor(() => !coordinatorStatus().running);
+      } finally {
+        await stopCoordinator(); await pause(150); resetCoordinatorForTests();
+        if (oldFlag === undefined) delete process.env.ORCA_DAG_OPENCODE_TUI; else process.env.ORCA_DAG_OPENCODE_TUI = oldFlag;
+      }
+    });
+  }
+  it("loads persisted frontend preferences when a Run request omits the new fields", async () => {
+    resetCoordinatorForTests();
+    const orca = load(orcaFile);
+    orca.tasks.task_done = { id: "task_done", run_id: "run_test", status: "completed", deps: "[]" };
+    writeFileSync(orcaFile, JSON.stringify(orca));
+    const policy = createSecurityPolicy({});
+    await saveConfig(root, { defaultOpenCodeUi: "mini" });
+    const { app } = createApp({ workspaceDir: root, worktree: `path:${root}`, policy, embeddedAssets: null });
+    const server = await listenLoopback(app, 0);
+    try {
+      const address = server.address(); assert.ok(address && typeof address === "object");
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/run`, { method: "POST",
+        headers: { "Content-Type": "application/json", "X-Orca-Dag-Token": policy.token },
+        body: JSON.stringify({ runId: "run_test", defaultHarness: "opencode", maxConcurrency: 1,
+          environmentByTask: { task_done: "env_remote" },
+          placementByTask: { task_done: { kind: "existing", selector: "path:/remote/already-settled" } } }) });
+      assert.equal(response.status, 200, await response.text());
+      await waitFor(() => Boolean(coordinatorStatus().attempts[0]?.dispatchId));
+      assert.equal((await store.listOpenCodeLaunches())[0].frontend, "mini");
+      assert.equal((await store.listOpenCodeLaunches())[0].requestedModel, null);
+      await settleWithLock(); await waitFor(() => !coordinatorStatus().running);
+    } finally {
+      await stopCoordinator(); await pause(150); resetCoordinatorForTests(); server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  });
+  it("freezes per-node frontend choices for later Run dispatches", async () => {
+    resetCoordinatorForTests();
+    const overrides: Record<string, "mini" | "tui"> = { task_test: "mini" };
+    try {
+      await startCoordinator({ ...coordinatorOpts(), defaultOpenCodeUi: "tui", openCodeUiByTask: overrides });
+      overrides.task_test = "tui";
+      await waitFor(() => Boolean(coordinatorStatus().attempts[0]?.dispatchId));
+      assert.equal((await store.listOpenCodeLaunches())[0].frontend, "mini");
+      await settleWithLock(); await waitFor(() => !coordinatorStatus().running);
+    } finally { await stopCoordinator(); await pause(150); resetCoordinatorForTests(); }
+  });
+  it("rejects an explicit new-worktree placement without creating a provider session or worker", async () => {
+    resetCoordinatorForTests();
+    try {
+      await startCoordinator({ ...coordinatorOpts(), defaultOpenCodeUi: "mini",
+        placementByTask: { task_test: { kind: "new-child", setup: "run" } } });
+      await waitFor(() => Boolean(coordinatorStatus().attempts[0]?.settled));
+      assert.equal(coordinatorStatus().attempts[0].outcome, "failed");
+      assert.equal(calls(providerLog, "POST").length, 0);
+      assert.equal(calls(orcaLog, "worker-start").length, 0);
+    } finally { await stopCoordinator(); await pause(150); resetCoordinatorForTests(); }
+  });
+  for (const frontend of ["mini", "tui"] as const) {
+    it(`starts explicit ${frontend} with one session and no model flags in worker-start`, async () => {
+      await interactive(frontend);
+      const launch = (await store.listOpenCodeLaunches())[0];
+      assert.equal(launch.frontend, frontend);
+      const command = calls(orcaLog, "create").find(row => row.argv.includes("--command")).argv;
+      assert.match(command[command.indexOf("--command") + 1], frontend === "mini" ? /^opencode mini --session / : /^opencode --auto --session /);
+      const wire = calls(orcaLog, "worker-start")[0].argv;
+      assert.ok(wire.includes("--terminal"));
+      for (const flag of ["--model", "--effort", "--agent"]) assert.equal(wire.includes(flag), false);
+      assert.equal(calls(providerLog, "POST").filter(row => row.argv[2] === "/api/session").length, 1);
+    });
+    it(`resolves the configured default model before creating ${frontend}'s pane`, async () => {
+      await interactive(frontend, null);
+      const launch = (await store.listOpenCodeLaunches())[0];
+      assert.equal(launch.requestedModel, null);
+      assert.deepEqual(launch.model, { providerID: "provider", id: "model", variant: "high" });
+      const post = calls(providerLog, "POST")[0].argv;
+      assert.deepEqual(JSON.parse(post[post.indexOf("--data") + 1]).model,
+        { providerID: "provider", id: "model", variant: "high" });
+      assert.equal(calls(providerLog, "GET").filter(row => row.argv[2].startsWith("/api/model/default?")).length, 1);
+    });
+  }
+  for (const version of ["opencode v2.1.1", "opencode v2.1.2-beta.1", "unknown"]) {
+    it(`refuses unqualified CLI ${version} before any preparation effect`, async () => {
+      update(providerFile, { version });
+      await assert.rejects(() => interactive(), /OpenCode >= 2.1.2/);
+      assert.deepEqual(await store.listOpenCodeLaunches(), []);
+      assert.equal(calls(providerLog, "POST").length, 0);
+      assert.equal(calls(orcaLog, "create").length, 0);
+    });
+  }
+  it("refuses an old running Orca before creating a session", async () => {
+    update(orcaFile, { version: "1.4.221" });
+    await assert.rejects(() => interactive(), /running Orca/);
+    assert.equal(calls(providerLog, "POST").length, 0);
+  });
+  it("never relaxes an explicit model/variant mismatch or launches a pane for it", async () => {
+    update(providerFile, { modelOverride: { providerID: "provider", id: "model", variant: "low" } });
+    await assert.rejects(() => interactive(), /preserve the requested/);
+    assert.equal(calls(orcaLog, "create").length, 0);
+    assert.equal(calls(orcaLog, "worker-start").length, 0);
+  });
+  it("refuses a default session without a resolved model rather than picking the first available model", async () => {
+    update(providerFile, { missingModel: true });
+    await assert.rejects(() => interactive("mini", null), /Invalid OpenCode Model/);
+    assert.equal(calls(orcaLog, "create").length, 0);
+    assert.equal(calls(providerLog, "POST").length, 1);
+    assert.equal((await store.listOpenCodeLaunches())[0].model, null);
+  });
+  it("refuses a session that replaces the officially resolved default model/variant", async () => {
+    update(providerFile, { modelOverride: { providerID: "provider", id: "model", variant: "low" } });
+    await assert.rejects(() => interactive("mini", null), /preserve the requested/);
+    assert.equal(calls(orcaLog, "create").length, 0);
+    assert.equal(calls(orcaLog, "worker-start").length, 0);
+    assert.equal((await store.listOpenCodeLaunches())[0].model, null);
+  });
+  it("does not create a session when the official default resolver reports an unavailable model", async () => {
+    update(providerFile, { defaultEnabled: false });
+    await assert.rejects(() => interactive("mini", null), /default model is unavailable/);
+    assert.equal(calls(providerLog, "POST").length, 0);
+    assert.equal(calls(orcaLog, "create").length, 0);
+    assert.deepEqual(await store.listOpenCodeLaunches(), []);
+  });
+  it("retains a prepared pane whose model changed before input without injecting or replacing it", async () => {
+    update(providerFile, { changeModelBeforeBind: true });
+    await assert.rejects(() => interactive(), /model changed before binding/);
+    assert.equal(calls(orcaLog, "worker-start").length, 0);
+    assert.equal(calls(orcaLog, "close").length, 0);
+    assert.equal((await store.listOpenCodeLaunches())[0].state, "retained");
+  });
+  it("keeps a lost default-model creation journaled and blocks replacement even without a model", async () => {
+    update(providerFile, { createResponseLost: true });
+    await assert.rejects(() => interactive("mini", null));
+    const launch = (await store.listOpenCodeLaunches())[0];
+    assert.equal(launch.model, null); assert.equal(launch.state, "prepared");
+    assert.equal(launch.frontend, "mini"); assert.equal(launch.requestedModel, null);
+    await assert.rejects(() => interactive("tui", null), /unresolved/);
+    assert.equal(calls(providerLog, "POST").length, 1);
+    assert.equal(calls(orcaLog, "create").length, 0);
+  });
+  it("requires a resolved model before attaching a pane and prevents journal identity replacement", async () => {
+    update(providerFile, { createResponseLost: true });
+    await assert.rejects(() => interactive("mini", null));
+    const launch = (await store.listOpenCodeLaunches())[0];
+    await assert.rejects(() => store.recordOpenCodeLaunch({ ...launch, terminal: "term_other" }), /resolved model/);
+    await assert.rejects(() => store.recordOpenCodeLaunch({ ...launch, frontend: "tui" }), /identity/);
+    await store.recordOpenCodeLaunch({ ...launch, model: { providerID: "provider", id: "model", variant: "high" } });
+    await assert.rejects(() => store.recordOpenCodeLaunch({ ...launch, model: { providerID: "provider", id: "model", variant: "low" } }), /identity/);
+    await assert.rejects(() => store.recordOpenCodeLaunch(launch), /identity/);
+  });
+  it("normalizes historical full-TUI journal rows without consulting current preferences", async () => {
+    await start();
+    const file = join(root, ".orca-dag/sessions.json"); const data = load(file);
+    delete data.openCodeLaunches[0].frontend; delete data.openCodeLaunches[0].requestedModel;
+    writeFileSync(file, JSON.stringify(data));
+    const legacy = (await store.listOpenCodeLaunches())[0];
+    assert.equal(legacy.frontend, "tui"); assert.deepEqual(legacy.requestedModel, legacy.model);
+    await assert.rejects(() => store.recordOpenCodeLaunch({ ...legacy, frontend: "mini" }), /identity/);
+  });
+  it("interrupts mini's exact provider session before external Orca accounting", async () => {
+    const started = await interactive();
+    await stopWorkerReceipt(started.dispatchId!);
+    assert.equal(load(providerFile).outcome, "interrupted");
+    const ops = readFileSync(orcaLog, "utf8").trim().split("\n").map(line => JSON.parse(line).argv[1]);
+    assert.ok(ops.indexOf("interrupt") < ops.indexOf("worker-abandon"));
+    assert.equal(calls(orcaLog, "worker-stop").length, 0);
+  });
+  it("does not inject into a mini pane that never clears its readiness prompt", async () => {
+    update(orcaFile, { tuiWaitSatisfied: false });
+    await assert.rejects(() => interactive(), /did not become ready/);
+    assert.equal(calls(orcaLog, "worker-start").length, 0);
+    assert.equal((await store.listOpenCodeLaunches())[0].state, "closed");
+  });
+  it("accepts a provider-resolved default variant without weakening explicit model selection", async () => {
+    update(providerFile, { defaultVariant: "default" });
+    await startOpenCodeTuiWorker({ taskId: "task_test", runId: "run_test", from: "term_coordinator",
+      worktree: `path:${root}`, model: "provider/model", retryRequestId: randomUUID(), onHandle: () => {} });
+    assert.deepEqual((await store.listOpenCodeLaunches())[0].model,
+      { providerID: "provider", id: "model", variant: "default" });
+    assert.equal(calls(orcaLog, "worker-start").length, 1);
+  });
   it("parses variant/effort without silently overriding conflicting preferences", () => {
     assert.equal(openCodeTuiTitle("6a7e0c99-7db5-42ed-80af-d398feb3b656"), "odag:6a7e0c997db542ed80afd398feb3b656");
     assert.deepEqual(parseOpenCodeModel("provider/model#high"), { providerID: "provider", id: "model", variant: "high" });

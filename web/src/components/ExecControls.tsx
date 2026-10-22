@@ -13,12 +13,14 @@ import {
   refreshConfig,
   retainMap,
   setDefaultHarness,
+  setDefaultOpenCodeUi,
+  openCodeUiMap,
   setMaxConcurrency,
   useConfig,
   useFlags,
   useReadiness,
 } from "../harness";
-import { HARNESSES, type DagEdge, type RunStatus } from "../types";
+import { HARNESSES, OPEN_CODE_UIS, isOpenCodeUi, type DagEdge, type RunStatus } from "../types";
 import { lanePlanProblems } from "../placement";
 import { laneMap, lanesSpecMap } from "../harness";
 
@@ -107,7 +109,7 @@ export function ExecControls({
   // report — so subscribe to the UI language here.
   const t = useT();
   const config = useConfig();
-  const { customCommandsAllowed: customOk } = useFlags();
+  const { customCommandsAllowed: customOk, platform } = useFlags();
   // Execution gate (Phase 2): the server probes the resolved Orca CLI once.
   // null = probe still in flight (controls stay live); false = view-only.
   const readiness = useReadiness();
@@ -257,6 +259,8 @@ export function ExecControls({
         // Phase 7: the lane plan rides along the same way.
         lanesSpecMap(),
         laneMap(taskIdsRef.current),
+        undefined,
+        { defaultOpenCodeUi: launchConfig.defaultOpenCodeUi, openCodeUiByTask: openCodeUiMap(taskIdsRef.current) },
       );
       startedStatus = s;
     } catch (e) {
@@ -304,6 +308,17 @@ export function ExecControls({
           </span>
         </summary>
         <div className="exec__settings-panel" role="group" aria-label={t("exec.groupAria")}>
+          {(config.defaultHarness === "opencode" || taskIds.some(id => (config.harnessByTask[id] ?? config.defaultHarness) === "opencode")) && (
+            <div className="exec__field">
+              <span className="exec__label">{t("openCode.uiLabel")}</span>
+              <DoodleSelect size="sm" value={config.defaultOpenCodeUi} disabled={launchLocked}
+                onChange={value => { if (!launchLocked && isOpenCodeUi(value)) setDefaultOpenCodeUi(value); }}
+                options={OPEN_CODE_UIS.map(value => ({ value, label: t(`openCode.ui.${value}`),
+                  disabled: value !== "auto" && Boolean(platform && platform !== "linux"), hint: value === "auto" ? undefined : t("openCode.uiRequirements") }))} />
+              <span className="exec__hint">{t("openCode.uiRequirements")}</span>
+              {config.defaultOpenCodeUi === "mini" && <span className="exec__hint">{t("openCode.miniPermissions")}</span>}
+            </div>
+          )}
           <div className="exec__field">
             <span className="exec__label">{t("exec.defaultHarness")}</span>
             <DoodleSelect

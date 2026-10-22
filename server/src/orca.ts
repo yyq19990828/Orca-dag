@@ -10,6 +10,7 @@ import {
   openCodeApi, parseOpenCodeModel, verifyOpenCodeModel, verifyOpenCodeSession,
   openCodeTuiTitle,
   validateOpenCodeModel,
+  assertOpenCodeModelSelection, verifyOpenCodeVersion, readOpenCodeDefaultModel,
   readOpenCodeExecution, interruptOpenCodeExecution,
   type OpenCodeLaunch, type OpenCodeEvidence,
 } from "./openCode";
@@ -4187,13 +4188,27 @@ export async function retainOpenCodeTui(dispatchId: string): Promise<void> {
   }
 }
 
-/** API-preselected full TUI, deliberately separate from the one-shot adapter. */
-export async function startOpenCodeTuiWorker(opts: {
+interface OpenCodeStartOptions {
   taskId: string; runId: string; from: string; worktree: string;
-  model: string; effort?: string | null; retryRequestId: string; retryOf?: string;
+  model?: string | null; effort?: string | null; retryRequestId: string; retryOf?: string;
   onHandle: (handle: string | null) => void;
   isCancelled?: () => boolean;
-}): Promise<StartedWorker> {
+}
+
+/** Compatibility entry point: the existing env opt-in keeps its POSIX scope. */
+export async function startOpenCodeTuiWorker(opts: OpenCodeStartOptions): Promise<StartedWorker> {
+  return startOpenCodeSessionWorker({ ...opts, frontend: "tui" }, false);
+}
+
+/** Explicit frontend selection is bounded by the host/CLI contract we accepted. */
+export async function startOpenCodeInteractiveWorker(opts: OpenCodeStartOptions & { frontend: "mini" | "tui" }): Promise<StartedWorker> {
+  return startOpenCodeSessionWorker(opts, true);
+}
+
+async function startOpenCodeSessionWorker(opts: OpenCodeStartOptions & { frontend: "mini" | "tui" }, explicit: boolean): Promise<StartedWorker> {
+  if (explicit && process.platform !== "linux") {
+    throw new OrcaCliError("Explicit OpenCode UI supports only local Linux existing workspaces", "invalid_placement");
+  }
   if (process.platform === "win32" || ["new-child", "new-top-level"].includes(opts.worktree)) {
     throw new OrcaCliError("OpenCode TUI supports only local POSIX existing workspaces", "invalid_placement");
   }
@@ -4202,8 +4217,18 @@ export async function startOpenCodeTuiWorker(opts: {
     throw new OrcaCliError("OpenCode TUI workspace must be positively local and registered", "workspace_unverifiable");
   }
   const workspace = realpathSync(row.path);
-  const model = parseOpenCodeModel(opts.model, opts.effort);
-  await verifyOpenCodeModel(workspace, model);
+  if (explicit) {
+    const status = await runOrca<{ runtime?: { appVersion?: string } }>(["status"]);
+    const version = status.runtime?.appVersion;
+    if (!version || !/^\d+\.\d+\.\d+$/.test(version) || compareVersions(version, "1.4.222") < 0) {
+      throw new OrcaCliError("Explicit OpenCode UI requires running Orca >= 1.4.222", "execution_disabled");
+    }
+    await verifyOpenCodeVersion(workspace);
+  }
+  if (!opts.model && opts.effort) throw new OrcaCliError("OpenCode effort requires an explicit model", "invalid_input");
+  const requestedModel = opts.model ? parseOpenCodeModel(opts.model, opts.effort) : null;
+  const creationModel = requestedModel ?? await readOpenCodeDefaultModel(workspace);
+  await verifyOpenCodeModel(workspace, creationModel, requestedModel === null);
   const store = new ProviderSessionStore(currentWorkspace().dir);
   const previous = await store.listOpenCodeLaunches(opts.runId);
   if (previous.some(v => v.taskId === opts.taskId && ["prepared", "bound"].includes(v.state))) {
@@ -4213,7 +4238,8 @@ export async function startOpenCodeTuiWorker(opts: {
     requestId: opts.retryRequestId, runId: opts.runId, taskId: opts.taskId,
     // V2 session.create accepts an explicit id. Journal it BEFORE POST so a
     // lost create response cannot result in another session on retry/restart.
-    sessionId: `ses_${randomUUID().replaceAll("-", "")}`, workspace, model,
+    sessionId: `ses_${randomUUID().replaceAll("-", "")}`, workspace,
+    frontend: opts.frontend, requestedModel, model: null,
     terminal: null, terminalTitle: openCodeTuiTitle(opts.retryRequestId),
     dispatchId: null, state: "prepared",
   };
@@ -4229,16 +4255,22 @@ export async function startOpenCodeTuiWorker(opts: {
     checkCancellation();
     createAttempted = true;
     const created = asRecord(await openCodeApi(workspace, "POST", "/api/session", {
-      id: launch.sessionId, title: launch.terminalTitle, agent: "build", model,
+      id: launch.sessionId, title: launch.terminalTitle, agent: "build",
+      model: creationModel,
       location: { directory: workspace },
     }));
     if (asRecord(created.data).id !== launch.sessionId) throw new Error("OpenCode did not confirm the journaled session ID");
     createConfirmed = true;
     const session = await verifyOpenCodeSession(launch);
-    if (JSON.stringify(parseOpenCodeModel(`${asRecord(session.model).providerID}/${asRecord(session.model).id}`,
-        asRecord(session.model).variant as string | undefined)) !== JSON.stringify(model)) {
-      throw new Error("OpenCode did not preserve the requested session model/variant");
-    }
+    const model = validateOpenCodeModel(session.model);
+    // Default intent remains null in the journal, but session.create must
+    // still honor the exact model returned by the official default resolver.
+    assertOpenCodeModelSelection(creationModel, model);
+    await verifyOpenCodeModel(workspace, model, true);
+    // Freeze the provider's exact resolution before the pane exists. A lost
+    // create response still leaves the original null-model preparation held.
+    launch = { ...launch, model };
+    await store.recordOpenCodeLaunch(launch);
     checkCancellation();
     terminalAttempted = true;
     const terminal = await runOrca<{ terminal?: { handle?: string } }>([
@@ -4247,7 +4279,7 @@ export async function startOpenCodeTuiWorker(opts: {
       // Prefixing `exec` leaves a visible working TUI but worker-start rejects
       // it as unrecognized (verified on 1.4.222). Unlike the one-shot shell
       // workaround, a full TUI stays interactive after its assigned turn.
-      "--command", `opencode --auto --session ${quoteLocalShellArg(launch.sessionId)}`,
+      "--command", `opencode ${opts.frontend === "mini" ? "mini" : "--auto"} --session ${quoteLocalShellArg(launch.sessionId)}`,
     ]);
     if (!terminal.terminal?.handle) throw new Error("OpenCode terminal creation returned no handle");
     launch = { ...launch, terminal: terminal.terminal.handle };

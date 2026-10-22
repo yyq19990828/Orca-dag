@@ -153,6 +153,12 @@ export const HARNESSES = [
 ] as const;
 export type Harness = (typeof HARNESSES)[number] | (string & {});
 
+export const OPEN_CODE_UIS = ["auto", "mini", "tui"] as const;
+export type OpenCodeUi = typeof OPEN_CODE_UIS[number];
+export function isOpenCodeUi(value: unknown): value is OpenCodeUi {
+  return typeof value === "string" && (OPEN_CODE_UIS as readonly string[]).includes(value);
+}
+
 /** Launch preferences for one attempt — requested (ours) vs effective (receipt echo). */
 export interface LaunchPrefsView {
   agent: string | null;
@@ -393,6 +399,9 @@ export interface RunAttempt {
   host: { kind: string; id: string } | null;
   /** What this viewer asked for at start (Phase 5). */
   requested: LaunchPrefsView;
+  openCodeUiRequested?: OpenCodeUi | null;
+  /** Viewer journal evidence, separate from Orca effective launch fields. */
+  openCodeUiLaunched?: "mini" | "tui" | "native" | "oneshot" | null;
   /** What the runtime echoed back — null/absent fields mean unknown (Phase 5). */
   effective: LaunchPrefsView | null;
   /** The settled Dispatch whose terminal this attempt reused (Phase 5). */
@@ -836,6 +845,8 @@ export interface RunStatus {
  * so the viewer keeps its own store instead of browser localStorage.
  */
 export interface ViewerConfig {
+  defaultOpenCodeUi: OpenCodeUi;
+  openCodeUiByTask: Record<string, OpenCodeUi>;
   defaultHarness: string;
   harnessByTask: Record<string, string>;
   /**

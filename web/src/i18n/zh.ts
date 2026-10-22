@@ -2,6 +2,17 @@ import type { Dict } from "../i18n";
 // Simplified Chinese. Type error here = key missing/extra vs en — fix the
 // dictionary, never silence the compiler.
 const zh: Dict = {
+  "openCode.uiLabel": "OpenCode 启动界面",
+  "openCode.ui.auto": "自动（兼容现有行为）",
+  "openCode.ui.mini": "Mini TUI",
+  "openCode.ui.tui": "完整 TUI",
+  "openCode.ui.native": "原生启动器",
+  "openCode.ui.oneshot": "单次执行",
+  "openCode.uiInherit": "继承（{mode}）",
+  "openCode.uiRequirements": "Mini / 完整 TUI：本机 Linux、当前或已有工作区、无 lane；需要 OpenCode ≥ 2.1.2、Orca ≥ 1.4.222，版本在启动时检查。",
+  "openCode.miniPermissions": "Mini 按 OpenCode 当前权限设置运行，必要时需要确认。",
+  "openCode.uiRequested": "计划界面：",
+  "openCode.uiLaunched": "Viewer 启动记录：",
   "data.summary": "摘要",
   "data.decision": "决策",
   "data.status": "状态",

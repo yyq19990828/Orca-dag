@@ -80,6 +80,7 @@ import {
 import {
   assertDiscoveredWorktreeAudience,
   assertEnvironmentPlacementCompatibility,
+  assertOpenCodeUiPlacement,
   assertLanePlacementDisjoint,
   assertLaneReferences,
   requireToken,
@@ -95,6 +96,8 @@ import {
   validateId,
   validateLaneTaskMap,
   validateModel,
+  validateOpenCodeUi,
+  validateOpenCodeUiTaskMap,
   validatePlacementTaskMap,
   validateSelector,
   validateTaskValueMap,
@@ -762,7 +765,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
   // every mutation. no-store keeps the token out of any cache along the way.
   app.get("/api/session", (_req, res) => {
     res.setHeader("Cache-Control", "no-store");
-    res.json({ token: policy.token, allowCustomCommands: policy.allowCustomCommands });
+    res.json({ token: policy.token, allowCustomCommands: policy.allowCustomCommands, platform: process.platform });
   });
 
   app.get("/api/health", (_req, res) => {
@@ -1132,6 +1135,10 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       const defaultHarness = req.body?.defaultHarness
         ? validateHarness(req.body.defaultHarness, policy)
         : "claude";
+      const storedConfig = await loadConfig(workspaceDir);
+      const defaultOpenCodeUi = req.body?.defaultOpenCodeUi === undefined
+        ? storedConfig.defaultOpenCodeUi ?? "auto" : validateOpenCodeUi(req.body.defaultOpenCodeUi);
+      const openCodeUiByTask = validateOpenCodeUiTaskMap(req.body?.openCodeUiByTask) ?? storedConfig.openCodeUiByTask ?? {};
       const harnessByTask = validateTaskValueMap(
         req.body?.harnessByTask,
         "harnessByTask",
@@ -1186,6 +1193,20 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       assertLaneReferences(laneByTask, worktreeLanes);
       assertLanePlacementDisjoint(placementByTask, laneByTask);
       assertEnvironmentPlacementCompatibility(environmentByTask, placementByTask);
+      // A known unsupported explicit placement must not bind a coordinator or
+      // create a worker. Dormant preferences on other harnesses do no work.
+      if ((defaultHarness === "opencode" || Object.values(harnessByTask ?? {}).includes("opencode")) &&
+          (defaultOpenCodeUi !== "auto" || Object.values(openCodeUiByTask).some(v => v !== "auto"))) {
+        for (const task of await listTasks(runId)) {
+          // A new preference never changes an already running/settled
+          // attempt. Recovery uses its journal, not today's placement choice.
+          if (["completed", "failed", "dispatched"].includes(task.status)) continue;
+          if ((harnessByTask?.[task.id] ?? defaultHarness) === "opencode") {
+            assertOpenCodeUiPlacement(openCodeUiByTask[task.id] ?? defaultOpenCodeUi,
+              environmentByTask?.[task.id], laneByTask?.[task.id], placementByTask?.[task.id]);
+          }
+        }
+      }
       // Per-task opt-out from automatic release (plan §7.3 retainByTask).
       // The request wins; the persisted config fills it in so a hand-edited
       // `.orca-dag/config.json` works without any UI for it yet. Absent
@@ -1220,6 +1241,8 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         modelByTask: modelByTask ?? {},
         effortByTask: effortByTask ?? {},
         defaultHarness,
+        defaultOpenCodeUi,
+        openCodeUiByTask,
         maxConcurrency,
         worktree,
         retainByTask: retainByTask ?? undefined,
@@ -3170,6 +3193,8 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         res.status(400).json({ error: "config body must be a JSON object", code: "invalid_input" });
         return;
       }
+      if (body.defaultOpenCodeUi !== undefined) validateOpenCodeUi(body.defaultOpenCodeUi);
+      validateOpenCodeUiTaskMap(body.openCodeUiByTask);
       validateTaskValueMap(
         body.harnessByTask,
         "harnessByTask",

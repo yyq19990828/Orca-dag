@@ -19,12 +19,39 @@ export interface OpenCodeLaunch {
   taskId: string;
   sessionId: string;
   workspace: string;
-  model: OpenCodeModel;
+  /** Missing on historical full-TUI rows; the reader normalizes it to tui. */
+  frontend?: "mini" | "tui";
+  requestedModel?: OpenCodeModel | null;
+  /** Null only before a session model is resolved, with no pane/Dispatch. */
+  model: OpenCodeModel | null;
   terminal: string | null;
   terminalTitle: string;
   dispatchId: string | null;
   /** Unknown effects stay prepared, never silently classified as closed. */
   state: "prepared" | "bound" | "closed" | "retained";
+}
+
+/** A selected frontend never falls back to another worker after refusal. */
+export async function verifyOpenCodeVersion(workspace: string): Promise<void> {
+  try {
+    const { stdout } = await execute("opencode", ["--version"], {
+      cwd: workspace, shell: false, timeout: 3_000, maxBuffer: 4096, encoding: "utf8",
+    });
+    const match = /^(?:opencode v?|v)?(\d+)\.(\d+)\.(\d+)$/.exec(stdout.trim());
+    if (match) {
+      const [, major, minor, patch] = match.map(Number);
+      if (major > 2 || major === 2 && (minor > 1 || minor === 1 && patch >= 2)) return;
+    }
+  } catch { /* No diagnostic passthrough: launch environments may carry credentials. */ }
+  throw new Error("Explicit OpenCode UI requires a verified OpenCode >= 2.1.2 in the worker workspace");
+}
+
+/** Unspecified variant means use the provider's default, not discard a requested variant. */
+export function assertOpenCodeModelSelection(requested: OpenCodeModel | null, selected: OpenCodeModel): void {
+  if (requested && (requested.providerID !== selected.providerID || requested.id !== selected.id ||
+      requested.variant !== undefined && requested.variant !== selected.variant)) {
+    throw new Error("OpenCode did not preserve the requested session model/variant");
+  }
 }
 export interface OpenCodeEvidence {
   source: "opencode-api";
@@ -78,11 +105,24 @@ export async function openCodeApi(workspace: string, method: string, path: strin
   }
 }
 
-export async function verifyOpenCodeModel(workspace: string, model: OpenCodeModel): Promise<void> {
+/** V2 session.create leaves model empty unless given one. Ask the official
+ * resolver for this workspace's default, never choose the first listed model.
+ * Model.Info also contains provider settings; copy only the public reference. */
+export async function readOpenCodeDefaultModel(workspace: string): Promise<OpenCodeModel> {
+  const response = record(await openCodeApi(workspace, "GET", `/api/model/default?location[directory]=${encodeURIComponent(workspace)}`));
+  const selected = record(response.data);
+  if (selected.enabled !== true) throw new Error("OpenCode default model is unavailable in this workspace");
+  return validateOpenCodeModel({ providerID: selected.providerID, id: selected.id,
+    ...(selected.variant === undefined ? {} : { variant: selected.variant }) });
+}
+
+export async function verifyOpenCodeModel(workspace: string, model: OpenCodeModel, resolved = false): Promise<void> {
   const response = record(await openCodeApi(workspace, "GET", `/api/model?location[directory]=${encodeURIComponent(workspace)}`));
   const rows = Array.isArray(response.data) ? response.data.map(record) : [];
   const matches = rows.filter(row => row.providerID === model.providerID && row.id === model.id && row.enabled === true);
-  if (matches.length !== 1 || (model.variant &&
+  // V2 reports the resolved default as a sentinel, absent from variants[].
+  // Only trust that sentinel on an actual session response, not a free-text override.
+  if (matches.length !== 1 || (model.variant && !(resolved && model.variant === "default") &&
       (!Array.isArray(matches[0].variants) || !matches[0].variants.some(v => record(v).id === model.variant)))) {
     throw new Error("The requested OpenCode model/variant is not uniquely available in this workspace");
   }
@@ -99,7 +139,7 @@ export async function verifyOpenCodeSession(launch: OpenCodeLaunch): Promise<Rec
 
 export function validateOpenCodeLaunch(value: unknown): OpenCodeLaunch {
   const row = record(value);
-  const keys = ["requestId", "runId", "taskId", "sessionId", "workspace", "model", "terminal", "terminalTitle", "dispatchId", "state"];
+  const keys = ["requestId", "runId", "taskId", "sessionId", "workspace", "model", "frontend", "requestedModel", "terminal", "terminalTitle", "dispatchId", "state"];
   if (Object.keys(row).some(key => !keys.includes(key))) throw new Error("Unknown OpenCode launch fields");
   for (const key of ["requestId", "runId", "taskId", "sessionId"]) {
     if (typeof row[key] !== "string" || !ID.test(row[key] as string)) throw new Error(`Invalid OpenCode launch ${key}`);
@@ -111,7 +151,12 @@ export function validateOpenCodeLaunch(value: unknown): OpenCodeLaunch {
       ![openCodeTuiTitle(String(row.requestId)), `orca-dag OpenCode TUI · ${row.requestId}`].includes(String(row.terminalTitle)) ||
       !["prepared", "bound", "closed", "retained"].includes(String(row.state)) ||
       (row.state === "bound" && (!row.terminal || !row.dispatchId))) throw new Error("Invalid OpenCode launch identity/state");
-  return { ...row, model: validateOpenCodeModel(row.model) } as unknown as OpenCodeLaunch;
+  if (row.frontend !== undefined && row.frontend !== "mini" && row.frontend !== "tui") throw new Error("Invalid OpenCode frontend");
+  if (row.model === null && (row.terminal !== null || row.dispatchId !== null)) throw new Error("OpenCode terminal requires a resolved model");
+  const model = row.model === null ? null : validateOpenCodeModel(row.model);
+  const requestedModel = row.requestedModel === undefined ? model :
+    row.requestedModel === null ? null : validateOpenCodeModel(row.requestedModel);
+  return { ...row, frontend: row.frontend ?? "tui", requestedModel, model } as unknown as OpenCodeLaunch;
 }
 
 function marker(text: string, id: string): boolean {

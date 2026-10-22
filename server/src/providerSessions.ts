@@ -407,8 +407,15 @@ export class ProviderSessionStore {
       const launches = file.openCodeLaunches ?? [];
       const existing = launches.find(v => v.requestId === row.requestId);
       if (existing) {
-        for (const key of ["runId", "taskId", "sessionId", "workspace", "terminalTitle", "model"] as const) {
+        for (const key of ["runId", "taskId", "sessionId", "workspace", "terminalTitle", "frontend", "requestedModel"] as const) {
           if (JSON.stringify(existing[key]) !== JSON.stringify(row[key])) throw new Error("OpenCode launch identity cannot change");
+        }
+        // The one allowed refinement resolves a journaled, not-yet-created
+        // session's effective model before any terminal or Dispatch exists.
+        if (JSON.stringify(existing.model) !== JSON.stringify(row.model) &&
+            !(existing.model === null && row.model !== null && existing.state === "prepared" &&
+              !existing.terminal && !existing.dispatchId && !row.terminal && !row.dispatchId && row.state === "prepared")) {
+          throw new Error("OpenCode launch identity cannot change");
         }
         if ((existing.terminal && existing.terminal !== row.terminal) ||
             (existing.dispatchId && existing.dispatchId !== row.dispatchId) ||

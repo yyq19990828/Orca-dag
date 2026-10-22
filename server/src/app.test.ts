@@ -72,6 +72,20 @@ describe("loopback binding", () => {
   });
 });
 
+describe("OpenCode UI HTTP preferences", () => {
+  it("round-trips a patch and rejects invalid modes at both write and launch boundaries", async () => {
+    assert.equal((await call("PUT", "/api/config", { defaultOpenCodeUi: "mini", openCodeUiByTask: { task_a: "tui" } }, policy.token)).status, 200);
+    assert.equal((await call("PUT", "/api/config", { runId: "run_ui" }, policy.token)).status, 200);
+    const config = (await call("GET", "/api/config")).json;
+    assert.equal(config.defaultOpenCodeUi, "mini"); assert.deepEqual(config.openCodeUiByTask, { task_a: "tui" });
+    for (const patch of [{ defaultOpenCodeUi: "full" }, { openCodeUiByTask: { task_a: "invalid" } }, { openCodeUiByTask: [] }]) {
+      assert.equal((await call("PUT", "/api/config", patch, policy.token)).status, 400);
+      assert.equal((await call("POST", "/api/run", { runId: "run_test", ...patch }, policy.token)).status, 400);
+    }
+    await call("PUT", "/api/config", { defaultOpenCodeUi: "auto", openCodeUiByTask: {} }, policy.token);
+  });
+});
+
 describe("unauthenticated surface", () => {
   it("serves /api/health without a token", async () => {
     const { status, json } = await call("GET", "/api/health");

@@ -7,8 +7,10 @@ const state = JSON.parse(readFileSync(file, "utf8"));
 appendFileSync(process.env.FAKE_OPENCODE_LOG, JSON.stringify({ argv: args, at: Date.now() }) + "\n");
 if (state.unavailable) { process.stderr.write("private credential must not leak"); process.exit(1); }
 const [command, method, path] = args;
+if (command === "--version") { console.log(state.version ?? "opencode v2.1.2"); process.exit(0); }
 if (command !== "api") process.exit(1);
 const reply = data => { console.log(JSON.stringify(data)); process.exit(0); };
+if (path.startsWith("/api/model/default")) reply({ data: { ...(state.defaultModel ?? { providerID: "provider", id: "model", variant: "high" }), enabled: state.defaultEnabled !== false } });
 if (path.startsWith("/api/model")) reply({ data: [{ id: "model", providerID: "provider", enabled: true, variants: [{ id: "high" }, { id: "low" }] }] });
 if (path === "/api/session" && method === "POST") {
   const body = JSON.parse(args[args.indexOf("--data") + 1]);
@@ -16,6 +18,9 @@ if (path === "/api/session" && method === "POST") {
   const journal = JSON.parse(readFileSync(process.env.FAKE_OPENCODE_JOURNAL, "utf8"));
   if (!journal.openCodeLaunches?.some(row => row.sessionId === body.id)) process.exit(2);
   state.sessions ??= {};
+  if (state.defaultVariant && !body.model.variant) body.model.variant = state.defaultVariant;
+  if (state.modelOverride) body.model = state.modelOverride;
+  if (state.missingModel) body.model = null;
   state.sessions[body.id] = body;
   writeFileSync(file, JSON.stringify(state));
   if (state.createResponseLost) process.exit(1);
@@ -47,6 +52,8 @@ if (path.includes("/message")) {
   if (state.loopCursor) reply({ data: messages, cursor: { next: "same_cursor" } });
   reply({ data: messages, cursor: { next: null, previous: null } });
 }
-reply({ data: { ...session, model: { id: session.model.id, providerID: session.model.providerID,
-  ...(session.model.variant ? { variant: session.model.variant } : {}) },
+const model = state.changeModelBeforeBind && JSON.parse(readFileSync(process.env.FAKE_ORCA_STATE)).terminals?.some(t => t.command?.includes(sessionId))
+  ? { ...session.model, variant: "low" } : session.model;
+reply({ data: { ...session, model: model ? { id: model.id, providerID: model.providerID,
+  ...(model.variant ? { variant: model.variant } : {}) } : null,
   location: state.wrongWorkspace ? { directory: "/" } : session.location, outcome: state.outcome ?? "succeeded" } });

@@ -23,6 +23,27 @@ after(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+describe("config: OpenCode interface preferences", () => {
+  it("preserves legacy absence and round-trips defaults, overrides, inheritance and patches", async () => {
+    writeFileSync(join(dir, CONFIG_FILE), JSON.stringify({ defaultHarness: "codex" }));
+    assert.equal((await loadConfig(dir)).defaultOpenCodeUi, undefined);
+    assert.equal((await loadConfig(dir)).openCodeUiByTask, undefined);
+    await saveConfig(dir, { defaultOpenCodeUi: "mini", openCodeUiByTask: { task_a: "tui", task_b: "auto" } });
+    await saveConfig(dir, { runId: "run_other" });
+    const config = await loadConfig(dir);
+    assert.equal(config.defaultHarness, "codex"); assert.equal(config.defaultOpenCodeUi, "mini");
+    assert.deepEqual(config.openCodeUiByTask, { task_a: "tui", task_b: "auto" });
+    await saveConfig(dir, { openCodeUiByTask: {} });
+    assert.deepEqual((await loadConfig(dir)).openCodeUiByTask, {});
+  });
+  it("drops malformed hand-written enum values without inventing valid overrides", async () => {
+    writeFileSync(join(dir, CONFIG_FILE), JSON.stringify({ defaultOpenCodeUi: "other", openCodeUiByTask: { task_a: "mini", task_b: null, task_c: "full" } }));
+    const config = await loadConfig(dir);
+    assert.equal(config.defaultOpenCodeUi, undefined);
+    assert.deepEqual(config.openCodeUiByTask, { task_a: "mini" });
+  });
+});
+
 describe("config: effortByTask (Phase 5)", () => {
   it("round-trips a well-formed effort map through save + load", async () => {
     await saveConfig(dir, { effortByTask: { task_a: "high", task_b: "low" } });

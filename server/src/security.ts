@@ -9,8 +9,9 @@ import {
   DISPLAY_NAME_MAX,
   PLACEMENT_NAME_PATTERN,
   SETUP_POLICIES,
+  isOpenCodeUi,
 } from "./config";
-import type { CreationOptions, PlacementSpec, SetupPolicy, WorktreeLaneSpec } from "./config";
+import type { CreationOptions, PlacementSpec, SetupPolicy, WorktreeLaneSpec, OpenCodeUi } from "./config";
 
 /**
  * Local control-plane security (Phase 1 of the hardening plan).
@@ -101,6 +102,28 @@ export class ValidationError extends Error {
     super(message);
     this.name = "ValidationError";
     this.code = code;
+  }
+}
+
+export function validateOpenCodeUi(value: unknown): OpenCodeUi {
+  if (!isOpenCodeUi(value)) throw new ValidationError("OpenCode UI must be auto, mini, or tui");
+  return value;
+}
+
+export function validateOpenCodeUiTaskMap(raw: unknown): Record<string, OpenCodeUi> | null {
+  if (raw === undefined) return null;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new ValidationError("openCodeUiByTask must be an object");
+  // Unlike legacy free-text maps, null/blank values are invalid enums;
+  // inheritance is represented by removing the Task key.
+  for (const value of Object.values(raw)) validateOpenCodeUi(value);
+  return validateTaskValueMap(raw, "openCodeUiByTask", { maxKeys: 500, valueKind: "OpenCode UI" }, validateOpenCodeUi) as Record<string, OpenCodeUi>;
+}
+
+export function assertOpenCodeUiPlacement(ui: OpenCodeUi, environment: unknown, lane: unknown,
+  placement: Pick<PlacementSpec, "kind"> | undefined, platform = process.platform): void {
+  if (ui !== "auto" && (platform !== "linux" || environment || lane ||
+      placement && !["current", "existing"].includes(placement.kind))) {
+    throw new ValidationError("Explicit OpenCode UI supports only local Linux current/existing non-lane workspaces", "invalid_placement");
   }
 }
 

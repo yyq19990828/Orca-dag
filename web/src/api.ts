@@ -53,6 +53,7 @@ export class ApiError extends Error {
 interface SessionInfo {
   token: string;
   allowCustomCommands: boolean;
+  platform?: string;
 }
 
 let session: SessionInfo | null = null;
@@ -294,6 +295,7 @@ export async function startRun(
   worktreeLanes: Record<string, WorktreeLaneSpec> = {},
   laneByTask: Record<string, string> = {},
   resumeBlocked?: { dispatchId: string; allowUnknownProvider: boolean },
+  openCodeUi?: Pick<ViewerConfig, "defaultOpenCodeUi" | "openCodeUiByTask">,
 ): Promise<RunStatus> {
   return post(`/api/run`, {
     runId,
@@ -310,6 +312,7 @@ export async function startRun(
     worktreeLanes,
     laneByTask,
     resumeBlocked,
+    ...openCodeUi,
   });
 }
 

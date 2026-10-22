@@ -36,6 +36,7 @@ import {
   showWorktree,
   startLegacyWorker,
   startOpenCodeTuiWorker,
+  startOpenCodeInteractiveWorker,
   findOpenCodeTuiLaunch,
   inspectOpenCodeTui,
   closeReleasedOpenCodeTui,
@@ -60,7 +61,8 @@ import {
   FLEET_CAPABILITY_GAP_REASONS,
 } from "./orca";
 import type { MutationRequestMeta } from "./requestLedger";
-import type { LaneSeedPlacement, PlacementSpec, WorktreeLaneSpec } from "./config";
+import type { LaneSeedPlacement, PlacementSpec, WorktreeLaneSpec, OpenCodeUi } from "./config";
+import { assertOpenCodeUiPlacement, validateOpenCodeUi } from "./security";
 import { ProviderSessionStore, discoverProviderSession } from "./providerSessions";
 import type { ProviderSessionBinding, ProviderSessionObservation, ProviderSessionStatus } from "./providerSessions";
 import { LaunchHistory } from "./launchHistory";
@@ -448,6 +450,9 @@ interface Attempt {
   /** Exact provider session binding, when recovery evidence supplied one. */
   providerSession: RecoverySessionView | null;
   openCodeTui?: boolean;
+  openCodeUiRequested?: OpenCodeUi | null;
+  /** Viewer launch evidence, never an Orca effective-launch echo. */
+  openCodeUiLaunched?: "mini" | "tui" | "native" | "oneshot" | null;
   openCodeEvidence?: OpenCodeEvidence | null;
   openCodeCheckedAt?: number;
 }
@@ -549,6 +554,8 @@ export interface StopReport {
 
 /** Options for one coordinator run; also the POST /api/run contract. */
 export interface StartOpts {
+  defaultOpenCodeUi?: OpenCodeUi;
+  openCodeUiByTask?: Record<string, OpenCodeUi>;
   runId: string;
   harnessByTask: Record<string, string>;
   /** Per-task model override; only used when the task's harness supports one. */
@@ -905,6 +912,8 @@ export function coordinatorStatus() {
       host: a.host,
       providerSession: a.providerSession ? { ...a.providerSession } : null,
       openCodeEvidence: a.openCodeEvidence ?? null,
+      openCodeUiRequested: a.openCodeUiRequested ?? null,
+      openCodeUiLaunched: a.openCodeUiLaunched ?? null,
       requested: a.requested,
       effective: a.effective,
       reuseOf: a.reuseOf,
@@ -992,6 +1001,9 @@ export async function startCoordinator(opts: StartOpts): Promise<void> {
   // bump and exit instead of racing this new incarnation.
   const myLoop = ++coordinatorLoopGeneration;
   state.phase = "binding";
+  // Freeze frontend choices for this Run; a config refresh cannot change
+  // the launch of a later ready task or a retry behind the operator's back.
+  opts = { ...opts, openCodeUiByTask: { ...opts.openCodeUiByTask } };
   state.opts = opts;
   state.attempts = new Map();
   state.retryCandidates = new Map();
@@ -1860,8 +1872,10 @@ async function recoverState(opts: StartOpts): Promise<void> {
       attempt.openCodeTui = true;
       attempt.harness = "opencode";
       attempt.handle = tui.terminal;
-      attempt.requested = { agent: "opencode", model: `${tui.model.providerID}/${tui.model.id}`,
-        effort: tui.model.variant ?? null, worktree: `path:${tui.workspace}`, terminal: tui.terminal, on: null };
+      const requested = tui.requestedModel;
+      attempt.requested = { agent: "opencode", model: requested ? `${requested.providerID}/${requested.id}` : null,
+        effort: requested?.variant ?? null, worktree: `path:${tui.workspace}`, terminal: tui.terminal, on: null };
+      attempt.openCodeUiLaunched = tui.frontend ?? "tui";
       if (tui.state === "closed" || tui.state === "retained") attempt.terminalDecision = tui.state;
     }
     attempt.fleetTerminalState = row.terminalState;
@@ -3905,7 +3919,15 @@ async function startOne(
     // versions, not `opencode2`: even an advertised launch-preferences
     // capability must not remove this model guard or add viewer Enter retries.
     let nativeOpenCode = false;
-    const apiOpenCode = attempt.harness === "opencode" && Boolean(model) && process.env.ORCA_DAG_OPENCODE_TUI === "1";
+    const ui = attempt.harness === "opencode"
+      ? validateOpenCodeUi(opts.openCodeUiByTask?.[task.id] ?? opts.defaultOpenCodeUi ?? "auto") : "auto";
+    attempt.openCodeUiRequested = attempt.harness === "opencode" ? ui : null;
+    if (attempt.harness === "opencode") {
+      assertOpenCodeUiPlacement(ui, environment, laneId, placement);
+      if (ui !== "auto" && reuseTerminal) throw new OrcaCliError("Explicit OpenCode UI cannot reuse a generic terminal", "invalid_placement");
+    }
+    const explicitOpenCode = attempt.harness === "opencode" && ui !== "auto";
+    const apiOpenCode = explicitOpenCode || attempt.harness === "opencode" && Boolean(model) && process.env.ORCA_DAG_OPENCODE_TUI === "1";
     attempt.openCodeTui = apiOpenCode;
     if (attempt.harness === "opencode" && (!model || apiOpenCode)) {
       const status = await runOrca<{ runtime?: { appVersion?: string } }>(["status"]);
@@ -4116,7 +4138,10 @@ async function startOne(
     // silently executing "remotely requested" work locally (that would be the
     // synthetic local fallback the plan forbids).
     if (apiOpenCode) {
-      started = await startOpenCodeTuiWorker({
+      const start = explicitOpenCode
+        ? (args: Parameters<typeof startOpenCodeTuiWorker>[0]) => startOpenCodeInteractiveWorker({ ...args, frontend: ui === "mini" ? "mini" : "tui" })
+        : startOpenCodeTuiWorker;
+      started = await start({
         taskId: task.id, runId, from, worktree: wt.worktree ?? opts.worktree,
         model: model!, effort: attempt.requested.effort,
         retryRequestId: startRequestId, retryOf: retryOf ?? undefined,
@@ -4124,6 +4149,7 @@ async function startOne(
         isCancelled: () => !isCurrent(),
       });
       attempt.requested = { ...attempt.requested, terminal: started.handle };
+      attempt.openCodeUiLaunched = started.openCodeLaunch?.frontend ?? null;
     } else if (attempt.harness === "opencode" && !nativeOpenCode) {
       if (environment) {
         throw new OrcaCliError(
@@ -4272,6 +4298,9 @@ async function startOne(
       }
     }
     attempt.mode = started.mode;
+    if (attempt.harness === "opencode" && !apiOpenCode && started.dispatchId) {
+      attempt.openCodeUiLaunched = nativeOpenCode ? "native" : "oneshot";
+    }
     if (started.dispatchId) {
       bindAttemptDispatch(attempt, started.dispatchId);
     }

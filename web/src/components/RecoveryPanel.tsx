@@ -11,7 +11,7 @@ import {
 } from "../api";
 import {
   effortMap, environmentMap, getMaxConcurrency, harnessMap, laneMap,
-  lanesSpecMap, modelMap, placementMap, retainMap, useConfig,
+  lanesSpecMap, modelMap, placementMap, retainMap, useConfig, refreshConfig, openCodeUiMap,
 } from "../harness";
 import { useLang, useT } from "../i18n";
 import { useDecisionDialog } from "./DecisionDialog";
@@ -81,7 +81,7 @@ export const RecoveryPanel = memo(function RecoveryPanel({
   disabledReason?: string | null;
 }) {
   const dialog = useDecisionDialog();
-  const config = useConfig();
+  useConfig();
   // The row memos below build translated fallbacks with the non-reactive `t`,
   // so `lang` rides in their dependency lists.
   const t = useT();
@@ -448,12 +448,14 @@ export const RecoveryPanel = memo(function RecoveryPanel({
     onRunStarting?.(runId);
     let started: RunStatus | null = null;
     try {
+      const launchConfig = await refreshConfig();
       started = await startRun(
-        runId, harnessMap(taskIds), config.defaultHarness, getMaxConcurrency(),
+        runId, harnessMap(taskIds), launchConfig.defaultHarness, getMaxConcurrency(),
         modelMap(taskIds), effortMap(taskIds), retainMap(taskIds),
         environmentMap(taskIds), placementMap(taskIds), lanesSpecMap(),
         laneMap(taskIds),
         { dispatchId: row.dispatchId, allowUnknownProvider: sessionStatus !== "exited" },
+        { defaultOpenCodeUi: launchConfig.defaultOpenCodeUi, openCodeUiByTask: openCodeUiMap(taskIds) },
       );
       onRetried();
     } catch (error) {

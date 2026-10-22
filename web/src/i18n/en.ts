@@ -1,6 +1,17 @@
 // English dictionary — the source of truth for keys. zh must define exactly
 // these keys (typed Record<TranslationKey, string> in zh.ts; tsc enforces it).
 const en = {
+  "openCode.uiLabel": "OpenCode interface",
+  "openCode.ui.auto": "Auto (existing behavior)",
+  "openCode.ui.mini": "Mini TUI",
+  "openCode.ui.tui": "Full TUI",
+  "openCode.ui.native": "Native launcher",
+  "openCode.ui.oneshot": "One-shot",
+  "openCode.uiInherit": "Inherit ({mode})",
+  "openCode.uiRequirements": "Mini / Full TUI: local Linux, current or existing workspace, no lane; OpenCode ≥ 2.1.2 and Orca ≥ 1.4.222. Versions are checked at launch.",
+  "openCode.miniPermissions": "Mini uses your OpenCode permission settings and may need confirmation.",
+  "openCode.uiRequested": "Planned interface:",
+  "openCode.uiLaunched": "Viewer launch record:",
   "data.summary": "Summary",
   "data.decision": "Decision",
   "data.status": "Status",

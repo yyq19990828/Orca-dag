@@ -55,6 +55,7 @@ Orca Tasks have no fields for harness, model, placement, or canvas layout. The v
 
 | Setting | Default / allowed value | Effect and limit |
 | --- | --- | --- |
+| OpenCode interface | `auto` | Auto retains current routes; Mini TUI / Full TUI are explicit, with per-node override or inherit. |
 | Default harness | `claude` | Used when a Stage has no override. Known choices include Claude, Codex, OpenCode, Gemini, Grok, Cursor, Droid, and Kimi. |
 | Stage harness | Inherits default | Selects the launch adapter; custom commands require `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1`. |
 | Stage model | Agent default | OpenCode enumerates `provider/model` IDs (optional `#variant`); Claude, Codex, and Cursor accept a model name. Other harnesses have no model picker. |
@@ -150,9 +151,17 @@ All five state files live inside `.orca-dag/`: `config.json` stores preferences,
 
 `orca-dag uninstall` removes installed skills, stale viewer coordinator terminals, and only its exact managed `.orca-dag/` and legacy `.orca/` ignore blocks in the selected workspace; user ignore rules are retained. `--purge` removes known viewer-owned state files in both layouts and committed-Stage Git evidence, but **never the shared directory, timestamp planning folders, or other user files**. Neither ordinary uninstall nor `--dry-run` relocates state. After uninstall, add your own ignore rules if retained files should stay ignored. It does not delete Orca Run/Task history, merge, or publish your branches.
 
+### OpenCode interface selection
+
+The Run settings and OpenCode node panel offer Auto, Mini TUI and Full TUI. Node overrides win over the workspace default; inherit removes the override. Auto preserves the existing routing described below, including `ORCA_DAG_OPENCODE_TUI=1`. Explicit selections do not need that flag. Choices are frozen for the Run, including Retry; Recovery refreshes saved choices before starting a new Run loop.
+
+Explicit interfaces currently require local Linux current/existing workspaces, no lane or generic terminal reuse, running Orca ≥ 1.4.222 and OpenCode ≥ 2.1.2 in the worker workspace. Unsupported placements or unknown versions are refused before worker preparation, with no alternate launch. The official workspace default-model resolver selects the configured default, which is then verified on the exact new session; explicit variants remain strict. Mini uses `opencode mini --session` without `--auto`, respects current permissions and can wait for confirmation.
+
+Both interfaces retain exact API/session/terminal identity in `sessions.json`. Viewer frontend records are not Orca effective-launch evidence. Accepted Task settlement and confirmed provider exit are required before caller-owned terminal cleanup. Later user input or unproven message provenance retains the pane; a follow-up nudge is not exempt merely because its text looks familiar. Stop first interrupts the exact provider execution, then performs the existing external `worker-abandon` accounting. New journal fields are backward-readable by this version, but older binaries can reject them: settle new preparations and back up history before downgrading; changing future starts to Auto is the normal feature rollback.
+
 ## Known limitations
 
-The viewer's `opencode` choice runs OpenCode 2. On a running Orca 1.4.220+, a Task without a per-node model override uses native `worker-start --agent opencode2`. With OpenCode 2.0.22, that path delivered a read-only Task and autonomously wrote and verified one file in an isolated worktree; Orca accepted `worker_done`, reported `agent_status`, and released the terminal. Selecting a model or using an older/unknown Orca keeps the one-shot path below. A failed native start never launches a second worker. `worker-read --source auto` currently falls back to terminal output for OpenCode 2, so this path does not provide an exact provider transcript.
+In Auto mode, the viewer's `opencode` choice runs OpenCode 2. On a running Orca 1.4.220+, a Task without a per-node model override uses native `worker-start --agent opencode2`. With OpenCode 2.0.22, that path delivered a read-only Task and autonomously wrote and verified one file in an isolated worktree; Orca accepted `worker_done`, reported `agent_status`, and released the terminal. Selecting a model or using an older/unknown Orca keeps the one-shot path below. A failed native start never launches a second worker. `worker-read --source auto` currently falls back to terminal output for OpenCode 2, so this path does not provide an exact provider transcript.
 
 Add new runtime findings here with the affected launch path, observable symptom, and tested recovery. Keep Orca fleet liveness separate from whether the Codex TUI is visible or a Task has completed.
 
