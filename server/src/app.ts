@@ -1766,7 +1766,9 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       res.json({
         runtime: {
           cli: r.cli,
+          cliVersion: r.cliVersion,
           version: r.version,
+          runtimeState: r.runtimeState,
           executionEnabled: r.executionEnabled,
           reason: r.reason,
         },

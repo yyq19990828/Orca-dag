@@ -291,6 +291,8 @@ before(() => {
     workspace,
     worktree: "path:" + workspace,
     version: "1.4.205",
+    cliVersion: "1.4.205",
+    runtimeState: "ready",
     executionEnabled: true,
     reason: null,
   };
@@ -803,6 +805,129 @@ describe("questions hold the Delivery open", () => {
     await waitFor(() => (coordinatorStatus().phase === "completed" ? true : null), "completion after reply");
   });
 
+  it("keeps the next FIFO question after a reply retires the current Delivery", async () => {
+    const { call } = await startApp();
+    const runId = "run_stale_reply_delivery";
+    await singleTaskState(runId);
+    await startCoordinator(baseOpts(runId));
+    await waitFor(() => calls("worker-start").length === 1 ? true : null, "worker to start");
+    const dispatchId = await dispatchIdOf("task_aaa");
+
+    const firstDeliveryId = await injectMail([{
+      id: "msg_stale_first",
+      run_id: runId,
+      type: "question",
+      from_handle: "term_worker",
+      to_handle: null,
+      subject: "First question",
+      body: "First answer?",
+      priority: "normal",
+      thread_id: null,
+      payload: JSON.stringify({ taskId: "task_aaa", dispatchId }),
+      created_at: "2026-10-17T00:00:01Z",
+      delivered_at: "2026-10-17T00:00:01Z",
+    }]);
+    await waitFor(
+      () => coordinatorStatus().inbox.pending.some((item) => item.messageId === "msg_stale_first") ? true : null,
+      "first question",
+    );
+    const secondDeliveryId = await injectMail([{
+      id: "msg_stale_second",
+      run_id: runId,
+      type: "question",
+      from_handle: "term_worker",
+      to_handle: null,
+      subject: "Second question",
+      body: "Second answer?",
+      priority: "normal",
+      thread_id: null,
+      payload: JSON.stringify({ taskId: "task_aaa", dispatchId }),
+      created_at: "2026-10-17T00:00:02Z",
+      delivered_at: "2026-10-17T00:00:02Z",
+    }]);
+    await settleViaTaskStatus("task_aaa", "succeeded");
+    await waitFor(() => attempt("task_aaa").terminalDecision === "released" ? true : null, "worker cleanup");
+
+    const firstReply = await call("POST", "/api/messages/msg_stale_first/reply", { runId, body: "first answer" });
+    assert.equal(firstReply.status, 200);
+    await waitFor(
+      () => coordinatorStatus().inbox.pending.some((item) => item.messageId === "msg_stale_second") ? true : null,
+      "question returned after stale_delivery",
+    );
+    assert.equal(ackCalls(firstDeliveryId).length, 1, "the retired first batch has one stale ack attempt");
+    assert.equal(ackCalls(secondDeliveryId).length, 0, "the next question remains unacknowledged");
+    assert.equal(coordinatorStatus().phase, "awaiting_input", "completion waits for the next FIFO question");
+
+    const secondReply = await call("POST", "/api/messages/msg_stale_second/reply", { runId, body: "second answer" });
+    assert.equal(secondReply.status, 200);
+    await waitFor(() => ackCalls(secondDeliveryId).length === 1 ? true : null, "second stale ack attempt");
+    await waitFor(() => coordinatorStatus().phase === "completed" ? true : null, "completion after both replies");
+  });
+
+  it("acks an invalid-only FIFO batch and processes the next question before completion", async () => {
+    const runId = "run_fifo_invalid_then_question";
+    await singleTaskState(runId);
+    await startCoordinator(baseOpts(runId));
+    await waitFor(() => (calls("worker-start").length === 1 ? true : null), "worker to start");
+    const dispatchId = await dispatchIdOf("task_aaa");
+
+    const [invalidDeliveryId, questionDeliveryId] = await mutateState((state) => {
+      const task = state.tasks.task_aaa;
+      const dispatch = state.dispatches[task.dispatch_id];
+      task.status = "completed";
+      dispatch.status = "completed";
+      dispatch.terminalState = "reclaimable";
+      state.archives ??= {};
+      state.archives[task.dispatch_id] = "output";
+      state.seq ??= {};
+      state.seq.delivery = (state.seq.delivery ?? 0) + 1;
+      const invalidId = `delivery_invalid${state.seq.delivery}`;
+      const questionId = `delivery_question${state.seq.delivery}`;
+      const handle = coordinatorTerminal(state).handle;
+      state.mailboxes ??= {};
+      state.mailboxes[handle] = [
+        {
+          deliveryId: invalidId,
+          messages: [{
+            ...workerDoneMessage("unknown_task", "ctx_unknown", "succeeded", "msg_invalid_only"),
+            run_id: runId,
+          }],
+        },
+        {
+          deliveryId: questionId,
+          messages: [{
+            id: "msg_after_invalid",
+            run_id: runId,
+            type: "question",
+            from_handle: "term_worker",
+            to_handle: null,
+            subject: "Question after an ignored report",
+            body: "Should I keep the existing API?",
+            priority: "normal",
+            thread_id: null,
+            payload: JSON.stringify({ taskId: "task_aaa", dispatchId }),
+            created_at: "2026-10-17T00:00:00Z",
+            delivered_at: "2026-10-17T00:00:00Z",
+          }],
+        },
+      ];
+      return [invalidId, questionId];
+    });
+
+    await waitFor(
+      () => coordinatorStatus().inbox.pending.some((item) => item.messageId === "msg_after_invalid") ? true : null,
+      "question returned by acknowledging the invalid batch",
+    );
+    await waitFor(() => attempt("task_aaa").terminalDecision === "released" ? true : null, "completed worker cleanup");
+    await waitFor(() => coordinatorStatus().phase === "awaiting_input" ? true : null, "question to hold completion");
+    assert.equal(ackCalls(invalidDeliveryId).length, 1, "the fully processed invalid batch is acked once");
+    assert.equal(ackCalls(questionDeliveryId).length, 0, "the returned question batch stays open");
+    assert.equal(coordinatorStatus().phase, "awaiting_input", "the returned question prevents completion");
+    assert.equal(coordinatorStatus().running, true, "the coordinator remains bound while input is owed");
+    await stopCoordinator();
+  });
+
+
   it("refuses guidance when Orca marks the active Dispatch unverifiable", async () => {
     const { call } = await startApp();
     const runId = "run_guidance_unverifiable";
@@ -855,6 +980,65 @@ describe("questions hold the Delivery open", () => {
     await stopCoordinator();
   });
 });
+
+describe("ordinary approval gates hold completion", () => {
+  for (const status of ["blocked", "ready"]) {
+    it(`holds a ${status} Task until every approval resolves, then starts it`, async () => {
+      const runId = `run_ordinary_gate_${status}`;
+      await singleTaskState(runId);
+      await mutateState((state) => {
+        state.tasks.task_aaa.status = status;
+        state.gates = [
+          {
+            id: "gate_already_approved", task_id: "task_aaa",
+            question: "First approval", options: ["approved", "rejected"],
+            status: "resolved", resolution: "approved",
+          },
+          {
+            id: "gate_ordinary", task_id: "task_aaa",
+            question: "Approve this stage?", options: ["approved", "rejected"],
+            status: "pending", resolution: null,
+          },
+        ];
+      });
+
+      await startCoordinator(baseOpts(runId));
+      await waitFor(() => coordinatorStatus().phase === "awaiting_input" ? true : null, "pending approval gate");
+      assert.equal(calls("worker-start").length, 0, "a gated Task is not launched through its gate");
+      assert.equal(coordinatorStatus().running, true, "the coordinator remains open for the decision");
+
+      await mutateState((state) => {
+        state.gates[1].status = "resolved";
+        state.gates[1].resolution = "approved";
+      });
+      await waitFor(() => calls("worker-start").length === 1 ? true : null, "approved Task to start");
+      await settleViaWorkerDone("task_aaa", "succeeded", "msg_ordinary_gate_done");
+      await waitFor(() => coordinatorStatus().phase === "completed" ? true : null, "approved Run to complete");
+    });
+  }
+
+  it("keeps a Run-scoped pending gate open even without a blocked Task", async () => {
+    const runId = "run_gate_without_task";
+    await mutateState((state) => {
+      state.tasks = {};
+      state.runs = { [runId]: { id: runId, objective: "approval only", legacy: 0 } };
+      state.gates = [{
+        id: "gate_run", task_id: null, question: "Approve the Run?",
+        options: ["approved", "rejected"], status: "pending", resolution: null,
+      }];
+    });
+    await startCoordinator(baseOpts(runId));
+    await waitFor(() => coordinatorStatus().phase === "awaiting_input" ? true : null, "Run-scoped approval");
+    assert.equal(coordinatorStatus().running, true);
+    assert.equal(calls("worker-start").length, 0);
+    await mutateState((state) => {
+      state.gates[0].status = "resolved";
+      state.gates[0].resolution = "approved";
+    });
+    await waitFor(() => coordinatorStatus().phase === "completed" ? true : null, "resolved approval-only Run");
+  });
+});
+
 
 describe("release_pending and release_unknown", () => {
   it("retries a deferred release and completes once Orca settles it", async () => {
@@ -1160,6 +1344,23 @@ describe("legacy (opencode) lane settlement", () => {
     assert.deepEqual(reclaimable, [], "no reclaimable workers after the legacy lane settles");
   });
 });
+describe("custom command routing", () => {
+  it("starts an opt-in custom command directly through the legacy path", async () => {
+    const runId = "run_custom_command";
+    await singleTaskState(runId);
+    await startCoordinator(baseOpts(runId, { defaultHarness: "aider --yes" }));
+    await waitFor(() => findAttempt("task_aaa")?.mode === "legacy" ? true : null, "custom legacy launch");
+    await waitFor(() => findAttempt("task_aaa")?.dispatchId ? true : null, "custom tracking Dispatch");
+
+    assert.equal(calls("worker-start").length, 0, "custom commands never probe native agent launch");
+    assert.equal(calls("dispatch").length, 1, "custom command keeps a tracking Dispatch");
+    assert.ok(readLog().some((call) =>
+      call.argv[0] === "terminal" && call.argv[1] === "create" &&
+      call.argv[call.argv.indexOf("--command") + 1] === "aider --yes"));
+    await stopCoordinator();
+  });
+});
+
 
 describe("native OpenCode 2", () => {
   // 1.4.222 fixes submit readiness for both OpenCode agent ids, but its
@@ -2111,21 +2312,23 @@ describe("Phase 4: failed-before-ready starts", () => {
     });
   }
 
-  it("parks a rejected native Codex start without launching a compatibility worker", async () => {
+  it("parks a rejected native Codex preference start without launching a compatibility worker", async () => {
     const runId = "run_codex_native_rejected";
     await singleTaskState(runId);
     await mutateState((state) => {
       state.runtime = { appVersion: "1.4.217" };
-      state.workerStartFail = { code: "agent_prompt_blocked", message: "Codex has a blocking prompt" };
+      state.workerStartFail = { code: "invalid_argument", message: "native model and effort rejected" };
     });
-    await startCoordinator(baseOpts(runId, { harnessByTask: { task_aaa: "codex" } }));
+    await startCoordinator(baseOpts(runId, {
+      harnessByTask: { task_aaa: "codex" },
+      modelByTask: { task_aaa: "gpt-6-luna" },
+      effortByTask: { task_aaa: "high" },
+    }));
     await waitFor(() => findAttempt("task_aaa")?.settledVia === "start_failed", "native rejection to park");
-    const argv = calls("worker-start")[0].argv;
-    assert.equal(argv[argv.indexOf("--agent") + 1], "codex");
     assert.equal(calls("worker-start").length, 1);
     assert.equal(calls("dispatch").length, 0);
     assert.equal(readLog().some((call) => call.argv[0] === "terminal" &&
-      call.argv.includes("--command") && call.argv.some((arg) => arg.startsWith("codex "))), false);
+      call.argv.includes("--command") && call.argv.some((arg) => arg === "codex" || arg.startsWith("codex "))), false);
     await stopCoordinator();
   });
 
@@ -2242,6 +2445,141 @@ describe("Phase 4: failed-before-ready starts", () => {
     assert.deepEqual(coordinatorStatus().cleanupDebt, []);
   });
 });
+describe("late settlement after failed worker-start", () => {
+  async function beginFailedStart(runId: string): Promise<string> {
+    await singleTaskState(runId);
+    await mutateState((state) => {
+      state.workerStartFail = {
+        code: "terminal_start_failed",
+        message: "Orca reported a late-start failure",
+        receipt: {
+          stage: "terminal_start",
+          failedStage: "agent_prompt_stalled",
+          taskId: "task_aaa",
+          dispatchId: "ctx_late",
+          residualResources: null,
+          recoveryCommands: [],
+        },
+      };
+    });
+    await startCoordinator(baseOpts(runId));
+    await waitFor(() => findAttempt("task_aaa")?.settledVia === "start_failed" ? true : null, "failed start receipt");
+    await waitFor(() => attempt("task_aaa").terminalDecision === "released" ? true : null, "failed-start custody decision");
+    assert.equal(attempt("task_aaa").outcome, "failed");
+    assert.equal(attempt("task_aaa").dispatchId, "ctx_late");
+    assert.equal(callsOf("worker-release", "--dispatch", "ctx_late").length, 1);
+    return "ctx_late";
+  }
+
+  it("accepts only exact late worker_done authority without repeating cleanup", async () => {
+    const runId = "run_late_mail";
+    const dispatchId = await beginFailedStart(runId);
+
+    const rejected = {
+      ...workerDoneMessage("task_aaa", dispatchId, "succeeded", "msg_late_rejected"),
+      run_id: runId,
+      subject: "Rejected worker_done: stale lifecycle",
+    };
+    const stale = {
+      ...workerDoneMessage("task_aaa", dispatchId, "succeeded", "msg_late_wrong_run"),
+      run_id: "run_other",
+    };
+    const staleDeliveryId = await injectMail([rejected, stale]);
+    await waitFor(
+      () => processedRow("msg_late_rejected") && processedRow("msg_late_wrong_run") ? true : null,
+      "rejected and stale late reports",
+    );
+    await waitFor(() => ackCalls(staleDeliveryId).length === 1 ? true : null, "stale reports to be acknowledged");
+    assert.equal(attempt("task_aaa").settledVia, "start_failed");
+    assert.equal(attempt("task_aaa").outcome, "failed");
+
+    await mutateState((state) => {
+      state.dispatches ??= {};
+      state.dispatches[dispatchId] = {
+        id: dispatchId,
+        task_id: "task_aaa",
+        run_id: runId,
+        status: "failed",
+        workerState: "failed",
+        terminalState: "released",
+      };
+      state.archives ??= {};
+      state.archives[dispatchId] = "late success output";
+      state.seq ??= {};
+      state.seq.delivery = (state.seq.delivery ?? 0) + 1;
+      const deliveryId = `delivery_late${state.seq.delivery}`;
+      const rejectedAfterCompletion = {
+        ...workerDoneMessage("task_aaa", dispatchId, "succeeded", "msg_late_rejected_after_complete"),
+        run_id: runId,
+        subject: "Rejected worker_done: still rejected",
+      };
+      const staleTask = {
+        ...workerDoneMessage("other_task", dispatchId, "succeeded", "msg_late_wrong_task"),
+        run_id: runId,
+      };
+      const accepted = {
+        ...workerDoneMessage("task_aaa", dispatchId, "succeeded", "msg_late_accepted"),
+        run_id: runId,
+      };
+      const handle = coordinatorTerminal(state).handle;
+      state.mailboxes ??= {};
+      state.mailboxes[handle] = [
+        ...(state.mailboxes[handle] ?? []),
+        {
+          deliveryId,
+          messages: [rejectedAfterCompletion, staleTask, accepted],
+        },
+      ];
+      state.settleOnDelivery ??= {};
+      state.settleOnDelivery[deliveryId] = {
+        taskId: "task_aaa",
+        dispatchId,
+        outcome: "succeeded",
+      };
+    });
+
+    await waitFor(
+      () => attempt("task_aaa").settledVia === "worker_done" &&
+        attempt("task_aaa").outcome === "succeeded" ? true : null,
+      "authoritative late worker_done correction",
+    );
+    await waitFor(() => coordinatorStatus().phase === "completed" ? true : null, "late-success completion");
+    assert.equal(attempt("task_aaa").terminalDecision, "released", "the prior custody decision is preserved");
+    assert.equal(attempt("task_aaa").startReceipt?.failedStage, "agent_prompt_stalled", "the start receipt stays in history");
+    assert.equal(calls("worker-start").length, 1, "the correction never retries the launch");
+    assert.equal(callsOf("worker-release", "--dispatch", dispatchId).length, 1, "the retained cleanup is not repeated");
+  });
+
+  it("reconciles a late Task completion for the exact failed-start Dispatch", async () => {
+    const runId = "run_late_task_status";
+    const dispatchId = await beginFailedStart(runId);
+    await mutateState((state) => {
+      state.tasks.task_aaa.status = "completed";
+      state.tasks.task_aaa.dispatch_id = dispatchId;
+      state.dispatches ??= {};
+      state.dispatches[dispatchId] = {
+        id: dispatchId,
+        task_id: "task_aaa",
+        run_id: runId,
+        status: "completed",
+        workerState: "succeeded",
+        terminalState: "released",
+      };
+    });
+
+    await waitFor(
+      () => attempt("task_aaa").settledVia === "task_status" &&
+        attempt("task_aaa").outcome === "succeeded" ? true : null,
+      "late Task-status correction",
+    );
+    await waitFor(() => coordinatorStatus().phase === "completed" ? true : null, "reconciled completion");
+    assert.equal(attempt("task_aaa").terminalDecision, "released", "the prior custody decision is preserved");
+    assert.equal(attempt("task_aaa").startReceipt?.failedStage, "agent_prompt_stalled");
+    assert.equal(calls("worker-start").length, 1);
+    assert.equal(callsOf("worker-release", "--dispatch", dispatchId).length, 1, "no duplicate cleanup");
+  });
+});
+
 
 describe("worker_done acceptance", () => {
   it("keeps a rejected worker_done dispatched even when its payload says succeeded", async () => {

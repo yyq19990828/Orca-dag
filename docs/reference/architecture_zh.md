@@ -82,7 +82,7 @@ Orca 对所有编排 API 的调用均通过 `resolveRunScope` 进行权限校验
 
 ## CLI 解析、工作区与执行能力判定
 
-所有基础环境判定均在 **viewer 启动时一次性解析**，存活期内不可变：
+CLI 与工作区在启动时解析一次；执行就绪情况会重新探测，仅对同一已解析运行时短暂缓存，不是永久的启动判定：
 
 1. **可执行文件解析顺序**：
    - 若设置了 `ORCA_CLI_COMMAND`，使用其精确解析出的带引号 argv 参数。**严禁通过 shell 执行**，参数中包含管道 `|`、重定向 `>`、子 shell `$()` 或未转义 `$` 时将被直接拒绝，防止注入漏洞。
@@ -94,8 +94,8 @@ Orca 对所有编排 API 的调用均通过 `resolveRunScope` 进行权限校验
    - 检查 `WORKSPACE_DIR`（默认当前目录）是否存在，并解析其**规范真实物理路径**（symlink 会被归一化到目标路径）。
    - 该路径转换为精确的 worktree 选择器 `path:<WORKSPACE_DIR>`。在目录 A 启动但指定 `WORKSPACE_DIR=/abs/B` 时，coordinator 与 worker 都将置于目录 B。显式声明的 `ORCA_WORKTREE` 拥有最高优先级。
 3. **执行能力门槛判定（`GET /api/readiness`）**：
-   - **Orca ≥ 1.4.205**：具备完整的 supervised worker 执行能力，开放全部 Run 与调度控制。
-   - **Orca 1.4.160–1.4.204**：降级为只读模式。DAG、审批门与状态正常渲染，但 Run/Gate 控件禁用并提示升级；绕过界面直接发起变更请求将收到 `503 execution_disabled`。
+   - **执行门槛**：CLI ≥ 1.4.205，且所选运行时明确处于 ready、稳定 appVersion ≥ 1.4.205；新 CLI 本身不足以证明可以执行。
+   - **只读模式**：运行时过旧、未知、断连或启动中时禁用执行并返回 `503 execution_disabled`，仍保留可用的读取操作。
    - 未找到有效 CLI 时，readiness 接口如实返回尝试过的解析路径与错误原因。
 
 ## 代码结构

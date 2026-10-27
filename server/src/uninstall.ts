@@ -17,9 +17,10 @@
 // in a half-removed state.
 
 import { existsSync, lstatSync, rmSync, unlinkSync } from "node:fs";
+import type { Stats } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { AGENT_SKILL_DIRS, SKILL_NAME } from "./skill";
+import { isSafeSkillPath, resolveAgentSkillDirs, SKILL_NAME } from "./skill";
 import { COORDINATOR_TITLE, closeTerminal, listTerminals, parseCoordinatorTitle } from "./orca";
 import { stageGitStoreDir } from "./stageGit";
 import { LEGACY_PLANNING_DIR, PLANNING_DIR, removePlanningIgnore } from "./planning";
@@ -38,17 +39,26 @@ const tilde = (p: string) => p.replace(homedir(), "~");
 /** Fixed-width action column so the report reads as a table, not a paragraph. */
 const act = (verb: string) => `  ${verb.padEnd(13)}`;
 
-/** Remove the installed skill from every agent directory. */
+/** Remove current and legacy skill locations without traversing linked parents. */
 function removeSkills(dryRun: boolean, log: (line: string) => void): number {
   let removed = 0;
-  for (const { agent, skills } of AGENT_SKILL_DIRS) {
-    const dir = join(homedir(), skills, SKILL_NAME);
-    if (!existsSync(dir) && !isBrokenLink(dir)) continue;
+  for (const { agent, skills, safeRoot } of resolveAgentSkillDirs()) {
+    const dir = join(skills, SKILL_NAME);
+    if (!isSafeSkillPath(dir, true, safeRoot)) continue;
+    let info: Stats;
     try {
-      // A symlink is the `ln -s "$PWD/skill"` recipe. Unlinking removes only
-      // the link — the checkout it points at is untouched — but say so, because
-      // "removed" next to a path inside their repo would read as data loss.
-      const link = lstatSync(dir).isSymbolicLink();
+      info = lstatSync(dir);
+    } catch {
+      continue;
+    }
+    const link = info.isSymbolicLink();
+    if (!link && !info.isDirectory()) {
+      log(`${act("skipped")}${tilde(dir)} — not a skill directory; left untouched`);
+      continue;
+    }
+    try {
+      // A final symlink is the `ln -s "$PWD/skill"` recipe. Unlink the link
+      // itself, never the checkout it points at.
       const note = link ? " (symlink only — your checkout is untouched)" : "";
       if (!dryRun) {
         if (link) unlinkSync(dir);

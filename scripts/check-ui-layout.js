@@ -30,7 +30,7 @@ async (page) => {
       data = {};
     } else if (path === "/api/config") data = { runId, defaultHarness: "claude", maxConcurrency: 4 };
     else if (path === "/api/session") data = { token: "fixture", allowCustomCommands: false };
-    else if (path === "/api/readiness") data = { executionEnabled: false, reason: "Read-only UI acceptance fixture", version: "1.4.209", cli: "orca", workspace: "/fixture", worktree: "path:/fixture" };
+    else if (path === "/api/readiness") data = { executionEnabled: false, reason: "Read-only UI acceptance fixture", version: "1.4.209", cliVersion: "1.4.229", runtimeState: "ready", cli: "orca", workspace: "/fixture", worktree: "path:/fixture" };
     else if (path === "/api/runs") data = { runs: [{ id: runId, objective: "Readable orchestration / 可读的任务编排", createdAt: now }], nextCursor: null };
     else if (path === "/api/dag") data = { runId, nodes, edges: [], hierarchy: [], gates, readyWave: { taskIds: ["task_3"], freeSlots: null }, readiness: {}, generatedAt: 0 };
     else if (path === "/api/run-status") data = status;

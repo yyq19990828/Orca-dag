@@ -305,14 +305,16 @@ function summarizeStage(
   const readiness = dag.readiness[node.id];
   const evidenceTitle = boundedLine(readiness?.reasons.join(" ") || "", 360);
 
-  if (node.status === "ready") {
+  // A raw Orca `ready` row can still owe another gate decision. Prefer the
+  // Run-scoped readiness projection over a misleading dispatchable subtitle.
+  if (node.status === "ready" && readiness?.runnable !== false) {
     const text = readiness?.codes.includes("waiting_for_capacity")
       ? t("dag.readyWaitingSlot")
       : t("dag.readyDispatch");
     return { text, title: evidenceTitle || text };
   }
 
-  if (node.status === "pending" || node.status === "blocked") {
+  if (node.status === "pending" || node.status === "blocked" || node.status === "ready") {
     const codes = readiness?.codes ?? [];
     let text: string;
     if (codes.includes("unmet_dependencies")) {

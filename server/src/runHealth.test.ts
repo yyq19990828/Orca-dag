@@ -553,7 +553,10 @@ describe("GET /api/capabilities", () => {
       "orchestration.worker-stop-verdict.v1",
     ];
     const advertised = [...ids, "orchestration.contract.v1", "orchestration.future.v1", "browser.screencast.v1"];
-    writeScript({ version: "1.4.209", statusResult: { runtime: { capabilities: advertised } } });
+    writeScript({
+      version: "1.4.229",
+      statusResult: { runtime: { capabilities: advertised, appVersion: "1.4.204", state: "ready" } },
+    });
     const res = await fetch(`${base}/api/capabilities`);
     assert.equal(res.status, 200);
     const json = (await res.json()) as {
@@ -571,8 +574,7 @@ describe("GET /api/capabilities", () => {
       assert.equal(cap.state, "supported");
     }
     assert.deepEqual(json.unknownAdvertised, ["orchestration.future.v1"]);
-    assert.equal(json.runtime.version, "1.4.209");
-    assert.equal(json.runtime.executionEnabled, true);
+    assert.equal(json.runtime.executionEnabled, false, "advertised capabilities do not grant execution to an old runtime");
   });
 
   it("keeps every row absent when status omits the capability field, regardless of version", async () => {

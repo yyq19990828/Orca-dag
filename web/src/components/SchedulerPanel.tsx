@@ -63,12 +63,12 @@ export function SchedulerPanel({
     (readiness[n.id]?.codes ?? []).includes("waiting_for_capacity"),
   );
 
-  // Waiting = every non-runnable node that still owes work (pending/blocked),
-  // plus ready nodes parked on capacity. Finished and in-flight tasks are the
-  // scheduler's business only when they block others, which the readiness
-  // reasons of those others already express.
+  // Waiting also includes raw `ready` rows still held by a gate. Capacity-only
+  // waits stay in the ready queue above; finished and in-flight tasks matter
+  // here only through the reasons of the Tasks they block.
   const waitingNodes = dag.nodes
-    .filter((n) => n.status === "pending" || n.status === "blocked")
+    .filter((n) => n.status === "pending" || n.status === "blocked" ||
+      (n.status === "ready" && readiness[n.id]?.runnable === false))
     .map((n) => ({ node: n, reasons: readiness[n.id]?.reasons ?? [] }))
     .filter(({ reasons }) => reasons.length > 0);
 

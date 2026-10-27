@@ -29,13 +29,16 @@ The `GET /api/readiness` endpoint reports runtime environment status:
   "cli": "orca",
   "workspace": "/path/to/project",
   "worktree": "path:/path/to/project",
+  "cliVersion": "1.4.242",
   "version": "1.4.242",
+  "runtimeState": "ready",
   "executionEnabled": true,
   "reason": null
 }
 ```
 
-- **Orca ≥ 1.4.205:** Full execution enabled.
+- **Execution gate:** Requires CLI ≥ 1.4.205 and the selected runtime positively `ready` with a stable appVersion ≥ 1.4.205. Unknown, unreachable, or starting runtimes remain view-only even with a newer CLI.
+- `cliVersion` describes the executable; `version` and `runtimeState` describe its selected runtime. Refresh the page after reconnecting; execution routes independently recheck the short-lived server probe.
 - **Orca 1.4.160–1.4.204:** **View-only mode**. Read endpoints function normally. Execution endpoints (`POST /api/runs`, `POST /api/run`, gate resolution) return `503 Service Unavailable` with `execution_disabled`.
 - **Coordinator Conflict:** Attempting to start the coordinator in a workspace already coordinated by another active viewer instance returns `409 Conflict` (`coordinator_conflict`).
 
@@ -50,7 +53,7 @@ All `POST` and `PUT` endpoints require the `X-Orca-Dag-Token` header. `GET` endp
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/session` | Returns `{ token, allowCustomCommands }`. Provides the per-process mutation token to same-origin clients (`Cache-Control: no-store`). |
-| `GET` | `/api/readiness` | Reports CLI resolution, Orca version, workspace path, worktree selector, and whether execution is enabled. |
+| `GET` | `/api/readiness` | Reports the resolved CLI/build version, selected runtime version/state, workspace selector, and execution permission with an actionable disabled reason. |
 | `GET` | `/api/capabilities` | Inspects local Orca capability advertisements and returns parsed support for canonical 1.4.206 orchestration capability IDs. |
 | `GET` | `/api/health` | Basic health check returning the current workspace directory. |
 

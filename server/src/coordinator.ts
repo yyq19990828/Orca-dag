@@ -1,3 +1,4 @@
+import { KNOWN_HARNESSES } from "./security";
 import {
   OrcaCliError,
   bindRun,
@@ -799,8 +800,6 @@ const RELEASE_RETRY_MAX = 40;
 /** Question/escalation wake types — see `check --types` (wake filter only). */
 const WAKE_TYPES = ["worker_done", "escalation", "question"];
 const TERMINAL_TASK_STATUS = new Set(["completed", "failed"]);
-/** Orca rejects these agents for `worker-start`; retry them the legacy way. */
-const UNCONFIGURED_AGENT_CODES = new Set(["agent_unconfigured", "invalid_argument"]);
 /** Keep the informational inbox log bounded. */
 const RECENT_MESSAGES_MAX = 30;
 /** Keep the replay-dedupe set bounded (deliveries are small; this is generous). */
@@ -2603,6 +2602,17 @@ async function loop(myLoop: number): Promise<void> {
       passError = passError ? `${passError}; reconcile: ${detail}` : detail;
       state.error = detail;
     }
+    if (myLoop !== coordinatorLoopGeneration) break;
+    // Ownership decisions run during reconciliation. Retry the delivery ACK
+    // afterward so a settled worker's release/retain is complete before Orca
+    // retires the batch.
+    try {
+      await acknowledgePendingDeliveryIfResolved();
+    } catch (e) {
+      const detail = String((e as Error).message ?? e);
+      passError = passError ? `${passError}; acknowledge: ${detail}` : detail;
+      state.error = detail;
+    }
     // Capture AFTER reconciliation so each receipt carries the freshest
     // worker-list projection the same check pass observed. A failed or empty
     // check is still recorded: both are meaningful coordinator health facts.
@@ -2691,13 +2701,25 @@ function markProcessed(id: string): boolean {
  * (the batch replays until acked). A row that fails validation is recorded
  * and skipped — it never settles a worker and never fails the whole batch.
  */
-async function processDelivery(delivery: {
-  deliveryId: string | null;
-  messages: OrcaMessage[];
-  replayed: boolean;
-}): Promise<void> {
+async function processDelivery(
+  delivery: {
+    deliveryId: string | null;
+    messages: OrcaMessage[];
+    replayed: boolean;
+  },
+  opts: { acknowledge?: boolean } = {},
+): Promise<void> {
   const generation = coordinatorLoopGeneration;
   const runId = state.runId;
+  if (delivery.deliveryId) {
+    // Hold the Delivery before any authority read: if one fails, completion
+    // must not close the coordinator while Orca is still replaying this batch.
+    state.pendingDeliveryId = delivery.deliveryId;
+  } else if (state.pendingDeliveryId && state.pendingDeliveryId === state.lastAckedDeliveryId) {
+    // A stale ack leaves a temporary completion guard until this ordinary
+    // inbox read confirms either the next FIFO batch or an empty mailbox.
+    state.pendingDeliveryId = null;
+  }
   // A rejected lifecycle report can still arrive as a worker_done-shaped
   // mailbox row. Orca's Task status, which changes atomically when it accepts
   // worker_done, is the settlement authority. Read it before marking any
@@ -2721,13 +2743,11 @@ async function processDelivery(delivery: {
           // here would let a crash between settlement and release lose the
           // release work, since the batch would never replay again.
           state.pendingOwnership.add(settledTaskId);
-          state.pendingDeliveryId = delivery.deliveryId;
         }
         break;
       }
       case "question":
-      case "escalation":
-        {
+      case "escalation": {
         const payload = parseWorkerDonePayload(message);
         const payloadTaskId = payload?.taskId ?? null;
         const payloadDispatchId = payload?.dispatchId ?? null;
@@ -2750,11 +2770,8 @@ async function processDelivery(delivery: {
             dispatchId: payloadDispatchId ?? relatedAttempt?.dispatchId ?? null,
           },
         ];
-        // Hold the Delivery open: it must not be acknowledged while a human
-        // question inside it is unanswered (it replays until then).
-        if (delivery.deliveryId) state.pendingDeliveryId = delivery.deliveryId;
         break;
-        }
+      }
       case "heartbeat":
         noteHeartbeat(message);
         break;
@@ -2772,7 +2789,7 @@ async function processDelivery(delivery: {
         break;
     }
   }
-  await acknowledgePendingDeliveryIfResolved();
+  if (opts.acknowledge !== false) await acknowledgePendingDeliveryIfResolved();
 }
 
 /**
@@ -2790,6 +2807,10 @@ let ackChain: Promise<void> = Promise.resolve();
 async function runAck(): Promise<void> {
   const deliveryId = state.pendingDeliveryId;
   if (!deliveryId || state.inbox.length > 0) return;
+  // A stale ACK already retired this batch. Keep the id as a completion guard
+  // until a fresh check observes the next head, but do not ACK it again during
+  // the post-reconciliation retry.
+  if (deliveryId === state.lastAckedDeliveryId) return;
   // Ownership gate: an attempt still sitting at `pending` means its release/
   // retain/close decision has not executed yet — keep the batch open so it
   // replays if we die first. Entries whose attempt vanished (stop, reset)
@@ -2814,15 +2835,30 @@ async function runAck(): Promise<void> {
       state.error = `Failed to acknowledge delivery ${deliveryId}: ${String(e.message ?? err)}`;
       return; // retry on a later pass — the batch simply replays
     }
+    // A reply can retire the Delivery before this ack arrives. Keep the exact
+    // id as a completion guard until the next ordinary check proves what is
+    // next (or that the mailbox is empty); never overwrite a newer pending id.
+    if (state.pendingDeliveryId === deliveryId) {
+      state.lastAckedDeliveryId = deliveryId;
+      state.pendingOwnership.clear();
+    }
+    return;
   }
+  // The native ACK belongs to the captured coordinator. A Stop/restart during
+  // the await must not enqueue its returned Delivery into a newer Run.
   if (!stillMyTurn(generation) || state.coordinatorHandle !== coordinator) return;
-  // ACK is also a consuming check on current Orca. Dropping the returned
-  // batch would allow Task-status reconciliation to declare completion with
-  // an already-observed actionable Delivery still unprocessed.
-  state.queuedDelivery = next?.deliveryId ? next : null;
-  state.pendingDeliveryId = null;
-  state.lastAckedDeliveryId = deliveryId;
-  state.pendingOwnership.clear();
+  if (state.pendingDeliveryId === deliveryId) {
+    state.pendingDeliveryId = null;
+    state.lastAckedDeliveryId = deliveryId;
+    state.pendingOwnership.clear();
+  }
+  // Orca acknowledges and consumes in one call. Preserve the returned FIFO
+  // batch for the loop's immediate next iteration; processing it here would
+  // bypass the loop's normal receipt/reconcile boundary.
+  if (next?.deliveryId && !state.pendingDeliveryId) {
+    state.queuedDelivery = next;
+  }
+
 }
 function acknowledgePendingDeliveryIfResolved(): Promise<void> {
   const run = ackChain.then(runAck, runAck);
@@ -2837,7 +2873,8 @@ function acknowledgePendingDeliveryIfResolved(): Promise<void> {
  * Task's terminal status is required in addition to matching identities:
  *
  *  - unknown task/dispatch        → not ours; recorded, never settles.
- *  - duplicate for a settled row  → replay; idempotent no-op.
+ *  - duplicate for a settled row  → replay; idempotent no-op (except an exact
+ *    Orca correction of a provisional start_failed outcome).
  *  - dispatch-id mismatch         → stale cross-task signal; never settles.
  *  - outcome other than the two   → unverifiable; never settles.
  *  - Task still dispatched        → rejected report; never settles.
@@ -2864,6 +2901,35 @@ async function handleWorkerDone(message: OrcaMessage, tasks: OrcaTask[]): Promis
 
   if (!attempt) {
     noteRecent(message, "worker_done for an unknown Dispatch — not settling anything");
+    return null;
+  }
+  // Only provisional start failures use this early correction path. A normal
+  // recovered settlement must still validate the report below and hold its ACK
+  // until the pending terminal-ownership decision has executed.
+  if (attempt.settled && attempt.settledVia === "start_failed") {
+    const runtimeTask = tasks.find((task) => task.id === attempt.taskId);
+    const exactLateSuccess =
+      attempt.outcome === "failed" &&
+      attempt.dispatchId !== null &&
+      outcome === "succeeded" &&
+      payloadTask === attempt.taskId &&
+      payloadDispatch === attempt.dispatchId &&
+      state.runId !== null &&
+      message.run_id === state.runId &&
+      !message.subject?.startsWith("Rejected worker_done") &&
+      !payload?._orcaLifecycleRejection &&
+      runtimeTask?.id === attempt.taskId &&
+      runtimeTask.run_id === state.runId &&
+      runtimeTask.status === "completed" &&
+      runtimeTask.dispatch_id === attempt.dispatchId;
+    if (exactLateSuccess && correctStartFailedOutcome(attempt, "worker_done")) {
+      noteRecent(message, "Orca corrected the provisional failed start to succeeded");
+      return attempt.taskId;
+    }
+    // A start-failure receipt remains authoritative unless Orca reports the
+    // exact successful Task/Dispatch transition; stale/rejected reports never
+    // undo its parking or alter terminal custody.
+    noteRecent(message, "worker_done for an already settled Dispatch — ignored");
     return null;
   }
   if (payloadDispatch && attempt.dispatchId && payloadDispatch !== attempt.dispatchId) {
@@ -2940,6 +3006,18 @@ function settleAttempt(attempt: Attempt, outcome: "succeeded" | "failed", via: "
       settledLocally: true, note: `Exact Dispatch settlement confirmed ${outcome}`,
     });
   }
+}
+/**
+ * Orca may accept a late terminal report after worker-start returned a
+ * provisional failure receipt. Correct only that outcome; the receipt and
+ * already-decided terminal custody remain untouched.
+ */
+function correctStartFailedOutcome(attempt: Attempt, via: "worker_done" | "task_status"): boolean {
+  if (attempt.settledVia !== "start_failed" || attempt.outcome !== "failed") return false;
+  attempt.outcome = "succeeded";
+  attempt.settledVia = via;
+  attempt.settledAt = Date.now();
+  return true;
 }
 
 /** A new Dispatch starts with unknown accounting; never carry its predecessor's count. */
@@ -3125,15 +3203,22 @@ async function reconcile(): Promise<void> {
     workerRows.filter((row) => row.runId === runId && activeDispatch(row)).map((row) => row.taskId),
   );
 
-  // Gate state is read when ANY task is blocked (entry or integration gates)
-  // or ANY ready task is a cross-lane join — the join's gate must exist before
-  // its first dispatch could ever happen. One Run-scoped read per pass, only
-  // when the pass can actually use it.
-  const blocked = tasks.filter((t) => t.status === "blocked" && !state.delegatedTaskIds.has(t.id));
+  // Read Run-scoped gate authority whenever blocked tasks or ready joins may
+  // use it, and also before dispatch/completion: Task statuses alone cannot
+  // prove that the Run owes no human decision.
+  const blocked = tasks.filter((t) => t.status === "blocked");
   const readyJoins = state.stageGit ? [] : tasks.filter(
     (t) => t.status === "ready" && isCrossLaneJoin(t, opts.laneByTask),
   );
-  const gates = blocked.length > 0 || readyJoins.length > 0 ? await listGates(runId) : [];
+  const gates = await listGates(runId);
+  const gateApprovalByTask = new Map<string, boolean>();
+  for (const gate of gates) {
+    if (!gate.taskId) continue;
+    const approved = gate.status === "resolved" && (isIntegrationGate(gate)
+      ? gate.resolution === INTEGRATION_RESOLUTION
+      : gate.resolution === "approved");
+    gateApprovalByTask.set(gate.taskId, approved && (gateApprovalByTask.get(gate.taskId) ?? true));
+  }
 
   // Release any task still `blocked` whose entry gate has already been
   // approved. Orca records the gate resolution but does NOT flip the gated
@@ -3148,17 +3233,8 @@ async function reconcile(): Promise<void> {
   // `integrated` resolution — a human's positive assertion that the lane
   // workspaces were reconciled. Dependency completion alone never counts.
   if (blocked.length > 0) {
-    const approvedTaskIds = new Set(
-      gates
-        .filter((g) => {
-          if (!g.taskId || g.status !== "resolved") return false;
-          return isIntegrationGate(g)
-            ? g.resolution === INTEGRATION_RESOLUTION
-            : g.resolution === "approved";
-        })
-        .map((g) => g.taskId!),
-    );
-    const toRelease = blocked.filter((t) => approvedTaskIds.has(t.id) && !occupiedTaskIds.has(t.id));
+    const toRelease = blocked.filter((task) =>
+      gateApprovalByTask.get(task.id) === true && !occupiedTaskIds.has(task.id));
     if (toRelease.length > 0) {
       await Promise.all(
         toRelease.map((t) => taskUpdate(t.id, "ready", runId, state.coordinatorHandle!)),
@@ -3298,7 +3374,21 @@ async function reconcile(): Promise<void> {
       attempt.openCodeEvidence = await inspectOpenCodeTui(attempt.dispatchId).catch(() => null);
     }
 
-    if (!attempt.settled) {
+    if (attempt.settled && attempt.settledVia === "start_failed") {
+      // worker-start can fail provisionally after Orca has dispatched a pane.
+      // A later exact Task pointer to this Dispatch may authoritatively correct
+      // that failure to success, but it must not reopen terminal ownership.
+      const exactLateSuccess =
+        attempt.outcome === "failed" &&
+        attempt.dispatchId !== null &&
+        attempt.dispatchId !== attempt.retriedFrom &&
+        task?.id === attempt.taskId &&
+        task.run_id === runId &&
+        task.status === "completed" &&
+        task.dispatch_id === attempt.dispatchId &&
+        row?.dispatchStatus !== "pending";
+      if (exactLateSuccess) correctStartFailedOutcome(attempt, "task_status");
+    } else if (!attempt.settled) {
       const outcome = task?.status === "completed" ? "succeeded" : "failed";
       // Task terminal status alone can belong to the predecessor of a lost
       // retry. An unresolved start needs this new Dispatch's exact scoped row
@@ -3384,6 +3474,7 @@ async function reconcile(): Promise<void> {
     .filter((t) => !state.attempts.has(t.id))
     .filter((t) => !occupiedTaskIds.has(t.id))
     .filter((t) => !state.delegatedTaskIds.has(t.id))
+    .filter((t) => gateApprovalByTask.get(t.id) !== false)
     // A join behind an unresolved integration gate is unstartable, whatever
     // the budget says. (Orca has it `blocked`; the ready snapshot above can
     // still carry the pass the gate was created in.)
@@ -3394,7 +3485,7 @@ async function reconcile(): Promise<void> {
     })
     .slice(0, budget);
   if (batch.length === 0) {
-    await evaluateCompletionBoundary(tasks);
+    await evaluateCompletionBoundary(tasks, gates);
     return;
   }
   // Reserve every slot synchronously so a slow start can't let the next
@@ -3803,7 +3894,7 @@ function recordDebt(
  * clause passes; anything less keeps the loop alive in `running` (or parks it
  * in `awaiting_input` when the blocker is a human decision).
  */
-async function evaluateCompletionBoundary(tasks: OrcaTask[]): Promise<void> {
+async function evaluateCompletionBoundary(tasks: OrcaTask[], gates: Gate[]): Promise<void> {
   const runId = state.runId!;
   const unsettled = [
     ...[...state.attempts.values()].filter((a) => !a.settled),
@@ -3823,9 +3914,18 @@ async function evaluateCompletionBoundary(tasks: OrcaTask[]): Promise<void> {
   const parked = new Set(
     [...state.attempts.values()].filter((a) => a.settledVia === "start_failed").map((a) => a.taskId),
   );
+  // Resolving one approval can make Orca report `ready` while another gate is
+  // still pending. Such a Task is human-owed work, not an active ready wave.
+  const pendingGateTaskIds = new Set<string>();
+  let hasPendingGates = false;
+  for (const gate of gates) {
+    if (gate.status !== "pending") continue;
+    hasPendingGates = true;
+    if (gate.taskId) pendingGateTaskIds.add(gate.taskId);
+  }
   const readyOrDispatched = tasks.filter(
     (t) =>
-      (t.status === "ready" || t.status === "dispatched") &&
+      (t.status === "dispatched" || (t.status === "ready" && !pendingGateTaskIds.has(t.id))) &&
       !parked.has(t.id) &&
       // A join parked behind its integration gate is neither ready work nor
       // finished work — it is human-owed work, handled by its own clause below.
@@ -3904,6 +4004,12 @@ async function evaluateCompletionBoundary(tasks: OrcaTask[]): Promise<void> {
   // A legacy cross-lane join waits for a human integration gate. Committed
   // Stage mode instead parks a join until its dependency SHAs are recorded.
   if (state.integrationParked.size > 0) {
+    state.phase = "awaiting_input";
+    return;
+  }
+  // Every pending gate is human-owed work, even if its Task is absent from
+  // this snapshot. `gates` is a fresh Run-scoped read, not cached UI state.
+  if (hasPendingGates) {
     state.phase = "awaiting_input";
     return;
   }
@@ -4064,6 +4170,7 @@ async function startOne(
   const laneId = laneOfTask(task.id, opts.laneByTask);
   const lane = laneId ? state.lanes.get(laneId) ?? null : null;
   const placement: PlacementSpec = lane ? lane.seed : opts.placementByTask?.[task.id] ?? { kind: "current" };
+  const customCommand = !KNOWN_HARNESSES.has(attempt.harness);
   // Phase 5: record what THIS start asks for — the "requested" half of the
   // requested/effective pair the UI displays. Effort only ever rides with a
   // model (`--effort requires --model`), so it is normalized here too. The
@@ -4160,7 +4267,7 @@ async function startOne(
     // 2. The legacy path creates a LOCAL terminal in the coordinator worktree
     //    — it can never honor a non-current lane. Refuse before a terminal or
     //    Dispatch exists (the same rule remote placement has always had).
-    if (lane && ((attempt.harness === "opencode" && !nativeOpenCode) || attempt.harness === "custom")) {
+    if (lane && ((attempt.harness === "opencode" && !nativeOpenCode) || customCommand)) {
       throw new OrcaCliError(
         `Cannot start task ${task.id} in lane "${laneId}": the ${attempt.harness} harness runs through ` +
           `the viewer's local legacy path and cannot honor non-current placement. ` +
@@ -4327,7 +4434,29 @@ async function startOne(
     // worktree — it can never honor a remote environment. Refuse instead of
     // silently executing "remotely requested" work locally (that would be the
     // synthetic local fallback the plan forbids).
-    if (apiOpenCode) {
+    if (customCommand) {
+      if (environment) {
+        throw new OrcaCliError(
+          `Cannot start task ${task.id} on environment "${environment}": custom commands run through the viewer's ` +
+            `local legacy path and cannot honor remote placement.`,
+          "remote_legacy_unsupported",
+        );
+      }
+      if (!isCurrent()) {
+        throw new OrcaCliError("Coordinator stopped before the legacy worker could start.", "not_running");
+      }
+      started = await startLegacyWorker({
+        taskId: task.id,
+        harness: attempt.harness,
+        runId,
+        from,
+        worktree: opts.worktree,
+        model,
+        onHandle: (handle) => {
+          attempt.handle = handle;
+        },
+      });
+    } else if (apiOpenCode) {
       const start = explicitOpenCode
         ? (args: Parameters<typeof startOpenCodeTuiWorker>[0]) => startOpenCodeInteractiveWorker({ ...args, frontend: ui === "mini" ? "mini" : "tui" })
         : startOpenCodeTuiWorker;
@@ -4366,126 +4495,96 @@ async function startOne(
         },
       });
     } else {
-      try {
-        // A local newly created worktree must exist BEFORE Codex launches.
-        // worker-start's combined create + launch + injection can report
-        // input_accepted while Codex's final splash repaint discards the
-        // preamble. Create the workspace and identify its startup shell first;
-        // then the same ready-composer prewarm used by current/existing
-        // workspaces can bind that exact pane to the Dispatch.
-        let codexStartupTerminal: string | null = null;
-        const creatingLocalCodex =
-          attempt.harness === "codex" && !environment && !reuseTerminal &&
-          process.platform !== "win32" &&
-          (wt.worktree === "new-child" || wt.worktree === "new-top-level");
-        if (creatingLocalCodex) {
-          const created = await createLocalCodexWorktree({
-            kind: wt.worktree as "new-child" | "new-top-level",
-            name: wt.name ?? deriveWorktreeName(runId, laneId ?? task.id),
-            repo: wt.repo,
-            parentWorktree: opts.worktree,
-            baseBranch: wt.baseBranch,
-            displayName: wt.displayName,
-            comment: wt.comment,
-            setup: wt.setup,
-          });
-          codexStartupTerminal = created.terminal;
-          attempt.handle = created.terminal;
-          if (state.stageGit) await state.stageGit.verifyBase(created.path);
-          if (lane) adoptLaneSelector(lane, created.selector, "worktree_show", { path: created.path });
-          // Creation-only flags cannot accompany worker-start --terminal.
-          // The exact registered selector is now the placement authority.
-          wt = { worktree: created.selector };
-        }
-        let preparedCodexHandle: string | null = null;
-        const canPrepareCodex =
-          attempt.harness === "codex" && !environment && !reuseTerminal &&
-          process.platform !== "win32" &&
-          wt.worktree !== "new-child" && wt.worktree !== "new-top-level";
-        // 1.4.217 fixes native Codex readiness and isolates each terminal's
-        // server, so existing workspaces no longer need viewer-owned TUI
-        // parsing. Inspect the RUNNING runtime: a newer CLI can still talk to
-        // an older app. Missing/unrecognizable versions keep compatibility.
-        // New worktrees retain create → base-SHA verification → prewarm until
-        // that separate placement path has been accepted end to end. Choose
-        // before launching; never retry a failed native start by prewarming.
-        let nativeCodex = false;
-        if (canPrepareCodex && !creatingLocalCodex) {
-          const status = await runOrca<{ runtime?: { appVersion?: string } }>(["status"]);
-          const version = status.runtime?.appVersion;
-          nativeCodex = typeof version === "string" && /^\d+\.\d+\.\d+$/.test(version) &&
-            compareVersions(version, MIN_NATIVE_CODEX_VERSION) >= 0;
-        }
-        if (canPrepareCodex && !nativeCodex) {
-          preparedCodexHandle = await prepareCodexTerminal({
-            worktree: wt.worktree ?? "current",
-            model: model ?? undefined,
-            effort: attempt.requested.effort ?? undefined,
-            terminal: codexStartupTerminal ?? undefined,
-            onHandle: (handle) => { attempt.handle = handle; },
-          });
-          attempt.requested = { ...attempt.requested, terminal: preparedCodexHandle };
-        }
-        if (!isCurrent()) {
-          throw new OrcaCliError("Coordinator stopped before worker-start was issued.", "not_running");
-        }
-        started = await startSupervisedWorker({
-          taskId: task.id,
-          agent: nativeOpenCode ? "opencode2" : attempt.harness,
-          runId,
-          from,
-          // Exact placement (lane-recovered selector, existing selector, or a
-          // creation mode with its creation fields) rides to the adapter,
-          // which re-validates the remote current/new-child refusal as the
-          // last gate before the CLI.
-          worktree: wt.worktree,
+      // A local newly created worktree must exist BEFORE Codex launches.
+      // worker-start's combined create + launch + injection can report
+      // input_accepted while Codex's final splash repaint discards the
+      // preamble. Create the workspace and identify its startup shell first;
+      // then the same ready-composer prewarm used by current/existing
+      // workspaces can bind that exact pane to the Dispatch.
+      let codexStartupTerminal: string | null = null;
+      const creatingLocalCodex =
+        attempt.harness === "codex" && !environment && !reuseTerminal &&
+        process.platform !== "win32" &&
+        (wt.worktree === "new-child" || wt.worktree === "new-top-level");
+      if (creatingLocalCodex) {
+        const created = await createLocalCodexWorktree({
+          kind: wt.worktree as "new-child" | "new-top-level",
+          name: wt.name ?? deriveWorktreeName(runId, laneId ?? task.id),
           repo: wt.repo,
-          name: wt.name,
+          parentWorktree: opts.worktree,
           baseBranch: wt.baseBranch,
           displayName: wt.displayName,
           comment: wt.comment,
           setup: wt.setup,
-          on: environment ?? undefined,
-          model: preparedCodexHandle ? undefined : model ?? undefined,
-          // Phase 5: per-task effort (model-gated) and terminal reuse are
-          // mutually exclusive by the CLI's own contract — the adapter
-          // refuses the combination, and the reuse candidate filter above
-          // already excludes model-carrying follow-ups.
-          effort: preparedCodexHandle ? undefined : attempt.requested.effort ?? undefined,
-          terminal: reuseTerminal ?? preparedCodexHandle ?? undefined,
-          retryRequestId: startRequestId,
-          retryOf: retryOf ?? undefined,
+
         });
-      } catch (err) {
-        // A harness Orca doesn't know as a configured TUI agent (or a custom
-        // command) can't go through worker-start — compose it by hand instead.
-        // Phase 6: never for a remote placement — the legacy fallback would
-        // run the task on the LOCAL server behind the user's back.
-        // Worktree lanes: likewise never for a lane member — the bare-shell
-        // fallback always runs in the coordinator worktree.
-        const code = (err as OrcaCliError).code;
-        // A prepared Codex pane already contains the chosen model and may
-        // have been claimed by worker-start. Never create a second legacy
-        // pane or overwrite its handle after a rejection.
-        // A native OpenCode start may have effects even if Orca rejects it.
-        // Never launch a second one-shot worker after that attempt.
-        if (nativeOpenCode || nativeOpenCodeModel || environment || lane || attempt.handle ||
-            !code || !UNCONFIGURED_AGENT_CODES.has(code)) throw err;
-        if (!isCurrent()) {
-          throw new OrcaCliError("Coordinator stopped before the legacy worker could start.", "not_running");
-        }
-        started = await startLegacyWorker({
-          taskId: task.id,
-          harness: attempt.harness,
-          runId,
-          from,
-          worktree: opts.worktree,
-          model,
-          onHandle: (handle) => {
-            attempt.handle = handle;
-          },
-        });
+        codexStartupTerminal = created.terminal;
+        attempt.handle = created.terminal;
+        if (state.stageGit) await state.stageGit.verifyBase(created.path);
+        if (lane) adoptLaneSelector(lane, created.selector, "worktree_show", { path: created.path });
+        // Creation-only flags cannot accompany worker-start --terminal.
+        // The exact registered selector is now the placement authority.
+        wt = { worktree: created.selector };
       }
+      let preparedCodexHandle: string | null = null;
+      const canPrepareCodex =
+        attempt.harness === "codex" && !environment && !reuseTerminal &&
+        process.platform !== "win32" &&
+        wt.worktree !== "new-child" && wt.worktree !== "new-top-level";
+      // 1.4.217 fixes native Codex readiness and isolates each terminal's
+      // server, so existing workspaces no longer need viewer-owned TUI
+      // parsing. Inspect the RUNNING runtime: a newer CLI can still talk to
+      // an older app. Missing/unrecognizable versions keep compatibility.
+      // New worktrees retain create → base-SHA verification → prewarm until
+      // that separate placement path has been accepted end to end. Choose
+      // before launching; never retry a failed native start by prewarming.
+      let nativeCodex = false;
+      if (canPrepareCodex && !creatingLocalCodex) {
+        const status = await runOrca<{ runtime?: { appVersion?: string } }>(["status"]);
+        const version = status.runtime?.appVersion;
+        nativeCodex = typeof version === "string" && /^\d+\.\d+\.\d+$/.test(version) &&
+          compareVersions(version, MIN_NATIVE_CODEX_VERSION) >= 0;
+      }
+      if (canPrepareCodex && !nativeCodex) {
+        preparedCodexHandle = await prepareCodexTerminal({
+          worktree: wt.worktree ?? "current",
+          model: model ?? undefined,
+          effort: attempt.requested.effort ?? undefined,
+          terminal: codexStartupTerminal ?? undefined,
+          onHandle: (handle) => { attempt.handle = handle; },
+        });
+        attempt.requested = { ...attempt.requested, terminal: preparedCodexHandle };
+      }
+      if (!isCurrent()) {
+        throw new OrcaCliError("Coordinator stopped before worker-start was issued.", "not_running");
+      }
+      started = await startSupervisedWorker({
+        taskId: task.id,
+        agent: nativeOpenCode ? "opencode2" : attempt.harness,
+        runId,
+        from,
+        // Exact placement (lane-recovered selector, existing selector, or a
+        // creation mode with its creation fields) rides to the adapter,
+        // which re-validates the remote current/new-child refusal as the
+        // last gate before the CLI.
+        worktree: wt.worktree,
+        repo: wt.repo,
+        name: wt.name,
+        baseBranch: wt.baseBranch,
+        displayName: wt.displayName,
+        comment: wt.comment,
+        setup: wt.setup,
+        on: environment ?? undefined,
+        model: preparedCodexHandle ? undefined : model ?? undefined,
+        // Phase 5: per-task effort (model-gated) and terminal reuse are
+        // mutually exclusive by the CLI's own contract — the adapter
+        // refuses the combination, and the reuse candidate filter above
+        // already excludes model-carrying follow-ups.
+        effort: preparedCodexHandle ? undefined : attempt.requested.effort ?? undefined,
+        terminal: reuseTerminal ?? preparedCodexHandle ?? undefined,
+        retryRequestId: startRequestId,
+        retryOf: retryOf ?? undefined,
+      });
     }
     attempt.mode = started.mode;
     if (attempt.harness === "opencode" && !apiOpenCode && started.dispatchId) {

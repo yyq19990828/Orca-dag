@@ -1,7 +1,7 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocketServer } from "ws";
@@ -12,7 +12,9 @@ import {
   ProviderSessionStore,
 } from "./providerSessions";
 
-const root = await mkdtemp(join(tmpdir(), "orca-dag-provider-sessions-"));
+// Darwin's sockaddr_un is shorter than the default per-user temp path plus
+// Codex's fixed socket suffix. Keep the actual socket and workspace canonical.
+const root = await realpath(await mkdtemp(join(process.platform === "darwin" ? "/tmp" : tmpdir(), "od-provider-")));
 const workspace = join(root, "worktree");
 const socketDir = join(root, "app-server-control");
 const socket = join(socketDir, "app-server-control.sock");

@@ -166,7 +166,11 @@ const entry = fileURLToPath(new URL("./index.ts", import.meta.url));
 const loader = import.meta.resolve("tsx");
 function environment(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  for (const key of Object.keys(env)) if (key.startsWith("ORCA_")) delete env[key];
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("ORCA_") || ["CLAUDE_CONFIG_DIR", "GROK_HOME", "KIRO_HOME", "CODEX_HOME"].includes(key)) {
+      delete env[key];
+    }
+  }
   return { ...env, HOME: home, WORKSPACE_DIR: workspace, ORCA_CLI_COMMAND: JSON.stringify(process.execPath), NO_OPEN: "1", PORT: "0", ...overrides };
 }
 

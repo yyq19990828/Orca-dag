@@ -30,8 +30,9 @@ viewer 作为一个具有直接控制 Orca 运行时能力的管理面进程，�
 
 在尝试执行或调度 DAG 之前，前端通过 `GET /api/readiness` 探测底层环境状态：
 
-- 接口响应格式为：`{ cli, workspace, worktree, version, executionEnabled, reason }`。
-- **执行门槛（Orca ≥ 1.4.205）**：启动 Run、解决审批门、新建 Run 等修改类操作仅在 Orca 版本满足要求时开放。
+- 响应包含 `{ cli, workspace, worktree, cliVersion, version, runtimeState, executionEnabled, reason }`；`cliVersion` 是可执行文件版本，`version` 与 `runtimeState` 来自所选运行时。
+- **执行门槛**：CLI ≥ 1.4.205，且目标运行时明确处于 `ready`、稳定 appVersion ≥ 1.4.205。未知、断连或启动中的运行时保持只读，不能仅凭新 CLI 开放执行。
+- 重新连接目标运行时后刷新页面；执行路由也会独立重新核验短暂缓存的服务端探测。
 - **只读降级（Orca 1.4.160–1.4.204）**：UI 界面上所有执行和决策按钮将自动置灰禁用（Run 按钮提示 "View-only"，Gate 按钮附带版本原因）。若外部脚本绕过界面直接发起变更请求，服务端将直接返回 HTTP `503 execution_disabled`。
 - **只读操作不受影响**：无论是否具备执行能力，DAG 结构渲染、Run 列表查看、终端状态以及本地偏好读取等功能始终正常可用。
 - **协调者冲突（HTTP 409）**：当另一个 viewer 实例已经绑定并正在协调当前工作区时，启动 coordinator 的请求将返回 `409 coordinator_conflict`，防止并发冲突。
@@ -43,7 +44,7 @@ viewer 作为一个具有直接控制 Orca 运行时能力的管理面进程，�
 | 方法 | 路由路径 | 参数与请求体说明 | 功能语义与行为规范 |
 |---|---|---|---|
 | `GET` | `/api/session` | 无 | 获取当前进程的 mutation token 以及自定义命令启用状态（响应头包含 `Cache-Control: no-store`）。 |
-| `GET` | `/api/readiness` | 无 | 获取解析出的 CLI 路径、工作区信息、Orca 版本以及是否允许执行；若不可执行，附带可操作的原因说明。 |
+| `GET` | `/api/readiness` | 无 | 获取 CLI 及其构建版本、目标运行时版本/状态、工作区信息及执行权限；不可执行时附上恢复原因。 |
 | `GET` | `/api/capabilities` | 无 | 获取 Orca 运行时能力矩阵：包含版本信息及各项编排能力的状态（`supported / alias / absent`）；未知能力保持列出但关闭。 |
 | `GET` | `/api/run-health?run=<id>` | `run` (查询参数): Run ID | 评估指定 Run 的健康与归属状态：返回状态（`viewer-owned / external / unbound / inconsistent`）、coordinator 句柄、按来源划分的任务计数与警告。 |
 | `GET` | `/api/dag?run=<id>` | `run`: Run ID | 获取指定 Run 的完整 DAG 结构，包括 `{ runId, nodes, edges, hierarchy, gates, readyWave, readiness, generatedAt }`。 |

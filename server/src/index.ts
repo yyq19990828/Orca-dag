@@ -137,7 +137,7 @@ console.log(
 // a view-only session is explained in the terminal too. Never fatal — the
 // /api/readiness route re-probes for the client.
 void checkReadiness().then((r) => {
-  if (r.executionEnabled) console.log(`Orca ${r.version} — execution enabled.`);
+  if (r.executionEnabled) console.log(`Orca runtime ${r.version} (CLI ${r.cliVersion}) — execution enabled.`);
   else console.log(`View-only: ${r.reason}`);
 });
 if (servingUI && process.env.NO_OPEN !== "1") void openBrowser(url);

@@ -79,6 +79,17 @@ export function validateOpenCodeModel(value: unknown): OpenCodeModel {
   return { providerID: row.providerID, id: row.id, ...(row.variant ? { variant: row.variant as string } : {}) };
 }
 
+/**
+ * V2 session.create canonicalizes an omitted variant to `default` (observed
+ * with OpenCode 2.0.28). That wire sentinel means no override, not a wildcard:
+ * provider/model and every explicitly selected variant must still match.
+ */
+export function sameOpenCodeModel(value: unknown, expected: OpenCodeModel): boolean {
+  const actual = validateOpenCodeModel(value);
+  return actual.providerID === expected.providerID && actual.id === expected.id &&
+    (actual.variant ?? "default") === (expected.variant ?? "default");
+}
+
 /** #variant and effort are two spellings of the same V2 Model.Ref field. */
 export function parseOpenCodeModel(value: string, effort?: string | null): OpenCodeModel {
   // Some providers (e.g. OpenRouter) namespace their model ID with slashes.

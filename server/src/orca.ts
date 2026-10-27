@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { writeFile } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import { realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,10 +10,11 @@ import { openCodeSessionTitle, ProviderSessionStore } from "./providerSessions";
 import {
   openCodeApi, parseOpenCodeModel, verifyOpenCodeModel, verifyOpenCodeSession,
   openCodeTuiTitle,
-  validateOpenCodeModel,
-  assertOpenCodeModelSelection, verifyOpenCodeVersion, readOpenCodeDefaultModel,
+  validateOpenCodeModel, assertOpenCodeModelSelection,
+  verifyOpenCodeVersion, readOpenCodeDefaultModel,
   readOpenCodeExecution, interruptOpenCodeExecution,
   type OpenCodeLaunch, type OpenCodeEvidence,
+  sameOpenCodeModel,
 } from "./openCode";
 // The audience allowlist is a security-boundary concept, so the adapter
 // consumes it from security.ts (which never imports this module — no cycle).
@@ -1247,8 +1249,12 @@ export interface OrcaReadiness {
   cli: string;
   workspace: string;
   worktree: string;
-  /** Parsed `major.minor.patch` from `--version`; null when undetectable. */
+  /** Parsed version of the resolved CLI executable; never runtime authority. */
+  cliVersion: string | null;
+  /** The selected running runtime's appVersion, not the CLI build version. */
   version: string | null;
+  /** Verbatim runtime state; missing/unreachable remains null. */
+  runtimeState: string | null;
   /** True only when the runtime supports the execution contract. */
   executionEnabled: boolean;
   /** Actionable explanation when execution is unavailable, else null. */
@@ -1269,24 +1275,22 @@ export function compareVersions(a: string, b: string): number {
 }
 
 /**
- * Pure classification of a readiness probe. Split from the spawn so every
- * branch (missing CLI, unparseable output, each version band) is testable
- * without an Orca on PATH.
+ * Classify the selected runtime's version and probe failure. The CLI build
+ * version cannot grant execution: paired hosts and installed clients update
+ * independently, and `--version` succeeds without any runtime connection.
  */
 export function evaluateReadiness(
   version: string | null,
   probeError: string | null,
 ): { executionEnabled: boolean; reason: string | null } {
-  if (version === null) {
-    const detail = probeError
-      ? `Probing it failed: ${probeError}`
-      : "Its --version output was not a recognizable x.y.z.";
+  if (probeError || version === null || !/^\d+\.\d+\.\d+$/.test(version)) {
+    const detail = probeError ?? "Its status did not report a stable x.y.z runtime appVersion.";
     return {
       executionEnabled: false,
       reason:
-        `Orca CLI not usable${probeError ? "" : " (unparseable version)"}. ${detail} ` +
-        `Install Orca ${MIN_EXECUTION_VERSION}+, make sure it is on PATH, or set ORCA_CLI_COMMAND ` +
-        `to the exact binary. The viewer stays open in view-only mode.`,
+        `Orca runtime is not ready for execution. ${detail} ` +
+        `Start or reconnect the selected Orca ${MIN_EXECUTION_VERSION}+ runtime, or check ` +
+        `ORCA_CLI_COMMAND and the selected environment. The viewer stays open in view-only mode.`,
     };
   }
   if (compareVersions(version, MIN_EXECUTION_VERSION) < 0) {
@@ -1311,6 +1315,7 @@ export function evaluateReadiness(
 
 const READINESS_TTL_MS = 30_000;
 let readinessCache: OrcaReadiness | null = null;
+let readinessRuntime: OrcaRuntime | null = null;
 
 /** `--version` output is plain text, not the JSON envelope runOrca unwraps. */
 async function runOrcaPlain(args: string[], timeoutMs: number): Promise<string> {
@@ -1325,36 +1330,59 @@ async function runOrcaPlain(args: string[], timeoutMs: number): Promise<string> 
 }
 
 /**
- * Probe the resolved CLI once and report whether execution may run. Result is
- * cached briefly — the UI polls this, and the resolved command/workspace are
- * fixed for the process lifetime anyway.
+ * Probe both the resolved CLI and the runtime it actually targets. Readiness
+ * requires a positive ready state and a supported runtime version; a newer CLI
+ * alone must never enable Run against an old, disconnected, or unknown host.
  */
 export async function checkReadiness(force = false): Promise<OrcaReadiness> {
-  if (!force && readinessCache?.checkedAt && Date.now() - readinessCache.checkedAt < READINESS_TTL_MS) {
+  const current = getOrcaRuntime();
+  if (!force && readinessRuntime === current && readinessCache?.checkedAt &&
+      Date.now() - readinessCache.checkedAt < READINESS_TTL_MS) {
     return readinessCache;
   }
-  const { command, workspace, worktree } = getOrcaRuntime();
+  const { command, workspace, worktree } = current;
+  let cliVersion: string | null = null;
   let version: string | null = null;
+  let runtimeState: string | null = null;
   let probeError: string | null = null;
   try {
     const stdout = await runOrcaPlain(["--version"], 15_000);
     const match = stdout.match(/(\d+\.\d+\.\d+)/);
-    version = match ? match[1] : null;
-    if (!version) probeError = null;
+    cliVersion = match ? match[1] : null;
+    if (!cliVersion) probeError = "The selected CLI did not report a recognizable --version.";
   } catch (err) {
-    version = null;
     const e = err as { message?: string; code?: string };
     probeError =
       e.code === "ENOENT"
         ? `no executable "${formatCommand(command)}" on PATH`
         : String(e.message ?? err).slice(0, 300);
   }
+  if (cliVersion) {
+    try {
+      const status = await runOrca<{ runtime?: { appVersion?: unknown; state?: unknown; reachable?: unknown } }>(
+        ["status"], { timeoutMs: 15_000 },
+      );
+      version = typeof status.runtime?.appVersion === "string" ? status.runtime.appVersion : null;
+      runtimeState = typeof status.runtime?.state === "string" ? status.runtime.state : null;
+      if (runtimeState !== "ready" || status.runtime?.reachable === false) {
+        probeError = `The selected runtime is ${runtimeState ?? "unreported"}${status.runtime?.reachable === false ? " and unreachable" : ""}.`;
+      }
+    } catch (err) {
+      probeError = String((err as Error).message ?? err).slice(0, 300);
+    }
+  }
+  if (!probeError && cliVersion && compareVersions(cliVersion, MIN_EXECUTION_VERSION) < 0) {
+    probeError = `The resolved CLI ${cliVersion} is too old; install CLI ${MIN_EXECUTION_VERSION}+ for supervised-worker commands.`;
+  }
   const verdict = evaluateReadiness(version, probeError);
+  readinessRuntime = current;
   readinessCache = {
     cli: formatCommand(command),
     workspace: workspace.dir,
     worktree,
+    cliVersion,
     version,
+    runtimeState,
     checkedAt: Date.now(),
     ...verdict,
   };
@@ -4333,6 +4361,9 @@ async function startOpenCodeSessionWorker(opts: OpenCodeStartOptions & { fronten
     // still honor the exact model returned by the official default resolver.
     assertOpenCodeModelSelection(creationModel, model);
     await verifyOpenCodeModel(workspace, model, true);
+    if (!sameOpenCodeModel(model, creationModel)) {
+      throw new Error("OpenCode did not preserve the requested session model/variant");
+    }
     // Freeze the provider's exact resolution before the pane exists. A lost
     // create response still leaves the original null-model preparation held.
     launch = { ...launch, model };
@@ -4341,18 +4372,36 @@ async function startOpenCodeSessionWorker(opts: OpenCodeStartOptions & { fronten
     terminalAttempted = true;
     const terminal = await runOrca<{ terminal?: { handle?: string } }>([
       "terminal", "create", "--worktree", `path:${workspace}`, "--title", launch.terminalTitle,
-      // Orca identifies a prestarted agent from the command's first word.
-      // Prefixing `exec` leaves a visible working TUI but worker-start rejects
-      // it as unrecognized (verified on 1.4.222). Unlike the one-shot shell
-      // workaround, a full TUI stays interactive after its assigned turn.
-      "--command", `opencode ${opts.frontend === "mini" ? "mini" : "--auto"} --session ${quoteLocalShellArg(launch.sessionId)}`,
+      // Tab restoration is shared by default and can select another session
+      // despite --session. A request-local TUI channel isolates only UI state;
+      // backend discovery and provider/model configuration stay unchanged.
+      // Orca identifies the live foreground OpenCode agent after it starts.
+      // Keep `opencode` as the actual command and preserve the selected frontend.
+      "--command", `OPENCODE_TUI_CHANNEL=${quoteLocalShellArg(`orca-dag-${opts.retryRequestId}`)} opencode ${opts.frontend === "mini" ? "mini" : "--auto"} --session ${quoteLocalShellArg(launch.sessionId)}`,
     ]);
     if (!terminal.terminal?.handle) throw new Error("OpenCode terminal creation returned no handle");
     launch = { ...launch, terminal: terminal.terminal.handle };
     opts.onHandle(launch.terminal!);
     await store.recordOpenCodeLaunch(launch);
+    // tui-idle can be satisfied by the startup shell before OpenCode mounts.
+    // Require the application's exact session-derived OSC title first, not
+    // the matching creation title; otherwise a ready shell can bind too soon.
+    const readyDeadline = Date.now() + 60_000;
+    for (;;) {
+      checkCancellation();
+      const pane = (await listTerminals()).find(row => row.handle === launch.terminal);
+      if (!pane || pane.worktreePath !== workspace) {
+        throw new OrcaCliError("OpenCode startup terminal identity changed", "session_binding_mismatch");
+      }
+      if (pane.title === `OC | ${launch.terminalTitle}`) break;
+      if (Date.now() >= readyDeadline) {
+        throw new OrcaCliError("OpenCode session title did not become ready; no Task input was sent", "opencode_not_ready");
+      }
+      await delay(250);
+    }
     const wait = await runOrca<{ wait?: { satisfied?: boolean } }>([
-      "terminal", "wait", "--terminal", launch.terminal!, "--for", "tui-idle", "--timeout-ms", "60000",
+      "terminal", "wait", "--terminal", launch.terminal!, "--for", "tui-idle",
+      "--timeout-ms", String(Math.max(1, readyDeadline - Date.now())),
     ]);
     if (wait.wait?.satisfied !== true) throw new OrcaCliError("OpenCode TUI did not become ready; no Task input was sent", "opencode_not_ready");
     checkCancellation();
@@ -4364,7 +4413,7 @@ async function startOpenCodeSessionWorker(opts: OpenCodeStartOptions & { fronten
       throw new OrcaCliError("Prepared OpenCode session has user-owned or unproven work; no Task input was sent", "preparation_retained");
     }
     const current = await verifyOpenCodeSession(launch);
-    if (JSON.stringify(validateOpenCodeModel(current.model)) !== JSON.stringify(model)) {
+    if (!sameOpenCodeModel(current.model, model)) {
       await store.recordOpenCodeLaunch({ ...launch, state: "retained" });
       opts.onHandle(null);
       throw new OrcaCliError("Prepared OpenCode model changed before binding; terminal retained, no input sent", "preparation_retained");
@@ -5254,6 +5303,10 @@ function gateIsOpen(g: Gate): boolean {
  * `pending`/`blocked` Task with NOTHING visible against it is `unknown`: Orca
  * itself flips those to `ready` (the coordinator nudges them), so a lingering
  * non-ready row is a runtime fact we must not paper over.
+ *
+ * Orca 1.4.229 can mark a Task `ready` after resolving one of several gates.
+ * A remaining open gate still wins over that raw status: it is not runnable
+ * and must not appear in the scheduler's ready wave.
  */
 export function explainReadiness(
   tasks: OrcaTask[],
@@ -5281,7 +5334,10 @@ export function explainReadiness(
     ids.map((id) => `${id} (${statusWord(id)})`).join(", ");
 
   const readyWave: ReadyWaveView = {
-    taskIds: tasks.filter((t) => t.status === "ready").map((t) => t.id).sort(),
+    taskIds: tasks
+      .filter((t) => t.status === "ready" && !openGatesByTask.has(t.id))
+      .map((t) => t.id)
+      .sort(),
     freeSlots,
   };
 
@@ -5300,8 +5356,15 @@ export function explainReadiness(
 
     switch (t.status) {
       case "ready": {
-        // Runnable by definition. Capacity only explains WHY it has not been
-        // placed yet — it never makes the Task less ready.
+        if (openGates.length > 0) {
+          codes.push("pending_gate");
+          reasons.push(
+            `Waiting on a decision gate: ${openGates.map((g) => `“${g.question || g.id}” (${g.id})`).join("; ")}.`,
+          );
+          break;
+        }
+        // Runnable once its gates are closed. Capacity explains WHY it has not
+        // been placed yet — it never makes the Task less ready.
         if (freeSlots !== null && freeSlots <= 0) {
           codes.push("waiting_for_capacity");
           reasons.push(
@@ -5362,7 +5425,7 @@ export function explainReadiness(
     }
 
     readiness[t.id] = {
-      runnable: t.status === "ready",
+      runnable: t.status === "ready" && openGates.length === 0,
       codes,
       reasons,
       unmetDependencyIds: unmetDeps,

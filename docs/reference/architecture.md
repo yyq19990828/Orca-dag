@@ -99,7 +99,7 @@ Because the viewer runs as an external OS process without an ambient Orca sessio
 
 ## CLI and Workspace Resolution
 
-CLI executable, workspace path, and execution capability are resolved **once at process startup** and remain immutable:
+The CLI executable and workspace path resolve once at startup. Readiness is re-probed with a short-lived cache scoped to that resolved runtime; it is not a permanent startup verdict.
 
 ### Executable Resolution Order
 
@@ -117,8 +117,8 @@ Every execution runs via `spawn` with `shell: false` and the workspace directory
 ### Execution Enablement Gate
 
 Checked via `GET /api/readiness`:
-- **Orca ≥ 1.4.205:** Full execution enabled.
-- **Orca 1.4.160–1.4.204:** **View-only mode**. The DAG, gates, and statuses render, but execution controls disable themselves, and mutating endpoints return `503 execution_disabled`.
+- **Execution:** CLI ≥ 1.4.205 plus a positively ready selected runtime with stable appVersion ≥ 1.4.205. A newer CLI alone does not establish readiness.
+- **View-only:** Older, unknown, unreachable, or starting runtimes keep execution disabled (`503 execution_disabled`); available read operations remain accessible.
 - **Orca < 1.4.160 / Not Found:** Unsupported. Readiness reports the exact attempted CLI resolution and error.
 
 ---

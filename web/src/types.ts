@@ -1112,17 +1112,18 @@ export interface OrcaRepoView {
 }
 
 /**
- * Server-side readiness probe (Phase 2): which Orca CLI was resolved, what
- * version it reports, and whether the viewer may execute at all. When
- * `executionEnabled` is false, `reason` carries the actionable explanation
- * shown by the disabled Run/gate/reset controls (e.g. Orca 1.4.160–1.4.204 is
- * view-only: execution needs 1.4.205+).
+ * Server-side execution readiness: the CLI build is diagnostic only; version
+ * and runtimeState describe the selected runtime. Execution requires positive
+ * ready status and a supported stable runtime version. The server's reason
+ * explains a disabled control without inferring availability from the CLI.
  */
 export interface OrcaReadiness {
   cli: string;
   workspace: string;
   worktree: string;
+  cliVersion: string | null;
   version: string | null;
+  runtimeState: string | null;
   executionEnabled: boolean;
   reason: string | null;
 }
@@ -1190,7 +1191,9 @@ export interface RuntimeCapabilityProjection {
 export interface RuntimeCapabilitiesResponse extends RuntimeCapabilityProjection {
   runtime: {
     cli: string;
+    cliVersion: string | null;
     version: string | null;
+    runtimeState: string | null;
     executionEnabled: boolean;
     reason: string | null;
   };

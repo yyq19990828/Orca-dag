@@ -42,6 +42,7 @@
 |---|---|---|
 | **1.4.217** | **Codex CLI 0.159.2** | 本机只读原生 Task：提示词执行、`live / agent_status`、精确 transcript 及 Orca 接受 `worker_done`。 |
 | **1.4.222** | **OpenCode 2.0.22** | 显式启用的 API 预选模型完整 TUI：逐节点模型/variant、依赖 Task、重启恢复且不重复派工、关闭终端后读取输出、成功完成后的清理及 provider 确认退出的 Stop。Stop 在 fencing 后可能保留终端，不保证自动关窗。 |
+| **1.4.229** | **OpenCode 2.0.28** | 已记录的本地 POSIX 显式模型 one-shot 认证：`deepseek/deepseek-flash` 两个依赖任务、阻塞 ask/reply、多审批门、同 Run 恢复且不重复生产任务、接受 `worker_done`、独立重算产物，最终无实验自有终端或清理债务。不代表原生 `opencode2` 模型选择或 API 预选 TUI 已通过，证据范围见操作教程。 |
 | **1.4.235** | **OpenCode 2.1.2** | Linux viewer 选择 Mini / 完整 TUI，指定模型与配置默认模型、写文件及获接受的 `worker_done`；Mini 前台等待 400.027 秒并确认后续消息、显式保留及活动 Stop。Mini fleet 仍可能为 `missing_status`；配置的 provider 必须可用（首次免费默认 provider 返回 403）。 |
 | **1.4.241** | **OpenCode 2.1.2** | 隔离 Linux headless 运行时，原生 `opencode` + `deepseek/deepseek-flash`：写文件并读回、接受 `worker_done`、effective 模型回显及终端释放；viewer 重启后恢复相同 Dispatch 并完成依赖 Task，无重复 worker、无清理债务。profile 的嵌套深度上限为 1，真实 helper 启动被拒绝；helper 归属/交回由回归套件覆盖，不宣称已通过真实 provider 验证。 |
 | **1.4.242** | **Codex 0.164.0** | 隔离 Linux 原生 worker：写文件并读回、显示 provider transcript、跨多个有界页面向前翻页、获接受的 `worker_done`、终端释放及释放后仍可读的 transcript 归档。另一次真实桌面 viewer A/B → C 流程观察到两个根 worker 并行存活，三个 Task 全部完成、结果为 `51`，恰好三个 Dispatch，终端完成复用/保留归属决策且无清理债务。不代表已覆盖远程/Windows，也未在真实 provider 上复现启动后期报错竞态。 |

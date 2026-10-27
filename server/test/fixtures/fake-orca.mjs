@@ -255,6 +255,23 @@ function emptyDelivery(extra = {}) {
     ...extra,
   };
 }
+function applyDeliverySettlement(delivery) {
+  // Some lifecycle tests model Orca's atomic acceptance point: the terminal
+  // Task/Dispatch transition lands as its worker_done Delivery is consumed,
+  // before the coordinator's authority read.
+  const settlement = state.settleOnDelivery?.[delivery.deliveryId];
+  if (!settlement) return;
+  const task = state.tasks?.[settlement.taskId];
+  const dispatch = state.dispatches?.[settlement.dispatchId];
+  if (task) {
+    task.status = settlement.outcome === "succeeded" ? "completed" : "failed";
+    task.dispatch_id = settlement.dispatchId;
+  }
+  if (dispatch) {
+    dispatch.status = settlement.outcome === "succeeded" ? "completed" : "failed";
+  }
+  delete state.settleOnDelivery[delivery.deliveryId];
+}
 
 /** Orca flips pending tasks to ready once every dep is terminal. */
 function deriveReadiness() {
@@ -452,13 +469,29 @@ if (ns === "orchestration" && verb === "run-list") {
   const box = state.mailboxes?.[flag("--terminal")] ?? [];
   const ack = flag("--ack");
   if (ack) {
-    const delivery = box.find((d) => d.deliveryId === ack);
-    if (delivery) delivery.open = false;
-  }
-  // Like Orca, ACK retires the old batch and then checks the next one.
-  {
+    const delivery = box.find((d) => d.deliveryId === ack && d.open !== false);
+    if (!delivery) fail("stale_delivery", `delivery ${ack} is no longer pending`);
+    delivery.open = false;
+    const next = box.find((d) => d.open !== false);
+    if (next) {
+      applyDeliverySettlement(next);
+      next.seen = (next.seen ?? 0) + 1;
+      ok(
+        emptyDelivery({
+          acknowledged: ack,
+          deliveryId: next.deliveryId,
+          messages: next.messages,
+          count: next.messages.length,
+          replayed: next.seen > 1,
+        }),
+      );
+    } else {
+      ok(emptyDelivery({ acknowledged: ack }));
+    }
+  } else {
     const open = box.find((d) => d.open !== false);
     if (open) {
+      applyDeliverySettlement(open);
       open.seen = (open.seen ?? 0) + 1;
       ok(
         emptyDelivery({
@@ -507,13 +540,16 @@ if (ns === "orchestration" && verb === "run-list") {
     for (const d of box) {
       // A replied message is marked handled: it no longer replays.
       d.messages = d.messages.filter((m) => m.id !== id);
+      if (d.messages.length === 0) d.open = false;
     }
   }
   ok({});
 } else if (ns === "orchestration" && verb === "worker-start") {
   if (state.openCodeTui && flag("--terminal")) {
     const terminal = (state.terminals ?? []).find(t => t.handle === flag("--terminal"));
-    if (!terminal?.command?.startsWith("opencode ")) fail("agent_unconfigured", "prepared command is not a recognized agent");
+    if (!terminal?.connected || terminal.pendingOpenCodeTitle) {
+      fail("agent_unconfigured", "terminal has no ready agent");
+    }
   }
   // Phase 4 idempotency: a repeated worker-start carrying an ALREADY-completed
   // retry-request id returns the recorded outcome verbatim — no second
@@ -888,14 +924,24 @@ if (ns === "orchestration" && verb === "run-list") {
 } else if (ns === "project" && verb === "list") {
   ok({ projects: state.projects ?? [] });
 } else if (ns === "terminal" && verb === "list") {
+  for (const terminal of state.terminals ?? []) {
+    if (terminal.titleDelayLists > 0 && --terminal.titleDelayLists === 0) {
+      terminal.title = terminal.pendingOpenCodeTitle;
+      delete terminal.pendingOpenCodeTitle;
+    }
+  }
   ok({ terminals: state.terminals ?? [] });
 } else if (ns === "terminal" && verb === "create") {
   state.seq ??= {};
   state.seq.terminal = (state.seq.terminal ?? 0) + 1;
   const handle = `term_f${state.seq.terminal}`;
   state.terminals ??= [];
+  const openCodeTitle = state.openCodeTui && flag("--title")?.startsWith("odag:")
+    ? `OC | ${flag("--title")}` : null;
   state.terminals.push({ handle, title: flag("--title") ?? null, connected: true,
-    ...(state.openCodeTui ? { worktreePath: flag("--worktree")?.replace(/^path:/, ""), command: flag("--command") } : {}) });
+    ...(state.openCodeTui ? { worktreePath: flag("--worktree")?.replace(/^path:/, ""), command: flag("--command") } : {}),
+    ...(openCodeTitle ? { title: state.openCodeTitleDelayLists ? "startup shell" : openCodeTitle,
+      ...(state.openCodeTitleDelayLists ? { pendingOpenCodeTitle: openCodeTitle, titleDelayLists: state.openCodeTitleDelayLists } : {}) } : {}) });
   if (state.terminalCreateLost) finishLostResponse("lost terminal create response");
   ok({ terminal: { handle } });
 } else if (ns === "terminal" && verb === "close") {
@@ -914,7 +960,7 @@ if (ns === "orchestration" && verb === "run-list") {
 } else if (ns === "terminal" && verb === "send") {
   ok({});
 } else if (ns === "status") {
-  ok({ runtime: state.runtime ?? { appVersion: state.version ?? "1.4.205" } });
+  ok({ runtime: state.runtime ?? { appVersion: state.version ?? "1.4.205", state: "ready", reachable: true } });
 } else {
   // Unknown surface: fail loudly rather than silently succeeding, so a drift
   // between the adapter and this double shows up as a test error, not a lie.
