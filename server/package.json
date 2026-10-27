@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
-    "test": "tsx --test src/*.test.ts"
+    "test": "tsx --test src/*.test.ts",
+    "verify:live": "tsx src/verifyLive.ts"
   },
   "dependencies": {
     "express": "^4.21.2",

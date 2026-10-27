@@ -112,7 +112,7 @@ viewer 是个普通进程，没有 Orca 会话或终端身份，所以写操作�
 | **1.4.222** | **OpenCode 2.0.22** | 显式启用的 API 预选模型完整 TUI：逐节点模型/variant、依赖 Task、重启恢复且不重复派工、关闭终端后读取输出、成功完成后的清理及 provider 确认退出的 Stop。Stop 在 fencing 后可能保留终端，不保证自动关窗。 |
 | **1.4.235** | **OpenCode 2.1.2** | Linux viewer 选择 Mini / 完整 TUI，指定模型与配置默认模型、写文件及获接受的 `worker_done`；Mini 前台等待 400.027 秒并确认后续消息、显式保留及活动 Stop。Mini fleet 仍可能为 `missing_status`；配置的 provider 必须可用（首次免费默认 provider 返回 403）。 |
 | **1.4.241** | **OpenCode 2.1.2** | 隔离 Linux headless 运行时，原生 `opencode` + `deepseek/deepseek-flash`：写文件并读回、接受 `worker_done`、effective 模型回显及终端释放；viewer 重启后恢复相同 Dispatch 并完成依赖 Task，无重复 worker、无清理债务。profile 的嵌套深度上限为 1，真实 helper 启动被拒绝；helper 归属/交回由回归套件覆盖，不宣称已通过真实 provider 验证。 |
-| **1.4.242** | **Codex 0.164.0** | 隔离 Linux 原生 worker：写文件并读回、显示 provider transcript、跨多个有界页面向前翻页、获接受的 `worker_done`、终端释放及释放后仍可读的 transcript 归档。不代表已覆盖远程/Windows，也未在真实 provider 上复现启动后期报错竞态。 |
+| **1.4.242** | **Codex 0.164.0** | 隔离 Linux 原生 worker：写文件并读回、显示 provider transcript、跨多个有界页面向前翻页、获接受的 `worker_done`、终端释放及释放后仍可读的 transcript 归档。另一次真实桌面 viewer A/B → C 流程观察到两个根 worker 并行存活，三个 Task 全部完成、结果为 `51`，恰好三个 Dispatch，终端完成复用/保留归属决策且无清理债务。不代表已覆盖远程/Windows，也未在真实 provider 上复现启动后期报错竞态。 |
 
 **原生 OpenCode 2 路径**也已使用 **OpenCode 2.0.22** 通过只读 Task 和隔离工作树写文件验证（该路径要求 Orca ≥ 1.4.220）。这与实验性 API 预选模型适配器的验证不同；后者在 macOS、**Node.js 22.23.0** 上实测，**尚未覆盖**长时间编码、Git Stage、新建工作区、lane、远程或 Windows 执行。
 
@@ -187,11 +187,14 @@ npx orca-orchestration-launcher uninstall   # 想先看清单就加 --dry-run
 ```bash
 npm install
 npm run check          # skill 校验 + 类型检查 + 测试 + web 构建（CI 跑的就是它）
+npm run verify:live -- http://127.0.0.1:8787 # 显式运行真实 Codex DAG；需要空闲的 viewer
 npm run dev            # 前端 5173 + 后端 8787（vite 代理 /api）→ http://localhost:5173
 npm run build:npm      # 打出可发布的包 → dist-npm/（只要 Node）
 npm run build:binary   # 便携单文件二进制 → dist/orca-dag（约 100 MB，前端已内嵌；需要 Bun）
 npm run release 1.0.0  # 打 tag 并推送；CI 负责发 npm + 把各平台二进制挂到 GitHub release
 ```
+
+`verify:live` 仅用于源码工作区，**不属于 `check`**。先启动本地 viewer；命令会创建一个新 Run 和三个真实 Codex Task，消耗已配置 provider 的用量。A/B 独立写入输入，C 随后计算并验证结果 `51`。worker 启动与结算只由 viewer 负责，验证器旁路观察并行状态，不再让 worker 等待测试标记。启动结果 unknown 时继续观察，绝不自动重试或取消；达到 15 分钟观察期限会保留 worker 并报告 `unverifiable`，不冒充成功。证据保存在 `.orca-dag/<时间戳>-verification-*/`；结束后恢复原并发设置，并保持验证 Run 被选中。
 
 用 `TARGET=bun-linux-x64 npm run build:binary` 交叉编译到别的平台；`bash scripts/build-all-binaries.sh` 一次编出全部目标，release workflow 跑的就是它。
 

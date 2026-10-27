@@ -113,7 +113,7 @@ All of this is resolved **once at startup** and then never changes for the life 
 | **1.4.222** | **OpenCode 2.0.22** | Opt-in API-preselected full TUI: per-node model/variant, dependent Tasks, restart recovery without duplicate Dispatches, output after terminal close, successful completion cleanup and provider-confirmed Stop. Stop can retain the pane after fencing; it is not a guarantee of automatic terminal closure. |
 | **1.4.235** | **OpenCode 2.1.2** | Linux viewer-selected Mini / Full TUI with explicit and configured default models, file writes and accepted `worker_done`; Mini foreground wait of 400.027 seconds plus acknowledged follow-up, explicit retention and active Stop. Mini can still report fleet `missing_status`; configured providers must be authorized (the initial free-provider default returned 403). |
 | **1.4.241** | **OpenCode 2.1.2** | Isolated Linux headless runtime, native `opencode` + `deepseek/deepseek-flash`: file write/readback, accepted `worker_done`, effective-model receipt and terminal release; viewer restart recovered the same Dispatch and completed a dependent Task with no duplicate workers or cleanup debt. Nested-helper execution was refused by the profile's depth limit of 1; helper custody/handback is covered by the regression suite, not claimed as live-provider verified. |
-| **1.4.242** | **Codex 0.164.0** | Isolated Linux native worker: file write/readback, rendered provider transcript, forward cursor paging over multiple bounded pages, accepted `worker_done`, terminal release and readable transcript archive after release. This does not establish remote/Windows coverage or reproduce the late-start-error race on a live provider. |
+| **1.4.242** | **Codex 0.164.0** | Isolated Linux native worker: file write/readback, rendered provider transcript, forward cursor paging over multiple bounded pages, accepted `worker_done`, terminal release and readable transcript archive after release. A separate live desktop viewer A/B → C flow observed parallel root workers, completed all three Tasks with result `51`, and used exactly three Dispatches with reuse/retention decisions and no cleanup debt. This does not establish remote/Windows coverage or reproduce the late-start-error race on a live provider. |
 
 The **native OpenCode 2 path** also passed read-only and isolated-worktree file-writing checks with **OpenCode 2.0.22** (path requirement: Orca ≥ 1.4.220). This is separate from the experimental API-preselected adapter, whose real-runtime checks ran on macOS with **Node.js 22.23.0** and did **not** cover long coding runs, Git Stage, newly created workspaces, lanes, remote or Windows execution.
 
@@ -188,11 +188,14 @@ Workspace viewer history is kept by default: config, Activity/check receipts, re
 ```bash
 npm install
 npm run check          # skill validation + typecheck + tests + web build (what CI runs)
+npm run verify:live -- http://127.0.0.1:8787 # opt-in real Codex DAG; requires an idle viewer
 npm run dev            # frontend :5173 + backend :8787 (vite proxies /api) → http://localhost:5173
 npm run build:npm      # stage the publishable package → dist-npm/ (Node only)
 npm run build:binary   # portable single binary → dist/orca-dag (~100 MB, frontend embedded; needs Bun)
 npm run release 1.0.0  # tag + push; CI publishes to npm and attaches every binary to a GitHub release
 ```
+
+`verify:live` is a source-checkout tool, **not part of `check`**. Start a local viewer first; it creates a new Run with three real Codex Tasks and consumes your configured provider's usage. A/B write independent inputs, then C computes and validates `51`. The viewer alone owns worker starts and settlement; the verifier observes parallelism without blocking workers on a test flag. Unknown starts remain under observation, never automatically retried or cancelled. An observation deadline (15 minutes) leaves workers untouched and reports `unverifiable`, not success. Evidence is retained under `.orca-dag/<timestamp>-verification-*/`; the previous concurrency setting is restored and the verification Run stays selected.
 
 Cross-compile a binary for another platform with `TARGET=bun-linux-x64 npm run build:binary`; `bash scripts/build-all-binaries.sh` does every target at once, which is what the release workflow runs.
 
