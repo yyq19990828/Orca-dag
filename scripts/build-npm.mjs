@@ -79,7 +79,9 @@ for (const f of ["README.md", "README_zh.md", "LICENSE"]) {
   if (existsSync(join(root, f))) cpSync(join(root, f), join(out, f));
 }
 mkdirSync(join(out, "docs"), { recursive: true });
-cpSync(join(root, "docs", "tutorials"), join(out, "docs", "tutorials"), { recursive: true });
+// README and tutorial navigation now include the docs index and reference pages.
+// Ship the complete documentation tree so future topic moves stay package-safe.
+cpSync(join(root, "docs"), join(out, "docs"), { recursive: true });
 // Ship the skill too, so `npx skills add orca-orchestration-launcher` (npm
 // source) and a plain `npm i -g orca-orchestration-launcher` both put SKILL.md
 // on disk next to the viewer.
@@ -97,7 +99,7 @@ writeFileSync(
       description: rootPkg.description,
       type: "module",
       bin: { "orca-dag": "bin/orca-dag.mjs" },
-      files: ["bin", "dist", "web", "skill", "docs/tutorials", "README.md", "README_zh.md", "LICENSE"],
+      files: ["bin", "dist", "web", "skill", "docs", "README.md", "README_zh.md", "LICENSE"],
       engines: { node: ">=20" },
       keywords: ["orca", "orchestration", "dag", "agents", "coordinator", "react-flow"],
       license: "MIT",

@@ -1,5 +1,7 @@
 # Readable orchestration layout
 
+English | [简体中文](ui-layout_zh.md) · [Documentation](README.md)
+
 ## Goal and decisions
 
 Help an operator answer, in order: what is happening, what needs my decision,

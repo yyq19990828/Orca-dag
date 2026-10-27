@@ -1,6 +1,6 @@
 # 教程：规划并运行 Orca 任务 DAG
 
-[English](orchestration.md) | 简体中文
+[English](orchestration.md) | 简体中文 · [文档导航](../README_zh.md)
 
 本教程以一个功能从需求到 Run 完成为例。编写时核对的 Orca CLI 版本是 1.4.209。**实际使用命令参数前，先加载本机 CLI 的指南：**`orca skills get orchestration`；如果[项目 skill](../../skill/SKILL.md)选用了其他可执行文件，就用那个文件运行 `skills get`。运行时指南和 `--help` 优先于本文示例。viewer 执行任务所需的最低 Orca 版本是 1.4.205。
 

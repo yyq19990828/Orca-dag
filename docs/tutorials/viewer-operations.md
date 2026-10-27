@@ -1,8 +1,8 @@
 # Tutorial: operate the orca-dag viewer
 
-English | [简体中文](viewer-operations_zh.md)
+English | [简体中文](viewer-operations_zh.md) · [Documentation](../README.md)
 
-This guide covers startup, launch settings, monitoring, recovery, and the viewer's API boundary. For a worked task graph, begin with [the orchestration tutorial](orchestration.md); for workspace rules, use [the isolation tutorial](worktree-isolation.md). The [README](../../README.md) remains the full feature and route inventory.
+This guide covers startup, launch settings, monitoring, recovery, and the viewer's API boundary. For a worked task graph, begin with [the orchestration tutorial](orchestration.md); for workspace rules, use [the isolation tutorial](worktree-isolation.md). Technical reference topics are organized into dedicated guides: [HTTP API reference](../reference/http-api.md), [viewer features](../reference/viewer-features.md), [compatibility matrix](../reference/compatibility.md), and [architecture reference](../reference/architecture.md).
 
 The viewer runs as a separate process because Orca intentionally has no scheduler, and its plugin panels cannot fetch this viewer's HTTP API. The app serves a loopback API and SPA, then can open a regular Orca browser tab for the UI. Its coordinator schedules Tasks while Orca remains the authority for Runs, Dispatches, workers, and worktrees.
 
@@ -35,7 +35,21 @@ env -u ORCA_TERMINAL_HANDLE -u ORCA_TAB_ID -u ORCA_WORKSPACE_ID -u ORCA_WORKTREE
 
 CLI auto-resolution is `ORCA_CLI_COMMAND` → `orca-dev` when `ORCA_DEV_REPO_ROOT` is set → `orca-ide` on Linux outside an Orca terminal → `orca`. The resolved CLI is used for both reads and mutations. `GET /api/readiness` shows that choice, workspace, version, and any execution-disabled reason. Orca 1.4.160–1.4.204 can display a Run; execution requires 1.4.205 or newer. The viewer and skill also ship as standalone release binaries and in the `npx orca-orchestration-launcher` package.
 
-Startup also announces `.orca-dag/<timestamp>/{PRD.md,TECH_SPEC.md}` and whether its default `.gitignore` setup succeeded. The skill creates a separate UTC timestamp directory for each new plan, records the Run id, and keeps earlier plans. These ignored docs are not committed or automatically copied to isolated worktrees; Task specs must carry the worker's required context. Legacy `.orca/` documents and their managed ignore block stay in place; new planning output uses only `.orca-dag/`.
+Startup also announces `.orca-dag/<timestamp>/{PRD.md,TECH_SPEC.md}` and whether its default `.gitignore` setup succeeded. The agent writes each new requirement or fresh replanning Run into its own UTC timestamp directory (milliseconds; collisions get a fresh timestamp or numeric suffix), rather than overwriting shared documents:
+
+```text
+.orca-dag/
+  config.json
+  activity.jsonl
+  launches.jsonl
+  requests.jsonl
+  sessions.json
+  20261008-143012-123/
+    PRD.md
+    TECH_SPEC.md
+```
+
+Continuing the same plan or adding Tasks to its Run keeps that directory; the agent records the Run id in both documents and reports the directory alongside the id. Documents are local and ignored, **not force-added to Git**. Task specs carry all required context so isolated workers do not depend on these files. Starting the viewer alone does not create a timestamp directory. Any additional file-based planning notes, task-spec drafts, or local DAG drafts also stay in that directory; they do not replace Orca's authoritative state. Legacy `.orca/` documents and their managed ignore block stay in place; all new planning output uses `.orca-dag/`.
 
 ## Read the interface before pressing Run
 
@@ -95,7 +109,7 @@ The viewer offers a local HTTP API for the same controls. `GET` routes are loopb
 }
 ```
 
-`POST /api/run` also accepts `effortByTask`, `environmentByTask`, `worktreeLanes`, `laneByTask`, and `retainByTask`. The maps are keyed by exact Task IDs. The UI builds them from saved settings, validates the whole plan before starting, and shows errors without creating a worker. `PUT /api/config` patches saved preferences; it does not grant Orca lifecycle authority. See the [HTTP API table](../../README.md#http-api) for the other routes and request details.
+`POST /api/run` also accepts `effortByTask`, `environmentByTask`, `worktreeLanes`, `laneByTask`, and `retainByTask`. The maps are keyed by exact Task IDs. The UI builds them from saved settings, validates the whole plan before starting, and shows errors without creating a worker. `PUT /api/config` patches saved preferences; it does not grant Orca lifecycle authority. See the [HTTP API reference](../reference/http-api.md) for the other routes and request details.
 
 ## Handle a blocked or uncertain Stage
 
@@ -147,9 +161,9 @@ A read-only Orca 1.4.226 acceptance check observed `ready`, a supervised worker 
 
 Use Workspace lanes' **Changed files / Diff** or the file review actions to open an exact local workspace in Orca. Resolve integration gates only after the target workspace contains the intended code. Remove a worktree only after its lane is settled and its changes and worker ownership are accounted for; removal calls `orca worktree rm` with explicit confirmation.
 
-All five state files live inside `.orca-dag/`: `config.json` stores preferences, `activity.jsonl` stores bounded explanatory activity, `requests.jsonl` stores mutation request IDs for audit, `sessions.json` stores exact provider session bindings, and `launches.jsonl` stores historical launch identities. None replaces Orca's authoritative Run/Task/Dispatch records. Stop older viewers before upgrading: startup moves legacy root `.orca-dag.*` files without overwriting destinations and prints the result. A conflict retains both files, uses the new one, and requires manual reconciliation. Unwritable migration leaves legacy regular files readable; writes never fall back to the root. Symlinked data directories/files are never followed.
+All five state files live inside `.orca-dag/`: `config.json` stores preferences, `activity.jsonl` stores bounded explanatory activity, `requests.jsonl` stores mutation request IDs for audit, `sessions.json` stores exact provider session bindings, and `launches.jsonl` stores historical launch identities. None replaces Orca's authoritative Run/Task/Dispatch records. Files are created only as their stores are used; `--no-workspace-init` skips ignore-rule setup, not state persistence or migration. Stop older viewers before upgrading: after acquiring its HTTP port, the new viewer moves legacy root `.orca-dag.*` state files here byte-for-byte and reports each move. A conflict retains both files, uses the new one, and warns you to reconcile manually. Unwritable migration leaves legacy regular files readable; writes never fall back to the root. Symlinked data directories/files are never followed.
 
-`orca-dag uninstall` removes installed skills, stale viewer coordinator terminals, and only its exact managed `.orca-dag/` and legacy `.orca/` ignore blocks in the selected workspace; user ignore rules are retained. `--purge` removes known viewer-owned state files in both layouts and committed-Stage Git evidence, but **never the shared directory, timestamp planning folders, or other user files**. Neither ordinary uninstall nor `--dry-run` relocates state. After uninstall, add your own ignore rules if retained files should stay ignored. It does not delete Orca Run/Task history, merge, or publish your branches.
+`orca-dag uninstall` removes the skill from every agent directory it was installed into (symlinks you created yourself are unlinked, never followed). It closes any `orca-dag coordinator` terminal a crashed viewer left bound to a Run, reporting the workspace (directory + hash) each terminal was coordinating before closing it (clearing stale coordinator fencing). It removes only its exact managed `.orca-dag/` and legacy `.orca/` ignore blocks in the selected workspace; user-authored ignore rules are retained. `--purge` removes known viewer-owned state files in both layouts and committed-Stage Git evidence, but **never the shared directory, timestamp planning folders, or other user files**. Neither ordinary uninstall nor `--dry-run` relocates state. Planning documents are always kept, even with `--purge`; add your own ignore rules if retained files should stay ignored. The executable itself is retained because a running process cannot delete its own binary; uninstall prints the appropriate follow-up command.
 
 ### OpenCode interface selection
 

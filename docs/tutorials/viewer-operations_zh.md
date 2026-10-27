@@ -1,8 +1,8 @@
 # 教程：操作 orca-dag viewer
 
-[English](viewer-operations.md) | 简体中文
+[English](viewer-operations.md) | 简体中文 · [文档导航](../README_zh.md)
 
-本教程覆盖启动、配置、监控、恢复和 viewer 的 API 边界。完整任务图示例见[编排教程](orchestration_zh.md)，工作区规则见[隔离教程](worktree-isolation_zh.md)。[中文 README](../../README_zh.md)保留完整的功能和接口清单。
+本教程覆盖启动、配置、监控、恢复和 viewer 的日常操作流程。完整任务图示例见[编排教程](orchestration_zh.md)，工作区规则见[隔离教程](worktree-isolation_zh.md)。完整的接口清单见[HTTP API 参考](../reference/http-api_zh.md)，功能特性详见[功能特性参考](../reference/viewer-features_zh.md)，兼容性矩阵见[兼容性参考](../reference/compatibility_zh.md)。
 
 viewer 作为独立进程运行，是因为 Orca 有意不内置调度器，而 Orca 插件面板也无法请求本 viewer 的 HTTP API。应用在本机回环地址提供 API 和 SPA，并可把界面打开到普通 Orca 浏览器标签。viewer 的 coordinator 调度 Task；Run、Dispatch、worker 和工作树的权威状态仍由 Orca 管理。
 
@@ -33,7 +33,7 @@ env -u ORCA_TERMINAL_HANDLE -u ORCA_TAB_ID -u ORCA_WORKSPACE_ID -u ORCA_WORKTREE
 | `--no-workspace-init` 或 `ORCA_DAG_NO_WORKSPACE_INIT=1` | 初始化 `.orca-dag/` 忽略规则 | 跳过向工作区 `.gitignore` 添加规划产物管理规则；规划前请自行确认 `.orca-dag/` 已被忽略。 |
 | `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1` | 关闭 | 允许自定义 harness 命令。它们走兼容性本地路径，不能使用隔离放置。 |
 
-CLI 自动选择顺序为：`ORCA_CLI_COMMAND` → 设置了 `ORCA_DEV_REPO_ROOT` 时的 `orca-dev` → Linux 且不在 Orca 终端内时的 `orca-ide` → `orca`。读取和修改都使用同一个已解析的 CLI。`GET /api/readiness` 会显示 CLI、工作区、版本及不能执行的原因。Orca 1.4.160–1.4.204 可以查看 Run；执行需要 1.4.205 或更新版本。viewer 和 skill 可以通过 `npx orca-orchestration-launcher` 一起安装，也有独立发布的二进制文件。
+CLI 自动选择顺序为：`ORCA_CLI_COMMAND` → 设置了 `ORCA_DEV_REPO_ROOT` 时的 `orca-dev` → Linux 且不在 Orca 终端内时的 `orca-ide` → `orca`。读取和修改都使用同一个已解析的 CLI。`GET /api/readiness` 会显示 CLI、工作区、版本及不能执行的原因。Orca 1.4.160–1.4.204 可以查看 Run；执行需要 1.4.205 或更新版本。除 `npx orca-orchestration-launcher` 自动安装 skill 并启动 viewer 外，亦可直接使用 GitHub Releases 提供的独立预编译二进制（如 `tar xzf orca-dag-darwin-arm64.tar.gz && sudo mv orca-dag /usr/local/bin/ && orca-dag`）。若仅需安装 skill 而无需 viewer，可使用 open agent skills CLI：`npx skills add yyq19990828/Orca-dag --skill orca-dag --global`。
 
 启动时还会提示 `.orca-dag/<timestamp>/{PRD.md,TECH_SPEC.md}` 及默认 `.gitignore` 初始化是否成功。skill 为每个新计划创建独立的 UTC 时间戳目录，记录 Run id，并保留旧计划。这些忽略的文档不提交 Git，也不会自动复制到隔离工作树；Task spec 必须包含 worker 所需信息。旧版 `.orca/` 文档及其忽略管理块原样保留；新规划产物只使用 `.orca-dag/`。
 
@@ -95,7 +95,7 @@ viewer 也通过本地 HTTP API 提供同一套控制。`GET` 是回环地址上
 }
 ```
 
-`POST /api/run` 还接受 `effortByTask`、`environmentByTask`、`worktreeLanes`、`laneByTask` 和 `retainByTask`。这些 map 使用精确 Task ID 作键。界面从已保存设置构造请求，在启动前验证整个计划；输入无效时显示错误，不创建 worker。`PUT /api/config` 只更新已保存的偏好，不授予 Orca 生命周期权限。其他路由及请求说明见[HTTP API 表](../../README_zh.md#http-接口)。
+`POST /api/run` 还接受 `effortByTask`、`environmentByTask`、`worktreeLanes`、`laneByTask` 和 `retainByTask`。这些 map 使用精确 Task ID 作键。界面从已保存设置构造请求，在启动前验证整个计划；输入无效时显示错误，不创建 worker。`PUT /api/config` 只更新已保存的偏好，不授予 Orca 生命周期权限。其他路由及请求说明见[HTTP API 参考](../reference/http-api_zh.md)。
 
 ## 处理受阻或状态不明的 Stage
 
@@ -149,7 +149,7 @@ worker 保持展开时，fleet 轮询仍会更新 ownership。若 fleet 与详�
 
 5 个状态文件都在 `.orca-dag/` 内：`config.json` 保存偏好，`activity.jsonl` 保存有界的解释性活动记录，`requests.jsonl` 保存可审计的修改请求 ID，`sessions.json` 保存精确的提供方会话绑定，`launches.jsonl` 保存历史派工身份。它们都不能代替 Orca 权威的 Run/Task/Dispatch 记录。升级前请停止旧 viewer：启动时将根目录旧 `.orca-dag.*` 文件迁入，绝不覆盖目标，并打印结果。发生冲突时保留两份文件、使用新位置，需人工核对。无法写入迁移时，旧普通文件仍可读取，新写入绝不回退到根目录；不会顺着符号链接读写目录或文件。
 
-`orca-dag uninstall` 会移除已安装的 skill、残留的 viewer coordinator 终端，以及所选工作区中自己写入且未被修改的 `.orca-dag/` 和旧版 `.orca/` 忽略管理块；用户自写规则会保留。加 `--purge` 只删除新旧位置已知的 viewer 状态文件和已提交 Stage 的 Git 证据，**永远不删除共享目录、时间戳规划目录或其他用户文件**。普通卸载与 `--dry-run` 都不会迁移状态。卸载后如需继续忽略保留的文件，请自行添加相应的忽略规则。它不会删除 Orca Run/Task 历史，也不会替你集成或发布分支。
+`orca-dag uninstall` 会移除已安装的 skill、残留的 viewer coordinator 终端，以及所选工作区中自己写入且未被修改的 `.orca-dag/` 和旧版 `.orca/` 忽略管理块；用户自写规则会保留。关闭残留 coordinator 终端前会逐个报告其当时协调的工作区（目录与 hash），防止残留终端持续占用 Run 导致外部 agent 被隔离。你自己创建的 symlink 仅被解除链接，绝不会顺着符号链接递归删除。加 `--purge` 只删除新旧位置已知的 viewer 状态文件和已提交 Stage 的 Git 证据，**永远不删除共享目录、时间戳规划目录或其他用户文件**。普通卸载与 `--dry-run` 都不会迁移状态。运行中的程序二进制本身会保留（进程无法删除自身二进制），卸载命令会打印对应的后续清理指令。卸载后如需继续忽略保留的文件，请自行添加相应的忽略规则。它不会删除 Orca Run/Task 历史，也不会替你集成或发布分支。
 
 ### OpenCode 启动界面选择
 

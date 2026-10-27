@@ -1,6 +1,6 @@
 # 教程：隔离工作树中的 Stage 行为
 
-[English](worktree-isolation.md) | 简体中文
+[English](worktree-isolation.md) | 简体中文 · [文档导航](../README_zh.md)
 
 viewer 中的 **Stage** 对应 Orca Task，不是 Git 的暂存区。每个 Git 工作树都有自己的工作文件和 index：在 worker 工作树执行 `git add`，不会把文件暂存到 coordinator 工作树；在一个分支提交，也不会让另一个分支自动获得改动。工作树共享仓库历史与引用，所以要明确选择起点分支和目标分支。
 

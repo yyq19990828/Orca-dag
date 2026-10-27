@@ -1,6 +1,6 @@
 # Tutorial: Stage behavior in isolated worktrees
 
-English | [简体中文](worktree-isolation_zh.md)
+English | [简体中文](worktree-isolation_zh.md) · [Documentation](../README.md)
 
 In the viewer, a **Stage** is an Orca Task, not Git's staging area. Each Git worktree has its own working files and index. `git add` in a worker worktree does not stage files in the coordinator worktree; a commit on one branch does not appear in another branch without integration. Worktrees share repository history and refs, so choose a base and target branch deliberately.
 
