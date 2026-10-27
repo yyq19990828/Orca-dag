@@ -410,6 +410,30 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
   const viewerCreatedRunIds = new Set<string>();
   const activityJournal = new ActivityJournal(workspaceDir);
   const activityCache = new Map<string, { at: number; value: Promise<ActivitySnapshot> }>();
+  // Presentation GETs can poll the same Run at once. Share only their
+  // identical reads while they are pending; settled values are never cached.
+  const presentationReads = new Map<string, Promise<unknown>>();
+  const sharePresentationRead = <T>(key: string, read: () => Promise<T>): Promise<T> => {
+    const pending = presentationReads.get(key);
+    if (pending) return pending as Promise<T>;
+    const value = read();
+    presentationReads.set(key, value);
+    void value.then(
+      () => {
+        if (presentationReads.get(key) === value) presentationReads.delete(key);
+      },
+      () => {
+        if (presentationReads.get(key) === value) presentationReads.delete(key);
+      },
+    );
+    return value;
+  };
+  const presentationTasks = (runId: string) =>
+    sharePresentationRead(JSON.stringify(["task-list", runId]), () => listTasks(runId));
+  const presentationGates = (runId: string) =>
+    sharePresentationRead(JSON.stringify(["gate-list", runId]), () => listGates(runId));
+  const presentationWorkers = (runId: string, options: { includeRemote: boolean }) =>
+    sharePresentationRead(JSON.stringify(["worker-list", runId, options]), () => listWorkers(runId, options));
   // Durable, bounded metadata for viewer-originated mutation requests
   // (Phase 5). Ids and scope only — the recorded state of a mutation is
   // ALWAYS re-read live from Orca (`request-show`); this ledger never
@@ -451,9 +475,9 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       // unknown, which the UI renders as no claim instead of a false "all
       // history present".
       const [tasks, page, workers, config, history] = await Promise.all([
-        listTasks(runId),
+        presentationTasks(runId),
         listRunMessagePage(runId).catch(() => ({ messages: [], window: null })),
-        listWorkers(runId, { includeRemote: true }).catch(() => []),
+        presentationWorkers(runId, { includeRemote: true }).catch(() => []),
         loadConfig(workspaceDir),
         activityJournal.listHistory(runId),
       ]);
@@ -837,7 +861,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         res.status(400).json({ error: "run query parameter required", code: "run_required" });
         return;
       }
-      const [tasks, gates] = await Promise.all([listTasks(runId), listGates(runId)]);
+      const [tasks, gates] = await Promise.all([presentationTasks(runId), presentationGates(runId)]);
       const { nodes, edges, hierarchy } = tasksToDag(tasks);
       // Capacity evidence (Phase 4 scheduler surface): ONLY this viewer's
       // coordinator occupancy on THIS Run counts. Any other state — not
@@ -1783,10 +1807,10 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       const viewer = coordinatorStatus();
       const [runRes, taskRes, gateRes, messageRes, workerRes] = await Promise.allSettled([
         showRun(runId),
-        listTasks(runId),
-        listGates(runId),
+        presentationTasks(runId),
+        presentationGates(runId),
         listRunMessages(runId),
-        listWorkers(runId, { includeRemote: true }),
+        presentationWorkers(runId, { includeRemote: true }),
       ]);
       const valueOf = <T,>(r: PromiseSettledResult<T>): { value: T | null; error: string | null } =>
         r.status === "fulfilled"
@@ -1856,7 +1880,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         res.status(400).json({ error: "run query parameter required", code: "run_required" });
         return;
       }
-      const workers = await listWorkers(runId, { includeRemote: true });
+      const workers = await presentationWorkers(runId, { includeRemote: true });
       // A damaged/unreadable viewer history file must not hide Orca's worker
       // inventory. The API can still backfill supervised rows from Orca.
       const saved = await launchHistory.list(runId).catch(() => new Map());

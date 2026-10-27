@@ -1,6 +1,6 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -836,6 +836,13 @@ let conf = {};
 const f = process.env.FAKE_ORCA_SCRIPT;
 if (f && existsSync(f)) { try { conf = JSON.parse(readFileSync(f, "utf8")); } catch {} }
 const flag = (name) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
+const readOperation = args.slice(0, 2).join(" ");
+const barrier = conf.readBarriers && conf.readBarriers[readOperation];
+if (barrier) {
+  appendFileSync(barrier.startedFile, "started\\n");
+  while (!existsSync(barrier.releaseFile)) await new Promise((resolve) => setImmediate(resolve));
+  if (f && existsSync(f)) { try { conf = JSON.parse(readFileSync(f, "utf8")); } catch {} }
+}
 if (args[0] === "--version") { process.stdout.write((conf.version ?? "1.4.205") + "\\n"); process.exit(0); }
 const out = { ok: true, result: {} };
 const rawFail = (script) => {
@@ -896,6 +903,7 @@ if (args[0] === "orchestration" && args[1] === "run-show") {
   }
 }
 if (args[0] === "orchestration" && args[1] === "task-list") {
+  rawFail(conf.taskList);
   out.result = { tasks: (conf.tasksByRun ?? {})[flag("--run")] ?? [] };
 }
 if (args[0] === "orchestration" && args[1] === "inbox") {
@@ -1587,4 +1595,130 @@ process.stdout.write(JSON.stringify(out));
     const unscoped = requests.filter((r) => r.runId === null);
     assert.ok(unscoped.some((r) => r.operation === "worktree-remove"));
   });
+
+  it("shares only overlapping presentation reads and releases them after success or failure", async () => {
+    const startedFile = join(root, "task-list.started");
+    const releaseFile = join(root, "task-list.release");
+    const oldTask = { id: "task_old", run_id: "run_a" };
+    const newTask = { id: "task_new", run_id: "run_a" };
+    writeScript({
+      readBarriers: {
+        "orchestration task-list": { startedFile, releaseFile },
+      },
+      tasksByRun: { run_a: [oldTask] },
+    });
+    clearLog();
+
+    const dagRequest = rpc("GET", "/api/dag?run=run_a");
+    const markerDeadline = Date.now() + 5_000;
+    while (!existsSync(startedFile) && Date.now() < markerDeadline) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.ok(existsSync(startedFile), "the first task-list call reached the fixture barrier");
+
+    const healthRequest = rpc("GET", "/api/run-health?run=run_a");
+    const healthReadDeadline = Date.now() + 5_000;
+    while (
+      !["run-show", "gate-list", "inbox", "worker-list"].every((command) =>
+        readLog().some((entry) => entry.argv[1] === command),
+      ) &&
+      Date.now() < healthReadDeadline
+    ) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.ok(
+      ["run-show", "gate-list", "inbox", "worker-list"].every((command) =>
+        readLog().some((entry) => entry.argv[1] === command),
+      ),
+      "health started its independent presentation reads while task-list remained blocked",
+    );
+    assert.equal(
+      readLog().filter((entry) => entry.argv[1] === "task-list" && entry.argv.includes("run_a")).length,
+      1,
+      "DAG and Health share the same pending Run-scoped task read",
+    );
+    writeFileSync(releaseFile, "release");
+    const [dag, health] = await Promise.all([dagRequest, healthRequest]);
+    assert.equal(dag.status, 200);
+    assert.ok((dag.json.nodes as Record<string, unknown>[]).some((node) => node.id === "task_old"));
+    assert.equal(health.status, 200);
+    const healthCounts = (health.json.health as Record<string, unknown>).counts as Record<string, unknown>;
+    assert.equal(healthCounts.tasks, 1);
+
+    // A later GET starts a fresh read rather than observing a settled cache.
+    writeScript({ tasksByRun: { run_a: [newTask] } });
+    const refreshed = await rpc("GET", "/api/dag?run=run_a");
+    assert.equal(refreshed.status, 200);
+    assert.ok((refreshed.json.nodes as Record<string, unknown>[]).some((node) => node.id === "task_new"));
+
+    // Distinct Run scopes must not borrow one another's in-flight task results.
+    writeScript({
+      tasksByRun: {
+        run_a: [{ id: "task_scope_a", run_id: "run_a" }],
+        run_b: [{ id: "task_scope_b", run_id: "run_b" }],
+      },
+    });
+    clearLog();
+    const [scopeA, scopeB] = await Promise.all([
+      rpc("GET", "/api/dag?run=run_a"),
+      rpc("GET", "/api/dag?run=run_b"),
+    ]);
+    assert.equal(scopeA.status, 200);
+    assert.equal(scopeB.status, 200);
+    assert.ok((scopeA.json.nodes as Record<string, unknown>[]).some((node) => node.id === "task_scope_a"));
+    assert.ok((scopeB.json.nodes as Record<string, unknown>[]).some((node) => node.id === "task_scope_b"));
+    assert.equal(readLog().filter((entry) => entry.argv[1] === "task-list").length, 2);
+
+    const workerStarted = join(root, "worker-list.started");
+    const workerRelease = join(root, "worker-list.release");
+    writeScript({
+      readBarriers: {
+        "orchestration worker-list": { startedFile: workerStarted, releaseFile: workerRelease },
+      },
+      workers: [],
+    });
+    clearLog();
+    const workersRequest = rpc("GET", "/api/workers?run=run_workers");
+    const workerMarkerDeadline = Date.now() + 5_000;
+    while (!existsSync(workerStarted) && Date.now() < workerMarkerDeadline) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.ok(existsSync(workerStarted), "the fleet read reached the fixture barrier");
+    const healthFleetRequest = rpc("GET", "/api/run-health?run=run_workers");
+    const fleetHealthDeadline = Date.now() + 5_000;
+    while (
+      !["run-show", "task-list", "gate-list", "inbox"].every((command) =>
+        readLog().some((entry) => entry.argv[1] === command && (command === "inbox" || entry.argv.includes("run_workers"))),
+      ) &&
+      Date.now() < fleetHealthDeadline
+    ) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.ok(
+      ["run-show", "task-list", "gate-list", "inbox"].every((command) =>
+        readLog().some((entry) => entry.argv[1] === command && (command === "inbox" || entry.argv.includes("run_workers"))),
+      ),
+      "health started its independent reads while the fleet read remained blocked",
+    );
+    assert.equal(
+      readLog().filter((entry) => entry.argv[1] === "worker-list" && entry.argv.includes("run_workers")).length,
+      1,
+      "Workers and Health share the same pending Run/options-scoped fleet read",
+    );
+    writeFileSync(workerRelease, "release");
+    const [workers, healthFleet] = await Promise.all([workersRequest, healthFleetRequest]);
+    assert.equal(workers.status, 200);
+    assert.deepEqual(workers.json.workers, []);
+    assert.equal(healthFleet.status, 200);
+
+    // Rejected reads are evicted as well; a subsequent GET can recover.
+    writeScript({ taskList: { rawError: "temporary task-list failure", exitCode: 1 } });
+    const failed = await rpc("GET", "/api/dag?run=run_a");
+    assert.equal(failed.status, 500);
+    writeScript({ tasksByRun: { run_a: [{ id: "task_after_failure", run_id: "run_a" }] } });
+    const recovered = await rpc("GET", "/api/dag?run=run_a");
+    assert.equal(recovered.status, 200);
+    assert.ok((recovered.json.nodes as Record<string, unknown>[]).some((node) => node.id === "task_after_failure"));
+  });
+
 });

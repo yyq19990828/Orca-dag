@@ -53,12 +53,20 @@ Run 是命名空间，**不等于 DAG** —— 一个 Run 里可以躺多张互�
 
 Orca 1.4.226 会沿确切的 `--retry-of` 链累计失败的 `worker-start`：第三次失败将状态设为 `circuit_broken`，之后的启动会以 `task_not_startable` 拒绝。worker 成功就绪后自报 `failed` 不会增加此计数。Stop/Run 和 viewer 重启都不会重置该链；应在同一 Run 中对同一 Task 重试确切的上一 Dispatch，并重新指定目标放置位置，因为 `--retry-of` 不继承放置。不要新建 Task 或 Run 来绕过熔断。标准恢复会在 Orca 允许时释放旧的、归 viewer 所有的失败终端；用户接管、显式归属的终端和结构化会话继续遵守原有 retain/release 保护。释放后仍可通过确切 Dispatch 读取归档输出。
 
+### Coordinator 安全边界与读取效率
+
+- 每个验证完成的 FIFO Delivery 都会确认，包括普通通知和过期生命周期报告。未回答的问题及尚未执行的终端归属决策继续阻止 ACK；`check --ack` 返回的下一批消息会在 Run 完成前处理。
+- 可回收清理债务会根据新鲜 fleet 记录重新核验，因此在 viewer 外完成的 release 也能消除旧债务。未知清理结果仍会阻止完成。
+- 同一 Run 的 helper 仍归其活动创建者管理。viewer 读取精确 Dispatch lineage，不把 `parent_id` 当作所有权；仅在确认创建者落定后接管 helper，归属不可读时保持等待。Stop 会报告委派工作，而不会擅自停止它。可见活动 worker 会占用派工预算，但 helper 可以在 viewer 外启动，因此 **Max parallel 不是整个运行时的硬上限**。
+- 自动终端复用要求相同 agent、相同工作区的新鲜、精确且已连接的 PTY 证据。Chat handle 不证明 PTY 存在；OpenCode 不参与通用复用，以保留指定模型及前端/session 的归属。
+- DAG、Workers、Activity、Health 的并发 GET 仅在相同 task/fleet/gate 读取尚未完成时共享请求，并按 Run 与选项隔离。不新增过期结果缓存；变更前置检查仍读取新鲜证据。
+
 ### 权限模型（为什么 viewer 要占一个终端）
 
 Orca 的所有编排调用都过 `resolveRunScope`：
 
 - **读**（`task-list` / `gate-list`）只要带 `--run <id>` 就跳过 consumer 检查，**任何进程都能读**。viewer 的轮询只需要这个。
-- **写**（`dispatch` / `gate-resolve` / `task-create` / `worker-start`）要求调用方拥有该 Run 的协调者绑定。Orca 原生聊天可以用自身会话身份操作；外部 viewer 则通过 `--from <handle>` 使用已绑定的终端。
+- **协调者写操作**（`dispatch` / `gate-resolve` / `task-create`，以及 viewer 的 `worker-start`）要求当前 Run 绑定。Orca 原生聊天使用会话身份；外部 viewer 通过 `--from <handle>` 使用已绑定终端。Orca ≥ 1.4.238 还允许活动 worker 在自己的 Run 中启动新的本机 helper，向创建者 Dispatch 回报，而不占用协调者席位。
 
 viewer 是个普通进程，没有 Orca 会话或终端身份，所以写操作会报 `run_required`。它会自己开一个标题为 `orca-dag coordinator · <workspace-hash> · <instance-id>` 的 Orca 终端，`run-use` 绑定，然后所有写操作带 `--from`。**绑定会 fence 掉原来的 coordinator**，无论它是 agent 终端还是 Orca 原生聊天，所以点执行前 viewer 会明确确认一次；该 agent 可以用 `orca orchestration run-use --id <run>` 取回权限。停止执行时 viewer 会关掉自己的终端，把 Run 让出来。
 
@@ -92,16 +100,18 @@ viewer 是个普通进程，没有 Orca 会话或终端身份，所以写操作�
 | 通过 supervised worker 执行 DAG | **1.4.205** | 通用执行基线；具体 agent 路径可能要求更新版本。 |
 | 原生 Codex 启动 | **1.4.217** | 本机 POSIX 当前/已有工作区；旧版、版本未知的运行时及新建本机工作区仍走兼容适配器。 |
 | 原生 OpenCode 2 TUI | **1.4.220** | 未设置逐节点模型；viewer 的 `opencode` 选择映射为 Orca 的 `opencode2` agent。 |
+| 自动模式下的 OpenCode 原生模型选择 | **1.4.241** | 声明启动偏好能力；本机 POSIX 当前/已有、非 lane 工作区；无 variant 或 effort。使用独立的 `opencode` agent，由执行主机验证模型及 CLI。 |
 | 显式选择 Mini / 完整 TUI | **1.4.222** | OpenCode ≥ **2.1.2**；本机 Linux 当前/已有、非 lane 工作区。默认仍为自动。 |
 | API 预选模型的 OpenCode 2 完整 TUI | **1.4.222** | 显式指定模型并设置 `ORCA_DAG_OPENCODE_TUI=1`；仅本机 POSIX 当前/已有、非 lane 工作区。实验性功能，默认关闭。 |
 
-**截至 2026-10-21，有记录的真实运行时验证：**
+**截至 2026-10-26，有记录的真实运行时验证：**
 
 | Orca app | Agent 版本 | 已验证内容 |
 |---|---|---|
 | **1.4.217** | **Codex CLI 0.159.2** | 本机只读原生 Task：提示词执行、`live / agent_status`、精确 transcript 及 Orca 接受 `worker_done`。 |
 | **1.4.222** | **OpenCode 2.0.22** | 显式启用的 API 预选模型完整 TUI：逐节点模型/variant、依赖 Task、重启恢复且不重复派工、关闭终端后读取输出、成功完成后的清理及 provider 确认退出的 Stop。Stop 在 fencing 后可能保留终端，不保证自动关窗。 |
 | **1.4.235** | **OpenCode 2.1.2** | Linux viewer 选择 Mini / 完整 TUI，指定模型与配置默认模型、写文件及获接受的 `worker_done`；Mini 前台等待 400.027 秒并确认后续消息、显式保留及活动 Stop。Mini fleet 仍可能为 `missing_status`；配置的 provider 必须可用（首次免费默认 provider 返回 403）。 |
+| **1.4.241** | **OpenCode 2.1.2** | 隔离 Linux headless 运行时，原生 `opencode` + `deepseek/deepseek-flash`：写文件并读回、接受 `worker_done`、effective 模型回显及终端释放；viewer 重启后恢复相同 Dispatch 并完成依赖 Task，无重复 worker、无清理债务。profile 的嵌套深度上限为 1，真实 helper 启动被拒绝；helper 归属/交回由回归套件覆盖，不宣称已通过真实 provider 验证。 |
 
 **原生 OpenCode 2 路径**也已使用 **OpenCode 2.0.22** 通过只读 Task 和隔离工作树写文件验证（该路径要求 Orca ≥ 1.4.220）。这与实验性 API 预选模型适配器的验证不同；后者在 macOS、**Node.js 22.23.0** 上实测，**尚未覆盖**长时间编码、Git Stage、新建工作区、lane、远程或 Windows 执行。
 
@@ -239,8 +249,8 @@ npm publish ./dist-npm --access public --tag bootstrap
 
 - **OpenCode 启动界面选择**：在运行设置选择 **自动（兼容现有行为）**、**Mini TUI** 或 **完整 TUI**，节点可覆盖或继承。设置通过 `defaultOpenCodeUi` / `openCodeUiByTask` 保存到 `.orca-dag/config.json`，旧配置缺字段时仍为自动。显式 Mini/完整 TUI 要求本机 Linux 当前/已有、非 lane 工作区，运行中的 Orca ≥ 1.4.222、经核实的 OpenCode ≥ 2.1.2；拒绝后不换模式或启动替代 worker。两者共用现有 session 适配器，支持显式模型或 OpenCode 配置的默认模型。Mini 遵守当前权限设置，可能需要确认，不能传 `--auto`。API 模型/执行证据与 Orca 回显分开。自动模式保留现有路由及旧环境变量行为，切换设置不能绕过未决 preparation。新 journal 字段需要兼容读取器；软件降级前先将未来启动切回自动，并结算、备份新准备记录。
 
-- **自动模式下的 OpenCode 2 原生 TUI**：已有的 `opencode` 选择，在运行中的 Orca ≥ 1.4.220 且未指定逐节点模型时，会使用 Orca 的 `opencode2` agent ID；状态、放置与终端清理由 Orca 管理，模型取自 OpenCode 自身配置。指定模型则保留 `opencode run --auto -m` 一次性路径；旧版或版本未知的运行时也保留该路径。原生启动失败后绝不再启动第二个 worker。已用 OpenCode 2.0.22 验证只读和写文件 Task。
-- **Orca 1.4.222 兼容性**：原生 OpenCode Task 会受益于 Orca 改进后的提交就绪检测。新版原生模型选择针对独立的 `opencode` agent 和经过验证的 CLI 版本，并不覆盖 viewer 的 `opencode2` 路径；自动模式下选定模型仍走一次性路径。详见[兼容边界](docs/tutorials/viewer-operations_zh.md#orca-14222-兼容边界)。
+- **自动模式下的 OpenCode**：未指定逐节点模型时，运行中的 Orca ≥ 1.4.220 使用原生 `opencode2`。符合上方版本表条件的显式模型走原生 `opencode` 模型路径；其他模型请求及旧版/未知运行时保留一次性兼容路径。`ORCA_DAG_OPENCODE_TUI=1` 与显式 Mini/完整 TUI 仍使用独立的 session 适配器。原生启动失败后绝不启动第二个 worker。
+- **旧版 Orca 兼容性**：1.4.222 改进了 OpenCode 原生提交就绪检测，但该版本的模型验证并不构成 viewer 新增原生模型路径的支持证据。保留旧版兼容路径，就绪与 Enter 处理仍交给 Orca。详见[启动边界](docs/tutorials/viewer-operations_zh.md#orca-14241-原生模型与-coordinator-边界)。
 
 - **实验性指定模型完整 TUI**：启动时设置 `ORCA_DAG_OPENCODE_TUI=1`，显式逐节点模型会使用 API 预建的 OpenCode 2 会话。要求运行中的 Orca ≥ 1.4.222，以及本机 POSIX 当前/已有、非 lane 工作区；不支持的放置或运行时在启动前拒绝，不回退一次性路径。`provider/model#variant` 与 effort 对应同一个 V2 variant，冲突值会被拒绝。准备记录与 session/terminal 身份保存到 `.orca-dag/sessions.json`，通过 `worker-start --terminal` 绑定；实际 assistant 模型/输出标为 **OpenCode API** 来源，不伪称 Orca effective 回显。未证实的输入绝不重发。清理仅在 external release 和 provider 退出已确认后关闭身份明确的自建终端；retain 或后续用户输入会保留终端。Stop 先中断精确共享服务会话，再做 Orca 编排记账；未知结果保留阻塞。首版不开放 TUI 复用、新工作树、lane、远程或 Windows。未设置开关时默认路径不变；关闭开关也不能绕过未知准备记录。
 
@@ -259,7 +269,7 @@ npm publish ./dist-npm --access public --tag bootstrap
 - **独立 Stage 卡片 + Activity / Chat 通信中心**：选中节点后，右侧纸张卡片单独显示设置；通信则占用专用左侧栏，DAG 自动缩放到剩余画布。Activity 保留 SSE 实时时间线（含有界轮询回退、筛选、实际运行信息和可展开技术证据）；Chat 把同一份 Run 作用域事件流按阶段分组并记录双向通信：worker 成功启动后形成 coordinator 的派工气泡，worker 上报显示在另一侧，待处理问题可以直接回复，也可以向 Orca 已验证仍存活的活跃 Dispatch 主动发送持久化指导（过期、已落定或无法验证的尝试会被拒绝）。聊天气泡下方是有界的实时 check 流：主编排器每轮检查都会留下 receipt，包括空检查、收到的消息类型、失败或重放、耗时，以及运行时实际观察到的 agent/model/activity 摘要；heartbeat/status 只更新这个运行态区域，不再伪装成重复聊天消息。日志功能出现前的历史派工会明确标注为根据 Task spec 恢复。界面中的“已发送”只代表 Orca 已接受持久化入队，不代表 worker 已阅读。
 - **忠实的会话语义**：Chat 保留 Orca 的线程身份（回复引用并关联原始提问），如实渲染每条消息的**优先级**徽标与**已读/未读**状态 —— "已发送"只代表 Orca 接受了持久化入队，绝不代表 worker 已读；当全局 Orca inbox 窗口饱和时会警告**"历史可能不完整"**，而不是假装可见的行就是全部（只有真正观察到边界时才渲染警告；没有警告也不是完整性的证明）。
 - **协调者群发（刻意的、可审计的广播）**：一条消息发给 `@all` 或 Orca 发现的 worktree 受众，受众来自新鲜发现的下拉选择 —— 绝不是自由填写的收件人。发送需要变更 token、预览过的受众、显式确认，并且本 viewer 必须是该 Run 的**活跃协调者**；生命周期信号类型（`worker_done`、`heartbeat`）在任何 Orca 调用之前就被拒绝。
-- **每节点选模型**：支持的 harness 才有 —— opencode 用 `opencode models` 枚举出下拉框（选定模型时走一次性路径）；claude / codex / cursor 是自由文本。Claude/Cursor 通过 `worker-start --model` 传入。本地 POSIX Codex 使用当前或已有工作树，且运行中的 Orca 为 1.4.217 或更新版本时，直接走原生 `worker-start --agent codex --model`。旧版或版本未知的运行时，以及本地新建工作树，保留预启动后绑定的兼容路径；工作树创建及已提交 Stage 模式下的基准 SHA 校验都在 Codex 启动前完成。远程和 Windows Codex 使用原生启动。其余 harness 用各自的默认模型。
+- **每节点选模型**：opencode 用 `opencode models` 枚举下拉框，具体启动路径遵循上方版本、放置与 variant 边界；Claude / Codex / Cursor 是自由文本。Claude/Cursor 通过 `worker-start --model` 传入。本地 POSIX Codex 使用当前或已有工作树，且运行中的 Orca 为 1.4.217 或更新版本时，直接走原生 `worker-start --agent codex --model`。旧版或版本未知的运行时，以及本地新建工作树，保留预启动后绑定的兼容路径；工作树创建及已提交 Stage 模式下的基准 SHA 校验都在 Codex 启动前完成。远程和 Windows Codex 使用原生启动。其余 harness 用各自的默认模型。
 - **每节点推理力度（effort）**：claude / codex / cursor 还可选 effort 档位。原生启动通过 `worker-start --effort` 传入；兼容路径预启动的 Codex 在终端启动时收到该设置。只有该节点设置了模型才生效（Orca 的契约），清掉模型会一并清掉 effort。
 - **每节点放置 —— 完整的本地矩阵**：每个节点都在四种 Orca 放置模式中选一种（在节点面板里选）：coordinator 工作区（**Current**，默认）、Orca 发现的**精确已有工作区**（`worktree list` 返回的完整选择器 —— Git worktree *或*文件夹工作区）、`worker-start` 期间由 Orca 创建的**新建子 worktree**（new child）、或以精确 Orca 仓库选择器创建的独立**新建顶层 worktree**（new top-level）。两种新建 worktree 模式携带有界的创建元数据 —— 显式名称（缺省时由 Run + Task/lane id 推导出确定性名称）、setup 策略（`run` / `skip` / `inherit`，默认 `run`）、可选 base 分支、显示名与备注。Current 与 existing 放置拒绝一切创建类字段，也绝不重跑 setup；每个 worker 的回执都会同时报告**请求值与实际生效值**（requested vs. effective placement）。
 - **每节点环境（远程放置）**：节点也可以跑在**已保存的连接环境**上（`orca environment list`），而 Run 仍在本机。远程放置只有两种无歧义形态 —— **精确已有工作区**（该环境发现的完整 `id:<repo>::<path>` 选择器）或**新建顶层 worktree**（精确 repo 选择器 + 显式名称）。远程 `current`/`new-child` 永远不会出现 —— 它们跨服务器有歧义 —— 服务端在 HTTP 边界和适配器里各拒绝一次，都发生在任何 Orca 调用之前。对端未通告 model/effort 能力时，相应控件自动隐藏。
@@ -269,7 +279,7 @@ npm publish ./dist-npm --access public --tag bootstrap
 - **Orca 原生的审阅与移除**：执行结束后，改动文件和 diff 会在 Orca 编辑器里针对精确已证实的工作区打开（`file open` / `file diff` / `file open-changed`；报告/文件路径先对工作区校验再传给 Orca）；已落定 lane 的 worktree 只能通过 `orca worktree rm` 移除 —— 需要显式确认、token 保护，且只要还有任何存活、可回收、被保留、释放中或不可验证的 worker 可能占用该工作区就拒绝移除。归档钩子失败会原样浮现；Orca 文档化的豁免路径是另一次独立确认，绝不是自动的，也绝不是 `--force`。
 - **每节点选 harness**：点节点在面板里选 `claude / kimi / opencode / grok / codex` 或自定义命令（持久化到 workspace 的 `.orca-dag/config.json`；自定义命令还需要 `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1`，见[安全模型](#安全模型)）；没单独设的节点用顶栏的**默认 harness** 兜底。一条 harness 边界：一次性 opencode 与自定义命令走 viewer 的 legacy 本地终端路径，无法拥有非 current 工作区 —— 二者与任何非 current 本地放置（或 lane）组合都会在任何动作开始前被拒绝，**绝不回退到 current**。
 - **执行后启动参数不可变**：任务一旦产生首个 Dispatch，harness、模型、effort、环境和放置就永久锁定；viewer 通过完整、包含远程记录的 worker 历史在重启后继续保持这把锁，因此安全重试会沿用原启动方案。所选 Run 的 coordinator 运行期间，尚未启动的任务也会暂时冻结，因为运行中的 coordinator 已持有启动快照；停止后只有从未启动的任务会重新解锁。
-- **▶ Run with Orca / ⏹ Stop** + **Max parallel**：启动/停止 viewer 内置的自驱动 coordinator；worker 数由 DAG 并行度决定（能并行就并行，受 "Max parallel" 上限约束）—— **不用手动加 worker**。落定的 worker 先归档输出，终端默认释放；如果有立即可兼容的后续任务（同 harness、模型不变），终端通过 `worker-start --terminal` 直接交给它；也可以用 **Retain for debugging** 显式保留。执行中显示 "N workers"。
+- **▶ Run with Orca / ⏹ Stop** + **Max parallel**：启动/停止 viewer 内置 coordinator，并根据可见活动 fleet 限制直接派工。helper 与 Stop 的覆盖范围见 [coordinator 安全边界](#coordinator-安全边界与读取效率)。落定 worker 默认归档输出并释放；只有新鲜精确 PTY 证据允许立即复用给可兼容的非 OpenCode 后续任务，**Retain for debugging** 则显式保留 worker。
 - **审批门与集成门**：审批操作放在 Activity 可展开的 Operational details 中，不再与其他卡片叠在画布上。跨 lane 集成门会注明来源与目标 lane，说明「上游完成 ≠ 已集成」，且只提供 `integrated` 一种决议；Workspace-lanes 面板从 lane 一侧展示同一道边界（`integration_required` 状态）。
 - **节点详情（只读 spec）**：点节点看 spec / 状态 / 结果。spec 默认是更小的一行预览，并提供可访问的 Expand 控件；结构化 worker 结果会解析为结果状态、简洁报告、修改文件列表和可选报告路径，完整 payload 收进默认折叠的技术详情；改 Task 或依赖仍需让 agent 重绘 DAG。
 - **Workers 面板**：Activity 的 Operational details 内按尝试展示 fleet 视图，包括存活状态、attention、执行主机、终端记账、请求值与实际生效值（模型/effort/**放置与工作区**）、Orca 字面 nextAction，以及带**来源徽标**（`auto / terminal / transcript`、截断/完整标记）的有界输出、只过滤**已加载行**的**搜索**（绝不会抓取更多转录）、本地**下载已加载行**导出，以及与 fleet 权威状态 visibly 区分的释放**归档事实**（归档存在只是证据，不等于结算）。每行还带证据门控的**停止 / 放弃 / 聚焦**操作：正面活跃才能停止，正面已退出或 Orca 指定放弃才能放弃，只有本地精确 `agentWait` 才能聚焦 —— 证据不足时连操作入口都不渲染。
@@ -415,7 +425,7 @@ scripts/
 - **viewer 自己当 coordinator**：Orca 故意不做调度器，所以 `server/src/coordinator.ts` 用 Orca 的 Run/Task/Dispatch 原语自己驱动循环。并行度由 DAG 决定（同时 ready 的任务一起派，受 `maxConcurrency` 上限）；落定的 worker 先归档输出，终端默认**释放**；只有在有立即可兼容的后续任务（同 harness、模型不变，走 `worker-start --terminal`）时才**复用**，或按明确请求**保留** —— 每个落定终端都有且只有一次有据可查的归属决定，释放结果含糊时以欠账形式浮出，绝不盲试。
 - **worker 必须是自主 agent**：hands-off 执行要求 worker 能自己跑 `orca orchestration send --type worker_done` 回报 —— 否则会卡在权限确认。`worker-start` 会带各 TUI agent 的免审批开关启动；自定义命令走 legacy 路径，用 `orca.ts` 的 `HARNESS_LAUNCH`（目前只验证过 `claude --dangerously-skip-permissions`，其余 harness 需各自填好并验证）。
 - **`dispatch --inject` 的坑**（legacy 路径）：它把 preamble 打进 agent 输入框，但常常**不自动提交**（就绪竞态）。coordinator 因此在 dispatch 后停 ~2s 再补发一个 Enter；对已提交/空输入的多余 Enter 是无害 no-op。
-- **OpenCode 启动映射**：viewer 的 `opencode` 选择指 OpenCode 2。运行中的 Orca ≥ 1.4.220 且未指定逐节点模型时，使用原生 `worker-start --agent opencode2`，由 Orca 监督 TUI 并清理终端；选定模型或运行时较旧、版本未知时，仍在裸 shell 中运行 `opencode run --auto` 并创建跟踪 Dispatch。原生启动失败后不会再启动第二个 legacy worker。
+- **自动模式的 OpenCode 启动映射**：默认模型的 `opencode2` 与显式模型的 `opencode` 是两条分别设门槛的原生路径，条件见上方支持版本表。超出已接受模型/放置/variant 边界的请求仍走兼容路径；原生启动失败后绝不启动第二个 legacy worker。
 - **放置要么精确、要么不发生 —— 本地与远程一视同仁**：四种本地模式与 `worker-start --worktree` 的取值一一对应（`current`、精确已有选择器、`new-child`、`new-top-level --repo <精确repo>`），创建类旗标（`--name`、`--base-branch`、`--display-name`、`--comment`、`--setup`）**只**在两种新建 worktree 模式上出现 —— current 与 existing 启动绝不带，也绝不重跑 setup。用户没给名称时，服务端在调用 Orca 前从 Run + Task/lane id 推导一个确定性的有界名称。绑定到已保存环境的节点通过 `worker-start --on <environment>` 启动 —— `--on` 只出现在这一次调用上；之后所有的读取、消息、停止、释放都只按 **Dispatch ID** 寻址（进程、文件系统、transcript、停止与清理事实都归执行主机所有）。远程只有两种放置形态 —— 该环境上发现的精确已有工作区选择器，或带精确 repo 选择器与显式名称的新顶层 worktree；远程 `current`/`new-child` 在 HTTP 边界和适配器里各被拒绝一次，都发生在任何 Orca 调用之前。任何地方都没有合成的本地回退：新建 worktree 启动失败绝不让任务跑进 current 工作区，也绝不凭缺失证据再造一个替代品；未知环境或未证实的能力会让启动失败并留下原因记录；安全重试只会重复正面证实过的选择器（放置无法再次证实时重试直接被拒）。模型/effort 转发与结构化 transcript 读取以对端**通告**的能力为准；主机断连时其 worker 显示 `unverifiable`（绝不会是 `exited`），且不会自动停止/重试/释放 —— 重连后恢复存活状态，原 Dispatch 照常落定。
 - **legacy harness 边界是「失败即关闭」**：一次性 opencode 与自定义命令走 viewer 的 legacy 本地终端路径，无法遵循精确的非 current 工作区，也无法原子地创建并拥有新 worktree。给这类 harness 选任何非 current 本地放置或 lane，都会在任何终端或 Dispatch 出现之前被拒绝 —— 绝不静默回退到 current，`agent_unconfigured` 也绝不在事后放宽放置。
 - **worktree 自始至终归 Orca 所有**：每个新 worktree 都由 `worker-start` 自己创建 —— 一份回执同时拥有 Task、Dispatch、setup、终端、worktree 效果、残留资源与恢复命令；没有单独的 `worktree create` 调用。每次移除都是对 Orca 返回或重新发现的精确选择器执行 `orca worktree rm`，前置条件是 worker 归属已落定加显式确认。产品代码里不存在任何原生 `git worktree` 命令或直接删目录，归档钩子失败会阻止移除而不是被豁免，单独一次 `worker-release` 也绝不解锁移除。

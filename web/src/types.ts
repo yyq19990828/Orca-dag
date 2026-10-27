@@ -885,9 +885,9 @@ export interface ViewerConfig {
 
 /**
  * Harness → model-selection capability. opencode gets an enumerable dropdown
- * (`opencode models`); a selected model uses its one-shot path, while the
- * configured default can use Orca's native OpenCode 2 TUI. claude/codex/cursor
- * get free-text. Everything else has no viewer-side model control.
+ * (`opencode models`); explicit models use a guarded native opencode start or
+ * one-shot/API compatibility, while the configured default can use native
+ * opencode2. claude/codex/cursor get free-text; others have no model control.
  */
 export type ModelPickerKind = "select" | "text" | "none";
 

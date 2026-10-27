@@ -1237,6 +1237,8 @@ export const MIN_EXECUTION_VERSION = "1.4.205";
 export const MIN_NATIVE_CODEX_VERSION = "1.4.217";
 /** First Orca release where this viewer verified the OpenCode 2 TUI worker path. */
 export const MIN_NATIVE_OPENCODE_VERSION = "1.4.220";
+/** Expanded execution-host model verification plus startup-prompt exclusions. */
+export const MIN_NATIVE_OPENCODE_MODEL_VERSION = "1.4.241";
 /** Oldest Orca whose Run/Task/Dispatch model the viewer can still render. */
 export const MIN_VIEW_VERSION = "1.4.160";
 
@@ -2079,6 +2081,8 @@ export interface WorkerDetailView {
     lastHeartbeatAt: string | null;
     retryOfDispatchId: string | null;
     depth: number | null;
+    /** Immutable helper owner; absent on older hosts, null positively means a root Dispatch. */
+    creatorDispatchId?: string | null;
   } | null;
   /** Supervised-worker record facts. */
   worker: {
@@ -2277,6 +2281,9 @@ export async function showWorkerDetail(dispatchId: string): Promise<WorkerDetail
       lastHeartbeatAt: stringOrNull(dispatch.lastHeartbeatAt),
       retryOfDispatchId: stringOrNull(dispatch.retryOfDispatchId),
       depth: numberOrNull(dispatch.depth),
+      ...(dispatch.creatorDispatchId === null || typeof dispatch.creatorDispatchId === "string"
+        ? { creatorDispatchId: dispatch.creatorDispatchId as string | null }
+        : {}),
     },
     worker: {
       state: stringOrNull(worker.state),

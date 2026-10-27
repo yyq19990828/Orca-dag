@@ -161,15 +161,28 @@ worker 保持展开时，fleet 轮询仍会更新 ownership。若 fleet 与详�
 
 ## 已知局限
 
-在自动模式下，viewer 的 `opencode` 选择运行的就是 OpenCode 2。在运行中的 Orca ≥ 1.4.220 且未设置逐节点模型时，Task 使用原生 `worker-start --agent opencode2`。在 OpenCode 2.0.22 上，这条路径已送达只读 Task，并在隔离工作树中自主写入、读回一个文件；Orca 接受 `worker_done`、报告 `agent_status` 并释放终端。选择模型或使用旧版、版本未知的 Orca 时，保留下文的一次性路径。原生启动失败后绝不再启动第二个 worker。当前 `worker-read --source auto` 对 OpenCode 2 会回退到终端输出，无法得到精确的 provider transcript。
+在自动模式下，viewer 的 `opencode` 选择运行的就是 OpenCode 2。在运行中的 Orca ≥ 1.4.220 且未设置逐节点模型时，Task 使用原生 `worker-start --agent opencode2`。在 OpenCode 2.0.22 上，这条路径已送达只读 Task，并在隔离工作树中自主写入、读回一个文件；Orca 接受 `worker_done`、报告 `agent_status` 并释放终端。显式模型遵循下方新增门槛，或保留一次性兼容路径。原生启动失败后绝不再启动第二个 worker。当前 `worker-read --source auto` 对 OpenCode 2 会回退到终端输出，无法得到精确的 provider transcript。
 
 后续运行时发现可继续加在这里，写清受影响的启动路径、可观察的现象和已验证的处理方式。Codex TUI 可见、Task 已完成与 Orca 的 worker 存活状态是不同的证据。
+
+### Orca 1.4.241 原生模型与 coordinator 边界
+
+当运行中的应用为稳定版 **1.4.241+**、声明 `orchestration.worker-launch-preferences.v1`，且放置为本机 POSIX 当前/已有、非 lane 工作区，不含模型 variant 或 effort 时，自动模式可使用原生 `opencode` 指定模型。这不证明 `opencode2` 支持指定模型。显式 Mini/完整 TUI 及 `ORCA_DAG_OPENCODE_TUI=1` 保留各自适配器。不符合条件的请求保留原兼容边界；原生启动被拒绝后绝不启动第二个 worker。
+
+执行主机验证 CLI 与模型可用性。标签中的[模型版本策略](https://github.com/stablyai/orca/blob/v1.4.241/src/main/opencode/opencode-model-version-policy.ts) 扩大了支持版本，而 [1.4.241](https://github.com/stablyai/orca/releases/tag/v1.4.241) 排除了会丢失首条 prompt 的版本。不能用本地 `opencode --version` 代替执行主机证据。所有 OpenCode worker 都不进入通用终端复用：不能仅凭 viewer 请求推断恢复终端当前的默认模型或前端。
+
+2026-10-26，在隔离 Linux Orca **1.4.241**、OpenCode **2.1.2** 上，原生 `opencode` + `deepseek/deepseek-flash` 完成了写文件及读回、获接受的 `worker_done`、effective 模型回显和终端释放。viewer 重启后恢复原 Dispatch，完成依赖 Task，以两个 Dispatch、无清理债务结束。这不覆盖远程/Windows、新工作树模型选择、活动 Stop 或精确 provider transcript。
+
+同一运行时确认 ACK 可以返回下一批 FIFO Delivery；coordinator 会保存该批次并在完成前处理。普通/过期报告会确认，未回答的问题与未执行的终端决策继续阻止 ACK；在外部释放的 reclaimable 债务会用新鲜 fleet 证据重新核验。并发展示 GET 只共享尚未完成的相同读取，不缓存变更证据。
+
+helper 仍归活动创建者管理，以精确 `worker-show` Dispatch lineage 为证据。Task parent 只是发现线索，不构成停止或释放权限。lineage 缺失时保持等待，确认创建者落定后才交回。回归覆盖保留中的活动 helper、blocked 交回及 Stop/重启读取竞争。真实 helper 启动被该 profile 的嵌套深度上限 **1** 拒绝，未修改或绕过限制。Max parallel 根据可见活动 fleet 限制 viewer 派工，不是运行时独立准入所有 helper 的硬上限。
+
 
 ### Orca 1.4.222 兼容边界
 
 [Orca 1.4.222](https://github.com/stablyai/orca/releases/tag/v1.4.222) 会等到 OpenCode 确实能够提交 worker 的 Task，而不只是等输入框出现。这同时适用于原生 `opencode` 和 `opencode2` 启动；viewer 在节点未指定模型时已经使用后者。就绪检测和提交交给 Orca，viewer 不追加 Enter 重试。远程 worker 需要执行主机更新才能使用这项等待逻辑；只更新 Run 所在的主机不能证明它已经生效。
 
-新版原生模型覆盖是另一份契约。在该发布标签的源码中，[`opencode` 模型预检](https://github.com/stablyai/orca/blob/v1.4.222/src/main/opencode/opencode-model-startup-plan.ts) 只接受经过验证的 OpenCode 2.0.16，或[精确的旧版 1.18.30、1.18.32](https://github.com/stablyai/orca/blob/v1.4.222/src/main/opencode/opencode-model-version-policy.ts)，并在执行主机检查模型是否可用。它没有为 `opencode2` 增加启动模型目录。因此，通用的 `orchestration.worker-launch-preferences.v1` 声明不足以开启 viewer 原生分支的模型选择。OpenCode 模型覆盖还要求当前或已有工作区，不能创建新工作树，也不支持 effort 或复用已有终端。viewer 继续让选定模型走现有一次性路径，并保留该路径的放置限制。
+新版原生模型覆盖是另一份契约。在该发布标签的源码中，[`opencode` 模型预检](https://github.com/stablyai/orca/blob/v1.4.222/src/main/opencode/opencode-model-startup-plan.ts) 只接受经过验证的 OpenCode 2.0.16，或[精确的旧版 1.18.30、1.18.32](https://github.com/stablyai/orca/blob/v1.4.222/src/main/opencode/opencode-model-version-policy.ts)，并在执行主机检查模型是否可用。它没有为 `opencode2` 增加启动模型目录。因此，通用的 `orchestration.worker-launch-preferences.v1` 声明不足以开启 viewer 原生分支的模型选择。OpenCode 模型覆盖还要求当前或已有工作区，不能创建新工作树，也不支持 effort 或复用已有终端。在 1.4.222 上，viewer 继续让选定模型走现有一次性路径，并保留该路径的放置限制。
 
 coordinator 回归套件覆盖 1.4.220 和 1.4.222：原生完成与释放、原生拒绝后不启动第二个 worker，以及即使声明了模型能力也保留指定模型的兼容路径。较新的 CLI 连接到旧版、预发布或版本未知的运行中应用时，仍走兼容路径。这些模拟 CLI 测试证明路由和生命周期记账，不证明真实 prompt 已提交；运行时验收必须观察到 Task 执行、获接受的 `worker_done` 和终端释放。
 
@@ -193,9 +206,9 @@ Orca 1.4.217 修复了 Codex 就绪检测，并默认隔离每个新终端的后
 
 **实验性替代路径：** `ORCA_DAG_OPENCODE_TUI=1` 会让显式 OpenCode 模型在运行中的 Orca ≥ 1.4.222 上使用 API 预选模型完整 TUI。首版仅支持本机 POSIX 当前/已有、非 lane 工作区；拒绝或回执未知后不回退。Dispatch 属于 supervised，但预建进程对 Orca 仍是 external。准备记录与 session/terminal 身份持久化到 `.orca-dag/sessions.json`；API assistant turn 证明执行，不替代 Task 落定。Orca model/effort 回显仍可能为空。
 
-Output 将有限 assistant 文本标为 `opencode-api` 来源，关闭终端后仍可读取，不复制工具输入或推理。默认清理要求有效落定、明确 external release、精确终端身份和 provider execution 退出；retain 或后续用户输入会保留终端。Stop 先中断精确共享服务会话，再做 Orca 编排记账；服务失败、身份变化或退出未知都不算成功。即使关闭开关，未知准备记录仍会阻止重新派工：应检查保存的 request/session/terminal 与请求审计，不是再次启动。首版仍禁用自动复用、新工作区、lane、远程与 Windows；未设置开关时，下述默认一次性路径不变。
+Output 将有限 assistant 文本标为 `opencode-api` 来源，关闭终端后仍可读取，不复制工具输入或推理。默认清理要求有效落定、明确 external release、精确终端身份和 provider execution 退出；retain 或后续用户输入会保留终端。Stop 先中断精确共享服务会话，再做 Orca 编排记账；服务失败、身份变化或退出未知都不算成功。即使关闭开关，未知准备记录仍会阻止重新派工：应检查保存的 request/session/terminal 与请求审计，不是再次启动。首版仍禁用自动复用、新工作区、lane、远程与 Windows；未设置开关时，自动模式按版本门槛选择原生或兼容路径。
 
-在一次性兼容路径上，viewer 用 `opencode run --auto` 启动 OpenCode，并创建 Orca Dispatch 记录任务。这条路径标记为 `unsupervised`，没有受监督的 worker 资源，也没有 `agent_status` fleet 证据。在 Orca 1.4.209 的并行只读对照中，OpenCode 通过 `worker_done` 完成了 Task，但运行时的 `worker-list` 显示 `unverifiable / missing_status`，落定后变为 `unverifiable / unsupervised_settled`。运行期间，`worker-show` 另外观察到精确的 OpenCode 终端仍然存活。这些 fleet 值符合 viewer 当前 OpenCode 启动路径的设计，不能单独证明 OpenCode 钩子损坏。对此路径应核对 Task/Dispatch 的结果与精确终端观察，也不能把 `unverifiable` 当作进程已退出的证据。
+在一次性兼容路径上，viewer 用 `opencode run --auto` 启动 OpenCode，并创建 Orca Dispatch 记录任务。这条路径标记为 `unsupervised`，没有受监督的 worker 资源，也没有 `agent_status` fleet 证据。在 Orca 1.4.209 的并行只读对照中，OpenCode 通过 `worker_done` 完成了 Task，但运行时的 `worker-list` 显示 `unverifiable / missing_status`，落定后变为 `unverifiable / unsupervised_settled`。运行期间，`worker-show` 另外观察到精确的 OpenCode 终端仍然存活。这些 fleet 值符合兼容路径的设计，不能单独证明 OpenCode 钩子损坏。对此路径应核对 Task/Dispatch 的结果与精确终端观察，也不能把 `unverifiable` 当作进程已退出的证据。
 
 在 Orca 1.4.209、OpenCode 2.0.15 上直接执行只读 `worker-start --agent opencode` 测试，任务正文仍未送达：回执显示 `input_accepted`，但 OpenCode TUI 始终停在空白初始输入框，没有 agent 回合或 `worker_done`。测试 Dispatch 已隔离，精确终端已关闭，Task 已标记失败。因此 viewer 仍保留一次性兼容路径；不能只凭 `input_accepted` 判断任务已经送达。
 

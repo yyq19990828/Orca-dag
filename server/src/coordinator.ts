@@ -17,6 +17,7 @@ import {
   listWorkers,
   MIN_NATIVE_CODEX_VERSION,
   MIN_NATIVE_OPENCODE_VERSION,
+  MIN_NATIVE_OPENCODE_MODEL_VERSION,
   newRequestId,
   normalizeLiveness,
   normalizeTerminalReceipt,
@@ -68,6 +69,7 @@ import type { ProviderSessionBinding, ProviderSessionObservation, ProviderSessio
 import { LaunchHistory } from "./launchHistory";
 import { MERGE_PREP_MARKER, StageGit, validateStagePlan } from "./stageGit";
 import type { OpenCodeEvidence } from "./openCode";
+import { readWorkerOwnership, type WorkerCreatorEvidence } from "./workerOwnership";
 import { realpath } from "node:fs/promises";
 
 /**
@@ -723,6 +725,10 @@ interface State {
   attempts: Map<string, Attempt>;
   /** In-flight retries reserve worker budget without replacing the old attempt. */
   retryCandidates: Map<string, RetryReservation>;
+  /** Exact immutable lineage, never inferred from the Task tree alone. */
+  workerCreators: Map<string, WorkerCreatorEvidence>;
+  delegatedTaskIds: Set<string>;
+  delegatedDispatchIds: Set<string>;
   startedAt: number;
   lastTick: number;
   lastReconciledAt: number;
@@ -730,6 +736,8 @@ interface State {
   error: string | null;
   /** FIFO Delivery awaiting full processing (a question is open in it). */
   pendingDeliveryId: string | null;
+  /** check --ack may also return the next FIFO batch; process it before completion. */
+  queuedDelivery: OrcaDelivery | null;
   /** The open questions/escalations inside the pending Delivery. */
   inbox: PendingInboxItem[];
   /** Message ids already side-effected — replays of the unacked batch skip them. */
@@ -814,12 +822,16 @@ const state: State = {
   opts: null,
   attempts: new Map(),
   retryCandidates: new Map(),
+  workerCreators: new Map(),
+  delegatedTaskIds: new Set(),
+  delegatedDispatchIds: new Set(),
   startedAt: 0,
   lastTick: 0,
   lastReconciledAt: 0,
   completedAt: null,
   error: null,
   pendingDeliveryId: null,
+  queuedDelivery: null,
   inbox: [],
   processedMessages: new Set(),
   pendingOwnership: new Set(),
@@ -851,12 +863,16 @@ export function resetCoordinatorForTests(): void {
   state.opts = null;
   state.attempts = new Map();
   state.retryCandidates = new Map();
+  state.workerCreators = new Map();
+  state.delegatedTaskIds = new Set();
+  state.delegatedDispatchIds = new Set();
   state.startedAt = 0;
   state.lastTick = 0;
   state.lastReconciledAt = 0;
   state.completedAt = null;
   state.error = null;
   state.pendingDeliveryId = null;
+  state.queuedDelivery = null;
   state.inbox = [];
   state.processedMessages = new Set();
   state.pendingOwnership = new Set();
@@ -1007,10 +1023,14 @@ export async function startCoordinator(opts: StartOpts): Promise<void> {
   state.opts = opts;
   state.attempts = new Map();
   state.retryCandidates = new Map();
+  state.workerCreators = new Map();
+  state.delegatedTaskIds = new Set();
+  state.delegatedDispatchIds = new Set();
   state.error = null;
   state.runId = null;
   state.completedAt = null;
   state.pendingDeliveryId = null;
+  state.queuedDelivery = null;
   state.inbox = [];
   state.processedMessages = new Set();
   state.pendingOwnership = new Set();
@@ -1147,7 +1167,7 @@ export async function startCoordinator(opts: StartOpts): Promise<void> {
     // verified. Only after recovery does the loop enter `running`.
     state.phase = "recovering";
     await recoverState(opts);
-    if (!state.running) {
+    if (!stillMyTurn(myLoop) || state.coordinatorHandle !== handle || state.runId !== opts.runId) {
       // Stopped while recovering — stopCoordinator already reported.
       return;
     }
@@ -1663,9 +1683,15 @@ async function refreshRecoverySessions(
 
 async function recoverState(opts: StartOpts): Promise<void> {
   const runId = opts.runId;
+  const generation = coordinatorLoopGeneration;
+  const coordinator = state.coordinatorHandle;
   // --include-remote: a crashed viewer's remote Dispatches live on their
   // connected servers; a local-only listing would misread them as lost.
   const [tasks, rows] = await Promise.all([listTasks(runId), listWorkers(runId, { includeRemote: true })]);
+  const ownership = await readWorkerOwnership(runId, tasks, rows, state.workerCreators);
+  if (!stillMyTurn(generation) || state.runId !== runId || state.coordinatorHandle !== coordinator) return;
+  state.delegatedTaskIds = ownership.heldTaskIds;
+  state.delegatedDispatchIds = ownership.heldDispatchIds;
   await captureProviderSessions(runId, tasks, rows);
   const rowByDispatch = new Map(rows.map((r) => [r.dispatchId, r]));
   const bindings = await listProviderSessions(runId);
@@ -1709,6 +1735,7 @@ async function recoverState(opts: StartOpts): Promise<void> {
     rows.filter((row) => row.runId === runId && activeDispatch(row)).map((row) => row.taskId),
   );
   for (const task of tasks) {
+    if (state.delegatedTaskIds.has(task.id)) continue;
     if (task.status !== "blocked" || activeTaskIds.has(task.id)) continue;
     const stopped = rows.find(
       (row) =>
@@ -1901,6 +1928,10 @@ async function recoverState(opts: StartOpts): Promise<void> {
   };
 
   for (const task of tasks) {
+    if (state.delegatedTaskIds.has(task.id)) {
+      summary.unverifiable.push(task.id);
+      continue;
+    }
     const evidence = taskDispatchEvidence(task, rows, runId);
     const row = evidence.row;
     if (task.status === "dispatched" || evidence.active.length > 0) {
@@ -2000,6 +2031,7 @@ async function recoverState(opts: StartOpts): Promise<void> {
   // from THAT Dispatch, never from a "latest worker for Task" heuristic. Orca's
   // own settlement still has to be positive on both the Task and fleet row.
   for (const launch of tuiLaunches) {
+    if (state.delegatedTaskIds.has(launch.taskId)) continue;
     if (!["prepared", "bound"].includes(launch.state)) continue;
     const task = tasks.find(candidate => candidate.id === launch.taskId);
     const row = launch.dispatchId ? rowByDispatch.get(launch.dispatchId) : undefined;
@@ -2154,6 +2186,15 @@ export async function stopCoordinator(): Promise<StopReport> {
   ];
   const coordinator = state.coordinatorHandle;
   const results: StopResultEntry[] = [];
+  // Stop covers this viewer's workers, not helpers still owned by an active
+  // creator (or whose creator is unreadable). Report the retained work rather
+  // than silently claiming the entire Run stopped.
+  for (const dispatchId of state.delegatedDispatchIds) {
+    results.push({
+      target: dispatchId, kind: "supervised", result: "unknown",
+      detail: "Helper custody belongs to its creator or is unverified; no Stop was sent to this Dispatch.",
+    });
+  }
 
   // Phase 5: every worker-stop runs under a durable, ledger-recorded request
   // id — recorded BEFORE the call so an interrupted stop stays inspectable,
@@ -2325,6 +2366,7 @@ export async function stopCoordinator(): Promise<StopReport> {
   state.retryCandidates = new Map();
   state.coordinatorHandle = null;
   state.pendingDeliveryId = null;
+  state.queuedDelivery = null;
   state.inbox = [];
   state.pendingOwnership = new Set();
   state.lanes = new Map();
@@ -2540,7 +2582,9 @@ async function loop(myLoop: number): Promise<void> {
     try {
       // Rolling inbox wait: block (bounded) for worker_done/escalation/question
       // mail instead of sleeping through it. Nothing pending → timedOut batch.
-      delivery = await checkInbox({
+      delivery = state.queuedDelivery;
+      state.queuedDelivery = null;
+      if (!delivery) delivery = await checkInbox({
         from: state.coordinatorHandle!,
         types: WAKE_TYPES,
         waitMs,
@@ -2646,6 +2690,8 @@ async function processDelivery(delivery: {
   messages: OrcaMessage[];
   replayed: boolean;
 }): Promise<void> {
+  const generation = coordinatorLoopGeneration;
+  const runId = state.runId;
   // A rejected lifecycle report can still arrive as a worker_done-shaped
   // mailbox row. Orca's Task status, which changes atomically when it accepts
   // worker_done, is the settlement authority. Read it before marking any
@@ -2653,6 +2699,11 @@ async function processDelivery(delivery: {
   const tasks = delivery.messages.some((message) => message.type === "worker_done") && state.runId
     ? await listTasks(state.runId)
     : [];
+  if (!stillMyTurn(generation) || state.runId !== runId) return;
+  // A real Delivery is the FIFO unit Orca keeps replaying until acked. Record
+  // it only after the worker_done validation read succeeds, so failed reads
+  // leave the entire batch untouched and replayable.
+  if (delivery.deliveryId) state.pendingDeliveryId = delivery.deliveryId;
   for (const message of delivery.messages) {
     if (markProcessed(message.id)) continue;
     switch (message.type) {
@@ -2745,15 +2796,24 @@ async function runAck(): Promise<void> {
       return; // decision still owed — the batch keeps replaying
     }
   }
+  const generation = coordinatorLoopGeneration;
+  const coordinator = state.coordinatorHandle!;
+  let next: OrcaDelivery | null = null;
   try {
-    await checkInbox({ from: state.coordinatorHandle!, ack: deliveryId });
+    next = await checkInbox({ from: coordinator, ack: deliveryId });
   } catch (err) {
+    if (!stillMyTurn(generation) || state.coordinatorHandle !== coordinator) return;
     const e = err as OrcaCliError;
     if (e?.code !== "stale_delivery") {
       state.error = `Failed to acknowledge delivery ${deliveryId}: ${String(e.message ?? err)}`;
       return; // retry on a later pass — the batch simply replays
     }
   }
+  if (!stillMyTurn(generation) || state.coordinatorHandle !== coordinator) return;
+  // ACK is also a consuming check on current Orca. Dropping the returned
+  // batch would allow Task-status reconciliation to declare completion with
+  // an already-observed actionable Delivery still unprocessed.
+  state.queuedDelivery = next?.deliveryId ? next : null;
   state.pendingDeliveryId = null;
   state.lastAckedDeliveryId = deliveryId;
   state.pendingOwnership.clear();
@@ -2800,12 +2860,6 @@ async function handleWorkerDone(message: OrcaMessage, tasks: OrcaTask[]): Promis
     noteRecent(message, "worker_done for an unknown Dispatch — not settling anything");
     return null;
   }
-  if (attempt.settled) {
-    // Duplicate/replayed worker_done: the whole point of idempotent handling —
-    // no double release, no advancement of another task.
-    noteRecent(message, "duplicate worker_done for an already settled Dispatch — ignored");
-    return null;
-  }
   if (payloadDispatch && attempt.dispatchId && payloadDispatch !== attempt.dispatchId) {
     noteRecent(message, "worker_done dispatch id does not match the active Dispatch — ignored");
     return null;
@@ -2821,6 +2875,13 @@ async function handleWorkerDone(message: OrcaMessage, tasks: OrcaTask[]): Promis
       (runtimeTask.dispatch_id && runtimeTask.dispatch_id !== attempt.dispatchId)) {
     noteRecent(message, "worker_done was not accepted by Orca — Task remains unsettled");
     return null;
+  }
+  if (attempt.settled) {
+    // Recovery may have observed accepted settlement before replaying its
+    // worker_done. Do not settle twice, but keep ACK behind the still-owed
+    // ownership decision exactly as for a newly accepted report.
+    noteRecent(message, "duplicate worker_done for an already settled Dispatch — ignored");
+    return attempt.terminalDecision === "pending" ? attempt.taskId : null;
   }
   settleAttempt(attempt, outcome, "worker_done");
   if (outcome === "failed" && state.runId) {
@@ -2981,6 +3042,48 @@ function reserveAttempt(task: Pick<OrcaTask, "id">, harness: string): Attempt {
 }
 
 /**
+ * A helper returns to Run custody only after its exact creator settles. This
+ * also handles helpers created after viewer startup: normal fleet visibility
+ * alone must neither adopt them early nor strand them forever after handback.
+ */
+async function refreshHelperOwnership(runId: string, tasks: OrcaTask[], rows: OrcaWorkerRow[]): Promise<boolean> {
+  const generation = coordinatorLoopGeneration;
+  const coordinator = state.coordinatorHandle;
+  const isCurrent = () => stillMyTurn(generation) && state.runId === runId &&
+    state.coordinatorHandle === coordinator;
+  const ownership = await readWorkerOwnership(runId, tasks, rows, state.workerCreators);
+  if (!isCurrent()) return false;
+  state.delegatedTaskIds = ownership.heldTaskIds;
+  state.delegatedDispatchIds = ownership.heldDispatchIds;
+  for (const row of ownership.handedBack) {
+    const task = tasks.find(candidate => candidate.id === row.taskId);
+    if (!task || state.attempts.has(task.id) || workerSupervision(row) !== "supervised") continue;
+    const evidence = taskDispatchEvidence(task, rows, runId);
+    if (evidence.uncertain || evidence.row?.dispatchId !== row.dispatchId) continue;
+    if (!activeDispatch(row) && task.status !== "completed" && task.status !== "failed") continue;
+    const reported = row.projection?.provider?.id ?? row.projection?.launch?.agent;
+    const harness = reported === "opencode2" ? "opencode" :
+      reported ?? state.opts!.harnessByTask[task.id] ?? state.opts!.defaultHarness;
+    const attempt = reserveAttempt(task, harness);
+    attempt.adopted = true;
+    attempt.dispatchId = row.dispatchId;
+    attempt.agentTerminalHandle = row.agentTerminalHandle;
+    attempt.requested.worktree = row.projection?.launch?.worktree ?? null;
+    attempt.requested.on = row.projection?.host?.kind === "local" ? null :
+      row.projection?.host?.id ?? "unverified";
+    const outcome = projectionOutcome(row);
+    if (outcome && row.dispatchStatus !== "pending") {
+      settleAttempt(attempt, outcome, "task_status");
+      seedInheritedTerminalState(attempt, row);
+    }
+    state.attempts.set(task.id, attempt);
+    await refreshAttemptDispatchDetail(attempt, runId);
+    if (!isCurrent()) return false;
+  }
+  return true;
+}
+
+/**
  * Periodic reconciliation against Orca's authoritative records (plan §6.3):
  * task statuses drive the DAG, worker-list drives terminal accounting, and
  * settled attempts get their ownership decision executed here.
@@ -2988,11 +3091,17 @@ function reserveAttempt(task: Pick<OrcaTask, "id">, harness: string): Attempt {
 async function reconcile(): Promise<void> {
   const opts = state.opts!;
   const runId = state.runId!;
+  const generation = coordinatorLoopGeneration;
   state.lastTick = Date.now();
 
-  let tasks = await listTasks(runId);
+  // Task DAG state and fleet accounting are independent read-only authorities.
+  let [tasks, workerRows] = await Promise.all([
+    listTasks(runId),
+    listWorkers(runId, { includeRemote: true }),
+  ]);
+  if (!stillMyTurn(generation) || state.runId !== runId) return;
   const byId = new Map(tasks.map((t) => [t.id, t]));
-  const workerRows = await listWorkers(runId, { includeRemote: true });
+  if (!await refreshHelperOwnership(runId, tasks, workerRows)) return;
   const occupiedTaskIds = new Set(
     workerRows.filter((row) => row.runId === runId && activeDispatch(row)).map((row) => row.taskId),
   );
@@ -3001,7 +3110,7 @@ async function reconcile(): Promise<void> {
   // or ANY ready task is a cross-lane join — the join's gate must exist before
   // its first dispatch could ever happen. One Run-scoped read per pass, only
   // when the pass can actually use it.
-  const blocked = tasks.filter((t) => t.status === "blocked");
+  const blocked = tasks.filter((t) => t.status === "blocked" && !state.delegatedTaskIds.has(t.id));
   const readyJoins = state.stageGit ? [] : tasks.filter(
     (t) => t.status === "ready" && isCrossLaneJoin(t, opts.laneByTask),
   );
@@ -3255,6 +3364,7 @@ async function reconcile(): Promise<void> {
   const batch = ready
     .filter((t) => !state.attempts.has(t.id))
     .filter((t) => !occupiedTaskIds.has(t.id))
+    .filter((t) => !state.delegatedTaskIds.has(t.id))
     // A join behind an unresolved integration gate is unstartable, whatever
     // the budget says. (Orca has it `blocked`; the ready snapshot above can
     // still carry the pass the gate was created in.)
@@ -3485,9 +3595,13 @@ async function decideTerminalOwnership(attempt: Attempt, opts: StartOpts, readyT
   // is the only one reuse considers.
   const placementCurrent = (attempt.requested?.worktree ?? "current") === "current";
   const settledLocal = !attempt.requested?.on;
-  if (handle && placementCurrent && settledLocal && !attempt.openCodeTui) {
+  // OpenCode's pinned model and explicit frontends have separate session
+  // ownership. Keep all OpenCode workers off generic reuse, including after
+  // recovery when the original requested model may no longer be available.
+  if (handle && placementCurrent && settledLocal && attempt.harness !== "opencode") {
     const candidate = readyTasks.find((t) => {
       if (state.attempts.has(t.id)) return false; // already attempted/parked
+      if (state.delegatedTaskIds.has(t.id)) return false;
       const harness = opts.harnessByTask[t.id] || opts.defaultHarness;
       if (harness !== attempt.harness) return false; // different agent → fresh
       if (opts.modelByTask[t.id]) return false; // model/effort → fresh terminal
@@ -3506,7 +3620,16 @@ async function decideTerminalOwnership(attempt: Attempt, opts: StartOpts, readyT
       if (candidatePlacement.kind !== "current") return false;
       return true;
     });
-    if (candidate) {
+    // A non-empty fleet handle may name a Chat session, not a PTY. Reusing
+    // sessions is a distinct contract; this automatic path requires fresh
+    // exact terminal facts in the coordinator's real workspace.
+    const exact = candidate ? await refreshAttemptDispatchDetail(attempt, state.runId!) : null;
+    const terminal = exact?.terminal;
+    const reusable = exact?.observation?.exactWorker === true && exact.observation.status === "live" &&
+      terminal?.handle === handle && terminal.connected === true && terminal.orphaned === false &&
+      terminal.worktreePath === getOrcaRuntime().workspace.dir &&
+      terminal.agentIdentity === attempt.harness;
+    if (candidate && reusable) {
       const next = reserveAttempt(candidate, attempt.harness);
       next.reuseOf = attempt.dispatchId;
       next.agentTerminalHandle = handle;
@@ -3695,6 +3818,45 @@ async function evaluateCompletionBoundary(tasks: OrcaTask[]): Promise<void> {
     state.phase = "awaiting_input";
     return;
   }
+  if (state.delegatedDispatchIds.size > 0) {
+    // Active creators still owe their helpers' decisions. Unreadable lineage
+    // also holds the boundary; absence never transfers cleanup authority.
+    state.phase = unsettled.length > 0 ? "running" : "awaiting_input";
+    return;
+  }
+  // A reclaimable debt is only a cached fleet observation. Revalidate it
+  // before allowing it to keep the boundary parked; unknown/failed cleanup
+  // debts remain untouched and still gate completion.
+  let reclaimableRows: OrcaWorkerRow[] | null = null;
+  if (state.cleanupDebt.some((debt) => debt.kind === "reclaimable")) {
+    try {
+      reclaimableRows = await listWorkers(runId, { terminalState: "reclaimable", includeRemote: true });
+      const reclaimableIds = new Set(reclaimableRows.map((row) => row.dispatchId));
+      state.cleanupDebt = state.cleanupDebt.filter(
+        (debt) => debt.kind !== "reclaimable" || (debt.dispatchId !== null && reclaimableIds.has(debt.dispatchId)),
+      );
+      if (reclaimableRows.length > 0) {
+        state.phase = "awaiting_input";
+        state.cleanupDebt = [
+          ...state.cleanupDebt,
+          ...reclaimableRows
+            .filter((row) => !state.cleanupDebt.some((debt) => debt.dispatchId === row.dispatchId))
+            .map((row) => ({
+              key: `reclaimable:${row.dispatchId}`,
+              kind: "reclaimable" as const,
+              dispatchId: row.dispatchId,
+              handle: null,
+              detail: `worker-list still reports reclaimable (state: ${row.terminalState})`,
+            })),
+        ];
+        return;
+      }
+    } catch (err) {
+      state.error = `reclaimable worker check failed: ${String((err as Error).message ?? err)}`;
+      state.phase = "awaiting_input";
+      return;
+    }
+  }
   // Ambiguous cleanup (release_unknown / close_failed / overdue pending).
   if (state.cleanupDebt.length > 0 || undecided.length > 0) {
     state.phase = "awaiting_input";
@@ -3735,7 +3897,7 @@ async function evaluateCompletionBoundary(tasks: OrcaTask[]): Promise<void> {
   try {
     // --include-remote: a remote worker whose execution host still owes a
     // release blocks completion exactly like a local one would.
-    const reclaimable = await listWorkers(runId, { terminalState: "reclaimable", includeRemote: true });
+    const reclaimable = reclaimableRows ?? await listWorkers(runId, { terminalState: "reclaimable", includeRemote: true });
     const reclaimableIds = new Set(reclaimable.map((r) => r.dispatchId));
     state.cleanupDebt = state.cleanupDebt.filter(
       (d) => d.kind !== "reclaimable" || (d.dispatchId !== null && reclaimableIds.has(d.dispatchId)),
@@ -3759,6 +3921,10 @@ async function evaluateCompletionBoundary(tasks: OrcaTask[]): Promise<void> {
   } catch (err) {
     state.error = `reclaimable worker check failed: ${String((err as Error).message ?? err)}`;
     state.phase = "awaiting_input";
+    return;
+  }
+  if (state.queuedDelivery) {
+    state.phase = "running";
     return;
   }
 
@@ -3909,16 +4075,14 @@ async function startOne(
     if (preparations.some(row => row.taskId === task.id && ["prepared", "bound"].includes(row.state))) {
       throw new OrcaCliError("This Task has an unresolved OpenCode TUI preparation; inspect it before any replacement", "start_unknown");
     }
-    // The viewer's `opencode` choice already means OpenCode 2. On a running
-    // Orca 1.4.220+ with no per-node model override, launch its native agent
-    // id (`opencode2`). Older/unknown runtimes and explicit `-m` selections
-    // keep the proven one-shot path. Do not use CLI version as a proxy for the
-    // app version, and do not retry an attempted native start as legacy.
-    // Orca 1.4.222 owns the improved OpenCode submit-readiness wait. Its new
-    // model override supports the distinct `opencode` agent and verified CLI
-    // versions, not `opencode2`: even an advertised launch-preferences
-    // capability must not remove this model guard or add viewer Enter retries.
+    // Default-model OpenCode uses the proven opencode2 agent. Explicit models
+    // can use the distinct opencode launcher on 1.4.241+, whose execution-host
+    // probes verify model availability and reject CLI releases that lose the
+    // first prompt. This is not opencode2 --model support. Mini, variants,
+    // effort, lanes, new worktrees and remote placements retain their adapters.
+    // Choose before launch; a failed native start never authorizes a fallback.
     let nativeOpenCode = false;
+    let nativeOpenCodeModel = false;
     const ui = attempt.harness === "opencode"
       ? validateOpenCodeUi(opts.openCodeUiByTask?.[task.id] ?? opts.defaultOpenCodeUi ?? "auto") : "auto";
     attempt.openCodeUiRequested = attempt.harness === "opencode" ? ui : null;
@@ -3928,12 +4092,19 @@ async function startOne(
     }
     const explicitOpenCode = attempt.harness === "opencode" && ui !== "auto";
     const apiOpenCode = explicitOpenCode || attempt.harness === "opencode" && Boolean(model) && process.env.ORCA_DAG_OPENCODE_TUI === "1";
+    const nativeModelCandidate = attempt.harness === "opencode" && Boolean(model) &&
+      !apiOpenCode && !model!.includes("#") && !attempt.requested.effort &&
+      !environment && !laneId && !reuseTerminal && process.platform !== "win32" &&
+      (placement.kind === "current" || placement.kind === "existing");
     attempt.openCodeTui = apiOpenCode;
-    if (attempt.harness === "opencode" && (!model || apiOpenCode)) {
-      const status = await runOrca<{ runtime?: { appVersion?: string } }>(["status"]);
+    if (attempt.harness === "opencode" && (!model || apiOpenCode || nativeModelCandidate)) {
+      const status = await runOrca<{ runtime?: { appVersion?: string; capabilities?: string[] } }>(["status"]);
       const version = status.runtime?.appVersion;
-      nativeOpenCode = typeof version === "string" && /^\d+\.\d+\.\d+$/.test(version) &&
+      nativeOpenCode = (!model || apiOpenCode) && typeof version === "string" && /^\d+\.\d+\.\d+$/.test(version) &&
         compareVersions(version, MIN_NATIVE_OPENCODE_VERSION) >= 0;
+      nativeOpenCodeModel = nativeModelCandidate && typeof version === "string" && /^\d+\.\d+\.\d+$/.test(version) &&
+        compareVersions(version, MIN_NATIVE_OPENCODE_MODEL_VERSION) >= 0 &&
+        status.runtime?.capabilities?.includes("orchestration.worker-launch-preferences.v1") === true;
       if (apiOpenCode && (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version) ||
           compareVersions(version, "1.4.222") < 0)) {
         throw new OrcaCliError("OpenCode API TUI requires running Orca >= 1.4.222; no one-shot fallback was attempted", "execution_disabled");
@@ -4150,7 +4321,7 @@ async function startOne(
       });
       attempt.requested = { ...attempt.requested, terminal: started.handle };
       attempt.openCodeUiLaunched = started.openCodeLaunch?.frontend ?? null;
-    } else if (attempt.harness === "opencode" && !nativeOpenCode) {
+    } else if (attempt.harness === "opencode" && !nativeOpenCode && !nativeOpenCodeModel) {
       if (environment) {
         throw new OrcaCliError(
           `Cannot start task ${task.id} on environment "${environment}": the ${attempt.harness} ` +
@@ -4279,7 +4450,7 @@ async function startOne(
         // pane or overwrite its handle after a rejection.
         // A native OpenCode start may have effects even if Orca rejects it.
         // Never launch a second one-shot worker after that attempt.
-        if (nativeOpenCode || environment || lane || attempt.handle ||
+        if (nativeOpenCode || nativeOpenCodeModel || environment || lane || attempt.handle ||
             !code || !UNCONFIGURED_AGENT_CODES.has(code)) throw err;
         if (!isCurrent()) {
           throw new OrcaCliError("Coordinator stopped before the legacy worker could start.", "not_running");
@@ -4299,7 +4470,7 @@ async function startOne(
     }
     attempt.mode = started.mode;
     if (attempt.harness === "opencode" && !apiOpenCode && started.dispatchId) {
-      attempt.openCodeUiLaunched = nativeOpenCode ? "native" : "oneshot";
+      attempt.openCodeUiLaunched = nativeOpenCode || nativeOpenCodeModel ? "native" : "oneshot";
     }
     if (started.dispatchId) {
       bindAttemptDispatch(attempt, started.dispatchId);

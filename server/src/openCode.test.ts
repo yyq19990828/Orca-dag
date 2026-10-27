@@ -82,6 +82,48 @@ after(() => {
 });
 
 describe("API-preselected OpenCode full TUI", () => {
+  it("preserves an explicit successor frontend after a native model-pinned task", async () => {
+    const oldFlag = process.env.ORCA_DAG_OPENCODE_TUI;
+    delete process.env.ORCA_DAG_OPENCODE_TUI;
+    resetCoordinatorForTests();
+    update(orcaFile, {
+      runtime: { appVersion: "1.4.241", capabilities: ["orchestration.worker-launch-preferences.v1"] },
+      tasks: {
+        task_test: { id: "task_test", run_id: "run_test", status: "ready", deps: "[]" },
+        task_next: { id: "task_next", run_id: "run_test", status: "pending", deps: '["task_test"]' },
+      },
+    });
+    try {
+      await startCoordinator({ ...coordinatorOpts(), modelByTask: { task_test: "provider/model" },
+        openCodeUiByTask: { task_next: "mini" } });
+      await waitFor(() => Boolean(coordinatorStatus().attempts.find(a => a.taskId === "task_test")?.dispatchId));
+      assert.equal(coordinatorStatus().attempts.find(a => a.taskId === "task_test")?.openCodeUiLaunched, "native");
+      await settleWithLock();
+      await waitFor(() => Boolean(coordinatorStatus().attempts.find(a => a.taskId === "task_next")?.dispatchId));
+      const next = coordinatorStatus().attempts.find(a => a.taskId === "task_next")!;
+      const launch = (await store.listOpenCodeLaunches()).find(row => row.taskId === "task_next");
+      assert.equal(next.settled, false);
+      assert.equal(next.openCodeUiLaunched, "mini");
+      assert.equal(next.reuseOf, null);
+      assert.equal(launch?.frontend, "mini");
+      assert.equal(launch?.dispatchId, next.dispatchId);
+      for (;;) {
+        try { mkdirSync(`${orcaFile}.lock`); break; } catch { await pause(5); }
+      }
+      try {
+        const data = load(orcaFile);
+        data.dispatches[next.dispatchId!].status = "completed";
+        data.dispatches[next.dispatchId!].terminalState = "reclaimable";
+        data.tasks.task_next.status = "completed";
+        writeFileSync(orcaFile, JSON.stringify(data));
+      } finally { rmSync(`${orcaFile}.lock`, { recursive: true }); }
+      await waitFor(() => coordinatorStatus().phase === "completed");
+      assert.equal((await store.listOpenCodeLaunches()).find(row => row.taskId === "task_next")?.state, "closed");
+    } finally {
+      await stopCoordinator(); await pause(150); resetCoordinatorForTests();
+      if (oldFlag === undefined) delete process.env.ORCA_DAG_OPENCODE_TUI; else process.env.ORCA_DAG_OPENCODE_TUI = oldFlag;
+    }
+  });
   for (const [defaultUi, override, expected] of [["mini", undefined, "mini"], ["mini", "tui", "tui"], ["tui", "mini", "mini"]] as const) {
     it(`routes workspace ${defaultUi} / node ${override ?? "inherit"} through the selected frontend`, async () => {
       const oldFlag = process.env.ORCA_DAG_OPENCODE_TUI;

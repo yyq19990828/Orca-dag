@@ -509,23 +509,44 @@ describe("worker_done validation", () => {
     await waitFor(() => (coordinatorStatus().phase === "completed" ? true : null), "completion");
   });
 
-  it("never treats an unknown Dispatch or unverifiable outcome as settlement", async () => {
+  it("acknowledges stale and unknown worker_done reports without settling their task", async () => {
     const runId = "run_strange";
     await singleTaskState(runId);
     await startCoordinator(baseOpts(runId));
     await waitFor(() => (calls("worker-start").length === 1 ? true : null), "worker to start");
 
     const dispatchId = await dispatchIdOf("task_aaa");
-    await injectMail([
+    const deliveryId = await injectMail([
       workerDoneMessage("task_aaa", "ctx_foreign", "succeeded", "msg_foreign"),
       workerDoneMessage("task_aaa", dispatchId, "probably_fine", "msg_unverifiable"),
     ]);
-    // Both rows must be *processed* (recorded) before we assert the negative.
     await waitFor(() => (processedRow("msg_foreign") && processedRow("msg_unverifiable") ? true : null), "strange rows to be processed");
-    const a = attempt("task_aaa");
-    assert.equal(a.settled, false, "unverifiable/foreign worker_done must not settle");
+    assert.equal(attempt("task_aaa").settled, false, "unverifiable/foreign worker_done must not settle");
     assert.notEqual(coordinatorStatus().phase, "completed");
+    await waitFor(() => (ackCalls(deliveryId).length === 1 ? true : null), "invalid lifecycle delivery to be acknowledged");
     await stopCoordinator();
+  });
+  it("acks an ordinary FIFO batch before processing the following actionable Delivery", async () => {
+    const runId = "run_ordinary_mail";
+    await singleTaskState(runId);
+    await startCoordinator(baseOpts(runId));
+    await waitFor(() => (calls("worker-start").length === 1 ? true : null), "worker to start");
+
+    const ordinaryDeliveryId = await injectMail([{
+      ...workerDoneMessage("task_aaa", "ctx_foreign", "succeeded", "msg_ordinary"),
+      type: "progress",
+      subject: "ordinary lifecycle notice",
+    }]);
+    await settleViaWorkerDone("task_aaa", "succeeded", "msg_actionable");
+    const actionableDeliveryId = Object.values(
+      getState().mailboxes as Record<string, { deliveryId: string }[]>,
+    ).flat().find((delivery) => delivery.deliveryId !== ordinaryDeliveryId)?.deliveryId;
+    assert.ok(actionableDeliveryId, "actionable Delivery queued behind ordinary FIFO batch");
+
+    await waitFor(() => (ackCalls(ordinaryDeliveryId).length === 1 ? true : null), "ordinary Delivery ack");
+    await waitFor(() => (attempt("task_aaa").terminalDecision === "released" ? true : null), "actionable lifecycle processed");
+    await waitFor(() => (ackCalls(actionableDeliveryId).length === 1 ? true : null), "actionable Delivery ack");
+    await waitFor(() => (coordinatorStatus().phase === "completed" ? true : null), "completion");
   });
 });
 
@@ -893,6 +914,37 @@ describe("release_pending and release_unknown", () => {
     assert.equal(noteManualRelease(dispatchId, "released"), true, "projection updated");
     await waitFor(() => (coordinatorStatus().phase === "completed" ? true : null), "completion after manual release");
     assert.deepEqual(coordinatorStatus().cleanupDebt, []);
+  });
+  it("prunes externally released reclaimable debt before completion gating", async () => {
+    const runId = "run_external_release";
+    await singleTaskState(runId);
+    await startCoordinator(baseOpts(runId));
+    await waitFor(() => (calls("worker-start").length === 1 ? true : null), "worker to start");
+
+    await mutateState((state) => {
+      state.dispatches = state.dispatches ?? {};
+      state.dispatches.ctx_external = {
+        id: "ctx_external",
+        task_id: "task_external",
+        run_id: runId,
+        status: "completed",
+        workerState: "supervised",
+        terminalState: "reclaimable",
+      };
+    });
+    await settleViaWorkerDone("task_aaa", "succeeded", "msg_external_release");
+    await waitFor(
+      () => (coordinatorStatus().cleanupDebt.some((debt) => debt.kind === "reclaimable" && debt.dispatchId === "ctx_external") ? true : null),
+      "reclaimable fleet debt",
+    );
+
+    // Model another Orca client releasing the worker; do not shortcut through
+    // the viewer's noteManualRelease projection update.
+    await mutateState((state) => {
+      state.dispatches.ctx_external.terminalState = "released";
+    });
+    await waitFor(() => (coordinatorStatus().phase === "completed" ? true : null), "completion after external release");
+    assert.deepEqual(coordinatorStatus().cleanupDebt, [], "stale reclaimable debt is pruned from the authoritative fleet read");
   });
 });
 
@@ -3931,5 +3983,248 @@ describe("committed Stage integration before development", () => {
     const argv = callsOf("worker-start", "--task", "source")[0].argv;
     assert.equal(argv[argv.indexOf("--base-branch") + 1], git("rev-parse", "HEAD"));
     await stopCoordinator();
+  });
+});
+
+describe("same-Run helper custody", () => {
+  async function seedHelpers(runId: string, helperStatus = "completed") {
+    await mutateState((s) => {
+      s.runs = { [runId]: { id: runId, objective: "helper custody", legacy: 0 } };
+      s.tasks = {
+        task_aaa: { id: "task_aaa", run_id: runId, status: "dispatched", deps: "[]", dispatch_id: "ctx_parent" },
+        task_helper: { id: "task_helper", run_id: runId, parent_id: "task_aaa", status: helperStatus,
+          deps: "[]", ...(helperStatus === "dispatched" ? { dispatch_id: "ctx_helper" } : {}) },
+      };
+      s.dispatches = {
+        ctx_parent: { id: "ctx_parent", task_id: "task_aaa", run_id: runId, status: "dispatched",
+          workerState: "ready", terminalState: "active", agentTerminal: "term_parent", creatorDispatchId: null, depth: 1 },
+        ctx_helper: { id: "ctx_helper", task_id: "task_helper", run_id: runId, status: helperStatus,
+          workerState: helperStatus === "completed" ? "succeeded" : "ready",
+          terminalState: helperStatus === "completed" ? "reclaimable" : "active",
+          agentTerminal: "term_helper", creatorDispatchId: "ctx_parent", depth: 2 },
+      };
+    });
+  }
+
+  it("leaves a settled helper with its active creator, then adopts and releases it after handback", async () => {
+    const runId = "run_helpers";
+    await seedHelpers(runId);
+    await startCoordinator(baseOpts(runId));
+    await waitFor(() => coordinatorStatus().checks.length > 0 ? true : null, "helper custody pass");
+    assert.equal(findAttempt("task_helper"), undefined);
+    assert.equal(callsOf("worker-release", "--dispatch", "ctx_helper").length, 0);
+    await settleViaTaskStatus("task_aaa", "succeeded");
+    await waitFor(() => coordinatorStatus().phase === "completed" ? true : null, "creator handback completion");
+    assert.equal(attempt("task_helper").dispatchId, "ctx_helper");
+    assert.equal(attempt("task_helper").terminalDecision, "released");
+    assert.equal(calls("worker-start").length, 0, "handback adopts the existing Dispatch, never launches another");
+    assert.equal(getState().dispatches.ctx_helper.terminalState, "released");
+  });
+
+  it("reports an active delegated helper without stopping it when the viewer stops", async () => {
+    const runId = "run_helper_stop";
+    await seedHelpers(runId, "dispatched");
+    await startCoordinator(baseOpts(runId));
+    await waitFor(() => coordinatorStatus().checks.length > 0 ? true : null, "active helper custody pass");
+    const report = await stopCoordinator();
+    assert.equal(callsOf("worker-stop", "--dispatch", "ctx_helper").length, 0);
+    assert.equal(getState().dispatches.ctx_helper.status, "dispatched");
+    assert.equal(report.clean, false);
+    assert.equal(report.results.find(row => row.target === "ctx_helper")?.result, "unknown");
+  });
+
+  it("does not transfer helper custody from a missing creator", async () => {
+    const runId = "run_helper_missing";
+    await seedHelpers(runId);
+    await mutateState(s => {
+      delete s.dispatches.ctx_parent;
+      s.tasks.task_aaa.status = "completed";
+      delete s.tasks.task_aaa.dispatch_id;
+    });
+    await startCoordinator(baseOpts(runId));
+    await waitFor(() => coordinatorStatus().phase === "awaiting_input" ? true : null, "unverifiable helper owner");
+    assert.equal(findAttempt("task_helper"), undefined);
+    assert.equal(callsOf("worker-release", "--dispatch", "ctx_helper").length, 0);
+    assert.equal(getState().dispatches.ctx_helper.terminalState, "reclaimable");
+  });
+
+  it("keeps an active retained helper under its creator's custody", async () => {
+    const runId = "run_helper_retained";
+    await seedHelpers(runId, "dispatched");
+    await mutateState(s => { s.dispatches.ctx_helper.terminalState = "retained"; });
+    await startCoordinator(baseOpts(runId));
+    await waitFor(() => coordinatorStatus().checks.length > 0 ? true : null, "retained helper inspection");
+    assert.equal(findAttempt("task_helper"), undefined);
+    const report = await stopCoordinator();
+    assert.equal(callsOf("worker-stop", "--dispatch", "ctx_helper").length, 0);
+    assert.equal(report.results.find(row => row.target === "ctx_helper")?.result, "unknown");
+    assert.equal(getState().dispatches.ctx_helper.status, "dispatched");
+  });
+
+  it("adopts an exact pending helper after creator settlement even when its Task is blocked", async () => {
+    const runId = "run_helper_pending";
+    await seedHelpers(runId, "dispatched");
+    await mutateState(s => {
+      s.tasks.task_helper.status = "blocked";
+      delete s.tasks.task_helper.dispatch_id;
+      s.dispatches.ctx_helper.status = "pending";
+      s.dispatches.ctx_helper.workerState = "start_unknown";
+    });
+    await startCoordinator(baseOpts(runId));
+    await waitFor(() => coordinatorStatus().checks.length > 0 ? true : null, "pending delegated helper");
+    assert.equal(findAttempt("task_helper"), undefined);
+    await settleViaTaskStatus("task_aaa", "succeeded");
+    await waitFor(() => findAttempt("task_helper")?.dispatchId === "ctx_helper" ? true : null, "pending helper handback");
+    assert.equal(attempt("task_helper").settled, false);
+    assert.equal(callsOf("worker-release", "--dispatch", "ctx_helper").length, 0);
+    await stopCoordinator();
+    assert.equal(callsOf("worker-stop", "--dispatch", "ctx_helper").length, 1);
+  });
+
+  it("discards an old helper inspection that returns after Stop and another Run starts", async () => {
+    const runId = "run_helper_old";
+    const replacement = "run_helper_new";
+    const startedFile = join(root, "helper-inspection-started");
+    const releaseFile = join(root, "helper-inspection-release");
+    const oldBarriers = process.env.FAKE_ORCA_READ_BARRIERS;
+    rmSync(startedFile, { force: true }); rmSync(releaseFile, { force: true });
+    await seedHelpers(runId);
+    await mutateState(s => { delete s.tasks.task_helper; delete s.dispatches.ctx_helper; });
+    await startCoordinator(baseOpts(runId));
+    await waitFor(() => coordinatorStatus().checks.length > 0 ? true : null, "initial root inspection");
+    process.env.FAKE_ORCA_READ_BARRIERS = JSON.stringify({ ctx_helper: { startedFile, releaseFile } });
+    try {
+      await mutateState(s => {
+        s.tasks.task_aaa.status = "completed"; s.dispatches.ctx_parent.status = "completed";
+        s.dispatches.ctx_parent.terminalState = "reclaimable";
+        s.tasks.task_helper = { id: "task_helper", run_id: runId, parent_id: "task_aaa", status: "completed", deps: "[]" };
+        s.dispatches.ctx_helper = { id: "ctx_helper", task_id: "task_helper", run_id: runId, status: "completed",
+          workerState: "succeeded", terminalState: "reclaimable", creatorDispatchId: "ctx_parent", depth: 2 };
+        s.runs[replacement] = { id: replacement, objective: "new Run", legacy: 0 };
+        s.tasks.task_new = { id: "task_new", run_id: replacement, status: "ready", deps: "[]" };
+      });
+      await waitFor(() => existsSync(startedFile) ? true : null, "old exact helper read to block");
+      await stopCoordinator();
+      await startCoordinator(baseOpts(replacement));
+      await dispatchIdOf("task_new");
+      writeFileSync(releaseFile, "");
+      await waitFor(() => callsOf("worker-show", "--dispatch", "ctx_helper").length > 0 ? true : null, "old helper read to return");
+      const reconciledAt = coordinatorStatus().lastReconciledAt ?? 0;
+      await waitFor(() => (coordinatorStatus().lastReconciledAt ?? 0) > reconciledAt ? true : null, "new Run reconciliation");
+      assert.equal(coordinatorStatus().runId, replacement);
+      assert.equal(findAttempt("task_helper"), undefined);
+      assert.equal(callsOf("worker-release", "--dispatch", "ctx_helper").length, 0);
+      assert.equal(getState().dispatches.ctx_helper.terminalState, "reclaimable");
+    } finally {
+      writeFileSync(releaseFile, "");
+      if (oldBarriers === undefined) delete process.env.FAKE_ORCA_READ_BARRIERS;
+      else process.env.FAKE_ORCA_READ_BARRIERS = oldBarriers;
+    }
+  });
+
+  it("does not mistake a planned Task parent for delegated Dispatch ownership", async () => {
+    const runId = "run_planned_parent";
+    await seedHelpers(runId);
+    await mutateState(s => { s.dispatches.ctx_helper.creatorDispatchId = null; s.dispatches.ctx_helper.depth = 1; });
+    await startCoordinator(baseOpts(runId));
+    await waitFor(() => findAttempt("task_helper")?.terminalDecision === "released" ? true : null, "root Dispatch release");
+    assert.equal(attempt("task_helper").dispatchId, "ctx_helper");
+    assert.equal(getState().dispatches.ctx_parent.status, "dispatched");
+  });
+});
+
+describe("PTY-only automatic reuse", () => {
+  it("starts a fresh dependent worker when a settled worker has a Chat handle but no PTY", async () => {
+    const runId = "run_chat_no_pty";
+    await mutateState(s => {
+      s.runs = { [runId]: { id: runId, objective: "Chat identity", legacy: 0 } };
+      s.tasks = {
+        task_aaa: { id: "task_aaa", run_id: runId, status: "pending", deps: "[]" },
+        task_bbb: { id: "task_bbb", run_id: runId, status: "pending", deps: '["task_aaa"]' },
+      };
+    });
+    await startCoordinator(baseOpts(runId, { maxConcurrency: 1 }));
+    const dispatchId = await dispatchIdOf("task_aaa");
+    await mutateState(s => {
+      s.dispatches[dispatchId].agentTerminal = "orca_session_id:chat_worker";
+      s.dispatches[dispatchId].noPty = true;
+    });
+    await settleViaWorkerDone("task_aaa", "succeeded", "msg_chat_done");
+    await dispatchIdOf("task_bbb");
+    assert.equal(attempt("task_aaa").terminalDecision, "released");
+    assert.equal(calls("worker-start").some(call => call.argv.includes("--terminal")), false);
+    assert.notEqual(getState().dispatches[attempt("task_bbb").dispatchId!].agentTerminal, "orca_session_id:chat_worker");
+    await settleViaWorkerDone("task_bbb", "succeeded", "msg_chat_next_done");
+    await waitFor(() => coordinatorStatus().phase === "completed" ? true : null, "Chat-dependent completion");
+  });
+});
+
+describe("native OpenCode model boundary", () => {
+  for (const scenario of [
+    { name: "verified runtime model launch", model: "provider/model", advertised: true, mode: "supervised" },
+    { name: "unadvertised model capability", model: "provider/model", advertised: false, mode: "legacy" },
+    { name: "explicit model variant", model: "provider/model#high", advertised: true, mode: "legacy" },
+  ] as const) {
+    it(`settles and cleans up the correct launch path for ${scenario.name}`, async () => {
+      const runId = "run_native_model_boundary";
+      await singleTaskState(runId);
+      await mutateState(s => {
+        s.runtime = { appVersion: "1.4.241",
+          capabilities: scenario.advertised ? ["orchestration.worker-launch-preferences.v1"] : [] };
+      });
+      await startCoordinator(baseOpts(runId, {
+        defaultHarness: "opencode", modelByTask: { task_aaa: scenario.model },
+      }));
+      await dispatchIdOf("task_aaa");
+      assert.equal(attempt("task_aaa").mode, scenario.mode);
+      if (scenario.mode === "supervised") {
+        assert.equal(calls("dispatch").length, 0);
+      } else {
+        assert.equal(calls("worker-start").length, 0);
+      }
+      await settleViaWorkerDone("task_aaa", "succeeded", "msg_native_model_boundary");
+      await waitFor(() => coordinatorStatus().phase === "completed" ? true : null, "model-path completion");
+      assert.equal(attempt("task_aaa").terminalDecision, scenario.mode === "supervised" ? "released" : "closed");
+    });
+  }
+
+  it("parks a refused native model start without creating a second one-shot worker", async () => {
+    const runId = "run_native_model_refused";
+    await singleTaskState(runId);
+    await mutateState(s => {
+      s.runtime = { appVersion: "1.4.241", capabilities: ["orchestration.worker-launch-preferences.v1"] };
+      s.workerStartFail = { code: "invalid_argument", message: "execution-host model verification refused" };
+    });
+    await startCoordinator(baseOpts(runId, {
+      defaultHarness: "opencode", modelByTask: { task_aaa: "provider/model" },
+    }));
+    await waitFor(() => findAttempt("task_aaa")?.settledVia === "start_failed" ? true : null, "native model refusal");
+    assert.equal(calls("worker-start").length, 1);
+    assert.equal(calls("dispatch").length, 0);
+    assert.equal(findAttempt("task_aaa")?.settled, true);
+    assert.equal(getState().tasks.task_aaa.status, "ready");
+  });
+});
+
+describe("recovered worker_done ownership acknowledgement", () => {
+  it("decides a recovered settled worker's terminal ownership before acknowledging its Delivery", async () => {
+    const runId = "run_recovered_mail";
+    const deliveryId = "delivery_recovered";
+    await mutateState(s => {
+      s.runs = { [runId]: { id: runId, objective: "recovered mail", legacy: 0 } };
+      s.tasks = { task_aaa: { id: "task_aaa", run_id: runId, status: "completed", deps: "[]" } };
+      s.dispatches = { ctx_recovered: { id: "ctx_recovered", task_id: "task_aaa", run_id: runId,
+        status: "completed", workerState: "succeeded", terminalState: "reclaimable", agentTerminal: "term_recovered" } };
+      s.seq = { terminal: 0 };
+      s.mailboxes = { term_f1: [{ deliveryId, messages: [
+        { ...workerDoneMessage("task_aaa", "ctx_recovered", "succeeded", "msg_recovered"), run_id: runId },
+      ] }] };
+    });
+    await startCoordinator(baseOpts(runId));
+    await waitFor(() => coordinatorStatus().phase === "completed" ? true : null, "recovered Delivery completion");
+    const releaseIndex = firstIndexOf("worker-release", "--dispatch", "ctx_recovered");
+    const ackIndex = firstIndexOf("check", "--ack", deliveryId);
+    assert.ok(releaseIndex >= 0 && ackIndex > releaseIndex, "release/retain must execute before the recovered Delivery is acknowledged");
+    assert.equal(getState().dispatches.ctx_recovered.terminalState, "released");
   });
 });

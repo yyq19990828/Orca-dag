@@ -24,6 +24,22 @@ const args = process.argv.slice(2);
 const statePath = process.env.FAKE_ORCA_STATE ?? "";
 const logPath = process.env.FAKE_ORCA_LOG ?? "";
 
+// A test-owned inspection barrier parks outside the state lock, so Stop and a
+// replacement coordinator can make progress while an old worker-show is pending.
+if (args[0] === "orchestration" && args[1] === "worker-show") {
+  const dispatchIndex = args.indexOf("--dispatch");
+  const barriers = JSON.parse(process.env.FAKE_ORCA_READ_BARRIERS ?? "{}");
+  const barrier = barriers[args[dispatchIndex + 1]];
+  if (barrier) {
+    appendFileSync(barrier.startedFile, "started\n");
+    const deadline = Date.now() + 15_000;
+    while (!existsSync(barrier.releaseFile)) {
+      if (Date.now() >= deadline) { process.stderr.write("fake-orca inspection barrier timeout\n"); process.exit(1); }
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  }
+}
+
 function busySleep(ms) {
   const t = Date.now();
   while (Date.now() - t < ms) {
@@ -320,7 +336,7 @@ if (ns === "orchestration" && verb === "run-list") {
   });
 } else if (ns === "orchestration" && verb === "task-list") {
   deriveReadiness();
-  ok({ tasks: Object.values(state.tasks ?? {}) });
+  ok({ tasks: Object.values(state.tasks ?? {}).filter(task => !flag("--run") || task.run_id === flag("--run")) });
 } else if (ns === "orchestration" && verb === "worker-show") {
   const failure = state.workerShowFailure?.[flag("--dispatch")];
   if (failure) fail(failure.code ?? "worker_detail_unavailable", failure.message ?? "scripted worker-show failure");
@@ -332,16 +348,24 @@ if (ns === "orchestration" && verb === "run-list") {
     (state.openCodeTui && `path:${w.path}` === d.launch?.worktree));
   const dispatch = { id: d.id, task_id: d.task_id, runId: d.run_id, status: d.status };
   if (Object.hasOwn(d, "failureCount")) dispatch.failureCount = d.failureCount;
+  if (Object.hasOwn(d, "creatorDispatchId")) dispatch.creatorDispatchId = d.creatorDispatchId;
+  if (Object.hasOwn(d, "depth")) dispatch.depth = d.depth;
   ok({
     dispatch,
     worker: { state: d.workerState, startOptions: {
       agent: d.launch?.agent, resolvedWorktreeId: d.launch?.worktree,
     } },
-    terminal: {
+    terminal: d.noPty ? null : {
       handle: d.agentTerminal,
-      worktreePath: worktree?.path ?? (d.launch?.worktree ? null : process.cwd()),
+      connected: d.terminalConnected ?? true,
+      orphaned: false,
+      agentIdentity: d.launch?.agent ?? "claude",
+      worktreePath: worktree?.path ?? (d.launch?.worktree?.startsWith("path:")
+        ? d.launch.worktree.slice(5)
+        : !d.launch?.worktree || d.launch.worktree === "current" ? process.cwd() : null),
       branch: worktree?.branch ?? null,
     },
+    observation: { status: d.terminalConnected === false ? "exited" : "live", exactWorker: true },
     ...(state.openCodeTui ? {
       observation: { status: "live", exactWorker: true },
       projection: { ...workerRows(d.run_id).find(row => row.dispatchId === d.id),
@@ -430,8 +454,9 @@ if (ns === "orchestration" && verb === "run-list") {
   if (ack) {
     const delivery = box.find((d) => d.deliveryId === ack);
     if (delivery) delivery.open = false;
-    ok(emptyDelivery({ acknowledged: ack }));
-  } else {
+  }
+  // Like Orca, ACK retires the old batch and then checks the next one.
+  {
     const open = box.find((d) => d.open !== false);
     if (open) {
       open.seen = (open.seen ?? 0) + 1;
@@ -441,6 +466,7 @@ if (ns === "orchestration" && verb === "run-list") {
           messages: open.messages,
           count: open.messages.length,
           replayed: open.seen > 1,
+          acknowledged: ack ?? null,
         }),
       );
     } else if (flag("--wait")) {
