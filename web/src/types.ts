@@ -474,6 +474,8 @@ export interface WorkerStartReceiptView {
   /** Echo of the durable --retry-request id the start ran under. */
   requestId: string | null;
   status: string | null;
+  /** Accepted work outcome reported during startup; not independent Task settlement. */
+  workerOutcome: "succeeded" | "failed" | null;
   /** Stage reached (or in-flight when it failed). */
   stage: string | null;
   /** The stage that failed, on a failed start. */

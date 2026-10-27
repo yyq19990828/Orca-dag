@@ -585,6 +585,25 @@ if (ns === "orchestration" && verb === "run-list") {
       };
     }
     finish({ ok: false, error }, 1);
+  } else if (state.workerStartUnknown) {
+    const taskId = flag("--task");
+    const outcome = landSupervised(taskId, flag("--run"));
+    const receipt = {
+      taskId,
+      dispatchId: outcome.dispatchId,
+      requestId,
+      stage: "worker_start",
+      state: "outcome_unknown",
+      workerOutcome: null,
+    };
+    finish({
+      ok: false,
+      error: {
+        code: "start_unknown",
+        message: "worker-start outcome is unknown",
+        data: { receipt },
+      },
+    }, 1);
   } else if (state.workerStartAmbiguous) {
     // Lost-response modes. "lost": the mutation LANDS (dispatch created, request
     // recorded completed) but the response is garbage — the caller must recover
@@ -620,6 +639,18 @@ if (ns === "orchestration" && verb === "run-list") {
     const t = state.tasks?.[taskId];
     if (!t) fail("task_not_found", `no task ${taskId}`);
     const outcome = landSupervised(taskId, flag("--run"));
+    const settlement = state.workerStartSettlement;
+    if (settlement === "succeeded" || settlement === "failed") {
+      delete state.workerStartSettlement;
+      const task = state.tasks[taskId];
+      const dispatch = state.dispatches[outcome.dispatchId];
+      task.status = settlement === "succeeded" ? "completed" : "failed";
+      dispatch.status = task.status;
+      dispatch.terminalState = "reclaimable";
+      outcome.state = "ready";
+      outcome.stage = "settled";
+      outcome.workerOutcome = settlement;
+    }
     if (requestId) {
       state.requests[requestId] = {
         state: "completed",

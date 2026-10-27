@@ -165,6 +165,20 @@ worker 保持展开时，fleet 轮询仍会更新 ownership。若 fleet 与详�
 
 后续运行时发现可继续加在这里，写清受影响的启动路径、可观察的现象和已验证的处理方式。Codex TUI 可见、Task 已完成与 Orca 的 worker 存活状态是不同的证据。
 
+### Orca 1.4.242 输出、启动与权限边界
+
+原生 transcript 页面包含带角色和类型化 block 的 `transcript.messages`。viewer 以标签显示正文、工具调用/结果和图片引用；未知 block 保留明确标记，不会消失或变成 `[object Object]`。每条显示消息最多 16,000 字符、每页最多 10,000 行；运行时 `limited` 或 viewer 裁剪都会保留“不完整”标记。terminal 与 OpenCode API 仍是独立适配器。
+
+cursor 从当前有界尾部之后**向前**继续，包括当前 EOF；不能恢复已经省略的较早历史。`contentComplete` 描述当前页面/读取窗口，不代表 Task 落定或全部历史会话。来源替换仍只重读一次，并标记不连续。[Orca 1.4.242](https://github.com/stablyai/orca/releases/tag/v1.4.242) 在上游修复了满页后继续扫描；viewer 不新增输出重试或自动耗尽历史。
+
+worker-start 回执优先将官方 `state` 规范化为状态，并单独保留可空的 `workerOutcome`。`ready / settled / workerOutcome: failed` 代表启动成功、工作失败，不是启动失败。显式 `outcome_unknown` 或 `start_unknown` 在确认落定前保留精确 Dispatch、request 与并发槽位，绝不授权 release、重放或替代派工。已记录回执的重放经过相同就绪检查。接受的 Task/Dispatch 证据会清除未决 request 标记，原始回执仍可检查。
+
+回归模拟启动后期报错前已获接受的成功/失败结果，检查终端归属、不重复派工及成功后的依赖推进；也覆盖显式 unknown 后确认精确落定。这依据标签中的[提前回报契约](https://github.com/stablyai/orca/pull/26762)，并非强制制造真实 provider 竞态。
+
+隔离 Linux Orca 1.4.242、Codex 0.164.0 已验证写文件与读回、原生 transcript 正文显示、跨多个页面向前翻页、接受完成、终端释放及释放后的 transcript 读取。本次未覆盖远程/Windows 和活动 Stop。
+
+ACK 返回的不同后续批次立即进入正常处理与核验；空批次、错误及未解决的重放批次保留轮询节流。worker 不能占用自身或祖先 Run 的协调者席位，也不能使用 `--takeover-legacy`。收信/回报遵循有效 preamble，只有有资格的协调者恢复 Run 权限；运行时匹配的 guide 仍是权威。
+
 ### Orca 1.4.241 原生模型与 coordinator 边界
 
 当运行中的应用为稳定版 **1.4.241+**、声明 `orchestration.worker-launch-preferences.v1`，且放置为本机 POSIX 当前/已有、非 lane 工作区，不含模型 variant 或 effort 时，自动模式可使用原生 `opencode` 指定模型。这不证明 `opencode2` 支持指定模型。显式 Mini/完整 TUI 及 `ORCA_DAG_OPENCODE_TUI=1` 保留各自适配器。不符合条件的请求保留原兼容边界；原生启动被拒绝后绝不启动第二个 worker。

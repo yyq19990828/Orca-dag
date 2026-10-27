@@ -967,7 +967,7 @@ describe("normalizeLiveness", () => {
 // --- Phase 5 foundations: bounded worker-read --------------------------------
 
 describe("readWorkerOutput", () => {
-  it("passes --source/--cursor/--limit through and parses the page", async () => {
+  it("renders typed transcript messages without losing continuation or clipping evidence", async () => {
     useRuntime({ workspace: root });
     writeScript({
       workerRead: {
@@ -975,27 +975,65 @@ describe("readWorkerOutput", () => {
           dispatchId: "ctx_r1",
           source: "transcript",
           cursor: "cur_9",
-          transcript: { rows: ["line a", "line b"] },
+          transcript: {
+            messages: [
+              { role: "user", blocks: [{ type: "text", text: "Question" }] },
+              { role: "assistant", blocks: [
+                { type: "text", text: "Answer\nwith a second line" },
+                { type: "tool-call", name: "search", input: { query: "needle" } },
+                { type: "tool-result", output: "found" },
+                { type: "image-ref", path: "/tmp/chart.png" },
+                { type: "image-ref" },
+                { type: "new-block", payload: { secret: true } },
+              ] },
+            ],
+            limited: true,
+          },
           contentComplete: false,
           warnings: ["partial page"],
-          clipping: ["oldest rows dropped"],
         },
       },
     });
     const receipt = await readWorkerOutput("ctx_r1", { source: "transcript", cursor: "cur_8", limit: 25 });
-    const call = readLog().find((c) => c.argv[1] === "worker-read")!;
-    assert.ok(call.argv.includes("--source"), "--source must reach the CLI");
-    assert.ok(call.argv.includes("transcript"));
-    assert.ok(call.argv.includes("--cursor"), "the paging cursor must reach the CLI");
-    assert.ok(call.argv.includes("cur_8"));
-    assert.deepEqual(call.argv.slice(call.argv.indexOf("--limit") + 1, call.argv.indexOf("--limit") + 2), ["25"]);
     assert.equal(receipt.source, "transcript");
     assert.equal(receipt.cursor, "cur_9");
-    assert.deepEqual(receipt.lines, ["line a", "line b"]);
+    assert.deepEqual(receipt.lines, [
+      "[user] Question",
+      "[assistant] Answer",
+      "with a second line",
+      '[tool search] {"query":"needle"}',
+      "[tool result] found",
+      "[image] /tmp/chart.png",
+      "[image omitted]",
+      "[unsupported block: new-block]",
+    ]);
     assert.equal(receipt.contentComplete, false);
-    assert.equal(receipt.clipped, true, "a clipping[] answer means the page was clipped");
+    assert.equal(receipt.clipped, true, "transcript.limited marks the page clipped");
     assert.deepEqual(receipt.warnings, ["partial page"]);
     assert.equal(receipt.sourceChanged, false);
+  });
+
+  it("marks display-budget clipping without losing the source cursor", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      workerRead: {
+        result: {
+          source: "transcript",
+          cursor: "cur_after_large_message",
+          transcript: { messages: [
+            { role: "assistant", blocks: [{ type: "text", text: `visible start ${"x".repeat(20_000)} omitted end` }] },
+          ], limited: false },
+          contentComplete: true,
+          warnings: [],
+        },
+      },
+    });
+    const receipt = await readWorkerOutput("ctx_large", { source: "transcript" });
+    assert.ok(receipt.lines[0].startsWith("[assistant] visible start "));
+    assert.ok(!receipt.lines.join("\n").includes("omitted end"));
+    assert.equal(receipt.clipped, true);
+    assert.equal(receipt.contentComplete, false);
+    assert.equal(receipt.cursor, "cur_after_large_message");
   });
 
   it("restarts once without the cursor on source_changed and labels the discontinuity", async () => {
@@ -1231,6 +1269,33 @@ describe("parseWorkerStartReceipt effective launch preferences", () => {
     );
     assert.equal(receipt.effective.on, "env_remote");
     assert.equal(receipt.effective.worktree, "id:repoA::/srv/ws");
+  });
+});
+
+describe("startSupervisedWorker official readiness state", () => {
+  it("does not accept outcome_unknown from an ok envelope or replay the request", async () => {
+    useRuntime({ workspace: root });
+    writeScript({ workerStart: { dispatchId: "ctx_unknown", state: "outcome_unknown", workerOutcome: null } });
+    await assert.rejects(
+      startSupervisedWorker({ taskId: "task_unknown", agent: "codex", runId: "run_unknown", from: "term_c" }),
+      (err: OrcaCliError & { receipt?: { dispatchId?: string | null; requestId?: string | null } }) =>
+        err.code === "start_unknown" &&
+        err.receipt?.dispatchId === "ctx_unknown" &&
+        typeof err.receipt.requestId === "string",
+    );
+    assert.equal(readLog().filter((call) => call.argv[1] === "worker-start").length, 1);
+  });
+
+  it("keeps ready as successful start when the worker outcome is failed", async () => {
+    useRuntime({ workspace: root });
+    writeScript({ workerStart: { dispatchId: "ctx_ready_failed", state: "ready", workerOutcome: "failed" } });
+    const started = await startSupervisedWorker({
+      taskId: "task_ready_failed", agent: "codex", runId: "run_ready_failed", from: "term_c",
+    });
+    assert.equal(started.dispatchId, "ctx_ready_failed");
+    assert.equal(started.receipt?.ok, true);
+    assert.equal(started.receipt?.status, "ready");
+    assert.equal(started.receipt?.workerOutcome, "failed");
   });
 });
 

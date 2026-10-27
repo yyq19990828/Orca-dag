@@ -198,8 +198,10 @@ const zh: Dict = {
   "dialog.confirmRunTitle": "让查看器协调这个 Run？",
   "dialog.confirmRunMessage":
     "开始执行会把协调器权限移交给查看器。当前正在协调这个 Run 的任何 agent 终端或 Orca 原生聊天都会被 fence，" +
-    "其编排变更会以 consumer_fenced 失败。它可以用以下命令取回权限：\n\n" +
-    "orca orchestration run-use --id {id}",
+    "其编排变更会以 consumer_fenced 失败。有资格的协调者可以用以下命令恢复协调：\n\n" +
+    "orca orchestration run-use --id {id}\n\n" +
+    "已派工的 worker 不能绑定自身或祖先 Run，也不能使用 --takeover-legacy。" +
+    "收信与回报必须遵循其当前有效的 preamble。",
   "dialog.startRun": "启动 Run",
   "dialog.notNow": "暂不",
   "dialog.cancel": "取消",

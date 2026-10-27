@@ -55,7 +55,7 @@ Orca 1.4.226 会沿确切的 `--retry-of` 链累计失败的 `worker-start`：�
 
 ### Coordinator 安全边界与读取效率
 
-- 每个验证完成的 FIFO Delivery 都会确认，包括普通通知和过期生命周期报告。未回答的问题及尚未执行的终端归属决策继续阻止 ACK；`check --ack` 返回的下一批消息会在 Run 完成前处理。
+- 每个验证完成的 FIFO Delivery 都会确认，包括普通通知和过期生命周期报告。未回答的问题及尚未执行的终端归属决策继续阻止 ACK；`check --ack` 返回的不同后续批次不再额外等待轮询间隔，批次之间仍正常核验派工与状态。空批次、错误和未解决批次保留轮询节流。
 - 可回收清理债务会根据新鲜 fleet 记录重新核验，因此在 viewer 外完成的 release 也能消除旧债务。未知清理结果仍会阻止完成。
 - 同一 Run 的 helper 仍归其活动创建者管理。viewer 读取精确 Dispatch lineage，不把 `parent_id` 当作所有权；仅在确认创建者落定后接管 helper，归属不可读时保持等待。Stop 会报告委派工作，而不会擅自停止它。可见活动 worker 会占用派工预算，但 helper 可以在 viewer 外启动，因此 **Max parallel 不是整个运行时的硬上限**。
 - 自动终端复用要求相同 agent、相同工作区的新鲜、精确且已连接的 PTY 证据。Chat handle 不证明 PTY 存在；OpenCode 不参与通用复用，以保留指定模型及前端/session 的归属。
@@ -68,7 +68,7 @@ Orca 的所有编排调用都过 `resolveRunScope`：
 - **读**（`task-list` / `gate-list`）只要带 `--run <id>` 就跳过 consumer 检查，**任何进程都能读**。viewer 的轮询只需要这个。
 - **协调者写操作**（`dispatch` / `gate-resolve` / `task-create`，以及 viewer 的 `worker-start`）要求当前 Run 绑定。Orca 原生聊天使用会话身份；外部 viewer 通过 `--from <handle>` 使用已绑定终端。Orca ≥ 1.4.238 还允许活动 worker 在自己的 Run 中启动新的本机 helper，向创建者 Dispatch 回报，而不占用协调者席位。
 
-viewer 是个普通进程，没有 Orca 会话或终端身份，所以写操作会报 `run_required`。它会自己开一个标题为 `orca-dag coordinator · <workspace-hash> · <instance-id>` 的 Orca 终端，`run-use` 绑定，然后所有写操作带 `--from`。**绑定会 fence 掉原来的 coordinator**，无论它是 agent 终端还是 Orca 原生聊天，所以点执行前 viewer 会明确确认一次；该 agent 可以用 `orca orchestration run-use --id <run>` 取回权限。停止执行时 viewer 会关掉自己的终端，把 Run 让出来。
+viewer 是个普通进程，没有 Orca 会话或终端身份，所以写操作会报 `run_required`。它会自己开一个标题为 `orca-dag coordinator · <workspace-hash> · <instance-id>` 的 Orca 终端，`run-use` 绑定，然后所有写操作带 `--from`。**绑定会 fence 掉原来的 coordinator**，无论它是 agent 终端还是 Orca 原生聊天，所以点执行前 viewer 会明确确认一次。有资格的协调者可用 `orca orchestration run-use --id <run>` 恢复协调。Orca ≥ 1.4.242 的已派工 worker 不能绑定自身或祖先 Run，也不能使用 `--takeover-legacy`；收信与回报遵循当前有效的 preamble。协调者安排的独立 Run 交接是另一种情形。停止执行时 viewer 会关掉自己的终端，把 Run 让出来。
 
 标题里的 `<workspace-hash>` 把 coordinator 限定在一个工作区：两个 viewer 指向**不同**工作区时各用各的 coordinator 终端，互不干扰；第二个 viewer 若启动在**同一**工作区，会直接报 `coordinator_conflict`（HTTP 409）——不会悄悄接管，也不会关掉第一个的终端。
 
@@ -104,7 +104,7 @@ viewer 是个普通进程，没有 Orca 会话或终端身份，所以写操作�
 | 显式选择 Mini / 完整 TUI | **1.4.222** | OpenCode ≥ **2.1.2**；本机 Linux 当前/已有、非 lane 工作区。默认仍为自动。 |
 | API 预选模型的 OpenCode 2 完整 TUI | **1.4.222** | 显式指定模型并设置 `ORCA_DAG_OPENCODE_TUI=1`；仅本机 POSIX 当前/已有、非 lane 工作区。实验性功能，默认关闭。 |
 
-**截至 2026-10-26，有记录的真实运行时验证：**
+**截至 2026-10-27，有记录的真实运行时验证：**
 
 | Orca app | Agent 版本 | 已验证内容 |
 |---|---|---|
@@ -112,6 +112,7 @@ viewer 是个普通进程，没有 Orca 会话或终端身份，所以写操作�
 | **1.4.222** | **OpenCode 2.0.22** | 显式启用的 API 预选模型完整 TUI：逐节点模型/variant、依赖 Task、重启恢复且不重复派工、关闭终端后读取输出、成功完成后的清理及 provider 确认退出的 Stop。Stop 在 fencing 后可能保留终端，不保证自动关窗。 |
 | **1.4.235** | **OpenCode 2.1.2** | Linux viewer 选择 Mini / 完整 TUI，指定模型与配置默认模型、写文件及获接受的 `worker_done`；Mini 前台等待 400.027 秒并确认后续消息、显式保留及活动 Stop。Mini fleet 仍可能为 `missing_status`；配置的 provider 必须可用（首次免费默认 provider 返回 403）。 |
 | **1.4.241** | **OpenCode 2.1.2** | 隔离 Linux headless 运行时，原生 `opencode` + `deepseek/deepseek-flash`：写文件并读回、接受 `worker_done`、effective 模型回显及终端释放；viewer 重启后恢复相同 Dispatch 并完成依赖 Task，无重复 worker、无清理债务。profile 的嵌套深度上限为 1，真实 helper 启动被拒绝；helper 归属/交回由回归套件覆盖，不宣称已通过真实 provider 验证。 |
+| **1.4.242** | **Codex 0.164.0** | 隔离 Linux 原生 worker：写文件并读回、显示 provider transcript、跨多个有界页面向前翻页、获接受的 `worker_done`、终端释放及释放后仍可读的 transcript 归档。不代表已覆盖远程/Windows，也未在真实 provider 上复现启动后期报错竞态。 |
 
 **原生 OpenCode 2 路径**也已使用 **OpenCode 2.0.22** 通过只读 Task 和隔离工作树写文件验证（该路径要求 Orca ≥ 1.4.220）。这与实验性 API 预选模型适配器的验证不同；后者在 macOS、**Node.js 22.23.0** 上实测，**尚未覆盖**长时间编码、Git Stage、新建工作区、lane、远程或 Windows 执行。
 

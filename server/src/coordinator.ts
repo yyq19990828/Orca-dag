@@ -2609,6 +2609,12 @@ async function loop(myLoop: number): Promise<void> {
     const check = recordCheckReceipt(delivery, iterStart, passError);
     if (check.persist) await emitCoordinatorCheck(check.receipt);
     if (!stillMyTurn(myLoop)) break;
+    // ACK may have already delivered a distinct next batch. Drain that known
+    // work now, after the normal reconciliation above, rather than delaying
+    // each notification by another tick. Errors and held/replayed batches
+    // still use the floor below, so they cannot turn into a hot polling loop.
+    if (!passError && state.queuedDelivery?.deliveryId &&
+        state.queuedDelivery.deliveryId !== delivery?.deliveryId) continue;
     // In production `check --wait` consumed the interval already; this floor
     // only matters when the check returned instantly (empty inbox fast path,
     // or a failed call) — without it an erroring loop would hot-spin the CLI.
@@ -2921,6 +2927,19 @@ function settleAttempt(attempt: Attempt, outcome: "succeeded" | "failed", via: "
   attempt.settledVia = via;
   attempt.settledAt = Date.now();
   attempt.terminalDecision = "pending";
+  const requestId = attempt.startRequestId;
+  attempt.startRequestId = null;
+  if (requestId) {
+    // Positive exact settlement retires the pending-start marker, but its
+    // immutable receipt keeps the request id for inspection. Audit is
+    // best-effort and never delays or overrides lifecycle authority; the
+    // sink and Run are captured synchronously before the journal awaits.
+    void noteRequest({
+      requestId, operation: "worker-start", runId: state.runId,
+      taskId: attempt.taskId, dispatchId: attempt.dispatchId,
+      settledLocally: true, note: `Exact Dispatch settlement confirmed ${outcome}`,
+    });
+  }
 }
 
 /** A new Dispatch starts with unknown accounting; never carry its predecessor's count. */
@@ -4709,7 +4728,12 @@ async function startOne(
       }
       if (receipt.dispatchId && !attempt.dispatchId) bindAttemptDispatch(attempt, receipt.dispatchId);
     }
-    const responseLost = receipt?.failedStage === "response_lost" || startErr.code === RESPONSE_LOST || startErr.code === "start_unknown";
+    const responseLost =
+      receipt?.failedStage === "response_lost" ||
+      receipt?.status === "outcome_unknown" ||
+      receipt?.status === "start_unknown" ||
+      startErr.code === RESPONSE_LOST ||
+      startErr.code === "start_unknown";
     const dispatchId = attempt.dispatchId ?? receipt?.dispatchId ?? null;
     if (dispatchId && attempt.dispatchId !== dispatchId) bindAttemptDispatch(attempt, dispatchId);
     const kind: "rejected" | "failed" | "unknown" = responseLost ? "unknown" : dispatchId ? "failed" : "rejected";

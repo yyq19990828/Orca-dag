@@ -67,8 +67,8 @@ const pExecFile = promisify(execFile);
  * Run, and pass its handle on every mutating call.
  *
  * Binding fences the previous coordinator, whether an agent terminal or an
- * Orca-native chat. That agent can take the Run back with
- * `orca orchestration run-use --id <run>`.
+ * Orca-native chat. An eligible coordinator can resume with `run-use`; a
+ * dispatched worker cannot bind its own/ancestor Run or use --takeover-legacy.
  */
 
 // --- CLI + workspace resolution (Phase 2) ----------------------------------
@@ -2574,7 +2574,7 @@ export interface WorkerOutputReceipt {
   source: string;
   /** Opaque paging cursor; pass back to continue AFTER these rows. */
   cursor: string | null;
-  /** Labeled terminal tail / transcript rows, however the source labeled them. */
+  /** Labeled terminal tail or formatted native transcript messages. */
   lines: string[];
   contentComplete: boolean;
   clipped: boolean;
@@ -2653,20 +2653,59 @@ export async function readWorkerOutput(
     source?: string;
     cursor?: string;
     terminal?: { tail?: string[]; truncated?: boolean; limited?: boolean };
-    transcript?: { rows?: string[] };
+    transcript?: { messages?: unknown[]; limited?: boolean };
     contentComplete?: boolean;
     warnings?: string[];
     clipping?: string[];
   }): WorkerOutputReceipt => {
-    const lines = result.terminal?.tail ?? result.transcript?.rows ?? [];
+    let textClipped = false;
+    const transcriptLines = (result.transcript?.messages ?? []).flatMap((rawMessage): string[] => {
+      const message = asRecord(rawMessage);
+      const role = typeof message.role === "string" ? message.role : "unknown";
+      const blocks = Array.isArray(message.blocks) ? message.blocks : [];
+      const rendered = blocks.flatMap((rawBlock): string[] => {
+        const block = asRecord(rawBlock);
+        switch (block.type) {
+          case "text":
+            return typeof block.text === "string" ? [block.text] : ["[malformed text block]"];
+          case "tool-call": {
+            let input: string;
+            try { input = JSON.stringify(block.input) ?? "null"; } catch { input = "[unserializable input]"; }
+            return [`[tool ${typeof block.name === "string" ? block.name : "unknown"}] ${input}`];
+          }
+          case "tool-result":
+            return [`[tool result${block.isError === true ? " error" : ""}] ${typeof block.output === "string" ? block.output : "[malformed output]"}`];
+          case "image-ref": {
+            const reference = typeof block.url === "string" ? block.url : typeof block.path === "string" ? block.path : null;
+            return [reference ? `[image] ${reference}` : "[image omitted]"];
+          }
+          case "subagent":
+            return [`[subagent ${typeof block.label === "string" ? block.label : typeof block.id === "string" ? block.id : "unknown"} · ${typeof block.state === "string" ? block.state : "unknown"}]`];
+          case "subagent-group":
+            return [`[subagents] ${Array.isArray(block.agents) ? `${block.agents.length} agents` : "unknown"}`];
+          case "background-task":
+            return [`[background task ${typeof block.label === "string" ? block.label : "unknown"} · ${typeof block.state === "string" ? block.state : "unknown"}]`];
+          default:
+            return [`[unsupported block${typeof block.type === "string" ? `: ${block.type}` : ""}]`];
+        }
+      });
+      const text = `[${role}]${rendered.length ? ` ${rendered.join("\n")}` : ""}`;
+      if (text.length > 16_000) textClipped = true;
+      return text.slice(0, 16_000).split("\n");
+    });
+    const terminalLines = result.terminal?.tail ?? [];
+    const sourceLines = result.source === "transcript" ? transcriptLines : terminalLines;
+    const lines = sourceLines.slice(0, 10_000);
+    const budgetClipped = textClipped || sourceLines.length > lines.length;
     return {
       dispatchId: String(result.dispatchId ?? dispatchId),
       source: String(result.source ?? "auto"),
       cursor: result.cursor ?? null,
-      lines: lines.map(String),
-      contentComplete: Boolean(result.contentComplete),
+      lines,
+      contentComplete: Boolean(result.contentComplete) && !budgetClipped && !result.transcript?.limited,
       clipped:
-        Boolean(result.terminal?.truncated || result.terminal?.limited) ||
+        Boolean(result.terminal?.truncated || result.terminal?.limited || result.transcript?.limited) ||
+        budgetClipped ||
         (result.clipping ?? []).length > 0,
       warnings: (result.warnings ?? []).map(String),
       sourceChanged: false,
@@ -2930,8 +2969,10 @@ export interface WorkerStartReceipt {
   dispatchId: string | null;
   /** Echo of the `--retry-request` id the call ran under. */
   requestId: string | null;
-  /** Terminal stage on success (typically "ready"). */
+  /** Runtime readiness state, preferring the official `state` spelling. */
   status: string | null;
+  /** Worker task outcome; separate from readiness/start settlement. */
+  workerOutcome: "succeeded" | "failed" | null;
   /** The stage the start reached (or was in when it failed). */
   stage: string | null;
   /** The stage that failed, on a failed start. */
@@ -3026,12 +3067,15 @@ export function parseWorkerStartReceipt(payload: unknown, ok: boolean): WorkerSt
   const structuredLaunch = Object.prototype.hasOwnProperty.call(launch, "effective") ||
     Object.prototype.hasOwnProperty.call(launch, "requested");
   const preferences = structuredLaunch ? asRecord(launch.effective) : launchRecord;
+  const state = pickString(nested, "state");
+  const workerOutcome = pickString(nested, "workerOutcome", "worker_outcome");
   return {
-    ok,
+    ok: ok && (state === null || state === "ready"),
     taskId: pickString(nested, "taskId", "task_id"),
     dispatchId: readDispatchId(nested),
     requestId: pickString(nested, "requestId", "request_id", "retryRequestId", "retry_request"),
-    status: pickString(nested, "status", "workerStatus"),
+    status: state ?? pickString(nested, "status", "workerStatus"),
+    workerOutcome: workerOutcome === "succeeded" || workerOutcome === "failed" ? workerOutcome : null,
     stage: pickString(nested, "stage", "workerStage"),
     failedStage: pickString(nested, "failedStage", "failed_stage"),
     setup: pickString(nested, "setup", "setupResult", "setup_result"),
@@ -3067,10 +3111,25 @@ export function parseWorkerStartReceipt(payload: unknown, ok: boolean): WorkerSt
   };
 }
 
+/** Apply the same ready/unknown boundary to direct starts and recorded replays. */
+function requireReadyWorkerStartReceipt(payload: unknown, requestId: string): WorkerStartReceipt {
+  const receipt = parseWorkerStartReceipt(payload, true);
+  receipt.requestId ??= requestId;
+  if (!receipt.ok) {
+    const unknown = receipt.status === "outcome_unknown" || receipt.status === "start_unknown";
+    throw new WorkerStartError(
+      receipt,
+      pickString(receipt.raw, "lastError") ?? `worker-start did not reach ready (${receipt.status ?? "unknown state"})`,
+      unknown ? "start_unknown" : receipt.status ?? "start_failed",
+    );
+  }
+  return receipt;
+}
+
 /**
- * A worker-start that definitely did NOT reach ready, carrying the receipt the
- * coordinator must retain (plan Phase 4 item 8: failed-before-ready starts are
- * never deleted — their receipt is the release/retry evidence).
+ * A worker-start whose readiness was refused or remains unconfirmed. Preserve
+ * its exact receipt for accounting; an unknown start is not failed-before-ready
+ * and never authorizes another worker or terminal cleanup.
  */
 export class WorkerStartError extends OrcaCliError {
   readonly receipt: WorkerStartReceipt;
@@ -4760,14 +4819,14 @@ export async function startSupervisedWorker(opts: {
       e.code ?? null,
     );
   }
-  const receipt = parseWorkerStartReceipt(result, true);
+  const receipt = requireReadyWorkerStartReceipt(result, requestId);
   return {
     mode: "supervised",
     dispatchId: receipt.dispatchId ?? readDispatchId(result),
     handle: null,
     // The caller MINTED this id and sent it — it is the durable id even when a
     // runtime version forgets to echo it back in the receipt.
-    receipt: { ...receipt, requestId: receipt.requestId ?? requestId },
+    receipt,
     replayed: false,
     adopted: false,
   };
@@ -4796,7 +4855,7 @@ async function resolveAmbiguousStart(
   if (probe && (probe.state === "completed" || probe.state === "pending")) {
     try {
       const result = await runOrca<Record<string, unknown>>(buildArgs());
-      const receipt = parseWorkerStartReceipt(result, true);
+      const receipt = requireReadyWorkerStartReceipt(result, requestId);
       return {
         mode: "supervised",
         dispatchId: receipt.dispatchId ?? readDispatchId(result),
@@ -4807,6 +4866,7 @@ async function resolveAmbiguousStart(
         adopted: false,
       };
     } catch (err) {
+      if (err instanceof WorkerStartError) throw err;
       const e = err as OrcaCliError;
       // A second lost response: still ambiguous — give up WITHOUT a decision.
       if (e instanceof OrcaCliError && e.code === RESPONSE_LOST) throw original;

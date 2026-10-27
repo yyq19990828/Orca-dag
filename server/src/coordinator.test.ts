@@ -4228,3 +4228,133 @@ describe("recovered worker_done ownership acknowledgement", () => {
     assert.equal(getState().dispatches.ctx_recovered.terminalState, "released");
   });
 });
+
+describe("FIFO drain responsiveness", () => {
+  it("drains distinct ACK-returned batches before another polling interval and holds an unanswered question", async () => {
+    const runId = "run_fifo_drain";
+    const deliveries = ["status", "status", "question"].map((type, index) => ({
+      deliveryId: `delivery_drain_${index}`,
+      messages: [{
+        id: `msg_drain_${index}`, type, from_handle: "term_sender",
+        to_handle: `run:${runId}`, run_id: runId, subject: `drain ${index}`,
+        body: "Inspect the current batch", created_at: new Date().toISOString(),
+      }],
+    }));
+    await mutateState(s => {
+      s.runs = { [runId]: { id: runId, objective: "FIFO drain", legacy: 0 } };
+      s.tasks = {};
+      s.mailboxes = { term_f1: deliveries };
+    });
+    // Larger than the observation deadline: a cached next Delivery must not
+    // wait for the next polling interval. No exact duration is asserted.
+    await startCoordinator(baseOpts(runId, { tickWaitMs: 4000 }));
+    await waitFor(() => {
+      const status = coordinatorStatus();
+      return status.phase === "awaiting_input" &&
+        status.inbox.pending.some(item => item.messageId === "msg_drain_2") ? true : null;
+    }, "already-delivered question before the next poll", 3000);
+    assert.equal(ackCalls("delivery_drain_0").length, 1);
+    assert.equal(ackCalls("delivery_drain_1").length, 1);
+    assert.equal(ackCalls("delivery_drain_2").length, 0, "unanswered questions still hold ACK");
+    assert.equal(coordinatorStatus().running, true, "the pending question still blocks Run completion");
+  });
+});
+
+describe("Orca 1.4.242 worker-start settlement receipts", () => {
+  for (const outcome of ["succeeded", "failed"] as const) {
+    it(`uses the exact Task and Dispatch settlement after a ready receipt reports ${outcome}`, async () => {
+      const runId = `run_242_${outcome}`;
+      await mutateState((s) => {
+        s.runs = { [runId]: { id: runId, objective: "worker-start receipt settlement", legacy: 0 } };
+        s.tasks = {
+          task_aaa: { id: "task_aaa", run_id: runId, status: "pending", deps: "[]" },
+        };
+        if (outcome === "succeeded") {
+          s.tasks.task_bbb = { id: "task_bbb", run_id: runId, status: "pending", deps: '["task_aaa"]' };
+        }
+        s.workerStartSettlement = outcome;
+      });
+      await startCoordinator(baseOpts(runId, { maxConcurrency: 1 }));
+      await waitFor(() => {
+        const a = findAttempt("task_aaa");
+        return a?.settled && a.startReceipt?.workerOutcome === outcome ? a : null;
+      }, "242 ready/settled receipt");
+      const a = attempt("task_aaa");
+      assert.equal(a.startReceipt?.status, "ready");
+      assert.equal(a.startReceipt?.stage, "settled");
+      assert.equal(a.outcome, outcome, "Task/Dispatch evidence, not the receipt alone, settles the attempt");
+      assert.equal(a.settled, true);
+      assert.equal(a.settledVia, "task_status");
+      assert.equal(getState().tasks.task_aaa.status, outcome === "succeeded" ? "completed" : "failed");
+      assert.equal(getState().dispatches[a.dispatchId!].status, outcome === "succeeded" ? "completed" : "failed");
+      await waitFor(() => ["released", "reused"].includes(attempt("task_aaa").terminalDecision) ? true : null,
+        "settled Dispatch ownership decision");
+      if (outcome === "succeeded") {
+        await waitFor(() => calls("worker-start").some((call) => call.argv.includes("task_bbb")) ? true : null,
+          "dependent Task progress");
+        assert.equal(attempt("task_bbb").settled, false, "the next worker-start is still a live Task");
+        await settleViaWorkerDone("task_bbb", "succeeded", "msg_242_dependent");
+        await waitFor(() => coordinatorStatus().phase === "completed" ? true : null, "dependent run completion");
+      } else {
+        await waitForFakeQuiet();
+        assert.equal(calls("worker-start").length, 1, "a failed Task is cleaned up, not automatically replaced");
+        assert.equal(calls("worker-start").filter((call) => call.argv.includes("task_aaa")).length, 1);
+      }
+    });
+  }
+
+  it("retains an explicit unknown receipt and exact slot until positive settlement, without replay or replacement", async () => {
+    const runId = "run_242_unknown";
+    await mutateState((s) => {
+      s.runs = { [runId]: { id: runId, objective: "unknown start recovery", legacy: 0 } };
+      s.tasks = {
+        task_aaa: { id: "task_aaa", run_id: runId, status: "pending", deps: "[]" },
+        task_bbb: { id: "task_bbb", run_id: runId, status: "pending", deps: "[]" },
+      };
+      s.workerStartUnknown = true;
+    });
+    await startCoordinator(baseOpts(runId, { maxConcurrency: 1 }));
+    await waitFor(() => findAttempt("task_aaa")?.startReceipt?.status === "outcome_unknown" ? true : null,
+      "explicit outcome-unknown receipt");
+    const a = attempt("task_aaa");
+    const exactDispatch = a.dispatchId!;
+    const exactRequest = a.startRequestId!;
+    assert.ok(exactDispatch);
+    assert.ok(exactRequest);
+    assert.equal(a.startReceipt?.dispatchId, exactDispatch);
+    assert.equal(a.startReceipt?.requestId, exactRequest);
+    assert.equal(a.settled, false);
+    assert.equal(a.outcome, null);
+    assert.equal(a.settledVia, null);
+    assert.equal(a.terminalDecision, "pending");
+    assert.equal(callsOf("worker-release", "--dispatch", exactDispatch).length, 0,
+      "an unknown start cannot authorize release");
+    await assert.rejects(retryWorker("task_aaa"), /not positively failed/);
+    await waitForFakeQuiet();
+    assert.equal(calls("worker-start").filter((call) => call.argv.includes("task_aaa")).length, 1,
+      "explicit unknown does not replay or place a replacement");
+    assert.equal(calls("worker-start").some((call) => call.argv.includes("task_bbb")), false,
+      "the unresolved exact Dispatch continues to consume the only slot");
+    assert.equal(getState().tasks.task_aaa.dispatch_id, exactDispatch);
+
+    await mutateState((s) => {
+      delete s.workerStartUnknown;
+      const task = s.tasks.task_aaa;
+      const dispatch = s.dispatches[exactDispatch];
+      task.status = "completed";
+      dispatch.status = "completed";
+      dispatch.terminalState = "reclaimable";
+    });
+    await waitFor(() => attempt("task_aaa").settled && attempt("task_aaa").outcome === "succeeded" ? true : null,
+      "positive exact Task/Dispatch settlement");
+    await waitFor(() => ["released", "reused"].includes(attempt("task_aaa").terminalDecision) ? true : null,
+      "unknown Dispatch ownership cleanup");
+    assert.equal(attempt("task_aaa").dispatchId, exactDispatch, "settlement preserves Dispatch ownership");
+    assert.equal(attempt("task_aaa").startRequestId, null, "positive settlement retires the exact request pointer");
+    await waitFor(() => calls("worker-start").some((call) => call.argv.includes("task_bbb")) ? true : null,
+      "queued work starts after exact settlement frees the slot");
+    assert.equal(calls("worker-start").filter((call) => call.argv.includes("task_aaa")).length, 1);
+    await settleViaWorkerDone("task_bbb", "succeeded", "msg_242_unknown_dependent");
+    await waitFor(() => coordinatorStatus().phase === "completed" ? true : null, "recovered run completion");
+  });
+});

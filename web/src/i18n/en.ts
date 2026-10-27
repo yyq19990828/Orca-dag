@@ -203,8 +203,10 @@ const en = {
   "dialog.confirmRunMessage":
     "Starting execution transfers coordinator authority to the Viewer. Any agent terminal or " +
     "Orca-native chat currently coordinating this Run will be fenced, so its orchestration " +
-    "mutations will fail with consumer_fenced. It can take authority back with:\n\n" +
-    "orca orchestration run-use --id {id}",
+    "mutations will fail with consumer_fenced. An eligible coordinator can resume with:\n\n" +
+    "orca orchestration run-use --id {id}\n\n" +
+    "Dispatched workers cannot bind their own or ancestor Run or use --takeover-legacy. " +
+    "They must follow their live preamble for mail and reporting.",
   "dialog.startRun": "Start Run",
   "dialog.notNow": "Not now",
   "dialog.cancel": "Cancel",

@@ -56,7 +56,7 @@ Orca 1.4.226 counts failed `worker-start` calls along the exact `--retry-of` cha
 
 ### Coordinator safety and read efficiency
 
-- Every validated FIFO Delivery is acknowledged, including ordinary notifications and stale lifecycle reports. Questions and still-owed terminal decisions hold the ACK; a next batch returned by `check --ack` is processed before the Run can complete.
+- Every validated FIFO Delivery is acknowledged, including ordinary notifications and stale lifecycle reports. Questions and still-owed terminal decisions hold the ACK; distinct next batches returned by `check --ack` are drained without another polling delay, with normal reconciliation between batches. Empty/error/held batches retain the polling floor.
 - Reclaimable cleanup debt is rechecked against fresh fleet state, so a release performed outside the viewer can clear it. Unknown cleanup remains a blocker.
 - Same-Run helpers stay with their active creator. The viewer reads exact Dispatch lineage rather than treating `parent_id` as ownership, adopts helpers only after positive creator settlement, and holds unreadable lineage. Stop reports delegated work without stopping it. Visible active workers consume admission budget, but helpers started outside the viewer mean **Max parallel is not a runtime-wide hard cap**.
 - Automatic terminal reuse requires fresh exact, connected PTY evidence for the same agent and workspace. Chat handles are not PTY proof; OpenCode uses fresh starts rather than generic reuse to preserve pinned models and frontend/session ownership.
@@ -69,7 +69,7 @@ Every Orca orchestration call goes through `resolveRunScope`:
 - **Reads** (`task-list` / `gate-list`) skip the consumer check as long as they pass `--run <id>` — **any process can read**. That's all the viewer's polling needs.
 - **Coordinator mutations** (`dispatch` / `gate-resolve` / `task-create`, and the viewer's `worker-start`) require the current Run binding. Orca-native chats can act through session identity; this external viewer uses a bound terminal via `--from <handle>`. Orca 1.4.238+ also allows active workers to start fresh local helpers in their own Run, reporting to their creator Dispatch without taking the coordinator seat.
 
-The viewer is an ordinary process with no Orca session or terminal identity, so every mutation would fail with `run_required`. It opens its own Orca terminal titled `orca-dag coordinator · <workspace-hash> · <instance-id>`, binds it with `run-use`, and passes `--from` on every mutation. **Binding fences the previous coordinator**, whether an agent terminal or an Orca-native chat, so the viewer asks for explicit confirmation before starting; that agent can reclaim the Run with `orca orchestration run-use --id <run>`. On stop, the viewer closes its terminal and releases the Run.
+The viewer is an ordinary process with no Orca session or terminal identity, so every mutation would fail with `run_required`. It opens its own Orca terminal titled `orca-dag coordinator · <workspace-hash> · <instance-id>`, binds it with `run-use`, and passes `--from` on every mutation. **Binding fences the previous coordinator**, whether an agent terminal or an Orca-native chat, so the viewer asks for explicit confirmation before starting. An eligible coordinator can resume with `orca orchestration run-use --id <run>`. On Orca 1.4.242+, dispatched workers cannot bind their own or ancestor Run or use `--takeover-legacy`; they follow their live preamble for mail and reports. A coordinator-directed handoff to a separate Run remains distinct. On stop, the viewer closes its terminal and releases the Run.
 
 The title's `<workspace-hash>` scopes the coordinator to one workspace: two viewers pointed at **different** workspaces each get their own coordinator terminal and never touch each other's, and a second viewer started on the **same** workspace refuses with a `coordinator_conflict` error (HTTP 409) instead of silently taking over or closing the first one's terminal.
 
@@ -105,7 +105,7 @@ All of this is resolved **once at startup** and then never changes for the life 
 | Explicit Mini / Full TUI selection | **1.4.222** | OpenCode ≥ **2.1.2**; local Linux current/existing non-lane workspaces. Auto remains the default. |
 | API-preselected OpenCode 2 full TUI | **1.4.222** | Explicit model + `ORCA_DAG_OPENCODE_TUI=1`; local POSIX current/existing non-lane workspaces only. Default-off and experimental. |
 
-**Recorded real-runtime verification, as of 2026-10-26:**
+**Recorded real-runtime verification, as of 2026-10-27:**
 
 | Orca app | Agent version | What was verified |
 |---|---|---|
@@ -113,6 +113,7 @@ All of this is resolved **once at startup** and then never changes for the life 
 | **1.4.222** | **OpenCode 2.0.22** | Opt-in API-preselected full TUI: per-node model/variant, dependent Tasks, restart recovery without duplicate Dispatches, output after terminal close, successful completion cleanup and provider-confirmed Stop. Stop can retain the pane after fencing; it is not a guarantee of automatic terminal closure. |
 | **1.4.235** | **OpenCode 2.1.2** | Linux viewer-selected Mini / Full TUI with explicit and configured default models, file writes and accepted `worker_done`; Mini foreground wait of 400.027 seconds plus acknowledged follow-up, explicit retention and active Stop. Mini can still report fleet `missing_status`; configured providers must be authorized (the initial free-provider default returned 403). |
 | **1.4.241** | **OpenCode 2.1.2** | Isolated Linux headless runtime, native `opencode` + `deepseek/deepseek-flash`: file write/readback, accepted `worker_done`, effective-model receipt and terminal release; viewer restart recovered the same Dispatch and completed a dependent Task with no duplicate workers or cleanup debt. Nested-helper execution was refused by the profile's depth limit of 1; helper custody/handback is covered by the regression suite, not claimed as live-provider verified. |
+| **1.4.242** | **Codex 0.164.0** | Isolated Linux native worker: file write/readback, rendered provider transcript, forward cursor paging over multiple bounded pages, accepted `worker_done`, terminal release and readable transcript archive after release. This does not establish remote/Windows coverage or reproduce the late-start-error race on a live provider. |
 
 The **native OpenCode 2 path** also passed read-only and isolated-worktree file-writing checks with **OpenCode 2.0.22** (path requirement: Orca ≥ 1.4.220). This is separate from the experimental API-preselected adapter, whose real-runtime checks ran on macOS with **Node.js 22.23.0** and did **not** cover long coding runs, Git Stage, newly created workspaces, lanes, remote or Windows execution.
 

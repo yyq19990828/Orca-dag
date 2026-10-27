@@ -165,6 +165,20 @@ In Auto mode, the viewer's `opencode` choice runs OpenCode 2. On a running Orca 
 
 Add new runtime findings here with the affected launch path, observable symptom, and tested recovery. Keep Orca fleet liveness separate from whether the Codex TUI is visible or a Task has completed.
 
+### Orca 1.4.242 output, startup and authority boundaries
+
+Native transcript pages contain `transcript.messages`, with roles and typed blocks. The viewer renders text, tool calls/results and image references with labels; unknown blocks remain explicit markers rather than disappearing or becoming `[object Object]`. Each displayed message is bounded to 16,000 characters and each page to 10,000 lines; runtime `limited` and viewer clipping keep the page marked partial. The terminal and OpenCode API adapters remain separate.
+
+A cursor continues **forward** after the current bounded tail, including at current EOF; it does not recover omitted older history. `contentComplete` describes this page/read window, not Task settlement or the entire historical conversation. Source replacement still restarts one read and labels the discontinuity. [Orca 1.4.242](https://github.com/stablyai/orca/releases/tag/v1.4.242) fixes full-page forward scanning upstream; the viewer does not add output retries or automatic history draining.
+
+Worker-start receipts normalize official `state` ahead of legacy status fields and preserve nullable `workerOutcome` separately. `ready / settled / workerOutcome: failed` is a successful start with failed work, not a failed launch. An explicit `outcome_unknown` or `start_unknown` holds the exact Dispatch, request and concurrency slot until positive settlement; it never authorizes release, replay or replacement. A recorded replay passes the same readiness gate. Accepted Task/Dispatch evidence retires the pending request marker while the original receipt remains inspectable.
+
+Regression coverage models both accepted outcomes before a late startup error, then checks terminal ownership, no duplicate worker and dependent progress after success. It also covers explicit unknown followed by positive exact settlement. This uses the tagged [early-report contract](https://github.com/stablyai/orca/pull/26762), not a forced live-provider race.
+
+An isolated Linux runtime with Orca 1.4.242 and Codex 0.164.0 verified file write/readback, a rendered native transcript, multiple forward cursor pages, accepted completion, terminal release and readable transcript after release. Remote/Windows and active Stop were not exercised by this check.
+
+ACK-returned distinct batches run immediately through normal processing and reconciliation; empty/error/replayed-held batches retain the polling floor. Workers must not take the coordinator seat for their own or ancestor Run or use `--takeover-legacy`. They read/report using the live preamble; only an eligible coordinator resumes Run authority. The runtime-matched guide remains authoritative.
+
 ### Orca 1.4.241 native model and coordinator boundaries
 
 Auto can use native `opencode` with a selected model when the running app is stable **1.4.241+**, advertises `orchestration.worker-launch-preferences.v1`, and the placement is local POSIX current/existing, non-lane, without model variant or effort. This does not establish model support for `opencode2`. Explicit Mini/Full TUI and `ORCA_DAG_OPENCODE_TUI=1` keep their own adapters. Unsupported requests retain their prior compatibility boundary; a refused native launch never causes a second start.
