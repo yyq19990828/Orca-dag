@@ -1003,9 +1003,12 @@ describe("questions hold the Delivery open", () => {
 });
 
 describe("ordinary approval gates hold completion", () => {
-  for (const status of ["blocked", "ready"]) {
-    it(`holds a ${status} Task until every approval resolves, then starts it`, async () => {
-      const runId = `run_ordinary_gate_${status}`;
+  for (const [resolution, status] of [
+    ["approve", "blocked"], ["approve", "ready"],
+    ["approved", "blocked"], ["approved", "ready"],
+  ]) {
+    it(`holds a ${status} Task until every approval resolves to ${resolution}, then starts it`, async () => {
+      const runId = `run_ordinary_gate_${status}_${resolution}`;
       await singleTaskState(runId);
       await mutateState((state) => {
         state.tasks.task_aaa.status = status;
@@ -1017,7 +1020,7 @@ describe("ordinary approval gates hold completion", () => {
           },
           {
             id: "gate_ordinary", task_id: "task_aaa",
-            question: "Approve this stage?", options: ["approved", "rejected"],
+            question: "Approve this stage?", options: [resolution, "rejected"],
             status: "pending", resolution: null,
           },
         ];
@@ -1030,13 +1033,50 @@ describe("ordinary approval gates hold completion", () => {
 
       await mutateState((state) => {
         state.gates[1].status = "resolved";
-        state.gates[1].resolution = "approved";
+        state.gates[1].resolution = resolution;
       });
       await waitFor(() => calls("worker-start").length === 1 ? true : null, "approved Task to start");
       await settleViaWorkerDone("task_aaa", "succeeded", "msg_ordinary_gate_done");
       await waitFor(() => coordinatorStatus().phase === "completed" ? true : null, "approved Run to complete");
     });
   }
+
+  it("holds a gate-promoted ready descendant through dispatch and terminal reuse until its dependencies complete", async () => {
+    const runId = "run_gate_ready_dependencies";
+    await mutateState((state) => {
+      // gate-resolve can promote this row without checking dependencies.
+      // Keep it first so a raw-ready-only scheduler would select it first.
+      state.tasks = {
+        task_join: { id: "task_join", run_id: runId, status: "ready", deps: '["task_aaa","task_bbb"]' },
+        task_aaa: { id: "task_aaa", run_id: runId, status: "pending", deps: "[]" },
+        task_bbb: { id: "task_bbb", run_id: runId, status: "pending", deps: "[]" },
+      };
+      state.runs = { [runId]: { id: runId, objective: "gate cannot bypass dependencies", legacy: 0 } };
+      state.gates = [{
+        id: "gate_join", task_id: "task_join", question: "Approve final review?",
+        options: ["approve", "reject"], status: "resolved", resolution: "approve",
+      }];
+    });
+
+    await startCoordinator(baseOpts(runId));
+    await dispatchIdOf("task_aaa");
+    await dispatchIdOf("task_bbb");
+    assert.equal(calls("worker-start").length, 2, "only the two roots are admitted");
+    assert.equal(callsOf("worker-start", "--task", "task_join").length, 0);
+
+    await settleViaWorkerDone("task_aaa", "succeeded", "msg_gate_root_a");
+    await waitFor(() => ["released", "retained", "closed"].includes(attempt("task_aaa").terminalDecision)
+      ? true : null, "settled root ownership while the other dependency is active");
+    assert.equal(callsOf("worker-start", "--task", "task_join").length, 0,
+      "a settled terminal cannot be reused to bypass the still-active dependency");
+    assert.equal(findAttempt("task_join"), undefined);
+
+    await settleViaWorkerDone("task_bbb", "succeeded", "msg_gate_root_b");
+    await dispatchIdOf("task_join");
+    assert.equal(callsOf("worker-start", "--task", "task_join").length, 1);
+    await settleViaWorkerDone("task_join", "succeeded", "msg_gate_join_done");
+    await waitFor(() => coordinatorStatus().phase === "completed" ? true : null, "dependency-ordered Run to complete");
+  });
 
   it("keeps a Run-scoped pending gate open even without a blocked Task", async () => {
     const runId = "run_gate_without_task";

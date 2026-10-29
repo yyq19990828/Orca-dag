@@ -57,6 +57,7 @@
   - **移除工作记录（removedWork）**：`run-show` 提供可选摘要，并通过 `/api/runs/:runId/removed-work?cursor=` 按需游标分页；旧宿主未提供时保持 unavailable 而不补 0。`activeWorkersAtRemoval` 仅表示移除跟踪时可能仍在运行的数量，不是历史或当前进程存活证明；不提供 reset 按钮。
   - **显式 Mini / Full TUI 与后端可见性丢失边界**：本次 OpenCode 2.2.0 实测中，API 预建会话的模型与位置正确，但两个前端均未在 60 秒内通过精确 session 派生标题检查。适配器在 Task 输入或 Dispatch 前拒绝，记录 `settledVia=start_failed`，最终安全关闭 preparation，清理债务为空。这不代表所有 2.2.0 环境绝对不支持，根因未证实，也未放宽就绪检查。当前无 Orca 托管 OpenCode 账户，不能宣称真实多账户通过；仅有独立回归 fixture 验证 API 可见性丢失时保留 `prepared` 记录与原 pane，不发送 Task 输入、不关闭 pane、不启动替代。
   - **非 worker 支持扩展**：不要把上游 PR 32006（nativeChat 模型）或新顶层工作树修复视为 `opencode2`、新工作树或远程/Windows 的 worker 支持扩展。保留既有兼容矩阵与旧版本记录。
+- **Task 就绪前置条件：**普通审批 gate 仅接受精确的已解决决定 `approve` 或 `approved`；`integrated` 仍是独立且精确的集成决定。Task 必须满足所有 gate 及同一 Run 内的全部依赖后才可运行，即使 Orca 的 Task 行已标记为 `ready`。
 2. **已验证的内置 Worker Harness 与 Claude Code**：viewer 内置支持的受监督调度 harness 仅限已完成真实运行时验证的 `claude`、`codex`、`opencode`，并遵守各版本与放置约束。Claude Code 有 Orca **1.4.209** 上的历史端到端验证，但当时未记录精确 CLI 版本。
 3. **未经验证的 Harness 明确拒绝**：`gemini`、`grok`、`cursor`、`droid`、`kimi` 尚未获得具体的 supervised worker 运行时验证，viewer 不再提供内置预设，亦不可用于调度启动。若节点配置或已保存设置尝试使用这些 harness，启动与重试均被前置拦截并明确返回 `unverified_harness` 拒绝，绝不进行静默替换或自动迁移；历史已落定的运行记录与账本在 viewer 中保持只读可查。
 4. **实验性自定义命令与 Bare ID 限制**：用户自定义命令需显式开启 `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1`，仅走本地兼容路径、不支持隔离放置，且**不构成**已验证支持承诺。即使开启自定义命令开关，上述 5 个未验证 bare ID（`gemini`、`grok`、`cursor`、`droid`、`kimi`）依然被直接拒绝并返回 `unverified_harness`，严禁将其作为 bare ID 绕过验证机制。

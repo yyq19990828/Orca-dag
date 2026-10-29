@@ -6,12 +6,14 @@ import { join } from "node:path";
 import type { Server } from "node:http";
 import {
   explainReadiness,
+  ordinaryGateApproved,
   initOrcaRuntime,
   tasksToDag,
   type Gate,
   type OrcaTask,
   type SchedulerOccupancy,
 } from "./orca";
+
 import { isCrossLaneJoin, laneOfTask, taskDeps, validateLaneTotalOrder } from "./coordinator";
 import { createApp, listenLoopback } from "./app";
 import { createSecurityPolicy, type SecurityPolicy } from "./security";
@@ -176,6 +178,72 @@ describe("readiness reasons", () => {
     assert.deepEqual(readyWave.taskIds, ["task_b"]);
     assert.deepEqual(readiness.task_b.codes, [], "no blocker may be invented");
     assert.deepEqual(readiness.task_b.pendingGateIds, []);
+  });
+
+  it("holds a raw-ready final review until every same-Run dependency completes", () => {
+    const tasks = [
+      task({ id: "task_v1", status: "pending" }),
+      task({ id: "task_failed", status: "failed" }),
+      task({ id: "task_blocked", status: "blocked" }),
+      task({ id: "task_final", status: "ready", deps: '["task_v1","task_failed","task_blocked","task_missing"]' }),
+    ];
+    const gates = [
+      gate({ id: "gate_approved", taskId: "task_final", status: "resolved", resolution: "approve" }),
+    ];
+    const held = explainReadiness(tasks, gates, { busy: 1, maxConcurrency: 1 });
+    assert.deepEqual(held.readyWave.taskIds, []);
+    assert.equal(held.readiness.task_final.runnable, false);
+    assert.deepEqual(held.readiness.task_final.codes, ["unmet_dependencies"]);
+    assert.deepEqual(held.readiness.task_final.unmetDependencyIds, [
+      "task_v1", "task_failed", "task_blocked", "task_missing",
+    ]);
+
+    tasks[0].status = "completed";
+    tasks[1].status = "completed";
+    tasks[2].status = "completed";
+    const missingStillBlocks = explainReadiness(tasks, gates, null);
+    assert.equal(missingStillBlocks.readiness.task_final.runnable, false);
+    assert.deepEqual(missingStillBlocks.readiness.task_final.codes, ["unmet_dependencies"]);
+    tasks.push(task({ id: "task_missing", status: "completed" }));
+    const released = explainReadiness(tasks, gates, null);
+    assert.deepEqual(released.readyWave.taskIds, ["task_final"]);
+    assert.equal(released.readiness.task_final.runnable, true);
+    assert.deepEqual(released.readiness.task_final.codes, []);
+  });
+
+  it("reports dependency and gate blockers together for a raw-ready task", () => {
+    const tasks = [
+      task({ id: "task_v1", status: "pending" }),
+      task({ id: "task_final", status: "ready", deps: '["task_v1"]' }),
+    ];
+    const gates = [gate({ id: "gate_pending", taskId: "task_final" })];
+    const result = explainReadiness(tasks, gates, null);
+    assert.equal(result.readiness.task_final.runnable, false);
+    assert.deepEqual(result.readiness.task_final.codes, ["unmet_dependencies", "pending_gate"]);
+  });
+
+  it("accepts only exact affirmative resolved ordinary gate decisions", () => {
+    for (const resolution of ["approve", "approved"]) {
+      assert.equal(
+        ordinaryGateApproved(gate({ id: "gate", status: "resolved", resolution })),
+        true,
+      );
+    }
+    for (const [status, resolution] of [
+      ["pending", "approve"],
+      ["resolved", "rejected"],
+      ["resolved", "reject"],
+      ["resolved", "pending"],
+      ["resolved", "integrated"],
+      ["resolved", "APPROVED"],
+      ["closed", "approved"],
+    ]) {
+      assert.equal(
+        ordinaryGateApproved(gate({ id: "gate", status, resolution })),
+        false,
+        `${status}/${resolution} is not affirmative approval`,
+      );
+    }
   });
 
   it("holds a raw ready Task out of the wave until all of its approvals resolve", () => {

@@ -222,7 +222,7 @@ helper 仍归活动创建者管理，以精确 `worker-show` Dispatch lineage �
 
 - **原生拒绝不代表可以降级。** 不支持的 model/effort、无效参数或已知 agent 的 launcher 被禁用时，保留原尝试及回执并停车，绝不启动第二个 legacy worker。显式启用的自定义命令会在任何原生启动之前选择本地 legacy 路径。
 - **所有已处理 FIFO 批次都按归属约束确认**，包括只有被拒绝或重复报告的批次。ack 返回的下一批消息也会在 Run 完成前处理；未回答问题和未落定的终端归属仍阻止确认。
-- **未决 gate 会阻止完成**，包括没有关联阻塞 Task 的 Run 级 gate。同一 Task 的全部审批都必须明确通过后才会放行。Orca 可能在仅通过一个审批后就报告 `ready`；只要还有未决 gate，该 Task 就不能进入就绪波，其原因仍列入等待清单，且没有其他活动工作时 Run 保持等待输入。
+- **未决 gate 会阻止完成**，包括没有关联阻塞 Task 的 Run 级 gate。普通审批 gate 仅接受精确的已解决选项 `approve` 或 `approved`；Task 必须满足所有 gate 和同一 Run 内的依赖后才可运行。`integrated` 仍是独立且精确的集成决定。Orca 可能在仅通过一个审批后就报告 `ready`；其余未决 gate，或未完成、失败、阻塞、缺失的依赖，仍会将 Task 排除在就绪波外，并显示在等待原因中。
 - **Orca 可以纠正暂定启动失败。** Orca 接受精确同一 Run/Task/Dispatch 的迟到成功后，viewer 更新尝试结果，同时保留原启动回执和已执行的 release/retain 决策。旧报告、被拒绝报告或其他 Dispatch 都不能清除失败。
 
 本机 Orca 1.4.229 的只读 smoke 确认了 runtime readiness 与能力发现；所选环境不可达时保持只读，新建 Run 返回 `503 execution_disabled`。构建后页面的浏览器 smoke 还确认：该状态下执行和 **New Run** 均被禁用，而精确 ID 输入仍可编辑。原生拒绝、FIFO 消息、gate 推进和迟到纠正则使用隔离 CLI fixture 运行真实 coordinator 验证，没有启动真实付费 agent；这不代表全部 agent 都通过了 1.4.229 端到端验收。

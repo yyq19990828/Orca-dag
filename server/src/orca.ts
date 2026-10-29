@@ -5395,6 +5395,16 @@ function gateIsOpen(g: Gate): boolean {
 }
 
 /**
+ * Whether an ordinary task-bound approval gate has an affirmative resolution.
+ * Keep the accepted spellings exact; user-defined gate choices are not
+ * sufficient evidence of approval.
+ */
+export function ordinaryGateApproved(gate: Gate): boolean {
+  return gate.status === "resolved" &&
+    (gate.resolution === "approve" || gate.resolution === "approved");
+}
+
+/**
  * Explain scheduler readiness for one Run (operations epic O5 / plan Phase 4).
  *
  * Pure projection over Run-scoped facts: `task-list` rows, `gate-list` rows,
@@ -5440,7 +5450,10 @@ export function explainReadiness(
 
   const readyWave: ReadyWaveView = {
     taskIds: tasks
-      .filter((t) => t.status === "ready" && !openGatesByTask.has(t.id))
+      .filter((t) => {
+        if (t.status !== "ready" || openGatesByTask.has(t.id)) return false;
+        return parseDeps(t.deps).every((dep) => byId.get(dep)?.status === "completed");
+      })
       .map((t) => t.id)
       .sort(),
     freeSlots,
@@ -5461,16 +5474,20 @@ export function explainReadiness(
 
     switch (t.status) {
       case "ready": {
+        if (unmetDeps.length > 0) {
+          codes.push("unmet_dependencies");
+          reasons.push(
+            `Waiting on ${unmetDeps.length} unmet ${unmetDeps.length === 1 ? "dependency" : "dependencies"}: ${depSentence(unmetDeps)}.`,
+          );
+        }
         if (openGates.length > 0) {
           codes.push("pending_gate");
           reasons.push(
             `Waiting on a decision gate: ${openGates.map((g) => `“${g.question || g.id}” (${g.id})`).join("; ")}.`,
           );
-          break;
         }
-        // Runnable once its gates are closed. Capacity explains WHY it has not
-        // been placed yet — it never makes the Task less ready.
-        if (freeSlots !== null && freeSlots <= 0) {
+        // Capacity only explains delay after all task prerequisites are met.
+        if (codes.length === 0 && freeSlots !== null && freeSlots <= 0) {
           codes.push("waiting_for_capacity");
           reasons.push(
             `Ready now — every coordinator worker slot is busy (${occupancy?.busy ?? 0}/${occupancy?.maxConcurrency ?? 0} running); it is dispatched when a slot frees.`,
@@ -5478,6 +5495,7 @@ export function explainReadiness(
         }
         break;
       }
+
       case "dispatched": {
         codes.push("in_flight");
         reasons.push(
@@ -5530,7 +5548,8 @@ export function explainReadiness(
     }
 
     readiness[t.id] = {
-      runnable: t.status === "ready" && openGates.length === 0,
+      runnable:
+        t.status === "ready" && unmetDeps.length === 0 && openGates.length === 0,
       codes,
       reasons,
       unmetDependencyIds: unmetDeps,

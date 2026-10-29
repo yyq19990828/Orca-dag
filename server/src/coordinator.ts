@@ -22,6 +22,7 @@ import {
   newRequestId,
   normalizeLiveness,
   normalizeTerminalReceipt,
+  ordinaryGateApproved,
   parseCoordinatorTitle,
   parsePeerCapabilities,
   parseWorkerDonePayload,
@@ -3205,6 +3206,10 @@ async function reconcile(): Promise<void> {
   ]);
   if (!stillMyTurn(generation) || state.runId !== runId) return;
   const byId = new Map(tasks.map((t) => [t.id, t]));
+  // gate-resolve can promote a Task to ready before its dependencies settle.
+  // Recheck the actual same-Run prerequisites for every scheduling path.
+  const dependenciesCompleted = (task: OrcaTask) =>
+    taskDeps(task).every((id) => byId.get(id)?.status === "completed");
   if (!await refreshHelperOwnership(runId, tasks, workerRows)) return;
   const occupiedTaskIds = new Set(
     workerRows.filter((row) => row.runId === runId && activeDispatch(row)).map((row) => row.taskId),
@@ -3215,15 +3220,15 @@ async function reconcile(): Promise<void> {
   // prove that the Run owes no human decision.
   const blocked = tasks.filter((t) => t.status === "blocked");
   const readyJoins = state.stageGit ? [] : tasks.filter(
-    (t) => t.status === "ready" && isCrossLaneJoin(t, opts.laneByTask),
+    (t) => t.status === "ready" && dependenciesCompleted(t) && isCrossLaneJoin(t, opts.laneByTask),
   );
   const gates = await listGates(runId);
   const gateApprovalByTask = new Map<string, boolean>();
   for (const gate of gates) {
     if (!gate.taskId) continue;
-    const approved = gate.status === "resolved" && (isIntegrationGate(gate)
-      ? gate.resolution === INTEGRATION_RESOLUTION
-      : gate.resolution === "approved");
+    const approved = isIntegrationGate(gate)
+      ? gateIntegrated(gate)
+      : ordinaryGateApproved(gate);
     gateApprovalByTask.set(gate.taskId, approved && (gateApprovalByTask.get(gate.taskId) ?? true));
   }
 
@@ -3241,7 +3246,7 @@ async function reconcile(): Promise<void> {
   // workspaces were reconciled. Dependency completion alone never counts.
   if (blocked.length > 0) {
     const toRelease = blocked.filter((task) =>
-      gateApprovalByTask.get(task.id) === true && !occupiedTaskIds.has(task.id));
+      gateApprovalByTask.get(task.id) === true && dependenciesCompleted(task) && !occupiedTaskIds.has(task.id));
     if (toRelease.length > 0) {
       await Promise.all(
         toRelease.map((t) => taskUpdate(t.id, "ready", runId, state.coordinatorHandle!)),
@@ -3433,7 +3438,9 @@ async function reconcile(): Promise<void> {
         // pass's Stage artifact checks and parking have run. In committed
         // Stage mode, release the settled terminal first; the later dispatch
         // batch is the only path that may start verified downstream work.
-        state.stageGit ? [] : tasks.filter((t) => t.status === "ready" && !occupiedTaskIds.has(t.id)),
+        state.stageGit ? [] : tasks.filter((t) =>
+          t.status === "ready" && dependenciesCompleted(t) &&
+          gateApprovalByTask.get(t.id) !== false && !occupiedTaskIds.has(t.id)),
       );
     }
   }
@@ -3456,8 +3463,8 @@ async function reconcile(): Promise<void> {
   // over), then the completion boundary is evaluated.
   // An explicitly approved retry stays blocked in Orca until worker-start
   // accepts --retry-of. Reopening it as ready first invalidates that lineage.
-  const ready = tasks.filter((t) => t.status === "ready" ||
-    (t.status === "blocked" && state.retryOfByTask.has(t.id)));
+  const ready = tasks.filter((t) => dependenciesCompleted(t) &&
+    (t.status === "ready" || (t.status === "blocked" && state.retryOfByTask.has(t.id))));
   const activeAttempts =
     [...state.attempts.values()].filter((a) => !a.settled).length +
     [...state.retryCandidates.values()].filter((r) => !r.attempt.settled).length;
@@ -5103,6 +5110,13 @@ export async function retryWorker(idOrTask: string): Promise<{
     if (task.status === "dispatched") {
       throw new OrcaCliError(
         `Refusing to retry ${attempt.taskId}: Orca reports the task as dispatched.`,
+        "retry_not_allowed",
+      );
+    }
+    if (taskDeps(task).some((id) => !tasks.some((dependency) =>
+      dependency.id === id && dependency.status === "completed"))) {
+      throw new OrcaCliError(
+        `Refusing to retry ${attempt.taskId}: its dependencies are not completed in Run ${runId}.`,
         "retry_not_allowed",
       );
     }
