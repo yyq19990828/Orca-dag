@@ -2461,6 +2461,11 @@ export async function showWorkerDetail(
   // Provider history is advisory and can be slow/unavailable. Only the detail
   // presentation opts in; Stop, custody and scheduler reads stay Orca-only.
   if (!opts.includeProviderSession) return detail;
+  // Prepared TUIs keep their own startup/title identity reader; never
+  // reinterpret them as CLI-run bindings just to populate this extra panel.
+  try {
+    if (await findOpenCodeTuiLaunch(dispatchId)) return detail;
+  } catch { return detail; }
   const binding = await exactOpenCodeBinding(detail);
   if (!binding) return detail;
   const observedAt = new Date().toISOString();

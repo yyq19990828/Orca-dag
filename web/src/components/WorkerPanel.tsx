@@ -581,9 +581,9 @@ export const WorkerPanel = memo(function WorkerPanel({
                       </div>
                       <div className="inbox__meta">{providerSession.statusDetail}</div>
                     </div>
-                  ) : scopedDetail && (attempt?.harness === "opencode" || scopedDetail.launch?.agent === "opencode" || scopedDetail.fleet?.projection?.provider?.id === "opencode") ? (
+                  ) : oneShot && scopedDetail ? (
                     <div className="inbox__body" data-testid="provider-session-unbound">
-                      {oneShot && <>{t("worker.providerSessionCompatibility")} · </>}
+                      {t("worker.providerSessionCompatibility")} ·{" "}
                       {t("worker.providerSessionUnbound")}
                     </div>
                   ) : null}

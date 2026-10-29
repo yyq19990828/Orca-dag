@@ -283,6 +283,7 @@ export function ExecControls({
   }
 
   async function run() {
+    if (busy) return;
     if (!runId) {
       setErr(t("err.pickRunFirst"));
       return;
@@ -461,11 +462,15 @@ export function ExecControls({
           </label>
         </div>
       </details>
+      {/* Hard-disabling a busy trigger blurs it before the dialog can remember
+          it. Handlers reject repeat clicks; policy locks stay native-disabled. */}
       <button
         type="button"
         className="btn"
         onClick={inspectPlan}
-        disabled={busy || !runId}
+        disabled={!runId}
+        aria-disabled={busy}
+        aria-busy={busy}
       >
         {t("exec.previewButton")}
       </button>
@@ -534,8 +539,10 @@ export function ExecControls({
         <button
           className={`btn btn--run${readyCount > 0 && !busy && !execOff ? " btn--attract" : ""}`}
           onClick={run}
+          aria-disabled={busy}
+          aria-busy={busy}
           disabled={
-            busy || launchLocked || anotherRunStarting || Boolean(otherRunStatus) || taskIds.length === 0 || !runId || execOff
+            launchLocked || anotherRunStarting || Boolean(otherRunStatus) || taskIds.length === 0 || !runId || execOff
           }
           title={
             execOff
