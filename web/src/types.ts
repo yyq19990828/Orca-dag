@@ -1223,12 +1223,33 @@ export interface RunHealthWarning {
   message: string;
 }
 
-/**
- * Ownership + health of ONE Run (GET /api/run-health). Counts are `null`
- * when their read failed — unknown, never zero. Orca's Run record is the
- * only ownership evidence; this viewer never calls a coordinator "stale"
- * from a missing local terminal row.
- */
+export interface RemovedWorkSummaryView {
+  coverage: "complete" | "partial";
+  recordedSince: string;
+  tasks: number;
+  dispatches: number;
+  workers: number;
+  terminals: number;
+  activeWorkersAtRemoval: number;
+  lastRemovedAt: string | null;
+}
+
+export interface RemovedWorkEntryView {
+  seq: number;
+  id: string;
+  removedAt: string;
+  kind: string;
+  activeAtRemoval?: boolean;
+  unreadable?: true;
+  [field: string]: unknown;
+}
+
+export interface RemovedWorkPageView {
+  entries: RemovedWorkEntryView[];
+  page: { hasMore: boolean; nextCursor: string | null };
+}
+
+/** Ownership + health of ONE Run; failed reads are unknown, never zero. */
 export interface RunHealthView {
   runId: string;
   ownership: RunOwnershipState;
@@ -1244,5 +1265,6 @@ export interface RunHealthView {
     pendingGates: number | null;
   };
   evidenceComplete: boolean;
+  removedWork: RemovedWorkSummaryView | null;
   warnings: RunHealthWarning[];
 }

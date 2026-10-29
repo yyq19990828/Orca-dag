@@ -397,6 +397,37 @@ export interface OrcaRun {
   updated_at: string;
 }
 
+export interface OrcaRemovedWorkSummary {
+  coverage: "complete" | "partial";
+  recordedSince: string;
+  tasks: number;
+  dispatches: number;
+  workers: number;
+  terminals: number;
+  activeWorkersAtRemoval: number;
+  lastRemovedAt: string | null;
+}
+
+export interface OrcaRemovedWorkEntry {
+  seq: number;
+  id: string;
+  removedAt: string;
+  kind: string;
+  activeAtRemoval?: boolean;
+  unreadable?: true;
+  [field: string]: unknown;
+}
+
+export interface OrcaRemovedWorkPage {
+  entries: OrcaRemovedWorkEntry[];
+  page: { hasMore: boolean; nextCursor: string | null };
+}
+
+export interface OrcaRunShowResult {
+  run: OrcaRun;
+  removedWork: OrcaRemovedWorkSummary | null;
+}
+
 /** One attempt of a task, as returned by `dispatch-show` / `worker-show`. */
 export interface OrcaDispatch {
   id: string;
@@ -776,6 +807,55 @@ export async function bindRun(runId: string, from: string): Promise<OrcaRun> {
   return result.run;
 }
 
+/** Missing or malformed optional history evidence stays unavailable, never zero. */
+function parseRemovedWorkSummary(value: unknown): OrcaRemovedWorkSummary | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  if (
+    (raw.coverage !== "complete" && raw.coverage !== "partial") ||
+    typeof raw.recordedSince !== "string" ||
+    !["tasks", "dispatches", "workers", "terminals", "activeWorkersAtRemoval"].every(
+      (key) => typeof raw[key] === "number" && Number.isFinite(raw[key]) && (raw[key] as number) >= 0,
+    ) ||
+    !(raw.lastRemovedAt === null || typeof raw.lastRemovedAt === "string")
+  ) return null;
+  return {
+    coverage: raw.coverage,
+    recordedSince: raw.recordedSince,
+    tasks: raw.tasks as number,
+    dispatches: raw.dispatches as number,
+    workers: raw.workers as number,
+    terminals: raw.terminals as number,
+    activeWorkersAtRemoval: raw.activeWorkersAtRemoval as number,
+    lastRemovedAt: raw.lastRemovedAt,
+  };
+}
+
+const REMOVED_WORK_KINDS: Record<string, true> = {
+  task: true, dispatch: true, worker: true, terminal: true, remote_worker: true, federated_worker: true,
+};
+
+function parseRemovedWorkPage(value: unknown): OrcaRemovedWorkPage {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Malformed removed-work page");
+  const raw = value as Record<string, unknown>;
+  if (!Array.isArray(raw.entries) || !raw.page || typeof raw.page !== "object") throw new Error("Malformed removed-work page");
+  const page = raw.page as Record<string, unknown>;
+  if (typeof page.hasMore !== "boolean" || !(page.nextCursor === null || typeof page.nextCursor === "string")) {
+    throw new Error("Malformed removed-work page cursor");
+  }
+  if (raw.entries.length > 200) throw new Error("Removed-work page exceeds the official page limit");
+  const entries = raw.entries.map((item): OrcaRemovedWorkEntry => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("Malformed removed-work entry");
+    const entry = item as Record<string, unknown>;
+    if (typeof entry.seq !== "number" || !Number.isFinite(entry.seq) || typeof entry.id !== "string" || typeof entry.removedAt !== "string" || typeof entry.kind !== "string") {
+      throw new Error("Malformed removed-work entry");
+    }
+    if (!Object.hasOwn(REMOVED_WORK_KINDS, entry.kind)) return { seq: entry.seq as number, id: entry.id, removedAt: entry.removedAt, kind: entry.kind, unreadable: true };
+    return entry as OrcaRemovedWorkEntry;
+  });
+  return { entries, page: { hasMore: page.hasMore, nextCursor: page.nextCursor as string | null } };
+}
+
 /**
  * Inspect ONE Run by its exact id (read-only): its record names the bound
  * coordinator handle. Returns `null` only when Orca itself answers
@@ -784,15 +864,24 @@ export async function bindRun(runId: string, from: string): Promise<OrcaRun> {
  * masquerade as "no such Run", because callers treat null as an ownership
  * dead-end while contact loss is merely unverifiable.
  */
-export async function showRun(runId: string): Promise<OrcaRun | null> {
-  let result: { run?: OrcaRun };
+export async function showRun(runId: string): Promise<OrcaRunShowResult | null> {
+  // Keep Orca's sibling summary; ordinary inspection never requests entry pages.
+  let result: { run?: OrcaRun; removedWork?: unknown };
   try {
-    result = await runOrca<{ run?: OrcaRun }>(["orchestration", "run-show", "--id", runId]);
+    result = await runOrca<{ run?: OrcaRun; removedWork?: unknown }>(["orchestration", "run-show", "--id", runId]);
   } catch (err) {
     if (err instanceof OrcaCliError && err.code === "run_not_found") return null;
     throw err;
   }
-  return result.run ?? null;
+  return result.run ? { run: result.run, removedWork: parseRemovedWorkSummary(result.removedWork) } : null;
+}
+
+/** Fetch one removed-work page only when the viewer explicitly opens history. */
+export async function listRemovedWork(runId: string, cursor?: string): Promise<OrcaRemovedWorkPage> {
+  const args = ["orchestration", "run-show", "--id", runId, "--removed"];
+  if (cursor !== undefined) args.push("--cursor", cursor);
+  const result = await runOrca<{ removedWork?: unknown }>(args);
+  return parseRemovedWorkPage(result.removedWork);
 }
 
 // --- Read paths (no coordinator terminal needed) ---------------------------
@@ -4977,38 +5066,54 @@ async function resolveAmbiguousStart(
 }
 
 /**
- * Enumerate available models for a harness.
- *
- * Only opencode exposes a real, enumerable list (`opencode models` prints
- * `provider/model` lines). claude/codex/cursor have no programmatic model list
- * from either orca or their own CLIs, so this returns nothing for them — the UI
- * falls back to free-text input. Anything else (gemini/grok/kimi/custom) is not
- * model-selectable here either.
+ * Advisory model discovery. The subprocess runs in the resolved local viewer
+ * workspace (never a selected remote execution environment or worktree).
  */
-export async function listModels(harness: string): Promise<string[]> {
-  if (harness !== "opencode") return [];
+export interface ModelDiscoveryResult {
+  status: "available" | "unavailable";
+  models: string[];
+  diagnostic: string | null;
+  scope: "local-workspace";
+}
+
+export async function listModels(harness: string): Promise<ModelDiscoveryResult> {
+  if (harness !== "opencode") {
+    return { status: "available", models: [], diagnostic: null, scope: "local-workspace" };
+  }
   try {
-    const { stdout } = await pExecFile("opencode", ["models"], { timeout: 20000 });
-    return stdout
+    const { stdout } = await pExecFile("opencode", ["models"], {
+      cwd: currentWorkspace().dir,
+      timeout: 20000,
+    });
+    const models = stdout
       .split("\n")
-      .map((l) => l.trim())
-      // Same grammar the HTTP boundary validates (security.ts): provider/model
-      // plus the optional bounded `#variant` suffix, so an enumerated variant
-      // id like `zai-coding-plan/glm-5.3-flash#high` survives the round-trip into the picker.
-      .filter((l) => /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(?:#[A-Za-z0-9._-]{1,64})?$/.test(l));
-  } catch {
-    return [];
+      .map((line) => line.trim())
+      .filter((line) => /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(?:#[A-Za-z0-9._-]{1,64})?$/.test(line));
+    return { status: "available", models, diagnostic: null, scope: "local-workspace" };
+  } catch (error) {
+    const failure = error as NodeJS.ErrnoException & { killed?: boolean; signal?: string };
+    const diagnostic = failure.code === "ENOENT"
+      ? "OpenCode CLI was not found"
+      : failure.killed || failure.signal === "SIGTERM"
+        ? "OpenCode model discovery timed out after 20 seconds"
+        : typeof failure.code === "number"
+          ? `OpenCode model command failed (exit code ${failure.code})`
+          : "OpenCode model discovery failed";
+    return {
+      status: "unavailable",
+      models: [],
+      diagnostic,
+      scope: "local-workspace",
+    };
   }
 }
 
 /**
- * opencode workaround, verified end-to-end against Orca on 2026-08-10.
- *
- * This is the compatibility path for explicit models and older/unknown Orca
- * runtimes. Without a model, the coordinator uses native `opencode2` on
- * 1.4.220+. Orca 1.4.222 fixes native submit readiness, but its model support
- * is for the separate `opencode` agent with strictly verified CLI versions;
- * that does not yet qualify this viewer's `opencode2` model launch.
+ * Compatibility path for explicit OpenCode models when native model-launch
+ * eligibility is not met. Without a model, the coordinator uses native
+ * `opencode2` on supported Orca versions; eligible plain explicit models use
+ * Orca's distinct native `opencode` launcher. Model discovery is advisory and
+ * does not establish execution-host availability.
  *
  * `worker-start --agent opencode` opens the opencode TUI but does not reliably
  * land the injected preamble (orca #9951) — the app opens with no prompt and

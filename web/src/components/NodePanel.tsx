@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fetchEnvironments, fetchModels, fetchWorkerDetail } from "../api";
+import { fetchEnvironments, fetchModels, fetchWorkerDetail, type ModelDiscoveryResult } from "../api";
 import { useT, type Translator } from "../i18n";
 import { lanePlanProblems, laneLabel, laneProblemPrefix } from "../placement";
 import { workerWorkspaceLabel } from "../workerWorkspace";
@@ -235,28 +235,26 @@ export function NodePanel({
   }
 
   // --- per-node model ------------------------------------------------
-  // The model picker depends on the node's EFFECTIVE harness (its own override,
-  // else the inherited default), not the {sel,custom} transient state — so it
-  // reacts correctly even when the node just inherits. opencode → dropdown from
-  // `opencode models`; claude/codex/cursor → free-text (no enumerable list);
-  // anything else → no model control.
+  // Discovery is advisory and scoped to the local viewer workspace. The
+  // editable value remains local draft state until it is a complete model ID.
   const effHarness = effectiveHarness(node.id);
   const picker = MODEL_PICKER[effHarness] ?? "none";
   const model = getNodeModel(node.id);
-  const [openCodeModels, setOpenCodeModels] = useState<string[] | null>(null);
+  const [openCodeDiscovery, setOpenCodeDiscovery] = useState<ModelDiscoveryResult | null>(null);
+  const [modelDraft, setModelDraft] = useState(model ?? "");
+  useEffect(() => setModelDraft(model ?? ""), [model, node.id, effHarness]);
   useEffect(() => {
-    if (effHarness !== "opencode") return;
+    if (effHarness !== "opencode") {
+      setOpenCodeDiscovery(null);
+      return;
+    }
     let alive = true;
-    fetchModels("opencode")
-      .then((m) => {
-        if (alive) setOpenCodeModels(m);
-      })
-      .catch(() => {
-        if (alive) setOpenCodeModels([]);
-      });
-    return () => {
-      alive = false;
-    };
+    setOpenCodeDiscovery(null);
+    fetchModels("opencode").then(
+      (result) => { if (alive) setOpenCodeDiscovery(result); },
+      () => { if (alive) setOpenCodeDiscovery({ status: "unavailable", models: [], diagnostic: "Model discovery request failed", scope: "local-workspace" }); },
+    );
+    return () => { alive = false; };
   }, [effHarness]);
 
   // Placement is launch intent. The worker's terminal observation is the
@@ -502,36 +500,53 @@ export function NodePanel({
             advertise model/effort forwarding cannot accept either control. */}
         {picker !== "none" && peerModelEffort && (
           <div className="node-panel__field">
-            <span className="node-panel__key">
-              {t("node.modelKey", { harness: effHarness })}
-              {model ? null : t("node.modelDefaultSuffix")}
-            </span>
-            {picker === "select" ? (
+            <label className="node-panel__key" htmlFor={`node-model-${node.id}`}>
+              {t("node.modelKey", { harness: effHarness })}{model ? null : t("node.modelDefaultSuffix")}
+            </label>
+            {picker === "select" && (
               <DoodleSelect
+                ariaLabel={t("node.modelKey", { harness: effHarness })}
                 value={model ?? ""}
-                onChange={(v) => {
-                  if (!launchLocked) setNodeModel(node.id, v || null);
+                onChange={(value) => {
+                  if (launchLocked) return;
+                  setNodeModel(node.id, value || null);
+                  setModelDraft(value);
                 }}
                 disabled={launchLocked}
-                loading={openCodeModels === null}
+                loading={openCodeDiscovery === null}
                 options={[
                   { value: "", label: t("node.defaultModel") },
-                  ...(openCodeModels ?? []).map((m) => ({ value: m, label: m })),
+                  ...((model && !openCodeDiscovery?.models.includes(model)) ? [{ value: model, label: model }] : []),
+                  ...(openCodeDiscovery?.models ?? []).filter((entry) => entry !== model).map((entry) => ({ value: entry, label: entry })),
                 ]}
               />
-            ) : (
-              <input
-                className="node-panel__custom"
-                value={model ?? ""}
-                placeholder={t("node.modelPlaceholder", {
-                  example: effHarness === "claude" ? "opus" : effHarness === "codex" ? "o3" : "<model>",
-                })}
-                onChange={(e) => setNodeModel(node.id, e.target.value.trim() || null)}
-                disabled={launchLocked}
-              />
             )}
-            {effHarness === "opencode" && model && (
-              <span className="node-panel__hint">{t("node.openCodeModelLaunchHint")}</span>
+            <input
+              id={`node-model-${node.id}`}
+              className="node-panel__custom"
+              value={modelDraft}
+              placeholder={t("node.modelPlaceholder", { example: effHarness === "opencode" ? "provider/model[#variant]" : effHarness === "claude" ? "opus" : effHarness === "codex" ? "o3" : "<model>" })}
+              onChange={(event) => {
+                const value = event.target.value;
+                setModelDraft(value);
+                if (launchLocked) return;
+                const normalized = value.trim();
+                if (!normalized) setNodeModel(node.id, null);
+                else if (effHarness !== "opencode" || /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(?:#[A-Za-z0-9._-]{1,64})?$/.test(normalized)) setNodeModel(node.id, normalized);
+              }}
+              disabled={launchLocked}
+              aria-invalid={effHarness === "opencode" && Boolean(modelDraft.trim()) && !/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(?:#[A-Za-z0-9._-]{1,64})?$/.test(modelDraft.trim())}
+            />
+            {effHarness === "opencode" && (
+              <>
+                <span className="node-panel__hint">
+                  {openCodeDiscovery === null ? t("node.modelDiscoveryLoading")
+                    : openCodeDiscovery.status === "unavailable" ? t("node.modelDiscoveryUnavailable", { diagnostic: openCodeDiscovery.diagnostic ?? "" })
+                      : openCodeDiscovery.models.length === 0 ? t("node.modelDiscoveryEmpty") : t("node.modelDiscoveryReady")}
+                  {" "}{t("node.modelDiscoveryScope")}
+                </span>
+                {model && <span className="node-panel__hint">{t("node.openCodeModelLaunchHint")}</span>}
+              </>
             )}
           </div>
         )}

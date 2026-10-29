@@ -589,13 +589,14 @@ describe("integration: remaining HTTP boundaries", () => {
     assert.equal(malformed.json.code, "invalid_input");
   });
 
-  it("returns the non-enumerable harness model list without a CLI and normalizes the harness name", async () => {
-    // claude/codex/cursor have no programmatic model list (the UI falls back
-    // to free text), so this needs no `orca` and no `opencode` on PATH.
+  it("returns explicit available-empty metadata for a non-enumerable harness and normalizes its name", async () => {
     const res = await call("GET", "/api/models/CLAUDE");
     assert.equal(res.status, 200);
     assert.equal(res.json.harness, "claude");
+    assert.equal(res.json.status, "available");
     assert.deepEqual(res.json.models, []);
+    assert.equal(res.json.diagnostic, null);
+    assert.equal(res.json.scope, "local-workspace");
   });
 });
 

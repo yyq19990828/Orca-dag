@@ -45,12 +45,19 @@ For operational step-by-step procedures, consult [Operating the Viewer](../tutor
 
 - **Multi-Harness Selection:** Nodes can run under `claude`, `codex`, `opencode`, `gemini`, `grok`, `cursor`, `droid`, `kimi`, or opt-in custom commands (`ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1`). Unconfigured nodes inherit the toolbar's Default harness.
 - **Per-Node Model Overrides:**
-  - **OpenCode:** Dropdown populated live via `opencode models`.
+  - **OpenCode:**
+    - **Advisory Discovery & Live Dropdown:** Populated via local workspace discovery (`GET /api/models/opencode`). Discovery is strictly scoped to `local-workspace`; failures produce controlled English diagnostics without leaking stderr. Distinguishes a verified empty catalog (`status: "available"`, `models: []`) from discovery failure (`status: "unavailable"`).
+    - **Dropdown and Manual Free-Text Input:** Supports selecting discovered models or free-text input formatted as `provider/model[#variant]`.
+    - **Draft Validation and Persistence:** Manual text input validates against `^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(?:#[A-Za-z0-9._-]{1,64})?$`. Invalid drafts set `aria-invalid` and are not written to the node configuration store until valid. Emptying input resets to default model (`null`).
+    - **Saved Absent Models Retained:** Models saved in node configuration that are absent from the local catalog remain selectable options in the dropdown and are never dropped or wiped.
+    - **Launch-Locked Preferences:** Once a Task starts its first Dispatch (or while the coordinator is active), the model dropdown and manual text input are completely disabled (`disabled={launchLocked}`) along with harness, effort, and placement.
   - **Claude / Cursor:** Free-text model input passed via `worker-start --model`.
   - **Codex:** Local POSIX current/existing workspaces use native model starts on running Orca ≥ 1.4.217. Older/unknown runtimes and newly created local workspaces retain prestart-and-bind compatibility; remote and Windows use native starts. See [Codex startup boundaries](../tutorials/viewer-operations.md#codex-native-startup-and-compatibility).
 - **Reasoning Effort:** Claude, Codex, and Cursor expose their supported effort levels only alongside a model. Native launches use `--effort`; compatibility-prestarted Codex receives effort in its launch command.
-- **OpenCode Interface Selection:**
-  - **Auto Mode (Default):** OpenCode Tasks without a model override use native `opencode2` on Orca ≥ 1.4.220. Explicit models use native `opencode` only when all [compatibility conditions](compatibility.md) hold; other requests retain their existing routing. Native refusal never launches a second worker.
+- **OpenCode Interface Selection & Native Route Boundaries:**
+  - **Auto Mode (Default):** OpenCode Tasks without a model override use native `opencode2` on Orca ≥ 1.4.220. Plain explicit models (without `#variant`, reasoning effort, lane, non-Windows, current/existing placement, not TUI) use Orca's distinct native `opencode` launcher on Orca ≥ 1.4.241+; local catalog discovery is advisory and does not prove execution-host availability.
+  - **Compatibility Retention:** Mini TUI, Full TUI, model variants (`#variant`), effort, lanes, new worktrees, and remote placements retain their respective adapters and compatibility routes.
+  - **Pre-Launch Route Selection & Refusal:** Launch routing is chosen before dispatch; a native start refusal never authorizes a second or fallback worker.
   - **Explicit Mini TUI / Full TUI:** Available on Linux current/existing non-lane workspaces (Orca ≥ 1.4.222, OpenCode ≥ 2.1.2).
   - **Experimental Model-Pinned Full TUI:** Enabled via `ORCA_DAG_OPENCODE_TUI=1` on Orca ≥ 1.4.222.
 - **Immutable Launch Preferences:** Harness, model, effort, environment, and placement lock permanently once a Task launches its first Dispatch. Retries preserve identical settings across viewer restarts.
@@ -74,7 +81,13 @@ For operational step-by-step procedures, consult [Operating the Viewer](../tutor
 ## Monitoring and Observability
 
 - **Workspace-Scoped Run Picker:** Displays Runs created within the active workspace, with cursor-based pagination and exact Run ID search.
-- **Run Health Badge:** Real-time badge indicating whether the selected Run is `viewer-owned`, `external`, `unbound`, or `inconsistent`.
+- **Run Health Badge & Removed Work:** Real-time badge indicating whether the selected Run is `viewer-owned`, `external`, `unbound`, or `inconsistent`, with per-source counts, warnings, and optional removed-work ledger evidence:
+  - **Removed Work Summary (`health.removedWork`):** Displays removal metrics (tasks, dispatches, workers, terminals, coverage `complete`/`partial`, recordedSince, lastRemovedAt, and `activeWorkersAtRemoval`). When unsupported or absent on the host, `removedWork` is `null` and displayed as unavailable; missing evidence is never zero-padded.
+  - **On-Demand Paginated History:** History entries are loaded on-demand via `GET /api/runs/:runId/removed-work` only when explicitly expanding "View removed-work details", avoiding eager payload bloat.
+  - **Opaque Cursor & Bounded Pages:** Loads up to 200 entries per official page. Supports "Load more" with client-side cycle detection and cursor advance validation (handles 502/503 errors gracefully with inline alerts and retry).
+  - **Historical Activity Indicator:** Entries report `activeAtRemoval` to indicate whether the entity was actively running at the moment of removal—a historical snapshot strictly distinct from current live fleet state.
+  - **Future Kind Resilience:** Tolerates unknown removal kinds by marking them `unreadable: true` and rendering them safely.
+  - **Immutable & No Reset:** The removal ledger is append-only audit data; no reset button or mutation action exists in the viewer.
 - **Runtime Capability Matrix:** Evaluates active Orca runtime capability advertisements against canonical orchestration specifications.
 - **Scheduler and Ready Queue:** Displays ready tasks in ID order, available worker concurrency, and evidence-backed wait reasons (unmet dependency, gate, concurrency limit, or unknown).
 - **Communication Center (Activity & Chat):**

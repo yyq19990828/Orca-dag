@@ -51,7 +51,7 @@ CLI 自动选择顺序为：`ORCA_CLI_COMMAND` → 设置了 `ORCA_DEV_REPO_ROOT
 
 | 区域 | 展示的信息 | 可执行的操作 |
 | --- | --- | --- |
-| Run 选择器与健康徽标 | 当前工作区的 Run 历史；coordinator 状态为 `viewer-owned`、`external`、`unbound` 或 `inconsistent`。 | 选择或新建 Run、分页加载旧 Run，或按精确 Run ID 查找。 |
+| Run 选择器与健康徽标 | 当前工作区的 Run 历史；coordinator 状态为 `viewer-owned`、`external`、`unbound` 或 `inconsistent`，并提供可空的 `removedWork` 摘要与按需分页加载（不提供重置数据库控件）。 | 选择或新建 Run、分页加载旧 Run、查看已移除工作历史，或按精确 Run ID 查找。 |
 | DAG 与 Stage 卡片 | Task 说明、依赖箭头、单独的父子连线、状态、结果和 worker 实际工作区。 | 选中 Stage，在设置锁定前选择其启动参数。 |
 | Scheduler | 就绪波次、可用容量及每个等待中的 Stage 的原因。 | 区分依赖未满足、决策门、无空闲槽位或状态未知。 |
 | Chat / Activity | 派工、回复、持久化发送、coordinator 检查和事件时间线。 | 回答问题，或向 Orca 已确认活跃的 Dispatch 发送指导。 |
@@ -68,7 +68,7 @@ Orca Task 没有 harness、模型、放置位置或画布布局字段。viewer �
 | OpenCode 启动界面 | `auto` | 自动保留当前路由；可显式选择 Mini TUI / 完整 TUI，节点支持覆盖或继承。 |
 | 默认 harness | `claude` | Stage 没有单独覆盖时使用。已知选项包括 Claude、Codex、OpenCode、Gemini、Grok、Cursor、Droid、Kimi。 |
 | Stage harness | 继承默认值 | 选择启动适配器；自定义命令需要 `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1`。 |
-| Stage 模型 | agent 默认值 | OpenCode 列举 `provider/model` ID（可带 `#variant`）；Claude、Codex 和 Cursor 可填写模型名。其他 harness 不显示模型选择器。 |
+| Stage 模型 | agent 默认值 | OpenCode 提供来自本地工作区建议性发现的下拉候选项，同时支持手动输入合法的 `provider/model[#variant]`；Claude、Codex 和 Cursor 可填写模型名。已保存但未在列表中的模型予以保留；开始执行后锁定。 |
 | Stage effort | 不设置 | Claude、Codex、Cursor 的界面选项是 `low`、`medium`、`high`；同一个 Stage 必须已设置模型，远端还须通告相应能力。 |
 | Max parallel | `4`，整数 `1`–`16` | 限制同时启动的 worker 数；DAG 依赖和 lane 可能使实际并行数更低。 |
 | Stage 环境/放置 | 本地 / Current | 已保存的远端环境需要精确 Existing 工作区或显式命名的新顶层工作树。见[放置参数](worktree-isolation_zh.md#创建字段及限制)。 |
@@ -88,7 +88,7 @@ viewer 创建与工作区对应的 Orca 终端，并绑定为 Run 的 coordinato
 
 ### 消息、会话与审计证据
 
-Chat 可向一个经 Orca 证实仍活跃的 `dispatch:<id>` 发送指导。群发编辑器只提供 `@all` 或新发现的工作树受众，先预览接收者，再由此 Run 的活跃 viewer coordinator 确认发送。`worker_done` 等生命周期消息不能群发。发送成功只表示 Orca 已持久化入队，不表示 agent 已阅读或接受。
+Chat 可向一个经 Orca 证实仍活跃的 `dispatch:<id>` 发送指导。群发编辑器只提供 `@all` 或新发现的工作树受众，先预览接收者，再由此 Run 的活跃 viewer coordinator 确认发送。`worker_done` 和 `heartbeat` 等生命周期消息不能群发；Orca 对群发受众拒绝这些消息，viewer 也会直接以 `forbidden_group_type`（HTTP 400）拒绝。发送成功只表示 Orca 已持久化入队，不表示 agent 已阅读或接受。
 
 Recovery 能在身份唯一时绑定 Claude、Codex 或 OpenCode 的精确提供方会话，也可由操作者手动提供准确 ID。提供方探测可能返回 `active`、`idle`、`exited`、`unknown` 或 `unavailable`；它只是 Orca Dispatch 状态旁边的一项观察，不能代替落定。未知或断连的尝试继续占用并行槽位。Request audit 会在 CLI 调用前记录 viewer 修改请求的 ID，再通过 `request-show` 区分 `completed`、`pending`、`absent` 和 `unknown`，不会重放操作。
 
@@ -159,6 +159,8 @@ worker 保持展开时，fleet 轮询仍会更新 ownership。若 fleet 与详�
 
 5 个状态文件都在 `.orca-dag/` 内：`config.json` 保存偏好，`activity.jsonl` 保存有界的解释性活动记录，`requests.jsonl` 保存可审计的修改请求 ID，`sessions.json` 保存精确的提供方会话绑定，`launches.jsonl` 保存历史派工身份。它们都不能代替 Orca 权威的 Run/Task/Dispatch 记录。升级前请停止旧 viewer：启动时将根目录旧 `.orca-dag.*` 文件迁入，绝不覆盖目标，并打印结果。发生冲突时保留两份文件、使用新位置，需人工核对。无法写入迁移时，旧普通文件仍可读取，新写入绝不回退到根目录；不会顺着符号链接读写目录或文件。
 
+Run health 还包含可选的 `removedWork` 移除工作摘要（`coverage` 为 `complete` 或 `partial`、记录数量及可空的 `lastRemovedAt`）。旧版本运行时或未提供摘要时保持 `null`（不可用）而非补零。历史 `activeWorkersAtRemoval` 记录移除瞬间可能活跃的 worker 数，并非当前存活进程的探测结果。详细记录支持通过 `GET /api/runs/:runId/removed-work?cursor=` 按需游标分页加载（每页上限 200 条），未知类型标记为 `unreadable` 而不丢弃。查看移除历史绝不会重置编排状态；viewer 明确不提供任何 reset 按钮。
+
 `orca-dag uninstall` 会移除已安装的 skill、残留的 viewer coordinator 终端，以及所选工作区中自己写入且未被修改的 `.orca-dag/` 和旧版 `.orca/` 忽略管理块；用户自写规则会保留。关闭残留 coordinator 终端前会逐个报告其当时协调的工作区（目录与 hash），防止残留终端持续占用 Run 导致外部 agent 被隔离。你自己创建的 symlink 仅被解除链接，绝不会顺着符号链接递归删除。加 `--purge` 只删除新旧位置已知的 viewer 状态文件和已提交 Stage 的 Git 证据，**永远不删除共享目录、时间戳规划目录或其他用户文件**。普通卸载与 `--dry-run` 都不会迁移状态。运行中的程序二进制本身会保留（进程无法删除自身二进制），卸载命令会打印对应的后续清理指令。卸载后如需继续忽略保留的文件，请自行添加相应的忽略规则。它不会删除 Orca Run/Task 历史，也不会替你集成或发布分支。
 
 ### OpenCode 启动界面选择
@@ -174,6 +176,20 @@ worker 保持展开时，fleet 轮询仍会更新 ownership。若 fleet 与详�
 在自动模式下，viewer 的 `opencode` 选择运行的就是 OpenCode 2。在运行中的 Orca ≥ 1.4.220 且未设置逐节点模型时，Task 使用原生 `worker-start --agent opencode2`。在 OpenCode 2.0.22 上，这条路径已送达只读 Task，并在隔离工作树中自主写入、读回一个文件；Orca 接受 `worker_done`、报告 `agent_status` 并释放终端。显式模型遵循下方新增门槛，或保留一次性兼容路径。原生启动失败后绝不再启动第二个 worker。当前 `worker-read --source auto` 对 OpenCode 2 会回退到终端输出，无法得到精确的 provider transcript。
 
 后续运行时发现可继续加在这里，写清受影响的启动路径、可观察的现象和已验证的处理方式。Codex TUI 可见、Task 已完成与 Orca 的 worker 存活状态是不同的证据。
+
+### Orca 1.4.243 发现、心跳与已移除工作边界
+
+通过 `GET /api/models/:harness` 获取的建议性模型发现运行在本地解析的 viewer 工作区（`scope: "local-workspace"`），而非所选执行主机或远端环境。它明确区分空列表（`status: "available", models: []`）与不可用/失败查询（`status: "unavailable"`，返回脱敏的英文诊断而不泄露 stderr）。Node 面板提供建议下拉列表与 `provider/model[#variant]` 手动输入，未完成的草稿不持久化到 config，已保存的非列表模型予以保留；执行开始后与启动参数一同锁定。
+
+本地发现失败不改变原生路由门槛：2026-10-29，在隔离 Linux Orca 1.4.243 与 OpenCode 2.2.0 环境中，PATH wrapper 强制 `opencode models` 退出码为 23，但显式指定 `deepseek/deepseek-flash` 的单个原生 worker 依然成功启动，完成 `{"verified":243,"frontend":"native"}` 的文件写入与读回，获得接受的 `worker_done`，恰好 1 个 Dispatch，终端释放且无清理债务。这证明本地 viewer 发现失败时原生执行依然通过，但不能证明执行宿主发现也失败。上游 PR 32006（nativeChat 模型）或新顶层工作树修复不得视为 `opencode2`、新工作树、variant/effort 或远程/Windows 的 worker 支持扩展。
+
+心跳消息（`type: "heartbeat"`）严格作为**存活证据**，绝非完成或结算依据。coordinator 仅记录 attempt 上的 `lastHeartbeatAt`，绝不落定 Task 或 Dispatch。Activity 时间线合并同阶段的相邻心跳（`label is working · <phase>`），不掩盖结果或后续事件。Orca 在群发中拒绝生命周期消息（`worker_done`、`heartbeat`），viewer 校验为 HTTP 400 `forbidden_group_type`。隔离 profile 中，派工前 preamble 预览验证了 5 分钟、关闭、15 分钟三种配置，关闭时 preamble 中不输出心跳命令；本次仅在预览中验证，未启动心跳 worker 或测试旧 worker 热变更，不修改全局设置。
+
+Orca 在 `run-show` 中可选返回 `removedWork` 摘要，映射至 `GET /api/run-health`。旧宿主或未提供时保持 `null`（不可用）而非补零；历史 `activeWorkersAtRemoval` 记录移除时刻的状态，不是当前存活进程检查。详细移除历史通过 `GET /api/runs/:runId/removed-work?cursor=` 按需游标分页（每页最多 200 条），未知类型标记为 `unreadable: true`。viewer 绝不提供 reset 按钮（因为 `orchestration reset --tasks` 没有 `--run` 作用域，会清空整个本地编排数据库）。查看移除历史不重置任何状态。
+
+在 Orca 1.4.243 与 OpenCode 2.2.0 上，显式 Mini 和 Full TUI 均未通过启动身份就绪门：API 预建会话已使用所请求的模型，但 60 秒内未观察到精确的 `OC | odag:<request>` 标题。另一个不发送输入的 Mini 诊断 pane 显示 `▪ oc mini v2.2.0 ...` / `Build · Default model`，终端仍保持创建标题。两次均未发送 Task 输入或创建 Dispatch。viewer 记录 `settledVia=start_failed` 并搁置该尝试；`awaiting_input` 是 Run 调度循环阶段，不是新的 Orca Task 状态。两条 preparation 最终均安全关闭，`POST /api/run-stop` 返回 `clean: true`，清理债务为空。这是安全拒绝验证，不是 Mini/Full 执行认证通过；根因尚未证实，身份检查未被放宽。
+
+当前没有可用的 Orca 托管 OpenCode 账户，因此不宣称已通过真实多账户认证。独立回归 fixture 模拟建 pane 后 API 会话不可见：两个前端都保留精确的 `prepared` 记录、原 provider session 与 pane，不发送 Task 输入、不关闭 pane、不启动替代。这些 fixture 不代表真实账户兼容性已通过。
 
 ### Orca 1.4.242 输出、启动与权限边界
 

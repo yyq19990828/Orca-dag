@@ -127,6 +127,18 @@ export interface RunHealthEvidence {
   workerError: string | null;
 }
 
+/** Summary evidence from Orca's optional removed-work ledger. */
+export interface RemovedWorkSummary {
+  coverage: "complete" | "partial";
+  recordedSince: string;
+  tasks: number;
+  dispatches: number;
+  workers: number;
+  terminals: number;
+  activeWorkersAtRemoval: number;
+  lastRemovedAt: string | null;
+}
+
 /** The RunHealthView contract from the epic's data additions. */
 export interface RunHealthView {
   runId: string;
@@ -146,6 +158,7 @@ export interface RunHealthView {
   };
   /** False when any read failed — counts are then unknown, not zero. */
   evidenceComplete: boolean;
+  removedWork: RemovedWorkSummary | null;
   warnings: RunHealthWarning[];
 }
 
@@ -175,6 +188,7 @@ export function buildRunHealth(opts: {
   evidence: RunHealthEvidence;
   /** Workspace dir — enables the foreign-workspace task-creator check. */
   workspaceDir?: string;
+  removedWork?: RemovedWorkSummary | null;
 }): RunHealthView {
   const { runId, run, viewer, evidence } = opts;
   const ownership = evaluateRunOwnership(run, viewer);
@@ -194,13 +208,12 @@ export function buildRunHealth(opts: {
   // --- dispatched task with no fleet worker: a possibly-dead attempt --------
   if (evidence.tasks !== null && evidence.workers !== null) {
     const dispatched = evidence.tasks.filter((t) => t.status === "dispatched");
-    const orphaned = dispatched.filter((task) => {
-      return !evidence.workers!.some(
-        (row) =>
-          (task.dispatch_id ? row.dispatchId === task.dispatch_id : false) ||
-          row.taskId === task.id,
-      );
-    });
+    const orphaned = dispatched.filter(
+      (task) =>
+        !evidence.workers!.some((row) =>
+          typeof task.dispatch_id === "string" ? row.dispatchId === task.dispatch_id : row.taskId === task.id,
+        ),
+    );
     if (orphaned.length > 0) {
       warnings.push({
         code: "dispatched_task_without_worker",
@@ -294,6 +307,7 @@ export function buildRunHealth(opts: {
       evidence.gates !== null &&
       evidence.messages !== null &&
       evidence.workers !== null,
+    removedWork: opts.removedWork ?? null,
     warnings,
   };
 }

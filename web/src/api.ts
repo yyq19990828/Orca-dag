@@ -14,6 +14,7 @@ import type {
   RequestDetailResponse,
   RequestLedgerRowView,
   RunHealthView,
+  RemovedWorkPageView,
   RunsPageView,
   RunStatus,
   StopResultEntry,
@@ -278,6 +279,15 @@ export async function fetchRunHealth(runId: string): Promise<RunHealthView> {
   return health;
 }
 
+/** Read one cursor page of removed history, on demand and Run-scoped. */
+export async function fetchRemovedWork(runId: string, cursor?: string): Promise<RemovedWorkPageView> {
+  const query = cursor === undefined ? "" : `?cursor=${encodeURIComponent(cursor)}`;
+  const { page } = await get<{ page: RemovedWorkPageView }>(
+    `/api/runs/${encodeURIComponent(runId)}/removed-work${query}`,
+  );
+  return page;
+}
+
 /**
  * Start the self-driven coordinator on `runId`. It binds an Orca terminal as
  * the Run's coordinator — fencing any agent terminal currently coordinating it.
@@ -456,14 +466,19 @@ export async function saveConfig(patch: Partial<ViewerConfig>): Promise<void> {
   await put("/api/config", patch);
 }
 
-/**
- * Models available for a harness. Only opencode returns a list (`opencode
- * models`); claude/codex/cursor return an empty array — the UI falls back to
- * free-text input for those.
- */
-export async function fetchModels(harness: string): Promise<string[]> {
-  const { models } = await get<{ models: string[] }>(`/api/models/${encodeURIComponent(harness)}`);
-  return models ?? [];
+export interface ModelDiscoveryResult {
+  status: "available" | "unavailable";
+  models: string[];
+  diagnostic: string | null;
+  scope: "local-workspace";
+}
+
+/** Discover advisory models in the local viewer workspace. */
+export async function fetchModels(harness: string): Promise<ModelDiscoveryResult> {
+  const result = await get<{ harness: string } & ModelDiscoveryResult>(
+    `/api/models/${encodeURIComponent(harness)}`,
+  );
+  return result;
 }
 
 // --- Phase 5: mutation-request audit (read-only) ------------------------------

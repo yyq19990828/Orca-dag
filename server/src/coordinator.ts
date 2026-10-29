@@ -1207,7 +1207,7 @@ export async function startCoordinator(opts: StartOpts): Promise<void> {
  */
 async function adoptDeadCoordinatorTerminal(runId: string): Promise<void> {
   const run = await showRun(runId);
-  const stale = run?.coordinator_handle;
+  const stale = run?.run.coordinator_handle;
   if (!stale) return;
   const terminals = await listTerminals();
   const found = terminals.find((t) => t.handle === stale);
@@ -4201,10 +4201,10 @@ async function startOne(
     if (preparations.some(row => row.taskId === task.id && ["prepared", "bound"].includes(row.state))) {
       throw new OrcaCliError("This Task has an unresolved OpenCode TUI preparation; inspect it before any replacement", "start_unknown");
     }
-    // Default-model OpenCode uses the proven opencode2 agent. Explicit models
-    // can use the distinct opencode launcher on 1.4.241+, whose execution-host
-    // probes verify model availability and reject CLI releases that lose the
-    // first prompt. This is not opencode2 --model support. Mini, variants,
+    // Default-model OpenCode uses the proven opencode2 agent. Eligible explicit
+    // models can use Orca's distinct native opencode launcher on 1.4.241+;
+    // local catalog discovery is advisory and does not verify execution-host
+    // availability. This is not opencode2 --model support. Mini, variants,
     // effort, lanes, new worktrees and remote placements retain their adapters.
     // Choose before launch; a failed native start never authorizes a fallback.
     let nativeOpenCode = false;

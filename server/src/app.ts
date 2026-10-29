@@ -53,6 +53,7 @@ import {
   sendCoordinatorMessage,
   showRepo,
   showRun,
+  listRemovedWork,
   showRequest,
   showWorktree,
   showWorkerDetail,
@@ -1076,7 +1077,8 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         res.status(400).json({ error: "run id required" });
         return;
       }
-      const run = await showRun(runId);
+      const runResult = await showRun(runId);
+      const run = runResult?.run;
       if (!run) {
         res.status(404).json({ error: "no such run", code: "run_not_found" });
         return;
@@ -1825,10 +1827,11 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       const workers = valueOf(workerRes);
       return buildRunHealth({
         runId,
-        // showRun resolves null both for "Orca doesn't know this id" and for a
-        // failed read — either way ownership is unverifiable, which is the
-        // state the projection renders.
-        run: run.value,
+        // showRun resolves null only for a definite absence; a failed read is
+        // caught as unknown evidence below, so contact loss never becomes
+        // "no Run" and ownership remains unverifiable.
+        run: run.value?.run ?? null,
+        removedWork: run.value?.removedWork ?? null,
         viewer: {
           running: viewer.running,
           runId: viewer.runId,
@@ -1863,6 +1866,33 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         return;
       }
       res.json({ health: await loadRunHealth(runId) });
+    }),
+  );
+
+  app.get(
+    "/api/runs/:runId/removed-work",
+    route(async (req, res) => {
+      const runId = validateId(req.params.runId, "run id");
+      if (!runId) {
+        res.status(400).json({ error: "run id required", code: "run_required" });
+        return;
+      }
+      const cursor = req.query.cursor;
+      if (cursor !== undefined && (typeof cursor !== "string" || cursor.length === 0 || cursor.length > 2048)) {
+        res.status(400).json({ error: "invalid removed-work cursor", code: "invalid_cursor" });
+        return;
+      }
+      const run = await showRun(runId);
+      if (!run) {
+        res.status(404).json({ error: "no such run", code: "run_not_found" });
+        return;
+      }
+      const page = await listRemovedWork(runId, cursor as string | undefined);
+      if (page.page.hasMore && (!page.page.nextCursor || page.page.nextCursor === cursor)) {
+        res.status(502).json({ error: "removed-work page cursor did not advance", code: "invalid_page_cursor" });
+        return;
+      }
+      res.json({ page });
     }),
   );
 
@@ -3289,17 +3319,15 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
   );
 
   /**
-   * Models available for a harness, for the node model picker.
-   *
-   * Only opencode actually has an enumerable list (`opencode models`). claude/
-   * codex/cursor return an empty array here — their models have no programmatic
-   * source, so the UI offers free-text input for them instead.
+   * Advisory discovery scoped to the local viewer workspace. A failed OpenCode
+   * query remains distinct from a successful empty catalog; manual selection
+   * is valid regardless of either result.
    */
   app.get(
     "/api/models/:harness",
     route(async (req, res) => {
       const harness = String(req.params.harness ?? "").trim().toLowerCase();
-      res.json({ harness, models: await listModels(harness) });
+      res.json({ harness, ...await listModels(harness) });
     }),
   );
 

@@ -37,6 +37,8 @@ interface FakeConf {
   gatesByRun?: Record<string, unknown[]>;
   inboxMessages?: unknown[];
   workersByRun?: Record<string, unknown[]>;
+  removedWorkByRun?: Record<string, unknown>;
+  removedPagesByRun?: Record<string, Record<string, unknown>>;
   /** Simulate a failed read per command pair, e.g. { "worker-list": true }. */
   fail?: Record<string, boolean>;
 }
@@ -70,11 +72,20 @@ if (args[0] === "status") out.result = conf.statusResult ?? { runtime: {} };
 if (args[0] === "orchestration" && args[1] === "run-show") {
   const id = args[args.indexOf("--id") + 1];
   const run = (conf.runsById ?? {})[id];
-  if (run === undefined) {
+  if (args.includes("--removed")) {
+    if (run === undefined) {
+      out.ok = false;
+      out.error = { code: "run_not_found", message: "Unknown run: " + id };
+    } else {
+      const cursorAt = args.indexOf("--cursor");
+      const cursor = cursorAt >= 0 ? args[cursorAt + 1] : "__first__";
+      out.result = { removedWork: (((conf.removedPagesByRun ?? {})[id] ?? {})[cursor]) ?? { entries: [], page: { hasMore: false, nextCursor: null } } };
+    }
+  } else if (run === undefined) {
     out.ok = false;
     out.error = { code: "run_not_found", message: "Unknown run: " + id };
   } else {
-    out.result = { run };
+    out.result = { run, ...(conf.removedWorkByRun?.[id] === undefined ? {} : { removedWork: conf.removedWorkByRun[id] }) };
   }
 }
 if (args[0] === "orchestration" && args[1] === "task-list") {
@@ -168,6 +179,11 @@ async function getHealth(runId: string): Promise<{ status: number; health: Recor
   const res = await fetch(`${base}/api/run-health?run=${encodeURIComponent(runId)}`);
   const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   return { status: res.status, health: (json.health ?? {}) as Record<string, unknown> };
+}
+async function getRemoved(runId: string, cursor?: string): Promise<{ status: number; json: Record<string, unknown> }> {
+  const query = cursor === undefined ? "" : `?cursor=${encodeURIComponent(cursor)}`;
+  const res = await fetch(`${base}/api/runs/${encodeURIComponent(runId)}/removed-work${query}`);
+  return { status: res.status, json: (await res.json().catch(() => ({}))) as Record<string, unknown> };
 }
 
 /** A task row that provably belongs to this test workspace. */
@@ -335,6 +351,22 @@ describe("buildRunHealth (pure)", () => {
     });
     assert.ok(withWorkers.warnings.some((w) => w.code === "dispatched_task_without_worker"));
 
+    const dispatchedTask = localTask({ id: "task_d1", status: "dispatched", dispatch_id: "ctx_current" });
+    const previousAttempt = buildRunHealth({
+      ...base,
+      evidence: { ...ok, tasks: [dispatchedTask], workers: [workerRow({ dispatchId: "ctx_previous", taskId: dispatchedTask.id })] },
+    });
+    assert.ok(previousAttempt.warnings.some((w) => w.code === "dispatched_task_without_worker"));
+    const exactAttempt = buildRunHealth({
+      ...base,
+      evidence: { ...ok, tasks: [dispatchedTask], workers: [workerRow({ dispatchId: "ctx_current", taskId: dispatchedTask.id })] },
+    });
+    assert.equal(exactAttempt.warnings.some((w) => w.code === "dispatched_task_without_worker"), false);
+    const noPointerFallback = buildRunHealth({
+      ...base,
+      evidence: { ...ok, tasks: [localTask({ id: "task_d1", status: "dispatched" })], workers: [workerRow({ taskId: "task_d1" })] },
+    });
+    assert.equal(noPointerFallback.warnings.some((w) => w.code === "dispatched_task_without_worker"), false);
     // same tasks but the worker read failed → unknown, never asserted
     const withoutWorkers = buildRunHealth({
       ...base,
@@ -602,5 +634,76 @@ describe("GET /api/capabilities", () => {
     };
     assert.deepEqual(json.advertised, []);
     assert.ok(json.capabilities.every((cap) => !cap.supported));
+  });
+});
+
+describe("removed-work health and scoped pagination", () => {
+  const run = (id: string) => ({ id, coordinator_handle: null, consumer_generation: 0 });
+  const summary = {
+    coverage: "partial", recordedSince: "2026-01-01T00:00:00Z", tasks: 0, dispatches: 0,
+    workers: 0, terminals: 0, activeWorkersAtRemoval: 2, lastRemovedAt: "2026-10-01T00:00:00Z",
+  };
+
+  it("keeps removed summary in ordinary health reads, and absent or malformed evidence unavailable", async () => {
+    writeFileSync(join(root, "calls.log"), "");
+    writeScript({
+      runsById: { run_partial: run("run_partial"), run_complete: run("run_complete"), run_bad: run("run_bad"), run_old: run("run_old") },
+      removedWorkByRun: {
+        run_partial: summary,
+        run_complete: { ...summary, coverage: "complete", tasks: 2, activeWorkersAtRemoval: 0 },
+        run_bad: { ...summary, workers: "0" },
+      },
+    });
+    const partial = await getHealth("run_partial");
+    assert.equal(partial.status, 200);
+    assert.deepEqual(partial.health.removedWork, summary);
+    const complete = await getHealth("run_complete");
+    assert.equal((complete.health.removedWork as { coverage: string }).coverage, "complete");
+    assert.equal((complete.health.removedWork as { tasks: number }).tasks, 2);
+    assert.equal(
+      readFileSync(join(root, "calls.log"), "utf8").trim().split("\n")
+        .some((line) => (JSON.parse(line) as { argv: string[] }).argv.includes("--removed")),
+      false,
+      "ordinary health reads do not request detail rows",
+    );
+    assert.equal((await getHealth("run_bad")).health.removedWork, null);
+    assert.equal((await getHealth("run_old")).health.removedWork, null);
+  });
+
+  it("passes opaque cursors unchanged, isolates pages by Run, and surfaces transport failures", async () => {
+    const opaqueCursor = "cur/opaque+value%";
+    const runAEntry = { seq: 1, id: "task_a", removedAt: "t", kind: "task", title: "A" };
+    const runBEntry = { seq: 1, id: "worker_b", removedAt: "t", kind: "worker", activeAtRemoval: true };
+    writeFileSync(join(root, "calls.log"), "");
+    writeScript({
+      runsById: { run_a: run("run_a"), run_b: run("run_b") },
+      removedPagesByRun: {
+        run_a: {
+          __first__: { entries: [], page: { hasMore: true, nextCursor: opaqueCursor } },
+          [opaqueCursor]: { entries: [runAEntry], page: { hasMore: false, nextCursor: null } },
+        },
+        run_b: { [opaqueCursor]: { entries: [runBEntry], page: { hasMore: false, nextCursor: null } } },
+      },
+    });
+    const first = await getRemoved("run_a");
+    assert.equal(first.status, 200);
+    assert.equal((first.json.page as { page: { nextCursor: string } }).page.nextCursor, opaqueCursor);
+    const pageA = await getRemoved("run_a", opaqueCursor);
+    const pageB = await getRemoved("run_b", opaqueCursor);
+    assert.deepEqual((pageA.json.page as { entries: unknown[] }).entries, [runAEntry]);
+    assert.deepEqual((pageB.json.page as { entries: unknown[] }).entries, [runBEntry]);
+    assert.equal((await getRemoved("missing")).status, 404);
+
+    writeScript({ runsById: { run_a: run("run_a") }, fail: { "orchestration.run-show": true } });
+    assert.equal((await getRemoved("run_a")).status, 500, "transport failure is not converted into an empty page");
+    writeScript({
+      runsById: { run_loop: run("run_loop") },
+      removedPagesByRun: {
+        run_loop: {
+          loop: { entries: [], page: { hasMore: true, nextCursor: "loop" } },
+        },
+      },
+    });
+    assert.equal((await getRemoved("run_loop", "loop")).status, 502, "a cursor that does not advance cannot loop");
   });
 });

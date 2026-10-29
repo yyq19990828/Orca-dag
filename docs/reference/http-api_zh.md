@@ -46,11 +46,12 @@ viewer 作为一个具有直接控制 Orca 运行时能力的管理面进程，�
 | `GET` | `/api/session` | 无 | 获取当前进程的 mutation token 以及自定义命令启用状态（响应头包含 `Cache-Control: no-store`）。 |
 | `GET` | `/api/readiness` | 无 | 获取 CLI 及其构建版本、目标运行时版本/状态、工作区信息及执行权限；不可执行时附上恢复原因。 |
 | `GET` | `/api/capabilities` | 无 | 获取 Orca 运行时能力矩阵：包含版本信息及各项编排能力的状态（`supported / alias / absent`）；未知能力保持列出但关闭。 |
-| `GET` | `/api/run-health?run=<id>` | `run` (查询参数): Run ID | 评估指定 Run 的健康与归属状态：返回状态（`viewer-owned / external / unbound / inconsistent`）、coordinator 句柄、按来源划分的任务计数与警告。 |
+| `GET` | `/api/run-health?run=<id>` | `run` (查询参数): Run ID | 返回归属状态（`viewer_coordinator / viewer_coordinator_other_run / external_coordinator / unbound / unverifiable`）、coordinator 句柄、按来源划分的计数、警告与可空的 `health.removedWork` 摘要。 |
 | `GET` | `/api/dag?run=<id>` | `run`: Run ID | 获取指定 Run 的完整 DAG 结构，包括 `{ runId, nodes, edges, hierarchy, gates, readyWave, readiness, generatedAt }`。 |
 | `GET` | `/api/runs` | 无 | 列出精确归属于当前工作区的 Run 列表（基于任务创建者的 worktree 身份过滤，排除其他工作区的不相关 Run）。 |
 | `GET` | `/api/runs/page?cursor=` | `cursor` (可选): 不透明游标 | 分页读取原始 `run-list` 注册表；透传游标，每行携带轻量级本地归属证据。 |
-| `GET` | `/api/runs/:runId` | `:runId` (路径参数): Run ID | 通过 `run-show` 精确查找单个 Run 及其工作区归属证据；仅在 Orca 确认不存在时返回 `run_not_found`，外来工作区 ID 按不存在处理。 |
+| `GET` | `/api/runs/:runId` | `:runId` (路径参数): Run ID | 通过 `run-show` 精确查找单个 Run，返回 `{ run, workspace }`；外来 Run 仍可见，但 `workspace.owned: false`。仅在 Orca 确认不存在时返回 `run_not_found`。 |
+| `GET` | `/api/runs/:runId/removed-work?cursor=` | `:runId`: Run ID, `cursor`: 不透明游标 | 按需分页拉取 Run 的已移除工作历史账本（`{ page: { entries, page: { hasMore, nextCursor } } }`）。单页上限为官方 200 行；不透明游标（1–2048 字符），校验游标推进（游标停滞返回 502，非法游标返回 400）；条目携带历史移除时活跃标记 `activeAtRemoval`，未知 kind 标记 `unreadable: true`；只读不可变，无重置接口。 |
 | `POST` | `/api/runs` | `{ objective?: string }` | 在当前工作区创建一个新的空 Run（通过一次性临时 coordinator 终端完成创建，避免占用主循环）。 |
 | `GET` | `/api/terminals` | 无 | 列出当前 Orca 运行时的所有终端实例。 |
 | `POST` | `/api/run` | `{ runId, harnessByTask?, modelByTask?, effortByTask?, retainByTask?, environmentByTask?, placementByTask?, worktreeLanes?, laneByTask?, defaultHarness?, maxConcurrency? }` | 启动自驱动 coordinator 循环开始调度指定的 Run。若当前环境只读则返回 503，若已在协调则返回 409。 |
@@ -88,7 +89,7 @@ viewer 作为一个具有直接控制 Orca 运行时能力的管理面进程，�
 | `POST` | `/api/files/diff` | `{ path, worktree? }` | 在 Orca 编辑器中查看指定文件的 diff 差异对比。 |
 | `POST` | `/api/files/open-changed` | `{ worktree }` | 在 Orca 编辑器中打开指定工作区的所有已变动文件。 |
 | `POST` | `/api/worktrees/remove` | `{ worktreeSelector, confirmed: true }` | 使用精确选择器调用 `orca worktree rm` 移除工作树；必须提供已落定证据，否则以 `removal_evidence_required` 拒绝。 |
-| `GET` | `/api/models/:harness` | `:harness`: Harness 名称 | 获取指定 harness 支持的模型列表（当前由 OpenCode 提供枚举能力）。 |
+| `GET` | `/api/models/:harness` | `:harness`: Harness 名称 | 本地工作区范围（`scope: "local-workspace"`）的模型建议性发现接口。返回 `{ harness, status, models, diagnostic, scope }`。区分成功空目录与发现失败（返回可控英文诊断，不泄露 stderr）。 |
 | `GET` | `/api/environments` | 无 | 获取已保存的远程连接环境列表（`environment list`），包含对端通告的能力集。 |
 | `GET` | `/api/environments/:envId/worktrees?repo=` | `:envId`: 环境标识符, `repo`: 仓库路径 | 获取远程环境上的精确工作区选择器（格式为 `id:<repoId>::<path>`）。 |
 | `GET` | `/api/environments/:envId/repos` | `:envId`: 环境标识符 | 获取远程环境上已注册的仓库列表（用于新建顶层工作树）。 |
@@ -96,3 +97,92 @@ viewer 作为一个具有直接控制 Orca 运行时能力的管理面进程，�
 | `GET` | `/api/config` | 无 | 读取当前工作区的偏好配置（`.orca-dag/config.json`）。 |
 | `PUT` | `/api/config` | 合并配置对象 | 合并并更新当前工作区的偏好配置。 |
 | `GET` | `/api/health` | 无 | 基础服务健康检查接口，返回工作区物理路径。 |
+
+### Run 健康度与已移除工作账本
+
+`GET /api/run-health` 返回聚合的健康与归属数据，`GET /api/runs/:runId/removed-work` 支持按需分页加载已移除条目：
+
+```json
+{
+  "health": {
+    "runId": "run_01j7...",
+    "ownership": "viewer_coordinator",
+    "ownershipDetail": "...",
+    "coordinatorHandle": "term_coord_1",
+    "consumerGeneration": 1,
+    "counts": { "tasks": 4, "messages": 1, "workers": 2, "gates": 0, "pendingGates": 0 },
+    "evidenceComplete": true,
+    "removedWork": {
+      "coverage": "complete",
+      "recordedSince": "2026-10-29T00:00:00Z",
+      "tasks": 2,
+      "dispatches": 2,
+      "workers": 1,
+      "terminals": 1,
+      "activeWorkersAtRemoval": 0,
+      "lastRemovedAt": "2026-10-29T01:00:00Z"
+    },
+    "warnings": []
+  }
+}
+```
+
+```json
+{
+  "page": {
+    "entries": [
+      {
+        "seq": 1,
+        "id": "worker_01j7...",
+        "kind": "worker",
+        "removedAt": "2026-10-29T01:00:00Z",
+        "activeAtRemoval": false
+      }
+    ],
+    "page": {
+      "hasMore": false,
+      "nextCursor": null
+    }
+  }
+}
+```
+
+- **可空 `removedWork` 摘要**：内部 `showRun` 适配器保留 `{ run, removedWork }`；HTTP 客户端通过 `health.removedWork` 读取摘要。旧宿主缺少字段、可选账本读取失败或摘要格式错误时为 `null`，绝不把缺失证据补成 0。
+- **按需作用域分页**：已移除工作明细不在初次健康检查时全量加载，仅在界面显式展开时按需拉取，单页受 Orca 官方 200 行上限约束。
+- **不透明游标校验**：游标参数必须为 1–2048 字符的字符串；非法游标返回 HTTP `400 invalid_cursor`。当 `page.hasMore` 为 `true` 但 `nextCursor` 未能推进行进（为 `null` 或与当前游标相同）时，服务端返回 HTTP `502 invalid_page_cursor`。
+- **历史活动 vs 存活 Fleet**：worker 条目的 `activeAtRemoval: true` 表示移除跟踪时它可能仍在运行；这既不是历史进程存活证明，也不是当前存活判决。
+- **前向兼容与 Kind 弹性**：支持已知标准 kind（`task`, `dispatch`, `worker`, `terminal`, `remote_worker`, `federated_worker`）；未来或未知 kind 会被标记为 `unreadable: true` 并在界面安全降级展示，不阻断渲染。
+- **只读账本与无重置**：已移除工作历史为只读审计事实，viewer 不提供重置按钮或任何修改/清空端点。
+
+### 本地模型建议性发现接口
+
+```json
+// 发现成功 / 填充目录 (本地工作区)
+{
+  "harness": "opencode",
+  "status": "available",
+  "models": [
+    "anthropic/claude-3-5-sonnet-20241022",
+    "deepseek/deepseek-chat"
+  ],
+  "diagnostic": null,
+  "scope": "local-workspace"
+}
+```
+
+```json
+// 发现失败 (受控英文诊断)
+{
+  "harness": "opencode",
+  "status": "unavailable",
+  "models": [],
+  "diagnostic": "OpenCode model discovery timed out after 20 seconds",
+  "scope": "local-workspace"
+}
+```
+
+- **作用域限制**：严格限定于本地 viewer 工作区（`scope: "local-workspace"`，执行 `opencode models`），绝不探测远程执行环境或非当前 worktree。
+- **状态与诊断分类**：
+  - `status: "available"`：`models` 为匹配 `^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(?:#[A-Za-z0-9._-]{1,64})?$` 的模型标识数组。若查询成功但目录为空，返回 `{ status: "available", models: [], diagnostic: null }`。非 OpenCode harness 直接返回 `status: "available"`、空 `models` 及 `diagnostic: null`。
+  - `status: "unavailable"`：发现执行失败（CLI 缺失 → `"OpenCode CLI was not found"`；20 秒超时 → `"OpenCode model discovery timed out after 20 seconds"`；退出码 → `"OpenCode model command failed (exit code <N>)"`；常规失败 → `"OpenCode model discovery failed"`）。`models` 为空列表；绝不向客户端泄露 stderr 或底层异常堆栈。
+- **建议性语义**：模型目录发现仅作为本地工作区配置的输入参考。发现失败或目录为空均不妨碍手动填写合法模型，目录中的模型亦不代表远端宿主必定就绪。

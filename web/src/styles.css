@@ -4692,6 +4692,50 @@ body {
   font-size: 12px;
   color: var(--ink-faint);
 }
+
+.runhealth__removed {
+  border-top: 1px dashed var(--line);
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.runhealth__removed h3,
+.runhealth__removed p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.runhealth__removed h3 {
+  font-family: var(--font-display);
+  color: var(--ink);
+}
+.runhealth__removed-warning {
+  color: #b37f16;
+}
+.runhealth__removed button {
+  align-self: flex-start;
+}
+.runhealth__removed-list {
+  max-height: 220px;
+  overflow: auto;
+  font-size: 11.5px;
+}
+.runhealth__removed-list ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.runhealth__removed-list li {
+  display: flex;
+  flex-direction: column;
+  overflow-wrap: anywhere;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 4px;
+}
 /* Phone widths: the chip no longer sits at the viewport's right edge (the
    status row wraps), so the chip-anchored panel would hang off one side of
    the screen at 375px. Pin it to the viewport gutters instead; `top` stays

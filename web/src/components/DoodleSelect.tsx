@@ -42,6 +42,7 @@ export function DoodleSelect({
   size = "md",
   className,
   title,
+  ariaLabel,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -57,6 +58,7 @@ export function DoodleSelect({
   size?: "sm" | "md";
   className?: string;
   title?: string;
+  ariaLabel?: string;
 }) {
   const t = useT();
   // The caller's own wording wins (a Run picker says "(no Runs)", not "No
@@ -202,6 +204,7 @@ export function DoodleSelect({
         }
         disabled={disabled}
         title={title}
+        aria-label={ariaLabel}
         aria-haspopup="listbox"
         aria-expanded={open}
         onClick={() => setOpen((o) => !o)}

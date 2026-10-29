@@ -34,6 +34,13 @@ if (path === "/api/session/active") {
   reply({ data: state.active ? Object.fromEntries(Object.keys(state.sessions ?? {}).map(id => [id, { type: "running" }])) : {} });
 }
 if (!session) process.exit(3);
+// Model a different account/backend becoming visible after Orca creates the
+// PTY: the journaled session still exists on the preparation backend, but
+// cannot be found by the API caller's current discovery scope.
+if (state.sessionUnavailableAfterPane &&
+    JSON.parse(readFileSync(process.env.FAKE_ORCA_STATE)).terminals?.some(t => t.command?.includes(sessionId))) {
+  process.exit(3);
+}
 if (path.includes("/interrupt")) {
   appendFileSync(process.env.FAKE_ORCA_LOG, JSON.stringify({ argv: ["opencode-api", "interrupt"] }) + "\n");
   state.active = false; state.outcome = "interrupted";

@@ -65,10 +65,67 @@ All `POST` and `PUT` endpoints require the `X-Orca-Dag-Token` header. `GET` endp
 |---|---|---|
 | `GET` | `/api/runs` | Lists Runs whose Task creator identity matches this workspace, plus the current/persisted empty Run. |
 | `GET` | `/api/runs/page?cursor=` | Cursor-paginated raw `run-list` page. The opaque `nextCursor` token passes through byte-for-byte (`null` on the last page). |
-| `GET` | `/api/runs/:runId` | Fetches single Run details (`run-show`) verified against workspace ownership. Returns 404 only on definite Orca absence. |
+| `GET` | `/api/runs/:runId` | Fetches single Run details (`run-show`) and workspace ownership evidence as `{ run, workspace }`. Foreign Runs remain visible with `workspace.owned: false`. Returns 404 only on definite Orca absence. |
 | `POST` | `/api/runs` | `{ objective? }`: Creates a new empty Run in the current workspace using a temporary coordinator terminal. Requires `executionEnabled`. |
-| `GET` | `/api/run-health?run=<id>` | Evaluates ownership and health state of a Run: `viewer-owned`, `external`, `unbound`, or `inconsistent`, with per-source counts and warnings. |
+| `GET` | `/api/run-health?run=<id>` | Evaluates Run ownership (`viewer_coordinator`, `viewer_coordinator_other_run`, `external_coordinator`, `unbound`, or `unverifiable`), per-source counts, warnings, and nullable `health.removedWork` summary. |
+| `GET` | `/api/runs/:runId/removed-work?cursor=` | On-demand cursor-paginated removed-work ledger page (`{ page: { entries, page: { hasMore, nextCursor } } }`). Bounded at 200 entries/page. Opaque cursor (1–2048 chars); validates advance (502 on stuck cursor, 400 on invalid cursor). Reports historical `activeAtRemoval` and safe `unreadable: true` for unknown kinds. Read-only, no reset endpoint. |
 | `GET` | `/api/dag?run=<id>` | Returns DAG structure: `{ runId, nodes, edges, hierarchy, gates, readyWave, readiness, generatedAt }`. |
+
+#### Run Health and Removed-Work Ledger
+
+`GET /api/run-health` includes optional removal evidence, and `GET /api/runs/:runId/removed-work` loads history entries on demand:
+
+```json
+{
+  "health": {
+    "runId": "run_01j7...",
+    "ownership": "viewer_coordinator",
+    "ownershipDetail": "...",
+    "coordinatorHandle": "term_coord_1",
+    "consumerGeneration": 1,
+    "counts": { "tasks": 4, "messages": 1, "workers": 2, "gates": 0, "pendingGates": 0 },
+    "evidenceComplete": true,
+    "removedWork": {
+      "coverage": "complete",
+      "recordedSince": "2026-10-29T00:00:00Z",
+      "tasks": 2,
+      "dispatches": 2,
+      "workers": 1,
+      "terminals": 1,
+      "activeWorkersAtRemoval": 0,
+      "lastRemovedAt": "2026-10-29T01:00:00Z"
+    },
+    "warnings": []
+  }
+}
+```
+
+```json
+{
+  "page": {
+    "entries": [
+      {
+        "seq": 1,
+        "id": "worker_01j7...",
+        "kind": "worker",
+        "removedAt": "2026-10-29T01:00:00Z",
+        "activeAtRemoval": false
+      }
+    ],
+    "page": {
+      "hasMore": false,
+      "nextCursor": null
+    }
+  }
+}
+```
+
+- **Nullable `removedWork` Summary:** The internal `showRun` adapter preserves `{ run, removedWork }`; HTTP clients read the summary through `health.removedWork`. An omitted or malformed optional summary is `null`, including on older hosts or when the optional ledger read failed. Missing evidence is never padded with zeroes.
+- **On-Demand Scoped Pagination:** Removed-work entries are loaded only when explicitly opened in the UI, bounded to Orca's official limit of 200 rows per page.
+- **Opaque Cursor Validation:** Cursor tokens must be strings (1–2048 characters). Malformed tokens return `400 invalid_cursor`. If `page.hasMore` is `true` but `nextCursor` fails to advance (is `null` or matches the current cursor), the server returns `502 invalid_page_cursor`.
+- **Historical Activity vs Live State:** A worker entry's `activeAtRemoval: true` means it may still have been running when tracking was removed. It is not proof of either historical or current process liveness.
+- **Kind Resilience:** Known kinds (`task`, `dispatch`, `worker`, `terminal`, `remote_worker`, `federated_worker`) retain their fields. Unknown string kinds are tagged with `unreadable: true`; malformed pages fail rather than becoming empty history.
+- **Read-Only Viewer:** There is no reset button, wipe command, or removal-ledger mutation endpoint in the viewer.
 
 ---
 
@@ -158,7 +215,40 @@ All `POST` and `PUT` endpoints require the `X-Orca-Dag-Token` header. `GET` endp
 | `GET` | `/api/environments/:envId/worktrees?repo=` | Discovers exact workspace selectors (`id:<repoId>::<path>`) on a remote environment. |
 | `GET` | `/api/environments/:envId/repos` | Lists repositories registered on a remote environment for new-top-level placement. |
 | `GET` | `/api/environments/:envId/projects` | Lists project groupings visible on a remote environment. |
-| `GET` | `/api/models/:harness` | Enumerates selectable models for a harness (such as OpenCode). |
+| `GET` | `/api/models/:harness` | Advisory model discovery scoped strictly to the local viewer workspace (`scope: "local-workspace"`). Returns `{ harness, status, models, diagnostic, scope }`. |
+
+#### Model Discovery Response (`GET /api/models/:harness`)
+
+```json
+// Success / populated catalog (local workspace)
+{
+  "harness": "opencode",
+  "status": "available",
+  "models": [
+    "anthropic/claude-3-5-sonnet-20241022",
+    "deepseek/deepseek-chat"
+  ],
+  "diagnostic": null,
+  "scope": "local-workspace"
+}
+```
+
+```json
+// Discovery failure (controlled English diagnostic)
+{
+  "harness": "opencode",
+  "status": "unavailable",
+  "models": [],
+  "diagnostic": "OpenCode model discovery timed out after 20 seconds",
+  "scope": "local-workspace"
+}
+```
+
+- **Scope:** Scoped strictly to `local-workspace` (the current local viewer workspace where `opencode models` executes). It does not probe remote execution environments or alternate worktrees.
+- **Status & Diagnostic:**
+  - `status: "available"`: `models` contains catalog strings matching `^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(?:#[A-Za-z0-9._-]{1,64})?$`. A successful query with no models returns `{ status: "available", models: [], diagnostic: null }`. Non-OpenCode harnesses return `available` with empty `models`.
+  - `status: "unavailable"`: Discovery failed (e.g., CLI not found → `"OpenCode CLI was not found"`, 20s timeout → `"OpenCode model discovery timed out after 20 seconds"`, process exit code → `"OpenCode model command failed (exit code <N>)"`, generic failure → `"OpenCode model discovery failed"`). `models` is empty. Stderr and internal process stack traces are never leaked.
+- **Advisory Semantics:** Model discovery is purely advisory for local workspace selection. A failed discovery or empty catalog does not prevent manual model entry, nor does a successful catalog entry guarantee execution-host availability.
 
 ---
 

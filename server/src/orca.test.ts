@@ -1,9 +1,9 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import type { Server } from "node:http";
 import {
   abandonWorkerReceipt,
@@ -36,6 +36,7 @@ import {
   initOrcaRuntime,
   getOrcaRuntime,
   isInsideManagedOrcaTerminal,
+  listModels,
   listEnvironments,
   listProjects,
   listRepos,
@@ -67,6 +68,7 @@ import {
   showEnvironment,
   showRepo,
   showRun,
+  listRemovedWork,
   showWorkerDetail,
   showWorktree,
   startSupervisedWorker,
@@ -145,6 +147,8 @@ function writeScript(
     /** Workspace-scope discovery: global Runs + per-Run Task creator rows. */
     runs?: unknown[];
     runsById?: Record<string, unknown>;
+    removedWorkByRun?: Record<string, unknown>;
+    runRemovedPages?: Record<string, Record<string, unknown>>;
     inboxMessages?: unknown[];
     tasksByRun?: Record<string, unknown[]>;
     workers?: unknown[];
@@ -263,7 +267,13 @@ if (args[0] === "orchestration" && args[1] === "run-show") {
   const id = args[args.indexOf("--id") + 1];
   const run = conf.runsById && conf.runsById[id];
   if (run) {
-    out.result = { run };
+    if (args.includes("--removed")) {
+      const cursorAt = args.indexOf("--cursor");
+      const cursor = cursorAt >= 0 ? args[cursorAt + 1] : "__first__";
+      out.result = { removedWork: (((conf.runRemovedPages ?? {})[id] ?? {})[cursor]) ?? { entries: [], page: { hasMore: false, nextCursor: null } } };
+    } else {
+      out.result = { run, ...(conf.removedWorkByRun?.[id] === undefined ? {} : { removedWork: conf.removedWorkByRun[id] }) };
+    }
   } else {
     // The real runtime's definite-absence answer for an unknown exact id.
     out.ok = false;
@@ -389,6 +399,54 @@ function useRuntime(opts: {
     cwd: opts.cwd ?? root,
   });
 }
+describe("advisory OpenCode model discovery", () => {
+  it("distinguishes empty, failed, and timed-out discovery and filters IDs in the resolved local cwd", async () => {
+    const workspace = wsA();
+    const bin = join(root, "model-bin");
+    const executable = join(bin, "opencode");
+    const cwdFile = join(root, "model-cwd");
+    mkdirSync(bin, { recursive: true });
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${bin}${delimiter}${originalPath ?? ""}`;
+    process.env.MODEL_CWD_FILE = cwdFile;
+    useRuntime({ workspace, cwd: root });
+    try {
+      writeFileSync(executable, `#!/bin/sh\nprintf '%s' "$PWD" > "$MODEL_CWD_FILE"\nprintf '\\nprovider/model\\nprovider/model#high\\nnot-a-model\\nprovider/model#bad/value\\n'\n`);
+      chmodSync(executable, 0o755);
+      assert.deepEqual(await listModels("opencode"), {
+        status: "available", models: ["provider/model", "provider/model#high"], diagnostic: null, scope: "local-workspace",
+      });
+      assert.equal(readFileSync(cwdFile, "utf8"), workspace);
+      writeFileSync(executable, "#!/bin/sh\nprintf 'provider-secret-token' >&2\nexit 9\n");
+      const failed = await listModels("opencode");
+      assert.equal(failed.status, "unavailable");
+      assert.deepEqual(failed.models, []);
+      assert.equal(failed.diagnostic, "OpenCode model command failed (exit code 9)");
+      assert.equal(failed.diagnostic?.includes("provider-secret-token"), false);
+      const emptyPath = join(root, "empty-model-bin");
+      mkdirSync(emptyPath, { recursive: true });
+      process.env.PATH = emptyPath;
+      const missing = await listModels("opencode");
+      assert.equal(missing.status, "unavailable");
+      assert.equal(missing.diagnostic, "OpenCode CLI was not found");
+      process.env.PATH = `${bin}${delimiter}${originalPath ?? ""}`;
+      writeFileSync(executable, "#!/bin/sh\nsleep 21\n");
+      chmodSync(executable, 0o755);
+      const timedOut = await listModels("opencode");
+      assert.equal(timedOut.status, "unavailable");
+      assert.deepEqual(timedOut.models, []);
+      assert.equal(timedOut.diagnostic, "OpenCode model discovery timed out after 20 seconds");
+      writeFileSync(executable, "#!/bin/sh\nprintf '\\n\\n'\n");
+      chmodSync(executable, 0o755);
+      assert.deepEqual(await listModels("opencode"), {
+        status: "available", models: [], diagnostic: null, scope: "local-workspace",
+      });
+    } finally {
+      process.env.PATH = originalPath;
+      delete process.env.MODEL_CWD_FILE;
+    }
+  });
+});
 
 let wsADir: string | null = null;
 let wsBDir: string | null = null;
@@ -3620,10 +3678,46 @@ describe("showRun exact lookup (fake CLI)", () => {
       },
     });
     const run = await showRun("run_known");
-    assert.equal(run?.coordinator_handle, "term_c");
+    assert.equal(run?.run.coordinator_handle, "term_c");
     const call = readLog().find((c) => c.argv[1] === "run-show")!;
     assert.deepEqual(call.argv.slice(0, 4), ["orchestration", "run-show", "--id", "run_known"]);
     assert.equal(await showRun("run_missing"), null, "a definite absence stays null");
+  });
+
+  it("preserves validated removal summary and pages unknown kinds with opaque cursors", async () => {
+    useRuntime({ workspace: root });
+    const run = {
+      id: "run_known", objective: "o", coordinator_handle: null, consumer_generation: 0,
+      legacy: 0, created_at: "t", updated_at: "t",
+    };
+    const summary = {
+      coverage: "partial", recordedSince: "2026-01-01T00:00:00Z", tasks: 3, dispatches: 4,
+      workers: 2, terminals: 1, activeWorkersAtRemoval: 1, lastRemovedAt: "2026-10-01T00:00:00Z",
+    };
+    writeScript({ runsById: { run_known: run }, removedWorkByRun: { run_known: summary } });
+    const result = await showRun("run_known");
+    assert.equal(result?.removedWork?.coverage, "partial");
+    assert.equal(result?.removedWork?.activeWorkersAtRemoval, 1);
+    writeScript({ runsById: { run_known: run }, removedWorkByRun: { run_known: { ...summary, tasks: "3" } } });
+    assert.equal((await showRun("run_known"))?.removedWork, null);
+    writeScript({ runsById: { run_known: run } });
+    assert.equal((await showRun("run_known"))?.removedWork, null, "older host omission remains unavailable");
+
+    const opaqueCursor = "opaque/cursor+with%chars";
+    writeScript({
+      runsById: { run_known: run },
+      runRemovedPages: {
+        run_known: {
+          [opaqueCursor]: {
+            entries: [{ seq: 2, id: "removed_future", removedAt: "t", kind: "future_kind" }],
+            page: { hasMore: false, nextCursor: null },
+          },
+        },
+      },
+    });
+    const page = await listRemovedWork("run_known", opaqueCursor);
+    assert.equal(page.entries[0].kind, "future_kind");
+    assert.equal(page.entries[0].unreadable, true);
   });
 
   it("never re-answers a lost response as 'no such Run' — contact loss throws", async () => {

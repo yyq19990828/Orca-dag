@@ -36,20 +36,32 @@
 
 - **多 Agent Harness 矩阵**：支持 `claude / codex / opencode / gemini / grok / cursor / droid / kimi` 及自定义命令（自定义命令需要启动参数放行）。支持通过工具条的默认 harness 统一兜底，亦可针对单个任务独立覆盖。
 - **每节点模型覆盖**：
-  - `opencode` harness 支持通过本地 CLI 枚举模型下拉选择；
+  - `opencode` harness：
+    - **建议性发现与下拉选单**：通过本地工作区模型发现接口（`GET /api/models/opencode`）动态加载。作用域限定于 `local-workspace`；失败时提供受控英文诊断且不泄露 stderr。明确区分成功但目录为空（`status: "available"`、空 `models`）与发现失败（`status: "unavailable"`）。
+    - **下拉选单与手动自由文本输入**：支持直接从发现目录中选取，亦可在文本框中手动填写 `provider/model[#variant]`。
+    - **草稿校验与持久化规则**：自由文本输入校验严格匹配 `/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(?:#[A-Za-z0-9._-]{1,64})?$/` 正则。不合法的输入被标记为 `aria-invalid`，且绝不写入节点配置存储；清空文本框则重置恢复为默认模型（`null`）。
+    - **已保存但不在目录中的模型保留**：若节点此前保存的模型在本地发现目录中不存在（如自定义 provider 或宿主环境差异），该模型依然作为候选项保留在下拉列表中，绝不自动抹除。
+    - **启动锁定（Launch-Locked）**：任务一旦派发过首次 Dispatch 或协调者处于运行中，模型下拉选单与手动输入文本框连同 harness、effort、placement 一同置灰禁用（`disabled={launchLocked}`）。
   - `claude` 和 `cursor` 通过 `worker-start --model` 传递模型；
   - 本地 POSIX Codex 在当前/已有工作区、运行中的 Orca ≥ 1.4.217 时使用原生模型启动；旧版/未知运行时及本地新建工作区保留预启动绑定路径，远程与 Windows 使用原生路径。详见[Codex 启动边界](../tutorials/viewer-operations_zh.md#codex-原生启动与兼容路径)。
 - **推理力度（Effort）**：`claude`、`codex`、`cursor` 可选择各自支持的力度，且必须同时设置模型；清空模型会清空 effort。原生启动传递 `--effort`，兼容预启动 Codex 则在启动命令中设置。
-- **OpenCode 启动模式与界面策略**：
-  - 提供**自动模式**、**Mini TUI** 和**完整 TUI** 三种界面模式选择；
-  - 显式 Mini/完整 TUI 要求本机 Linux、当前/已有且非 lane 工作区、运行中的 Orca ≥ 1.4.222 及 OpenCode ≥ 2.1.2；
-  - 自动模式下，未指定模型且 Orca ≥ 1.4.220 时使用原生 `opencode2`；显式模型仅在满足[完整兼容条件](compatibility_zh.md)时使用原生 `opencode`，其他请求保留原兼容路径。原生启动被拒绝后不会再启动替代 worker。
-- **实验性 API 预选模型完整 TUI（`ORCA_DAG_OPENCODE_TUI=1`）**：在 Orca ≥ 1.4.222 上针对指定模型使用预建 API 会话，会话与终端身份持久化于 `.orca-dag/sessions.json`。Stop 操作先通过 API 中断执行，再执行编排记账，提供更精细的外部进程控制。
+- **OpenCode 启动模式与原生路由边界**：
+  - **自动模式（默认）**：未指定模型且 Orca ≥ 1.4.220 时使用原生 `opencode2`；纯净显式模型（不含 `#variant`、不带 effort、非 lane、非 Windows、当前/已有放置、非 TUI 模式）在运行中 Orca ≥ 1.4.241+ 上使用独立的 Orca 原生 `opencode` 启动器。本地目录发现仅具建议性，不代表执行宿主真实可用。
+  - **兼容路径保留**：显式 Mini TUI、Full TUI、模型变体（`#variant`）、推理力度（effort）、lanes、新建工作树（new child/top-level）及远程放置均保留各自适配器与兼容路径。
+  - **启动前路由判定与拒绝规则**：启动前做出路由判定；原生启动被拒绝后绝不启动替代 worker 或静默降级重试。
+  - **显式 Mini TUI / 完整 TUI**：要求本机 Linux、当前/已有且非 lane 工作区、运行中的 Orca ≥ 1.4.222 及 OpenCode ≥ 2.1.2；
+  - **实验性 API 预选模型完整 TUI（`ORCA_DAG_OPENCODE_TUI=1`）**：在 Orca ≥ 1.4.222 上针对指定模型使用预建 API 会话，会话与终端身份持久化于 `.orca-dag/sessions.json`。Stop 操作先通过 API 中断执行，再执行编排记账，提供更精细的外部进程控制。
 
 ## 工作区隔离、放置矩阵与 Lanes
 
 - **按工作区隔离的 Run 视图**：Orca 编排注册表全局共享，但 viewer 仅展示任务创建者身份与当前工作区匹配的 Run，杜绝跨工作区混淆。支持新建 Run、游标分页加载历史 Run 以及精确 ID 查询。
-- **Run 健康度徽标**：直观展示 Run 当前归属与健康状态（`viewer-owned / external / unbound / inconsistent`），若存在内部状态不一致或数据读取失败，提供显式警告。
+- **Run 健康度徽标与已移除工作**：直观展示 Run 当前归属与健康状态（`viewer-owned / external / unbound / inconsistent`），包含各来源计数、警告以及可选的已移除工作账本证据：
+  - **已移除工作摘要（`health.removedWork`）**：展示已移除指标（tasks、dispatches、workers、terminals、覆盖范围 `complete` 或 `partial`、记录起始时间、最近移除时间以及 `activeWorkersAtRemoval`）。宿主不支持或数据缺失时为 `null`，明确提示不可用，缺失数据绝不补 0。
+  - **按需分页明细**：仅在操作者显式点击“View removed-work details / 查看已移除工作明细”时通过 `GET /api/runs/:runId/removed-work` 按需拉取历史记录，避免初次数据膨胀。
+  - **不透明游标与官方页限制**：单页最多拉取 200 行官方上限。支持“Load more”，具备客户端游标环路检测与停滞游标校验（友好处理 502/503 重试与内联告警）。
+  - **历史活跃状态标识**：条目附带 `activeAtRemoval` 标记，表明该工作项在被移除的历史瞬间是否处于活跃运行中——此快照属于历史账本，绝不可等同于当前存活 fleet。
+  - **未知与未来 kind 兼容**：对非标准 kind 标记 `unreadable: true` 并安全降级展示，绝不破坏界面渲染。
+  - **只读不可变与无重置**：已移除工作历史为只读审计证据，viewer 不提供重置按钮或任何状态重置接口。
 - **本地放置矩阵（4 种模式）**：
   1. `Current`：在当前协调者工作区运行（默认）；
   2. `Existing`：放置于 Orca 已注册发现的精确工作区（`worktree list` 返回的完整选择器）；

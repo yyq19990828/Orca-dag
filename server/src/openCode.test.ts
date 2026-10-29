@@ -358,6 +358,23 @@ describe("API-preselected OpenCode full TUI", () => {
       assert.equal((await store.listOpenCodeLaunches())[0].state, "closed");
     });
   }
+  for (const frontend of ["mini", "tui"] as const) {
+    it(`holds ${frontend}'s exact preparation when its API backend loses the session after pane creation`, async () => {
+      update(providerFile, { sessionUnavailableAfterPane: true });
+      await assert.rejects(() => interactive(frontend), /ownership is unproven/);
+      const launch = (await store.listOpenCodeLaunches())[0];
+      assert.equal(launch.state, "prepared");
+      assert.equal(launch.dispatchId, null);
+      assert.ok(launch.terminal, "the exact created pane remains available for inspection");
+      assert.equal(load(providerFile).sessions[launch.sessionId].id, launch.sessionId,
+        "loss of API visibility must not erase the original provider session");
+      assert.equal(calls(orcaLog, "worker-start").length, 0, "no Task input reaches an unproven backend");
+      assert.equal(calls(orcaLog, "close").length, 0, "missing API evidence cannot authorize closing the pane");
+      await assert.rejects(() => interactive(frontend), /unresolved OpenCode preparation/);
+      assert.equal(calls(providerLog, "POST").length, 1, "no replacement session");
+      assert.equal(calls(orcaLog, "create").length, 1, "no replacement pane");
+    });
+  }
   it("does not mistake input acceptance or silence for an assistant turn or resend", async () => {
     update(providerFile, { noAssistant: true });
     const started = await start();
