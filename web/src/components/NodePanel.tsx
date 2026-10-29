@@ -29,6 +29,7 @@ import {
 } from "../harness";
 import {
   HARNESSES,
+  UNVERIFIED_HARNESSES,
   OPEN_CODE_UIS,
   isOpenCodeUi,
   EFFORT_LEVELS,
@@ -144,6 +145,9 @@ export function NodePanel({
             ? t("exec.lockHistoryLoading")
       : null;
   const stored = getNodeHarness(node.id);
+  const defaultHarness = getDefaultHarness();
+  const defaultIsUnverified = UNVERIFIED_HARNESSES[defaultHarness] === true;
+  const storedIsUnverified = stored !== null && UNVERIFIED_HARNESSES[stored] === true;
   const [sel, setSel] = useState(stored === null ? INHERIT : KNOWN.includes(stored) ? stored : CUSTOM);
   const [custom, setCustom] = useState(stored && !KNOWN.includes(stored) ? stored : "");
   const [specExpanded, setSpecExpanded] = useState(false);
@@ -164,7 +168,7 @@ export function NodePanel({
     else if (v !== CUSTOM) setNodeHarness(node.id, v);
   }
   function pickCustom(v: string) {
-    if (!customOk || launchLocked) return; // keep the stored value intact while locked
+    if (!customOk || launchLocked || storedIsUnverified) return;
     setCustom(v);
     setNodeHarness(node.id, v.trim() || null);
   }
@@ -465,7 +469,14 @@ export function NodePanel({
             disabled={launchLocked}
             title={launchLocked ? lockReason ?? t("node.launchLockedTitle") : undefined}
             options={[
-              { value: INHERIT, label: t("node.defaultHarnessOption", { harness: getDefaultHarness() }) },
+              {
+                value: INHERIT,
+                label: t("node.defaultHarnessOption", {
+                  harness: defaultIsUnverified
+                    ? t("exec.unverifiedHarness", { harness: defaultHarness }) : defaultHarness,
+                }),
+                disabled: defaultIsUnverified,
+              },
               ...HARNESSES.map((h) => ({ value: h, label: h })),
               // Same policy as the toolbar: no "Custom…" unless the server allows
               // it — but a stored custom value stays visible (and clearable via
@@ -474,9 +485,11 @@ export function NodePanel({
                 ? [
                     {
                       value: CUSTOM,
-                      label: customOk ? t("exec.custom") : t("exec.customDisabled"),
-                      disabled: !customOk,
-                      hint: customOk ? undefined : "ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1",
+                      label: storedIsUnverified
+                        ? t("exec.unverifiedHarness", { harness: stored! })
+                        : customOk ? t("exec.custom") : t("exec.customDisabled"),
+                      disabled: !customOk || storedIsUnverified,
+                      hint: storedIsUnverified ? undefined : customOk ? undefined : "ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1",
                     },
                   ]
                 : []),
@@ -488,10 +501,13 @@ export function NodePanel({
               value={custom}
               placeholder={t("node.customPlaceholder")}
               onChange={(e) => pickCustom(e.target.value)}
-              disabled={!customOk || launchLocked}
+              disabled={!customOk || launchLocked || storedIsUnverified}
             />
           )}
-          {sel === CUSTOM && !customOk && (
+          {UNVERIFIED_HARNESSES[effHarness] === true && (
+            <span className="node-panel__hint">{t("exec.unverifiedHarnessHint", { harness: effHarness })}</span>
+          )}
+          {sel === CUSTOM && !customOk && !storedIsUnverified && (
             <span className="node-panel__hint">{t("exec.customOffHint")}</span>
           )}
         </div>
@@ -553,7 +569,7 @@ export function NodePanel({
 
         {/* worker-start accepts effort only alongside a model, and only for
             supported harnesses. Clearing the model clears stored effort. */}
-        {model && EFFORT_SUPPORTED.has(effHarness) && peerModelEffort && (
+        {model && EFFORT_SUPPORTED[effHarness] === true && peerModelEffort && (
           <div className="node-panel__field">
             <span className="node-panel__key">{t("node.effortKey", { harness: effHarness })}</span>
             <DoodleSelect

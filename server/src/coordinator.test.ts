@@ -383,6 +383,27 @@ async function singleTaskState(runId: string): Promise<void> {
 
 // --- tests -------------------------------------------------------------------
 
+describe("unverified harness rejection", () => {
+  for (const harness of ["gemini", "grok", "cursor", "droid", "kimi"]) {
+    it(`rejects ${harness} default and task override before coordinator side effects`, async () => {
+      await singleTaskState(`run_unverified_${harness}`);
+      await assert.rejects(
+        startCoordinator(baseOpts(`run_unverified_${harness}`, { defaultHarness: harness })),
+        (error: unknown) => (error as { code?: string }).code === "unverified_harness",
+      );
+      assert.equal(coordinatorStatus().running, false);
+      assert.equal(readLog().length, 0);
+
+      await assert.rejects(
+        startCoordinator(baseOpts(`run_unverified_${harness}`, { harnessByTask: { task_aaa: harness } })),
+        (error: unknown) => (error as { code?: string }).code === "unverified_harness",
+      );
+      assert.equal(coordinatorStatus().running, false);
+      assert.equal(readLog().length, 0);
+    });
+  }
+});
+
 describe("two-wave DAG: dependency order, concurrency cap, completion boundary", () => {
   it("runs two parallel roots then the dependent, releases every settled worker (success AND failure), and completes with zero reclaimable workers", async () => {
     const runId = "run_t";

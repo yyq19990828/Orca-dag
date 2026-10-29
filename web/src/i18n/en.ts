@@ -188,6 +188,8 @@ const en = {
   "exec.bindRunTitle": "Bind this Run and execute in dependency order",
   "exec.execUnavailableTitle": "Execution is unavailable on this Orca runtime",
   "exec.outcomeUnknown": "outcome unknown",
+  "exec.unverifiedHarness": "{harness} (unverified — unavailable)",
+  "exec.unverifiedHarnessHint": "{harness} has not been verified for viewer execution and cannot be launched. Choose claude, codex, or opencode. Saved preferences and history are preserved.",
   "exec.stopCleanOne": "✓ Stop clean · {n} action",
   "exec.stopCleanMany": "✓ Stop clean · {n} actions",
   "exec.stopUncertainOne": "⚠ Stop finished with {uncertain} uncertain · {n} action",

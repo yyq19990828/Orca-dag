@@ -261,6 +261,7 @@ export function DoodleSelect({
                     data-idx={i}
                     role="option"
                     aria-selected={o.value === value}
+                    aria-disabled={o.disabled || undefined}
                     className={
                       "doodle-select__opt" +
                       (i === active ? " doodle-select__opt--active" : "") +

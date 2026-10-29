@@ -133,8 +133,14 @@ describe("validateText", () => {
 
 describe("validateHarness", () => {
   it("lets known Orca agent ids through with zero setup", () => {
-    for (const h of ["claude", "codex", "opencode", "gemini", "grok", "cursor", "droid", "kimi"]) {
+    for (const h of ["claude", "codex", "opencode"]) {
       assert.equal(validateHarness(h, FLAG_OFF), h);
+    }
+  });
+  it("rejects formerly exposed harness ids even when custom commands are enabled", () => {
+    for (const h of ["gemini", "grok", "cursor", "droid", "kimi"]) {
+      assertThrowsWith(() => validateHarness(h, FLAG_OFF), "unverified_harness");
+      assertThrowsWith(() => validateHarness(h, FLAG_ON), "unverified_harness");
     }
   });
   it("rejects custom commands unless the policy allows them", () => {
@@ -263,8 +269,11 @@ describe("validateGroupAudience (Phase 6)", () => {
   });
 
   it("accepts known harness groups and nothing harness-shaped beyond the allowlist", () => {
-    for (const harness of ["claude", "codex", "opencode", "gemini", "grok", "cursor", "droid", "kimi"]) {
+    for (const harness of ["claude", "codex", "opencode"]) {
       assert.equal(validateGroupAudience(`@${harness}`), `@${harness}`);
+    }
+    for (const harness of ["gemini", "grok", "cursor", "droid", "kimi"]) {
+      assertThrowsWith(() => validateGroupAudience(`@${harness}`), "invalid_audience");
     }
     // Not a harness, not a Run group: an invented group can never pass.
     assertThrowsWith(() => validateGroupAudience("@kernel"), "invalid_audience");

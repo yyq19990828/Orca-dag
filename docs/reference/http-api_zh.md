@@ -18,11 +18,14 @@ viewer 作为一个具有直接控制 Orca 运行时能力的管理面进程，�
    - 同源的前端 SPA 应用在加载时通过 `GET /api/session` 获取并缓存该 Token；当服务端重启（Token 更换）后，客户端会自动重新拉取并透明重试一次请求。
    - 只读请求（`GET` 路由）不需要携带 Token。
    - 任何未携带或携带无效 Token 的写请求，在进入具体业务逻辑之前即被直接拒绝并返回 HTTP `403 Forbidden`。
-4. **自定义 Harness 命令限制**：
-   - 默认状态下，viewer 仅允许调度已知且经过适配的内置 harness（如 `claude`、`codex`、`opencode`、`gemini`、`grok`、`cursor`、`droid`、`kimi` 等）。
-   - 任何未知的自定义命令（例如直接运行 `aider` 等）将被服务拒绝，并返回 `custom_commands_disabled` 错误。
-   - 只有在启动 viewer 时显式声明环境变量 `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1`，方可解锁自定义命令。
-5. **严密的基础校验与防注入**：
+4. **已验证 Harness 与未验证 Harness 明确拒绝**：
+   - viewer 内置支持的受监督调度 harness 仅限已完成真实运行时验证的 `claude`、`codex` 与 `opencode`。
+   - 未经验证的 harness（`gemini`、`grok`、`cursor`、`droid`、`kimi`）缺乏具体的 supervised worker 运行验证，不可用于 viewer 调度启动。任何在调度启动（`POST /api/run`）或重试（`POST /api/workers/:id/retry`）中使用这 5 个 harness 的请求均被前置拦截并返回 HTTP 400 `unverified_harness` 拒绝，绝不进行静默替换或自动迁移；历史已落定的 worker 数据与账本记录在读取接口（如 `GET /api/workers`）中保持只读可查。
+5. **自定义 Harness 命令限制**：
+   - 任意用户自定义命令属于实验性逃生通道，不构成已验证支持承诺；默认状态下会被服务端拒绝并返回 HTTP 400 `custom_commands_disabled` 错误。
+   - 只有在启动 viewer 时显式声明环境变量 `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1` 方可解锁自定义命令，且仅走本地兼容路径、不支持隔离放置。
+   - 即使开启了 `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1`，上述 5 个未验证 bare ID（`gemini`、`grok`、`cursor`、`droid`、`kimi`）依然被直接拒绝并返回 `unverified_harness`，严禁将其作为 bare ID 绕过验证机制。
+6. **严密的基础校验与防注入**：
    - 所有输入的 Run ID、Task ID、Gate ID、harness 名称、`provider/model` 路径、并发上限数值等，在 HTTP 边界均经过严格的白名单和格式校验。
    - 后端调用 Orca CLI 时采用已解析的纯 argv 参数列表，执行选项强制设为 `shell: false`，杜绝任何 shell 命令注入风险。
 

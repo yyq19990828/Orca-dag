@@ -31,7 +31,7 @@ env -u ORCA_TERMINAL_HANDLE -u ORCA_TAB_ID -u ORCA_WORKSPACE_ID -u ORCA_WORKTREE
 | `ORCA_CLI_COMMAND` | Auto-resolved CLI | Exact executable plus quoted argv; parsed **without a shell**. Pipes, redirection, substitutions, and unquoted `$` are rejected. |
 | `--no-skill` or `ORCA_DAG_NO_SKILL=1` | Skill installed | Skip best-effort installation of the bundled `orca-dag` skill into existing agent directories. |
 | `--no-workspace-init` or `ORCA_DAG_NO_WORKSPACE_INIT=1` | `.orca-dag/` ignore initialized | Skip adding the managed planning-artifact rule to the workspace's `.gitignore`; ensure `.orca-dag/` is ignored yourself before planning. |
-| `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1` | Off | Allow custom harness commands. Such commands use the legacy local path and cannot use an isolated placement. |
+| `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1` | Off | Allow experimental custom harness commands (opt-in escape hatch; NOT a verified support claim). Such commands use the legacy local path and cannot use an isolated placement. Unverified bare IDs (`gemini`, `grok`, `cursor`, `droid`, `kimi`) are rejected with `unverified_harness` even with this flag enabled. |
 
 CLI auto-resolution is `ORCA_CLI_COMMAND` → `orca-dev` when `ORCA_DEV_REPO_ROOT` is set → `orca-ide` on Linux outside an Orca terminal → `orca`. The resolved CLI is used for both reads and mutations. `GET /api/readiness` reports `cliVersion` separately from the selected runtime's `version` and `runtimeState`; a newer executable does not prove its target is running or updated. Execution requires CLI 1.4.205+ and a positively ready runtime with a stable appVersion of 1.4.205+; unknown, disconnected, or starting runtimes stay view-only. Orca 1.4.160–1.4.204 can still display a Run. The viewer and skill also ship as standalone release binaries and in the `npx orca-orchestration-launcher` package.
 
@@ -53,7 +53,7 @@ Continuing the same plan or adding Tasks to its Run keeps that directory; the ag
 
 ### Skill installation and agent homes
 
-The bundled skill is installed only for detected agent configuration roots. Claude Code, Cursor, Gemini CLI, Droid, Grok, Kiro, Qoder and CodeBuddy use native skill directories. Codex, OpenCode, Pi, OMP and Kimi share a canonical `~/.agents/skills` copy; their existing config directories can trigger installation even when `.agents` does not exist yet. An otherwise agent-free HOME is not populated.
+The bundled skill is installed only for detected agent configuration roots. Claude Code, Cursor, Gemini CLI, Droid, Grok, Kiro, Qoder and CodeBuddy use native skill directories. Codex, OpenCode, Pi, OMP and Kimi share a canonical `~/.agents/skills` copy; their existing config directories can trigger installation even when `.agents` does not exist yet. An otherwise agent-free HOME is not populated. Agent skill installation and planning capability are independent of supervised worker execution verification.
 
 `CLAUDE_CONFIG_DIR`, `GROK_HOME` and `KIRO_HOME` select existing absolute native-agent homes; relative paths, HOME itself and its ancestors are ignored. `CODEX_HOME` also participates in detection, while its skill destination stays canonical. Use the same overrides when uninstalling.
 
@@ -78,10 +78,10 @@ Orca Tasks have no fields for harness, model, placement, or canvas layout. The v
 | Setting | Default / allowed value | Effect and limit |
 | --- | --- | --- |
 | OpenCode interface | `auto` | Auto retains current routes; Mini TUI / Full TUI are explicit, with per-node override or inherit. |
-| Default harness | `claude` | Used when a Stage has no override. Known choices include Claude, Codex, OpenCode, Gemini, Grok, Cursor, Droid, and Kimi. |
-| Stage harness | Inherits default | Selects the launch adapter; custom commands require `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1`. |
-| Stage model | Agent default | OpenCode offers advisory dropdown suggestions from local workspace discovery alongside manual valid `provider/model[#variant]` input; Claude, Codex, and Cursor accept a model name. Saved unlisted models are preserved; locked once execution begins. |
-| Stage effort | Unset | `low`, `medium`, or `high` in the UI for Claude, Codex, or Cursor; requires a model on the same Stage and remote peer support when applicable. |
+| Default harness | `claude` | Used when a Stage has no override. Built-in selectable choices are strictly limited to verified harnesses: `claude`, `codex`, and `opencode`. Unverified harnesses (`gemini`, `grok`, `cursor`, `droid`, `kimi`) are not exposed as built-in presets; saved selections attempting to launch fail upfront with an explicit `unverified_harness` refusal (no silent fallback or auto-migration). Historical records remain readable. |
+| Stage harness | Inherits default | Selects the launch adapter (`claude`, `codex`, `opencode`). User-defined custom commands require `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1` (experimental opt-in, legacy local path only, no isolated placement, and NOT a verified support claim; unverified bare IDs are rejected even with custom flag on). |
+| Stage model | Agent default | OpenCode offers advisory dropdown suggestions from local workspace discovery alongside manual valid `provider/model[#variant]` input; Claude and Codex accept a model name. Saved unlisted models are preserved; locked once execution begins. |
+| Stage effort | Unset | `low`, `medium`, or `high` in the UI for Claude or Codex; requires a model on the same Stage and remote peer support when applicable. |
 | Max parallel | `4`, integer `1`–`16` | Caps simultaneous worker starts; DAG dependencies and lanes may reduce actual parallelism. |
 | Stage environment / placement | Local / Current | A saved remote environment needs an exact existing workspace or named new top-level worktree. See [placement parameters](worktree-isolation.md#creation-fields-and-limits). |
 | Workspace lane | None | Reuses one non-Current local workspace for a dependency-ordered Task chain. |

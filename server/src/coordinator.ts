@@ -1,4 +1,4 @@
-import { KNOWN_HARNESSES } from "./security";
+import { isUnverifiedHarness, KNOWN_HARNESSES } from "./security";
 import {
   OrcaCliError,
   bindRun,
@@ -1009,6 +1009,13 @@ export type CoordinatorStatus = Omit<ReturnType<typeof coordinatorStatus>, "reco
  * `consumer_fenced` on its own mutations until it runs `run-use` again.
  */
 export async function startCoordinator(opts: StartOpts): Promise<void> {
+  const unverified = [opts.defaultHarness, ...Object.values(opts.harnessByTask ?? {})].find(isUnverifiedHarness);
+  if (unverified) {
+    throw new OrcaCliError(
+      `"${unverified}" is an unverified harness and cannot be launched by Orca viewer.`,
+      "unverified_harness",
+    );
+  }
   if (state.running) return;
   state.running = true;
   // Supersede any loop that might still be draining its final iteration (see
@@ -4194,6 +4201,14 @@ async function startOne(
     on: environment,
   };
   try {
+    // Recovered history can retain a retired preset. Use the normal refusal
+    // settlement path so a reserved slot cannot remain pending indefinitely.
+    if (isUnverifiedHarness(attempt.harness)) {
+      throw new OrcaCliError(
+        `"${attempt.harness}" is an unverified harness and cannot be launched by Orca viewer.`,
+        "unverified_harness",
+      );
+    }
     // This protection remains even if the experimental flag/harness changed
     // after a crash. Disabling the adapter must not authorize a duplicate
     // one-shot (or another harness) over an unresolved preparation.
@@ -4987,6 +5002,12 @@ export async function retryWorker(idOrTask: string): Promise<{
     throw new OrcaCliError(
       `No attempt matching ${idOrTask} in this coordinator's projection.`,
       "retry_target_not_found",
+    );
+  }
+  if (isUnverifiedHarness(attempt.harness)) {
+    throw new OrcaCliError(
+      `"${attempt.harness}" is an unverified harness and cannot be launched by Orca viewer.`,
+      "unverified_harness",
     );
   }
   if (state.retryCandidates.has(attempt.taskId)) {

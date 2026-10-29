@@ -136,22 +136,26 @@ export const STATUS_META: Record<TaskStatus, StatusMeta> = {
 };
 
 /**
- * Harness presets. These are Orca TUI agent ids: the coordinator passes one to
- * `orca orchestration worker-start --agent <id>`, so Orca owns the launcher and
- * its autonomous flags. Anything Orca doesn't recognize (a custom command) still
- * works — the coordinator falls back to creating the terminal itself.
+ * Viewer presets are limited to harnesses with recorded execution evidence.
+ * Orca recognizing an agent id does not establish viewer compatibility.
+ * Historical/configured strings remain readable; custom commands are a
+ * separate explicit opt-in, not a verified-agent support claim.
  */
 export const HARNESSES = [
   "claude",
   "codex",
   "opencode",
-  "gemini",
-  "grok",
-  "cursor",
-  "droid",
-  "kimi",
 ] as const;
 export type Harness = (typeof HARNESSES)[number] | (string & {});
+
+/** Previously advertised agents without viewer execution verification. */
+export const UNVERIFIED_HARNESSES: Readonly<Partial<Record<string, true>>> = {
+  gemini: true,
+  grok: true,
+  cursor: true,
+  droid: true,
+  kimi: true,
+};
 
 export const OPEN_CODE_UIS = ["auto", "mini", "tui"] as const;
 export type OpenCodeUi = typeof OPEN_CODE_UIS[number];
@@ -853,7 +857,7 @@ export interface ViewerConfig {
   harnessByTask: Record<string, string>;
   /**
    * Per-task model override. Only meaningful for harnesses that support model
-   * selection (opencode via `-m`, claude/codex/cursor via `worker-start
+   * selection (opencode via `-m`, claude/codex via `worker-start
    * --model`); empty string / absent means the agent's default model.
    */
   modelByTask: Record<string, string>;
@@ -889,7 +893,7 @@ export interface ViewerConfig {
  * Harness → model-selection capability. opencode gets an enumerable dropdown
  * (`opencode models`); explicit models use a guarded native opencode start or
  * one-shot/API compatibility, while the configured default can use native
- * opencode2. claude/codex/cursor get free-text; others have no model control.
+ * opencode2. claude/codex get free-text; other harnesses have no model control.
  */
 export type ModelPickerKind = "select" | "text" | "none";
 
@@ -897,7 +901,6 @@ export const MODEL_PICKER: Record<string, ModelPickerKind> = {
   opencode: "select",
   claude: "text",
   codex: "text",
-  cursor: "text",
 };
 
 /**
@@ -905,7 +908,7 @@ export const MODEL_PICKER: Record<string, ModelPickerKind> = {
  * effort requires a model, and opencode (the legacy path) has no effort flag —
  * so the effort picker renders only for these, and only when a model is set.
  */
-export const EFFORT_SUPPORTED: ReadonlySet<string> = new Set(["claude", "codex", "cursor"]);
+export const EFFORT_SUPPORTED: Readonly<Partial<Record<string, true>>> = { claude: true, codex: true };
 
 /** Common reasoning-effort levels. Orca owns the authoritative list per model. */
 export const EFFORT_LEVELS = ["low", "medium", "high"] as const;

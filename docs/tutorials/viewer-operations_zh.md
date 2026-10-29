@@ -31,7 +31,7 @@ env -u ORCA_TERMINAL_HANDLE -u ORCA_TAB_ID -u ORCA_WORKSPACE_ID -u ORCA_WORKTREE
 | `ORCA_CLI_COMMAND` | 自动选择 CLI | 指定准确的可执行文件及带引号的 argv；**不经 shell** 解析。管道、重定向、命令替换及未引用的 `$` 会被拒绝。 |
 | `--no-skill` 或 `ORCA_DAG_NO_SKILL=1` | 安装 skill | 跳过将随包提供的 `orca-dag` skill 尽力安装到已有 agent 目录。 |
 | `--no-workspace-init` 或 `ORCA_DAG_NO_WORKSPACE_INIT=1` | 初始化 `.orca-dag/` 忽略规则 | 跳过向工作区 `.gitignore` 添加规划产物管理规则；规划前请自行确认 `.orca-dag/` 已被忽略。 |
-| `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1` | 关闭 | 允许自定义 harness 命令。它们走兼容性本地路径，不能使用隔离放置。 |
+| `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1` | 关闭 | 允许实验性自定义 harness 命令（实验性逃生通道，不构成已验证支持承诺）。它们走兼容性本地路径，不能使用隔离放置。即使开启该开关，未验证 bare ID（`gemini`、`grok`、`cursor`、`droid`、`kimi`）依然被直接拒绝。 |
 
 CLI 自动选择顺序为：`ORCA_CLI_COMMAND` → 设置了 `ORCA_DEV_REPO_ROOT` 时的 `orca-dev` → Linux 且不在 Orca 终端内时的 `orca-ide` → `orca`。读取和修改都使用同一个已解析的 CLI。`GET /api/readiness` 分别报告 `cliVersion`、所选运行时的 `version` 与 `runtimeState`；较新的可执行文件不能证明目标正在运行或已升级。执行要求 CLI 1.4.205+，以及明确处于 ready 状态、稳定 appVersion 为 1.4.205+ 的运行时；状态未知、断连或启动中的运行时保持只读。Orca 1.4.160–1.4.204 仍可查看 Run。viewer 和 skill 可以通过 `npx orca-orchestration-launcher` 一起安装，也有独立发布的二进制文件。
 
@@ -39,7 +39,7 @@ CLI 自动选择顺序为：`ORCA_CLI_COMMAND` → 设置了 `ORCA_DEV_REPO_ROOT
 
 ### Skill 安装与 agent 目录
 
-仅为检测到配置目录的 agent 安装 skill。Claude Code、Cursor、Gemini CLI、Droid、Grok、Kiro、Qoder 和 CodeBuddy 使用各自的 skill 目录；Codex、OpenCode、Pi、OMP 和 Kimi 共享 `~/.agents/skills`。即使 `.agents` 尚不存在，检测到这些 agent 的配置也会建立共享安装；没有 agent 配置的 HOME 不会被填充。
+仅为检测到配置目录的 agent 安装 skill。Claude Code、Cursor、Gemini CLI、Droid、Grok、Kiro、Qoder 和 CodeBuddy 使用各自的 skill 目录；Codex、OpenCode、Pi、OMP 和 Kimi 共享 `~/.agents/skills`。即使 `.agents` 尚不存在，检测到这些 agent 的配置也会建立共享安装；没有 agent 配置的 HOME 不会被填充。Agent 的 skill 安装与规划能力与 supervised worker 执行验证相互独立。
 
 `CLAUDE_CONFIG_DIR`、`GROK_HOME` 和 `KIRO_HOME` 可指定已存在的绝对 native-agent 配置路径；相对路径、HOME 本身及其祖先目录会被忽略。`CODEX_HOME` 参与 Codex 发现，但 skill 仍安装到共享目录。卸载时使用同样的目录覆盖设置。
 
@@ -66,10 +66,10 @@ Orca Task 没有 harness、模型、放置位置或画布布局字段。viewer �
 | 设置 | 默认值或允许值 | 效果和限制 |
 | --- | --- | --- |
 | OpenCode 启动界面 | `auto` | 自动保留当前路由；可显式选择 Mini TUI / 完整 TUI，节点支持覆盖或继承。 |
-| 默认 harness | `claude` | Stage 没有单独覆盖时使用。已知选项包括 Claude、Codex、OpenCode、Gemini、Grok、Cursor、Droid、Kimi。 |
-| Stage harness | 继承默认值 | 选择启动适配器；自定义命令需要 `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1`。 |
-| Stage 模型 | agent 默认值 | OpenCode 提供来自本地工作区建议性发现的下拉候选项，同时支持手动输入合法的 `provider/model[#variant]`；Claude、Codex 和 Cursor 可填写模型名。已保存但未在列表中的模型予以保留；开始执行后锁定。 |
-| Stage effort | 不设置 | Claude、Codex、Cursor 的界面选项是 `low`、`medium`、`high`；同一个 Stage 必须已设置模型，远端还须通告相应能力。 |
+| 默认 harness | `claude` | Stage 没有单独覆盖时使用。内置可选 harness 严格限定于已完成真实运行时验证的 `claude`、`codex`、`opencode`。未经验证的 harness（`gemini`、`grok`、`cursor`、`droid`、`kimi`）不再提供内置预设；若节点保存了这些未验证 harness，启动与重试均被前置拦截并以 `unverified_harness` 明确拒绝（绝不进行静默替换或自动迁移），历史记录保持只读可查。 |
+| Stage harness | 继承默认值 | 选择启动适配器（`claude`、`codex`、`opencode`）；自定义命令属于实验性逃生通道且不构成已验证支持承诺，需要显式设置 `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1`（仅走本地兼容路径，不支持隔离放置；即使开启该开关，5 个未验证 bare ID 仍被拒绝）。 |
+| Stage 模型 | agent 默认值 | OpenCode 提供来自本地工作区建议性发现的下拉候选项，同时支持手动输入合法的 `provider/model[#variant]`；Claude 和 Codex 可填写模型名。已保存但未在列表中的模型予以保留；开始执行后锁定。 |
+| Stage effort | 不设置 | Claude、Codex 的界面选项是 `low`、`medium`、`high`；同一个 Stage 必须已设置模型，远端还须通告相应能力。 |
 | Max parallel | `4`，整数 `1`–`16` | 限制同时启动的 worker 数；DAG 依赖和 lane 可能使实际并行数更低。 |
 | Stage 环境/放置 | 本地 / Current | 已保存的远端环境需要精确 Existing 工作区或显式命名的新顶层工作树。见[放置参数](worktree-isolation_zh.md#创建字段及限制)。 |
 | 工作区 lane | 无 | 让一串依赖有序的 Task 复用一个非 Current 本地工作区。 |

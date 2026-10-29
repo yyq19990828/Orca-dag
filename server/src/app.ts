@@ -167,7 +167,7 @@ function fail(res: express.Response, err: unknown): void {
   }
   const e = err as OrcaCliError;
   const code = e?.code ?? null;
-  const status =
+  const status = code === "unverified_harness" ? 400 :
     code === "run_required" || code === "run_not_found"
       ? 409
       : code === "coordinator_conflict"

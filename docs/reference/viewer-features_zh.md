@@ -34,7 +34,10 @@
 
 ## Harness 适配、模型与推理力度
 
-- **多 Agent Harness 矩阵**：支持 `claude / codex / opencode / gemini / grok / cursor / droid / kimi` 及自定义命令（自定义命令需要启动参数放行）。支持通过工具条的默认 harness 统一兜底，亦可针对单个任务独立覆盖。
+- **已验证 Harness 矩阵**：内置可选 harness 严格限定于已完成真实运行时验证的 `claude`、`codex`、`opencode`，并遵守各版本与路径约束。未单独配置的节点继承顶栏默认 harness（`claude`）。
+- **未验证 Harness 明确拒绝**：`gemini`、`grok`、`cursor`、`droid`、`kimi` 尚未获得具体的 supervised worker 运行时验证，viewer 不再提供内置预设，亦不暴露可用于启动的选项。若节点配置或已保存设置尝试以这些未验证 harness 启动，将被前端与服务端以前置错误 `unverified_harness` 明确拒绝，绝不进行静默替换或自动迁移；历史已落定的 worker 数据与相关记录在 viewer 中保持只读可查。
+- **实验性自定义命令**：需显式设置环境变量 `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1` 方可解锁自定义命令，且仅走本地兼容路径、不支持隔离放置。自定义命令属于实验性逃生通道，**不构成**已验证支持承诺；即使开启该开关，上述 5 个未验证 bare ID（`gemini`、`grok`、`cursor`、`droid`、`kimi`）依然被直接拒绝并报错 `unverified_harness`，严禁将其作为 bare ID 绕过验证机制。
+- **技能安装与规划能力独立保留**：Agent 的 skill 安装（如 Claude Code、Codex、Cursor、OpenCode、Gemini、Grok、Droid、Kimi）和阅读 `SKILL.md` 的建图规划支持依然完整保留，因为建图端与 skill 生态能力与 worker 执行验证相互独立。
 - **每节点模型覆盖**：
   - `opencode` harness：
     - **建议性发现与下拉选单**：通过本地工作区模型发现接口（`GET /api/models/opencode`）动态加载。作用域限定于 `local-workspace`；失败时提供受控英文诊断且不泄露 stderr。明确区分成功但目录为空（`status: "available"`、空 `models`）与发现失败（`status: "unavailable"`）。
@@ -42,9 +45,9 @@
     - **草稿校验与持久化规则**：自由文本输入校验严格匹配 `/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(?:#[A-Za-z0-9._-]{1,64})?$/` 正则。不合法的输入被标记为 `aria-invalid`，且绝不写入节点配置存储；清空文本框则重置恢复为默认模型（`null`）。
     - **已保存但不在目录中的模型保留**：若节点此前保存的模型在本地发现目录中不存在（如自定义 provider 或宿主环境差异），该模型依然作为候选项保留在下拉列表中，绝不自动抹除。
     - **启动锁定（Launch-Locked）**：任务一旦派发过首次 Dispatch 或协调者处于运行中，模型下拉选单与手动输入文本框连同 harness、effort、placement 一同置灰禁用（`disabled={launchLocked}`）。
-  - `claude` 和 `cursor` 通过 `worker-start --model` 传递模型；
+  - `claude` 通过 `worker-start --model` 传递模型；
   - 本地 POSIX Codex 在当前/已有工作区、运行中的 Orca ≥ 1.4.217 时使用原生模型启动；旧版/未知运行时及本地新建工作区保留预启动绑定路径，远程与 Windows 使用原生路径。详见[Codex 启动边界](../tutorials/viewer-operations_zh.md#codex-原生启动与兼容路径)。
-- **推理力度（Effort）**：`claude`、`codex`、`cursor` 可选择各自支持的力度，且必须同时设置模型；清空模型会清空 effort。原生启动传递 `--effort`，兼容预启动 Codex 则在启动命令中设置。
+- **推理力度（Effort）**：`claude`、`codex` 可选择各自支持的力度，且必须同时设置模型；清空模型会清空 effort。原生启动传递 `--effort`，兼容预启动 Codex 则在启动命令中设置。
 - **OpenCode 启动模式与原生路由边界**：
   - **自动模式（默认）**：未指定模型且 Orca ≥ 1.4.220 时使用原生 `opencode2`；纯净显式模型（不含 `#variant`、不带 effort、非 lane、非 Windows、当前/已有放置、非 TUI 模式）在运行中 Orca ≥ 1.4.241+ 上使用独立的 Orca 原生 `opencode` 启动器。本地目录发现仅具建议性，不代表执行宿主真实可用。
   - **兼容路径保留**：显式 Mini TUI、Full TUI、模型变体（`#variant`）、推理力度（effort）、lanes、新建工作树（new child/top-level）及远程放置均保留各自适配器与兼容路径。

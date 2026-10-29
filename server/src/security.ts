@@ -135,21 +135,32 @@ export function assertOpenCodeUiPlacement(ui: OpenCodeUi, environment: unknown, 
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 /**
- * The harness ids this viewer treats as "known Orca agents" — passed to
- * `worker-start --agent`, whose launcher Orca owns. Keep in sync with
- * `HARNESSES` in web/src/types.ts (the UI's picker list). Anything else is a
- * custom command and goes through the `allowCustomCommands` gate.
+ * Harness ids that were previously exposed but have no recorded viewer
+ * worker-execution verification. Orca's own registry is not viewer evidence.
+ * Never fall through to custom-command handling, even with explicit opt-in.
+ */
+export const UNVERIFIED_HARNESSES: Readonly<Partial<Record<string, true>>> = {
+  gemini: true,
+  grok: true,
+  cursor: true,
+  droid: true,
+  kimi: true,
+};
+
+/**
+ * Verified viewer presets — Orca owns their launcher via `worker-start --agent`.
+ * Keep in sync with `HARNESSES` in web/src/types.ts. Unverified ids are refused
+ * separately; other commands go through the `allowCustomCommands` gate.
  */
 export const KNOWN_HARNESSES: ReadonlySet<string> = new Set([
   "claude",
   "codex",
   "opencode",
-  "gemini",
-  "grok",
-  "cursor",
-  "droid",
-  "kimi",
 ]);
+
+export function isUnverifiedHarness(harness: string): boolean {
+  return UNVERIFIED_HARNESSES[harness] === true;
+}
 
 const KNOWN_HARNESS_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
 
@@ -166,7 +177,7 @@ const KNOWN_HARNESS_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
  *    argument on the legacy shell path (see `startOpencodeWorker`).
  */
 export const OPENCODE_MODEL_PATTERN = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(?:#[A-Za-z0-9._-]{1,64})?$/;
-/** claude/codex/cursor take free-text model names via `worker-start --model`. */
+/** Verified claude/codex presets take free-text model names via `worker-start --model`. */
 const PLAIN_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._+/-]{0,127}$/;
 
 /** Trim + validate an Orca id (run, task, gate). Empty → null so callers can require it. */
@@ -205,6 +216,9 @@ export function validateText(raw: unknown, field: string, maxLen: number): strin
 export function validateHarness(raw: unknown, policy: SecurityPolicy): string {
   const v = String(raw ?? "").trim();
   if (!v) throw new ValidationError("harness value must not be empty");
+  if (isUnverifiedHarness(v)) {
+    throw new ValidationError(`"${v}" is an unverified harness and cannot be launched by Orca viewer`, "unverified_harness");
+  }
   if (KNOWN_HARNESSES.has(v)) return v;
   if (!policy.allowCustomCommands) {
     throw new ValidationError(

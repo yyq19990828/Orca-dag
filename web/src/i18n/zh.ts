@@ -185,6 +185,8 @@ const zh: Dict = {
   "exec.bindRunTitle": "绑定本 Run 并按依赖顺序执行",
   "exec.execUnavailableTitle": "当前 Orca 运行时无法执行",
   "exec.outcomeUnknown": "结果未知",
+  "exec.unverifiedHarness": "{harness}（未验证，不可用）",
+  "exec.unverifiedHarnessHint": "{harness} 尚未通过 viewer 执行验证，不能启动。请选择 claude、codex 或 opencode；原配置和历史记录会保留。",
   "exec.stopCleanOne": "✓ 停止完成 · {n} 项操作",
   "exec.stopCleanMany": "✓ 停止完成 · {n} 项操作",
   "exec.stopUncertainOne": "⚠ 停止结束，{uncertain} 项结果未知 · {n} 项操作",

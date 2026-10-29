@@ -20,7 +20,7 @@ import {
   useFlags,
   useReadiness,
 } from "../harness";
-import { HARNESSES, OPEN_CODE_UIS, isOpenCodeUi, type DagEdge, type RunStatus } from "../types";
+import { HARNESSES, UNVERIFIED_HARNESSES, OPEN_CODE_UIS, isOpenCodeUi, type DagEdge, type RunStatus } from "../types";
 import { lanePlanProblems } from "../placement";
 import { laneMap, lanesSpecMap } from "../harness";
 
@@ -115,6 +115,7 @@ export function ExecControls({
   const readiness = useReadiness();
   const execOff = readiness !== null && !readiness.executionEnabled;
   const storedIsCustom = !KNOWN.includes(config.defaultHarness);
+  const storedIsUnverified = UNVERIFIED_HARNESSES[config.defaultHarness] === true;
   // "Custom…" selected but not yet typed — a UI-only state until run()
   const [forceCustom, setForceCustom] = useState(false);
   const [custom, setCustom] = useState(storedIsCustom ? config.defaultHarness : "");
@@ -155,6 +156,8 @@ export function ExecControls({
       : historyLockReason;
   const launchLocked = running || starting || Boolean(historyLockReason);
   const resolvedDefault = defHarness === CUSTOM ? custom.trim() : defHarness;
+  const defaultLabel = storedIsUnverified
+    ? t("exec.unverifiedHarness", { harness: config.defaultHarness }) : resolvedDefault;
   // Settlement/ownership bookkeeping worth surfacing while the loop runs.
   const settled = (ownStatus?.attempts ?? []).filter((a) => a.settled).length;
   const released = (ownStatus?.attempts ?? []).filter((a) =>
@@ -223,6 +226,9 @@ export function ExecControls({
       const launchConfig = await refreshConfig();
       const launchDefault = launchConfig.defaultHarness;
       if (!launchDefault) throw new Error(t("err.pickDefaultHarness"));
+      const unverified = [launchDefault, ...Object.values(harnessMap(taskIdsRef.current))]
+        .find((harness) => UNVERIFIED_HARNESSES[harness] === true);
+      if (unverified) throw new Error(t("exec.unverifiedHarnessHint", { harness: unverified }));
       if (!customOk) {
         const customs = [launchDefault, ...Object.values(harnessMap(taskIdsRef.current))].some(
           (h) => !KNOWN.includes(h),
@@ -293,7 +299,7 @@ export function ExecControls({
       <details className="exec__settings">
         <summary
           aria-label={t("exec.settingsAria", {
-            harness: resolvedDefault || t("exec.noDefaultHarness"),
+            harness: defaultLabel || t("exec.noDefaultHarness"),
             n: config.maxConcurrency,
           })}
           title={launchLockReason ?? t("exec.settingsTitle")}
@@ -302,7 +308,7 @@ export function ExecControls({
           <span>{t("exec.settings")}</span>
           <span className="exec__settings-summary">
             {t("exec.summaryMax", {
-              harness: resolvedDefault || t("exec.noHarness"),
+              harness: defaultLabel || t("exec.noHarness"),
               n: config.maxConcurrency,
             })}
           </span>
@@ -335,9 +341,11 @@ export function ExecControls({
                   ? [
                       {
                         value: CUSTOM,
-                        label: customOk ? t("exec.custom") : t("exec.customDisabled"),
-                        disabled: !customOk,
-                        hint: customOk ? undefined : "ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1",
+                        label: storedIsUnverified
+                          ? t("exec.unverifiedHarness", { harness: config.defaultHarness })
+                          : customOk ? t("exec.custom") : t("exec.customDisabled"),
+                        disabled: !customOk || storedIsUnverified,
+                        hint: storedIsUnverified ? undefined : customOk ? undefined : "ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1",
                       },
                     ]
                   : []),
@@ -352,10 +360,12 @@ export function ExecControls({
                 onChange={(e) => {
                   if (!launchLocked) setCustom(e.target.value);
                 }}
-                disabled={launchLocked || !customOk}
+                disabled={launchLocked || !customOk || storedIsUnverified}
               />
             )}
-            {defHarness === CUSTOM && !customOk && <span className="exec__hint">{t(CUSTOM_OFF_HINT_KEY)}</span>}
+            {storedIsUnverified ? (
+              <span className="exec__hint">{t("exec.unverifiedHarnessHint", { harness: config.defaultHarness })}</span>
+            ) : defHarness === CUSTOM && !customOk && <span className="exec__hint">{t(CUSTOM_OFF_HINT_KEY)}</span>}
           </div>
 
           <label className="exec__field">
