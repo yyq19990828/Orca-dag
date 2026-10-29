@@ -85,6 +85,22 @@ describe("OpenCode UI HTTP preferences", () => {
     await call("PUT", "/api/config", { defaultOpenCodeUi: "auto", openCodeUiByTask: {} }, policy.token);
   });
 });
+describe("read-only launch preview validation", () => {
+  it("requires the session token and rejects invalid plan values before runtime access", async () => {
+    assert.equal((await call("POST", "/api/launch-preview", { runId: "run_preview" })).status, 403);
+    const invalidPlans = [
+      { runId: "run_preview", defaultHarness: "opencode", modelByTask: { task_a: "not-a-provider-model" } },
+      { runId: "run_preview", defaultHarness: "opencode", effortByTask: { task_a: "xhigh" } },
+      { runId: "run_preview", placementByTask: { task_a: { kind: "unknown" } } },
+    ];
+    for (const plan of invalidPlans) {
+      const result = await call("POST", "/api/launch-preview", plan, policy.token);
+      assert.equal(result.status, 400);
+      assert.equal(typeof result.json.error, "string");
+    }
+  });
+});
+
 
 describe("unauthenticated surface", () => {
   it("serves /api/health without a token", async () => {

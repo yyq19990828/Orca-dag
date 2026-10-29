@@ -60,14 +60,17 @@ import {
   stopWorkerReceipt,
   taskUpdate,
   tasksToDag,
-  type OrcaRun,
-  type OrcaReadiness,
+  MIN_NATIVE_OPENCODE_VERSION,
+  MIN_NATIVE_OPENCODE_MODEL_VERSION,
   type OrcaWorktreeRow,
   type WorkspaceChangedMode,
   type WorktreeRemovalReceipt,
   type WorkerObservation,
   workerSupervision,
+  OrcaReadiness,
+  OrcaRun,
 } from "./orca";
+import type { PlacementSpec } from "./config";
 import { buildRunHealth, type RunHealthView } from "./runHealth";
 import { loadConfig, saveConfig } from "./config";
 import {
@@ -84,7 +87,7 @@ import {
   assertOpenCodeUiPlacement,
   assertLanePlacementDisjoint,
   assertLaneReferences,
-  requireToken,
+  KNOWN_HARNESSES,
   validateBooleanTaskMap,
   validateConcurrency,
   validateEffort,
@@ -106,6 +109,7 @@ import {
   validateWorktreeLaneMap,
   ValidationError,
   type SecurityPolicy,
+  requireToken,
 } from "./security";
 import {
   ActivityJournal,
@@ -116,6 +120,7 @@ import {
 import { RequestLedger } from "./requestLedger";
 import { ProviderSessionStore } from "./providerSessions";
 import { LaunchHistory } from "./launchHistory";
+import { resolveOpenCodeRoute } from "./openCodeRoute";
 
 /**
  * The Express app, extracted from index.ts so it can be constructed and tested
@@ -1128,10 +1133,152 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
   );
 
   /**
+   * Read-only launch-plan preview. It validates launch harness/model/effort/
+   * placement fields, inspects current Orca runtime facts, and deliberately
+   * performs no terminal creation, binding, Task update, or worker start.
+   */
+  app.post(
+    "/api/launch-preview",
+    requireToken(policy),
+    route(async (req, res) => {
+      const runId = validateId(req.body?.runId, "runId");
+      if (!runId) throw new ValidationError("runId required", "run_required");
+      const saved = await loadConfig(workspaceDir);
+      const defaultHarness = req.body?.defaultHarness === undefined
+        ? validateHarness(saved.defaultHarness || "claude", policy)
+        : validateHarness(req.body.defaultHarness, policy);
+      const defaultOpenCodeUi = req.body?.defaultOpenCodeUi === undefined
+        ? saved.defaultOpenCodeUi ?? "auto" : validateOpenCodeUi(req.body.defaultOpenCodeUi);
+      const openCodeUiByTask = validateOpenCodeUiTaskMap(req.body?.openCodeUiByTask) ?? saved.openCodeUiByTask ?? {};
+      const harnessByTask = validateTaskValueMap(
+        req.body?.harnessByTask ?? saved.harnessByTask,
+        "harnessByTask",
+        { maxKeys: 500, valueKind: "harness" },
+        (value) => validateHarness(value, policy),
+      ) ?? {};
+      const modelByTask = validateTaskValueMap(
+        req.body?.modelByTask ?? saved.modelByTask,
+        "modelByTask",
+        { maxKeys: 500, valueKind: "model" },
+        (value, key) => validateModel(value, harnessByTask[key] ?? defaultHarness),
+      ) ?? {};
+      const effortByTask = validateTaskValueMap(
+        req.body?.effortByTask ?? saved.effortByTask,
+        "effortByTask",
+        { maxKeys: 500, valueKind: "effort" },
+        (value) => validateEffort(value),
+      ) ?? {};
+      for (const taskId of Object.keys(effortByTask)) {
+        if (!modelByTask[taskId]) throw new ValidationError(
+          `effortByTask["${taskId}"] requires a model for the same task`, "effort_requires_model",
+        );
+      }
+      const environmentByTask = validateEnvironmentTaskMap(req.body?.environmentByTask ?? saved.environmentByTask, "environmentByTask") ?? {};
+      const placementByTask = validatePlacementTaskMap(req.body?.placementByTask ?? saved.placementByTask, "placementByTask") ?? {};
+      const worktreeLanes = validateWorktreeLaneMap(req.body?.worktreeLanes ?? saved.worktreeLanes, "worktreeLanes") ?? {};
+      const laneByTask = validateLaneTaskMap(req.body?.laneByTask ?? saved.laneByTask, "laneByTask") ?? {};
+      assertLaneReferences(laneByTask, worktreeLanes);
+      assertLanePlacementDisjoint(placementByTask, laneByTask);
+      assertEnvironmentPlacementCompatibility(environmentByTask, placementByTask);
+      const tasks = await listTasks(runId);
+      for (const [taskId, ui] of Object.entries(openCodeUiByTask)) {
+        const task = tasks.find((candidate) => candidate.id === taskId);
+        if (!task || ["completed", "failed", "dispatched"].includes(task.status)) continue;
+        if ((harnessByTask[taskId] ?? defaultHarness) === "opencode" && ui !== "auto") {
+          assertOpenCodeUiPlacement(ui, environmentByTask[taskId], laneByTask[taskId], placementByTask[taskId]);
+        }
+      }
+      if ((defaultHarness === "opencode" || Object.values(harnessByTask).includes("opencode")) &&
+          (defaultOpenCodeUi !== "auto" || Object.values(openCodeUiByTask).some((value) => value !== "auto"))) {
+        for (const task of tasks) {
+          if (["completed", "failed", "dispatched"].includes(task.status)) continue;
+          if ((harnessByTask[task.id] ?? defaultHarness) === "opencode") {
+            assertOpenCodeUiPlacement(
+              openCodeUiByTask[task.id] ?? defaultOpenCodeUi,
+              environmentByTask[task.id], laneByTask[task.id], placementByTask[task.id],
+            );
+          }
+        }
+      }
+      const runtimeNeeded = tasks.some((task) =>
+        (harnessByTask[task.id] ?? defaultHarness) === "opencode",
+      );
+      const runtimeStatus = runtimeNeeded
+        ? await runOrca<{ runtime?: { appVersion?: string; capabilities?: string[] } }>(["status"])
+        : null;
+      const runtimeVersion = runtimeStatus?.runtime?.appVersion ?? null;
+      const capabilities = runtimeStatus?.runtime?.capabilities ?? [];
+      const entries = tasks.map((task) => {
+        const harness = harnessByTask[task.id] ?? defaultHarness;
+        const model = modelByTask[task.id] ?? null;
+        const effort = effortByTask[task.id] ?? null;
+        const laneId = laneByTask[task.id] ?? null;
+        const placement: PlacementSpec = laneId
+          ? worktreeLanes[laneId]!.placement
+          : placementByTask[task.id] ?? { kind: "current" };
+        const environment = environmentByTask[task.id] ?? null;
+        const ui = openCodeUiByTask[task.id] ?? defaultOpenCodeUi;
+        const route = harness === "opencode"
+          ? resolveOpenCodeRoute({
+              ui, model, effort, environment, lane: Boolean(laneId), placement,
+              reuseTerminal: null, platform: process.platform, runtimeVersion,
+              nativeDefaultVersion: MIN_NATIVE_OPENCODE_VERSION,
+              nativeModelVersion: MIN_NATIVE_OPENCODE_MODEL_VERSION,
+              capabilities,
+              tuiOptIn: process.env.ORCA_DAG_OPENCODE_TUI === "1",
+            })
+          : KNOWN_HARNESSES.has(harness)
+            ? {
+                route: "supervised" as const,
+                reason: "The selected harness uses the supervised worker path; compatibility depends on its Orca launcher.",
+                reasonCode: "supervisedCaveat",
+                limitations: [],
+              }
+            : (environment || laneId || placement.kind !== "current")
+              ? {
+                  route: "unsupported" as const,
+                  reason: "Custom commands use the local legacy path and cannot honor this worker placement.",
+                  reasonCode: "customCommandPlacementUnsupported",
+                  limitations: ["noFallback"],
+                }
+              : {
+                  route: "custom-command" as const,
+                  reason: "Custom command uses the viewer's local legacy terminal path.",
+                  reasonCode: "customCommandCaveat",
+                  limitations: [],
+                };
+        return {
+          taskId: task.id, status: task.status, harness, model, effort,
+          placement: {
+            environment,
+            laneId,
+            kind: placement.kind,
+            selector: placement.kind === "existing" ? placement.selector : null,
+          },
+          route: route.route, reason: route.reason, reasonCode: route.reasonCode, limitations: route.limitations,
+        };
+      });
+      const unsupported = entries.find((entry) =>
+        !["completed", "failed", "dispatched"].includes(entry.status) && entry.route === "unsupported",
+      );
+      if (unsupported) {
+        throw new ValidationError(
+          `Task ${unsupported.taskId} cannot honor the selected launch route: ${unsupported.reason}`,
+          "invalid_placement",
+        );
+      }
+      res.json({
+        runId, tasks: entries,
+        caveat: "Read-only plan preview; it is not proof of model availability or successful startup. External test runtimes/accounts/resources are operator or preparation-Task prerequisites, not worker-placement fields.",
+      });
+    }),
+  );
+  /**
    * Start the self-driven coordinator on one Run. It binds a coordinator terminal
    * (fencing any agent currently coordinating that Run) and then dispatches every
    * ready task in parallel until the DAG settles.
    */
+
   app.post(
     "/api/run",
     requireToken(policy),
@@ -1991,7 +2138,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         res.status(400).json({ error: "run query parameter required", code: "run_required" });
         return;
       }
-      const detail = await showWorkerDetail(dispatchId);
+      const detail = await showWorkerDetail(dispatchId, { includeProviderSession: true });
       if (!detail) {
         res.status(404).json({ error: "no such worker dispatch", code: "worker_not_found" });
         return;

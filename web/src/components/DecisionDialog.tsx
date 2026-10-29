@@ -184,7 +184,7 @@ export function DecisionDialogProvider({ children }: { children: ReactNode }) {
                 </span>
                 <h2 id="decision-dialog-title">{active.title}</h2>
               </header>
-              <p id="decision-dialog-message" className="decision-dialog__message">{active.message}</p>
+              <p id="decision-dialog-message" className="decision-dialog__message" tabIndex={0}>{active.message}</p>
               {active.kind === "prompt" && (
                 <label className="decision-dialog__field">
                   <span>{active.fieldLabel}</span>

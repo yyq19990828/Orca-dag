@@ -73,6 +73,7 @@ import { MERGE_PREP_MARKER, StageGit, validateStagePlan } from "./stageGit";
 import type { OpenCodeEvidence } from "./openCode";
 import { readWorkerOwnership, type WorkerCreatorEvidence } from "./workerOwnership";
 import { realpath } from "node:fs/promises";
+import { resolveOpenCodeRoute } from "./openCodeRoute";
 
 /**
  * Self-driven coordinator (Phase 3: closed supervised-worker lifecycle).
@@ -4228,7 +4229,6 @@ async function startOne(
     // local catalog discovery is advisory and does not verify execution-host
     // availability. This is not opencode2 --model support. Mini, variants,
     // effort, lanes, new worktrees and remote placements retain their adapters.
-    // Choose before launch; a failed native start never authorizes a fallback.
     let nativeOpenCode = false;
     let nativeOpenCodeModel = false;
     const ui = attempt.harness === "opencode"
@@ -4239,28 +4239,29 @@ async function startOne(
       if (ui !== "auto" && reuseTerminal) throw new OrcaCliError("Explicit OpenCode UI cannot reuse a generic terminal", "invalid_placement");
     }
     const explicitOpenCode = attempt.harness === "opencode" && ui !== "auto";
-    const apiOpenCode = explicitOpenCode || attempt.harness === "opencode" && Boolean(model) && process.env.ORCA_DAG_OPENCODE_TUI === "1";
-    const nativeModelCandidate = attempt.harness === "opencode" && Boolean(model) &&
-      !apiOpenCode && !model!.includes("#") && !attempt.requested.effort &&
-      !environment && !laneId && !reuseTerminal && process.platform !== "win32" &&
-      (placement.kind === "current" || placement.kind === "existing");
-    attempt.openCodeTui = apiOpenCode;
-    if (attempt.harness === "opencode" && (!model || apiOpenCode || nativeModelCandidate)) {
-      const status = await runOrca<{ runtime?: { appVersion?: string; capabilities?: string[] } }>(["status"]);
-      const version = status.runtime?.appVersion;
-      nativeOpenCode = (!model || apiOpenCode) && typeof version === "string" && /^\d+\.\d+\.\d+$/.test(version) &&
-        compareVersions(version, MIN_NATIVE_OPENCODE_VERSION) >= 0;
-      nativeOpenCodeModel = nativeModelCandidate && typeof version === "string" && /^\d+\.\d+\.\d+$/.test(version) &&
-        compareVersions(version, MIN_NATIVE_OPENCODE_MODEL_VERSION) >= 0 &&
-        status.runtime?.capabilities?.includes("orchestration.worker-launch-preferences.v1") === true;
-      if (apiOpenCode && (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version) ||
-          compareVersions(version, "1.4.222") < 0)) {
-        throw new OrcaCliError("OpenCode API TUI requires running Orca >= 1.4.222; no one-shot fallback was attempted", "execution_disabled");
-      }
-    }
-    if (apiOpenCode && (environment || laneId || reuseTerminal || process.platform === "win32" ||
-        !["current", "existing"].includes(placement.kind))) {
-      throw new OrcaCliError("OpenCode API TUI supports only local POSIX current/existing non-lane placements; no fallback was attempted", "invalid_placement");
+    const apiRequested = explicitOpenCode || attempt.harness === "opencode" && Boolean(model) && process.env.ORCA_DAG_OPENCODE_TUI === "1";
+    const runtimeStatus = attempt.harness === "opencode" && (!model || apiRequested ||
+      (!!model && !model.includes("#") && !attempt.requested.effort && !environment && !laneId &&
+        !reuseTerminal && process.platform !== "win32" && (placement.kind === "current" || placement.kind === "existing")))
+      ? await runOrca<{ runtime?: { appVersion?: string; capabilities?: string[] } }>(["status"])
+      : null;
+    const openCodeRoute = attempt.harness === "opencode"
+      ? resolveOpenCodeRoute({
+          ui, model, effort: attempt.requested.effort, environment, lane: Boolean(laneId), placement,
+          reuseTerminal: reuseTerminal ?? null, platform: process.platform,
+          runtimeVersion: runtimeStatus?.runtime?.appVersion ?? null,
+          nativeDefaultVersion: MIN_NATIVE_OPENCODE_VERSION,
+          nativeModelVersion: MIN_NATIVE_OPENCODE_MODEL_VERSION,
+          capabilities: runtimeStatus?.runtime?.capabilities ?? [],
+          tuiOptIn: process.env.ORCA_DAG_OPENCODE_TUI === "1",
+        })
+      : null;
+    const apiOpenCode = openCodeRoute?.route === "api-mini" || openCodeRoute?.route === "api-tui";
+    nativeOpenCode = openCodeRoute?.route === "native-default" || openCodeRoute?.route === "api-mini" || openCodeRoute?.route === "api-tui";
+    nativeOpenCodeModel = openCodeRoute?.route === "native-model";
+    attempt.openCodeTui = openCodeRoute?.route === "api-mini" || openCodeRoute?.route === "api-tui";
+    if (openCodeRoute?.route === "unsupported") {
+      throw new OrcaCliError(openCodeRoute.reason, apiOpenCode ? "execution_disabled" : "invalid_placement");
     }
     // --- Worktree-lane pre-flight: every refusal below happens BEFORE Orca
     // --- sees a mutation, and lands as a parked start_failed record.
@@ -4491,7 +4492,7 @@ async function startOne(
       });
       attempt.requested = { ...attempt.requested, terminal: started.handle };
       attempt.openCodeUiLaunched = started.openCodeLaunch?.frontend ?? null;
-    } else if (attempt.harness === "opencode" && !nativeOpenCode && !nativeOpenCodeModel) {
+    } else if (attempt.harness === "opencode" && openCodeRoute?.route === "cli-run") {
       if (environment) {
         throw new OrcaCliError(
           `Cannot start task ${task.id} on environment "${environment}": the ${attempt.harness} ` +

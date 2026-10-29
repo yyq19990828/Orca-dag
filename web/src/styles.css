@@ -1432,6 +1432,11 @@ body {
   line-height: 1.6;
   white-space: pre-line;
   overflow-wrap: anywhere;
+  /* Long launch plans must not scroll the heading offscreen when the safe
+     action receives focus. Keep the description independently scrollable. */
+  max-height: min(360px, 45vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .decision-dialog__field {

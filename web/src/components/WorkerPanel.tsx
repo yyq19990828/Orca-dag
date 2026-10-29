@@ -483,6 +483,9 @@ export const WorkerPanel = memo(function WorkerPanel({
           const decisionOwed =
             row.terminalState === "release_pending" ||
             (attempt?.settled === true && !DECIDED.has(attempt.terminalDecision));
+          const scopedDetail = detail?.dispatchId === row.dispatchId && detail.runId === runId ? detail : null;
+          const providerSession = scopedDetail?.providerSession;
+          const oneShot = attempt?.openCodeUiLaunched === "oneshot";
           return (
             <div
               key={row.dispatchId || row.taskId}
@@ -558,6 +561,32 @@ export const WorkerPanel = memo(function WorkerPanel({
                           : t("worker.unknown"))}
                     </b>
                   </div>
+                  {providerSession ? (
+                    <div className="inbox__body" data-testid="provider-session-evidence">
+                      {oneShot && <>{t("worker.providerSessionCompatibility")} · </>}
+                      {t("worker.providerSession")}{" "}
+                      <b>{t(`recovery.status.${providerSession.status}`)}</b>
+                      {" · "}{t("worker.providerSessionSource", { source: providerSession.statusSource })}
+                      <div className="inbox__meta" title={providerSession.observedAt}>
+                        {t("worker.providerSessionObservedAt", { time: new Date(providerSession.observedAt).toLocaleString() })}
+                      </div>
+                      <div>
+                        {t("worker.providerSessionModel")}{" "}
+                        <b>{providerSession.model
+                          ? `${providerSession.model.providerID}/${providerSession.model.id}${providerSession.model.variant ? `#${providerSession.model.variant}` : ""}`
+                          : t("worker.unknownNoEcho")}</b>
+                        {providerSession.modelSource
+                          ? ` · ${t(providerSession.modelSource === "assistant-message" ? "worker.providerSessionModelSourceAssistant" : "worker.providerSessionModelSourceSession")}`
+                          : ""}
+                      </div>
+                      <div className="inbox__meta">{providerSession.statusDetail}</div>
+                    </div>
+                  ) : scopedDetail && (attempt?.harness === "opencode" || scopedDetail.launch?.agent === "opencode" || scopedDetail.fleet?.projection?.provider?.id === "opencode") ? (
+                    <div className="inbox__body" data-testid="provider-session-unbound">
+                      {oneShot && <>{t("worker.providerSessionCompatibility")} · </>}
+                      {t("worker.providerSessionUnbound")}
+                    </div>
+                  ) : null}
                   <div className="inbox__body">
                     {t("worker.terminal")} <code>{row.agentTerminalHandle ?? t("worker.unknown")}</code>
                     {t("worker.orcaState")} <code>{row.terminalState}</code>

@@ -31,6 +31,46 @@ import type {
   RetryWorkerResult,
 } from "./types";
 
+export interface LaunchPreviewTask {
+  taskId: string;
+  status: string;
+  harness: string;
+  model: string | null;
+  effort: string | null;
+  placement: {
+    environment: string | null;
+    laneId: string | null;
+    kind: string;
+    selector: string | null;
+  };
+  route: string;
+  reason: string;
+  reasonCode: string;
+  limitations: string[];
+}
+
+export interface LaunchPreviewResponse {
+  runId: string;
+  tasks: LaunchPreviewTask[];
+  caveat: string;
+}
+
+export interface LaunchPlanRequest {
+  runId: string;
+  harnessByTask: Record<string, string>;
+  defaultHarness: string;
+  maxConcurrency: number;
+  modelByTask: Record<string, string>;
+  effortByTask: Record<string, string>;
+  retainByTask: Record<string, boolean>;
+  environmentByTask: Record<string, string>;
+  placementByTask: Record<string, PlacementSpec>;
+  worktreeLanes: Record<string, WorktreeLaneSpec>;
+  laneByTask: Record<string, string>;
+  defaultOpenCodeUi: ViewerConfig["defaultOpenCodeUi"];
+  openCodeUiByTask: ViewerConfig["openCodeUiByTask"];
+}
+
 /** An /api error that carries Orca's machine-readable error code. */
 export class ApiError extends Error {
   readonly code: string | null;
@@ -286,6 +326,11 @@ export async function fetchRemovedWork(runId: string, cursor?: string): Promise<
     `/api/runs/${encodeURIComponent(runId)}/removed-work${query}`,
   );
   return page;
+}
+
+/** Read-only launch-plan route preview, protected by the session token. */
+export async function fetchLaunchPreview(plan: LaunchPlanRequest): Promise<LaunchPreviewResponse> {
+  return mutate<LaunchPreviewResponse>("POST", "/api/launch-preview", plan);
 }
 
 /**

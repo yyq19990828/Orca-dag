@@ -1,10 +1,8 @@
-import { useEffect, useRef, useState } from "react";
-import { startRun, stopRun } from "../api";
+import { fetchLaunchPreview, startRun, stopRun, type LaunchPlanRequest, type LaunchPreviewResponse } from "../api";
 import { useT, type TranslationKey } from "../i18n";
 import { DoodleSelect } from "./DoodleSelect";
 import { useDecisionDialog } from "./DecisionDialog";
 import {
-  getMaxConcurrency,
   effortMap,
   environmentMap,
   harnessMap,
@@ -19,10 +17,13 @@ import {
   useConfig,
   useFlags,
   useReadiness,
+  laneMap,
+  lanesSpecMap,
 } from "../harness";
 import { HARNESSES, UNVERIFIED_HARNESSES, OPEN_CODE_UIS, isOpenCodeUi, type DagEdge, type RunStatus } from "../types";
 import { lanePlanProblems } from "../placement";
-import { laneMap, lanesSpecMap } from "../harness";
+import { useState, useRef, useEffect } from "react";
+ 
 
 const CUSTOM = "__custom__";
 const KNOWN = HARNESSES as readonly string[];
@@ -121,6 +122,7 @@ export function ExecControls({
   const [custom, setCustom] = useState(storedIsCustom ? config.defaultHarness : "");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const previewGeneration = useRef(0);
   const taskIdsRef = useRef(taskIds);
   taskIdsRef.current = taskIds;
 
@@ -128,6 +130,10 @@ export function ExecControls({
   useEffect(() => {
     if (storedIsCustom) setCustom(config.defaultHarness);
   }, [storedIsCustom, config.defaultHarness]);
+
+  useEffect(() => {
+    previewGeneration.current++;
+  }, [runId, config, forceCustom, custom]);
 
   const defHarness = forceCustom || storedIsCustom ? CUSTOM : config.defaultHarness;
   // `status` is App state fed by its single visibility-gated /api/run-status
@@ -176,13 +182,111 @@ export function ExecControls({
     setDefaultHarness(h);
   }
 
+  async function prepareLaunchPlan(refresh: boolean): Promise<LaunchPlanRequest> {
+    if (forceCustom && !custom.trim()) throw new Error(t("err.pickDefaultHarness"));
+    if (refresh && forceCustom) setDefaultHarness(custom.trim());
+    const launchConfig = refresh ? await refreshConfig() : config;
+    const launchDefault = forceCustom ? custom.trim() : launchConfig.defaultHarness;
+    if (!launchDefault) throw new Error(t("err.pickDefaultHarness"));
+    const harnessByTask = harnessMap(taskIdsRef.current);
+    const unverified = [launchDefault, ...Object.values(harnessByTask)]
+      .find((harness) => UNVERIFIED_HARNESSES[harness] === true);
+    if (unverified) throw new Error(t("exec.unverifiedHarnessHint", { harness: unverified }));
+    if (!customOk && [launchDefault, ...Object.values(harnessByTask)].some((harness) => !KNOWN.includes(harness))) {
+      throw new Error(t(CUSTOM_OFF_HINT_KEY));
+    }
+    const laneProblems = lanePlanProblems(
+      launchConfig.laneByTask, launchConfig.worktreeLanes, launchConfig.placementByTask,
+      launchConfig.environmentByTask, edges,
+    );
+    if (laneProblems.length > 0) throw new Error(t("err.placementFix", { detail: laneProblems[0] }));
+    return {
+      runId,
+      harnessByTask,
+      defaultHarness: launchDefault,
+      maxConcurrency: launchConfig.maxConcurrency,
+      modelByTask: modelMap(taskIdsRef.current),
+      effortByTask: effortMap(taskIdsRef.current),
+      retainByTask: retainMap(taskIdsRef.current),
+      environmentByTask: environmentMap(taskIdsRef.current),
+      placementByTask: placementMap(taskIdsRef.current),
+      worktreeLanes: lanesSpecMap(),
+      laneByTask: laneMap(taskIdsRef.current),
+      defaultOpenCodeUi: launchConfig.defaultOpenCodeUi,
+      openCodeUiByTask: openCodeUiMap(taskIdsRef.current),
+    };
+  }
+
+  async function inspectPlan() {
+    if (!runId || busy) return;
+    const generation = previewGeneration.current;
+    setBusy(true);
+    setErr(null);
+    try {
+      // The standalone control reads the editor snapshot without flushing
+      // config writes; Run repeats preview after refreshing the saved plan.
+      const next = await fetchLaunchPreview(await prepareLaunchPlan(false));
+      if (generation !== previewGeneration.current) return;
+      await dialog.alert({
+        title: t("exec.previewTitle"),
+        message: [
+          formatPreview(next),
+          t("exec.previewNotProof"),
+          t("exec.previewExternalRuntime"),
+        ].join("\n\n"),
+      });
+    } catch (error) {
+      setErr(String((error as Error).message ?? error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function formatPreview(value: LaunchPreviewResponse): string {
+    const routeName: Record<string, TranslationKey> = {
+      "native-default": "exec.previewNativeDefault",
+      "native-model": "exec.previewNativeModel",
+      "api-mini": "exec.previewMini",
+      "api-tui": "exec.previewTui",
+      "cli-run": "exec.previewCliRun",
+      "custom-command": "exec.previewCustomCommand",
+      unsupported: "exec.previewUnsupported",
+      supervised: "exec.previewSupervised",
+    };
+    return value.tasks.map((task) => {
+      const workspace = task.placement.kind === "existing"
+        ? t("exec.previewWorkspaceExisting", { selector: task.placement.selector ?? "" })
+        : task.placement.kind === "new-child"
+          ? t("exec.previewWorkspaceNewChild")
+          : task.placement.kind === "new-top-level"
+            ? t("exec.previewWorkspaceNewTopLevel")
+            : t("exec.previewWorkspaceCurrent");
+      const placement = t("exec.previewPlacement", {
+        environment: task.placement.environment ?? t("exec.previewLocal"),
+        lane: task.placement.laneId ?? t("exec.previewNoLane"),
+        workspace,
+      });
+      const reason = t(`exec.routeReason.${task.reasonCode}` as TranslationKey);
+      const limitations = task.limitations.map(code =>
+        t(`exec.routeLimitation.${code}` as TranslationKey),
+      ).join("; ");
+      return t("exec.previewTask", {
+        id: task.taskId,
+        harness: task.harness,
+        model: task.model ?? t("exec.previewDefaultModel"),
+        placement,
+        route: t(routeName[task.route] ?? "exec.previewUnsupported"),
+        reason,
+        limitations,
+      });
+    }).join("\n\n");
+  }
+
   async function run() {
     if (!runId) {
       setErr(t("err.pickRunFirst"));
       return;
     }
-    // Mirror the server's execution gate for a fast, clear error — the server
-    // re-checks (503) regardless, so this is UX, not the real gate.
     if (execOff) {
       setErr(readiness?.reason ?? t("err.executionUnavailable"));
       return;
@@ -203,72 +307,45 @@ export function ExecControls({
       setErr(t("err.runExecuting", { id: String(otherRunStatus.runId) }));
       return;
     }
-    // Binding is the only way to get mutation authority on a Run, and it fences
-    // whoever held it — usually the agent terminal that drew this DAG.
-    const ok = await dialog.confirm({
-      title: t("dialog.confirmRunTitle"),
-      message: t("dialog.confirmRunMessage", { id: runId }),
-      confirmLabel: t("dialog.startRun"),
-      cancelLabel: t("dialog.notNow"),
-    });
-    if (!ok) return;
-
     setBusy(true);
     setErr(null);
     let startedStatus: RunStatus | null = null;
     let startRequested = false;
     try {
-      // Config may have been written by a CLI or another Viewer while this
-      // tab stayed open. Flush local edits, then use the persisted plan for
-      // every launch field. A stale in-memory map would silently send the
-      // wrong model or "current" worktree to /api/run.
-      if (forceCustom) setDefaultHarness(custom.trim());
-      const launchConfig = await refreshConfig();
-      const launchDefault = launchConfig.defaultHarness;
-      if (!launchDefault) throw new Error(t("err.pickDefaultHarness"));
-      const unverified = [launchDefault, ...Object.values(harnessMap(taskIdsRef.current))]
-        .find((harness) => UNVERIFIED_HARNESSES[harness] === true);
-      if (unverified) throw new Error(t("exec.unverifiedHarnessHint", { harness: unverified }));
-      if (!customOk) {
-        const customs = [launchDefault, ...Object.values(harnessMap(taskIdsRef.current))].some(
-          (h) => !KNOWN.includes(h),
-        );
-        if (customs) throw new Error(t(CUSTOM_OFF_HINT_KEY));
-      }
-      // Validate the refreshed placement plan before binding a terminal.
-      const laneProblems = lanePlanProblems(
-        launchConfig.laneByTask,
-        launchConfig.worktreeLanes,
-        launchConfig.placementByTask,
-        launchConfig.environmentByTask,
-        edges,
-      );
-      if (laneProblems.length > 0) {
-        throw new Error(t("err.placementFix", { detail: laneProblems[0] }));
-      }
-      // Raise the App-level lock only after config refresh and preflight.
+      const plan = await prepareLaunchPlan(true);
+      const latestPreview = await fetchLaunchPreview(plan);
+      const ok = await dialog.confirm({
+        title: t("exec.previewTitle"),
+        message: [
+          t("dialog.confirmRunMessage", { id: runId }),
+          t("exec.previewReady"),
+          formatPreview(latestPreview),
+          t("exec.previewWarning"),
+          t("exec.previewNotProof"),
+          t("exec.previewExternalRuntime"),
+        ].join("\n\n"),
+        confirmLabel: t("dialog.startRun"),
+        cancelLabel: t("dialog.notNow"),
+      });
+      if (!ok) return;
+      // The same flushed/refreshed plan used for preview is submitted to start.
       onRunStarting?.(runId);
       startRequested = true;
-      const s = await startRun(
-        runId,
-        harnessMap(taskIdsRef.current),
-        launchDefault,
-        getMaxConcurrency(),
-        modelMap(taskIdsRef.current),
-        effortMap(taskIdsRef.current),
-        retainMap(taskIdsRef.current),
-        // Phase 6: per-node saved environment + exact placement, sent
-        // explicitly (same reason as effort/retain — avoids the 250 ms
-        // config-write debounce racing the run request).
-        environmentMap(taskIdsRef.current),
-        placementMap(taskIdsRef.current),
-        // Phase 7: the lane plan rides along the same way.
-        lanesSpecMap(),
-        laneMap(taskIdsRef.current),
+      startedStatus = await startRun(
+        plan.runId,
+        plan.harnessByTask,
+        plan.defaultHarness,
+        plan.maxConcurrency,
+        plan.modelByTask,
+        plan.effortByTask,
+        plan.retainByTask,
+        plan.environmentByTask,
+        plan.placementByTask,
+        plan.worktreeLanes,
+        plan.laneByTask,
         undefined,
-        { defaultOpenCodeUi: launchConfig.defaultOpenCodeUi, openCodeUiByTask: openCodeUiMap(taskIdsRef.current) },
+        { defaultOpenCodeUi: plan.defaultOpenCodeUi, openCodeUiByTask: plan.openCodeUiByTask },
       );
-      startedStatus = s;
     } catch (e) {
       setErr(String((e as Error).message ?? e));
     } finally {
@@ -384,6 +461,14 @@ export function ExecControls({
           </label>
         </div>
       </details>
+      <button
+        type="button"
+        className="btn"
+        onClick={inspectPlan}
+        disabled={busy || !runId}
+      >
+        {t("exec.previewButton")}
+      </button>
 
       {running ? (
         <div className="exec__live">

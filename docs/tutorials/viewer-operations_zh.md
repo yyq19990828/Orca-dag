@@ -78,7 +78,11 @@ Orca Task 没有 harness、模型、放置位置或画布布局字段。viewer �
 
 点击 Run 后，这些设置会被快照。coordinator 运行期间，即使 Stage 尚未启动，也会锁定到这份快照。Stage 第一次产生 Dispatch 后，启动设置在 viewer 重启后仍锁定；安全重试会使用原有 harness、模型、effort 和放置位置。如果读取 worker 历史失败，界面也会保持锁定，不能假定从未执行。
 
-一次常规的界面操作顺序是：选定 Run 并查看健康徽标；打开各 Stage，选择 harness 与放置位置；只给依赖有序的任务链分配 lane；设置 Max parallel；核对 Scheduler 的就绪波次和预检警告；点击 **Run with Orca** 并确认 coordinator 交接。执行期间用 Chat 和 Activity 了解进展，需要准确的 worker 或工作区证据才能处理的决定则到 Operational details 查看。
+**启动前检查**是只读操作，启动设置锁定时仍可使用。它展示当前配置，而不是既有 Dispatch 的启动回执：逐 Task 的请求模型、worker 放置位置、实际选择的适配器及限制。OpenCode Auto 配合 `#xhigh` 等模型变体可能选择 **CLI run 兼容路径**，并不等于原生 TUI。选择 Mini / 完整 TUI 仍须经过现有严格 API 适配器的执行主机版本、权限与启动身份检查，预览不会绕过这些条件。点击 Run 会先刷新已落盘配置，预览同一份计划，确认后才转移协调器权限；取消不会绑定 viewer。
+
+**外部资源必须在派工前准备。** Worker 放置设置不负责创建任意独立测试 runtime、账户或服务。应先准备资源，或添加准备 Task 依赖，交付资源所有者、精确路径/selector、runtime 身份、访问方法、允许修改范围与清理责任。Gate 批准不等于资源已分配；已有 Dispatch 后，不能要求用户通过锁定的放置控件搬迁 worker，而应安全交付额外测试资源，或遵守明确且基于证据的恢复流程。
+
+一次常规的界面操作顺序是：选定 Run 并查看健康徽标；打开各 Stage，选择 harness 与放置位置；只给依赖有序的任务链分配 lane；设置 Max parallel；核对**启动前检查**、Scheduler 就绪波次和预检警告；点击 **Run with Orca** 并确认刷新的计划与 coordinator 交接。执行期间用 Chat 和 Activity 了解进展，需要准确的 worker 或工作区证据才能处理的决定则到 Operational details 查看。
 
 ## 点击 Run 后发生什么
 
@@ -267,6 +271,10 @@ Orca 1.4.217 修复了 Codex 就绪检测，并默认隔离每个新终端的后
 Output 将有限 assistant 文本标为 `opencode-api` 来源，关闭终端后仍可读取，不复制工具输入或推理。默认清理要求有效落定、明确 external release、精确终端身份和 provider execution 退出；retain 或后续用户输入会保留终端。Stop 先中断精确共享服务会话，再做 Orca 编排记账；服务失败、身份变化或退出未知都不算成功。即使关闭开关，未知准备记录仍会阻止重新派工：应检查保存的 request/session/terminal 与请求审计，不是再次启动。首版仍禁用自动复用、新工作区、lane、远程与 Windows；未设置开关时，自动模式按版本门槛选择原生或兼容路径。
 
 在一次性兼容路径上，viewer 用 `opencode run --auto` 启动 OpenCode，并创建 Orca Dispatch 记录任务。这条路径标记为 `unsupervised`，没有受监督的 worker 资源，也没有 `agent_status` fleet 证据。在 Orca 1.4.209 的并行只读对照中，OpenCode 通过 `worker_done` 完成了 Task，但运行时的 `worker-list` 显示 `unverifiable / missing_status`，落定后变为 `unverifiable / unsupervised_settled`。运行期间，`worker-show` 另外观察到精确的 OpenCode 终端仍然存活。这些 fleet 值符合兼容路径的设计，不能单独证明 OpenCode 钩子损坏。对此路径应核对 Task/Dispatch 的结果与精确终端观察，也不能把 `unverifiable` 当作进程已退出的证据。
+
+Worker 详情现在独立展示精确持久化绑定的本地 OpenCode session 的 provider 状态、实测模型/variant、证据来源与观测时间。读取必须匹配 Run/Task/Dispatch、规范工作区路径、session 标题及 Task preamble，绝不猜“最新会话”。Provider 为 `active` 时 fleet 仍可为 `unverifiable`；provider execution 的 `exited` 不是 Task 成功，也不授予重试、Stop 或释放权限。
+
+对这类精确 CLI-run 绑定，Output 的 Auto / Transcript 模式读取有界的 `opencode-api` 文本与工具结果，并过滤工具输入中的敏感键；不展示启动指令、推理或后续用户拥有的回合。新增输出可以继续翻页，已读内容改变会明确报告来源重置。历史不完整、截断或读取不可用均保留可见提示，不伪造成空白或已完成的 transcript；显式 Terminal 模式仍只读取终端。小页读取规避了实测 OpenCode 2.2.0 大响应中“CLI 成功退出但 JSON 未完整输出”的情况；单条超大或不可读证据仍不能授权启动替代 worker。
 
 在 Orca 1.4.209、OpenCode 2.0.15 上直接执行只读 `worker-start --agent opencode` 测试，任务正文仍未送达：回执显示 `input_accepted`，但 OpenCode TUI 始终停在空白初始输入框，没有 agent 回合或 `worker_done`。测试 Dispatch 已隔离，精确终端已关闭，Task 已标记失败。因此 viewer 仍保留一次性兼容路径；不能只凭 `input_accepted` 判断任务已经送达。
 

@@ -322,6 +322,17 @@ export interface WorkerDetailView {
     resolvedWorktreeId: string | null;
   } | null;
   requestedLaunch: { agent: string | null; model: string | null; effort: string | null } | null;
+  /** Exact provider-session observations; never Orca liveness or settlement authority. */
+  providerSession?: {
+    harness: "opencode";
+    sessionId: string;
+    status: "active" | "idle" | "exited" | "unknown" | "unavailable";
+    statusSource: "opencode-api";
+    model: { providerID: string; id: string; variant?: string } | null;
+    modelSource: "assistant-message" | "session" | null;
+    observedAt: string;
+    statusDetail: string;
+  } | null;
   terminalResource: WorkerTerminalResourceView | null;
   /** Provider-specific Stop is selected from the server's exact durable binding. */
   stopOperation: "worker-stop" | "worker-abandon";

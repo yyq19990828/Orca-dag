@@ -4,7 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { openCodeTuiTitle, parseOpenCodeModel, readOpenCodeExecution } from "./openCode";
+import { openCodeTuiTitle, parseOpenCodeModel, readOpenCodeBoundSession, readOpenCodeExecution } from "./openCode";
 import { ProviderSessionStore } from "./providerSessions";
 import { coordinatorStatus, resetCoordinatorForTests, startCoordinator, stopCoordinator } from "./coordinator";
 import { createApp, listenLoopback } from "./app";
@@ -14,7 +14,7 @@ import { saveConfig } from "./config";
 import {
   closeReleasedOpenCodeTui, initOrcaRuntime, inspectOpenCodeTui, listWorkers,
   readWorkerOutput, recoverOpenCodeTuiBindings, releaseWorker, retainOpenCodeTui,
-  startOpenCodeTuiWorker, startOpenCodeInteractiveWorker, stopWorkerReceipt,
+  showWorkerDetail, startOpenCodeTuiWorker, startOpenCodeInteractiveWorker, stopWorkerReceipt,
 } from "./orca";
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), "orca-dag-tui-test-")));
@@ -401,6 +401,58 @@ describe("API-preselected OpenCode full TUI", () => {
     const output = await readWorkerOutput(started.dispatchId!, { limit: 200 });
     assert.equal(output.clipped, true); assert.equal(output.contentComplete, false);
     assert.ok(output.warnings.some(line => line.includes("output budget")));
+  });
+  it("reads a cold exact-bound one-shot session without upgrading fleet liveness", async () => {
+    const started = await start();
+    const binding = await store.get({ runId: "run_test", taskId: "task_test", dispatchId: started.dispatchId! });
+    assert.ok(binding);
+    const state = load(providerFile);
+    state.sessions[binding.sessionId].model = { providerID: "live", id: "actual", variant: "xhigh" };
+    state.sessions[binding.sessionId].title = `orca-dag:run_test:task_test:${started.dispatchId}`;
+    state.active = true;
+    state.userOwned = true;
+    writeFileSync(providerFile, JSON.stringify(state));
+    const journalPath = join(root, ".orca-dag/sessions.json");
+    update(journalPath, { openCodeLaunches: [] });
+    update(orcaFile, {
+      livenessOverride: { [started.dispatchId!]: "unverifiable" },
+      livenessReason: { [started.dispatchId!]: "missing_status" },
+    });
+    const detail = await showWorkerDetail(started.dispatchId!, { includeProviderSession: true });
+    assert.equal(detail?.providerSession?.status, "active");
+    assert.equal(detail?.providerSession?.model?.providerID, "live");
+    assert.equal(detail?.providerSession?.model?.id, "actual");
+    assert.equal(detail?.providerSession?.model?.variant, "xhigh");
+    assert.equal(detail?.providerSession?.modelSource, "assistant-message");
+    assert.equal(detail?.liveness.verdict, "unverifiable");
+    const output = await readWorkerOutput(started.dispatchId!, { limit: 100 });
+    assert.equal(output.source, "opencode-api");
+    assert.equal(output.contentComplete, false);
+    assert.match(output.lines.join("\n"), /verified worker output/);
+    assert.equal(output.lines.some(line => line.includes("task_test")), false, "startup instructions are identity evidence, not worker output");
+    assert.ok(output.warnings.some(line => line.includes("user-owned")));
+    assert.match(output.lines.join("\n"), /tool read_file/);
+    assert.match(output.lines.join("\n"), /tool result content/);
+    assert.equal(output.lines.join("\n").includes("do not store"), false);
+    assert.equal(output.lines.join("\n").includes("new user work"), false);
+    const firstPage = await readWorkerOutput(started.dispatchId!, { limit: 2 });
+    update(providerFile, { assistantText: "verified worker output\nsecond line\nappended progress" });
+    const appendedPage = await readWorkerOutput(started.dispatchId!, { cursor: firstPage.cursor!, limit: 40 });
+    assert.equal(appendedPage.sourceChanged, false);
+    assert.equal(appendedPage.lines[0], "appended progress");
+    update(providerFile, { assistantText: "changed original output\nsecond line" });
+    const changedPage = await readWorkerOutput(started.dispatchId!, { cursor: firstPage.cursor!, limit: 2 });
+    assert.equal(changedPage.sourceChanged, true);
+    assert.match(changedPage.lines[0], /changed original output/);
+    assert.equal(calls(orcaLog, "worker-read").length, 0);
+    await assert.rejects(() => readOpenCodeBoundSession({ ...binding, host: "remote:host" }));
+    await assert.rejects(() => readOpenCodeBoundSession({ ...binding, workspace: `${binding.workspace}/..` }));
+    update(providerFile, { unavailable: true });
+    assert.equal((await showWorkerDetail(started.dispatchId!, { includeProviderSession: true }))?.providerSession?.status, "unavailable");
+    await assert.rejects(() => readWorkerOutput(started.dispatchId!, { limit: 40 }), /OpenCode API.*unavailable/);
+    assert.equal(calls(orcaLog, "worker-read").length, 0);
+    await assert.rejects(() => readOpenCodeBoundSession({ ...binding, dispatchId: "ctx_other" }));
+    await assert.rejects(() => readOpenCodeBoundSession({ ...binding, runId: "run_other" }));
   });
   it("never closes on unknown release, live execution, changed pane identity, or later user-owned work", async () => {
     const started = await start(); settle();

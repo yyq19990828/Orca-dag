@@ -6,15 +6,12 @@ import { realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { openCodeSessionTitle, ProviderSessionStore } from "./providerSessions";
 import {
-  openCodeApi, parseOpenCodeModel, verifyOpenCodeModel, verifyOpenCodeSession,
-  openCodeTuiTitle,
-  validateOpenCodeModel, assertOpenCodeModelSelection,
-  verifyOpenCodeVersion, readOpenCodeDefaultModel,
-  readOpenCodeExecution, interruptOpenCodeExecution,
-  type OpenCodeLaunch, type OpenCodeEvidence,
-  sameOpenCodeModel,
+  openCodeApi, parseOpenCodeModel, readOpenCodeBoundSession, safeToolInput, verifyOpenCodeModel,
+  verifyOpenCodeSession, openCodeTuiTitle, validateOpenCodeModel,
+  assertOpenCodeModelSelection, verifyOpenCodeVersion, readOpenCodeDefaultModel,
+  readOpenCodeExecution, interruptOpenCodeExecution, type OpenCodeLaunch,
+  type OpenCodeEvidence, sameOpenCodeModel,
 } from "./openCode";
 // The audience allowlist is a security-boundary concept, so the adapter
 // consumes it from security.ts (which never imports this module — no cycle).
@@ -28,6 +25,7 @@ import {
   PLACEMENT_NAME_PATTERN,
   SETUP_POLICIES,
 } from "./config";
+import { ProviderSessionStore, openCodeSessionTitle } from "./providerSessions";
 
 const pExecFile = promisify(execFile);
 
@@ -2216,6 +2214,17 @@ export interface WorkerDetailView {
   observation: WorkerObservation | null;
   /** The Phase 2 presentation merge (fleet verdict + qualified observation). */
   liveness: WorkerLivenessPresentation;
+  /** Read-only exact provider evidence; never merged into fleet authority. */
+  providerSession: {
+    harness: "opencode";
+    sessionId: string;
+    status: "active" | "idle" | "exited" | "unknown" | "unavailable";
+    statusSource: "opencode-api";
+    statusDetail: string;
+    model: { providerID: string; id: string; variant?: string } | null;
+    modelSource: "assistant-message" | "session" | null;
+    observedAt: string;
+  } | null;
 }
 
 function asRecordOrNull(value: unknown): Record<string, unknown> | null {
@@ -2286,6 +2295,24 @@ function parseAgentWait(raw: unknown): WorkerAgentWait | null | undefined {
   };
 }
 
+async function exactOpenCodeBinding(detail: Pick<WorkerDetailView, "dispatchId" | "runId" | "taskId" | "fleet" | "terminal">) {
+  if (!detail.runId || !detail.taskId) return null;
+  const projection = detail.fleet?.projection;
+  const host = projection?.host;
+  const workspace = detail.terminal?.worktreePath ?? projection?.workspace;
+  if (host?.kind !== "local" || host.id !== "local" || typeof workspace !== "string" || !workspace.startsWith("/")) return null;
+  const binding = await new ProviderSessionStore(currentWorkspace().dir).get({
+    runId: detail.runId, taskId: detail.taskId, dispatchId: detail.dispatchId,
+  }).catch(() => null);
+  if (!binding || binding.harness !== "opencode" || binding.host !== "local:local" ||
+      binding.workspace !== workspace || realpathSyncSafe(binding.workspace) !== binding.workspace) return null;
+  return binding;
+}
+
+function realpathSyncSafe(path: string): string | null {
+  try { return realpathSync(path); } catch { return null; }
+}
+
 /**
  * Inspect ONE worker in depth (`orchestration worker-show --dispatch`) and
  * normalize the receipt into the Phase 2 detail view. Returns null only when
@@ -2294,7 +2321,10 @@ function parseAgentWait(raw: unknown): WorkerAgentWait | null | undefined {
  * unreachable". Read-only: safe to call for history, and safe whether or not
  * this viewer coordinates the Run.
  */
-export async function showWorkerDetail(dispatchId: string): Promise<WorkerDetailView | null> {
+export async function showWorkerDetail(
+  dispatchId: string,
+  opts: { includeProviderSession?: boolean } = {},
+): Promise<WorkerDetailView | null> {
   let result: Record<string, unknown>;
   try {
     result = await runOrca<Record<string, unknown>>([
@@ -2364,7 +2394,7 @@ export async function showWorkerDetail(dispatchId: string): Promise<WorkerDetail
     fleetReason: stringOrNull(asRecordOrNull(fleet?.liveness)?.reason),
     observation,
   });
-  return {
+  const detail: WorkerDetailView = {
     dispatchId,
     runId: stringOrNull(fleet?.runId) ?? stringOrNull(dispatch.runId),
     taskId: stringOrNull(fleet?.taskId) ?? stringOrNull(dispatch.taskId) ?? stringOrNull(dispatch.task_id),
@@ -2426,7 +2456,29 @@ export async function showWorkerDetail(dispatchId: string): Promise<WorkerDetail
       : null,
     observation,
     liveness,
+    providerSession: null,
   };
+  // Provider history is advisory and can be slow/unavailable. Only the detail
+  // presentation opts in; Stop, custody and scheduler reads stay Orca-only.
+  if (!opts.includeProviderSession) return detail;
+  const binding = await exactOpenCodeBinding(detail);
+  if (!binding) return detail;
+  const observedAt = new Date().toISOString();
+  try {
+    const read = await readOpenCodeBoundSession(binding);
+    detail.providerSession = {
+      harness: "opencode", sessionId: binding.sessionId, status: read.status,
+      statusSource: "opencode-api", statusDetail: read.statusDetail,
+      model: read.model, modelSource: read.modelSource, observedAt,
+    };
+  } catch {
+    detail.providerSession = {
+      harness: "opencode", sessionId: binding.sessionId, status: "unavailable",
+      statusSource: "opencode-api", statusDetail: "The exact bound OpenCode session could not be read or validated.",
+      model: null, modelSource: null, observedAt,
+    };
+  }
+  return detail;
 }
 
 export async function listWorkers(
@@ -2706,6 +2758,12 @@ export interface WorkerOutputReceipt {
   sourceChanged: boolean;
 }
 
+function openCodeOutputPrefixHash(lines: string[], end: number): string {
+  const hash = createHash("sha256");
+  for (let i = 0; i < end; i++) hash.update(lines[i]).update("\n");
+  return hash.digest("hex").slice(0, 16);
+}
+
 /**
  * Read a bounded page of one worker's output (`orchestration worker-read`).
  *
@@ -2757,6 +2815,95 @@ export async function readWorkerOutput(
         ...(execution.evidence.userOwned ? ["Later user-owned work is excluded; automatic terminal cleanup is disabled"] : []),
       ],
     };
+  }
+  if (opts.source !== "terminal") {
+    const detail = await showWorkerDetail(dispatchId);
+    if (detail) {
+      const binding = await exactOpenCodeBinding(detail);
+      if (binding) {
+        const read = await readOpenCodeBoundSession(binding);
+        const lines: string[] = [];
+        let textClipped = false;
+        let budget = 160_000;
+        const push = (text: string) => {
+          if (text.length > budget || lines.length >= 10_000) textClipped = true;
+          const value = text.slice(0, Math.max(0, budget));
+          budget -= value.length;
+          const remainingLines = 10_000 - lines.length;
+          const chunks = value.split("\n");
+          lines.push(...chunks.slice(0, remainingLines));
+          if (chunks.length > remainingLines) textClipped = true;
+        };
+        for (const message of read.messages) {
+          if (budget <= 0 || lines.length >= 10_000) { textClipped = true; break; }
+          const role = typeof message.type === "string" ? message.type : "unknown";
+          const model = asRecord(message.model);
+          const tag = role === "assistant" && model.providerID && model.id
+            ? ` · ${String(model.providerID)}/${String(model.id)}${model.variant ? `#${String(model.variant)}` : ""}`
+            : "";
+          const content = Array.isArray(message.content) ? message.content : [];
+          if (typeof message.text === "string") push(`[${role}] ${message.text}`);
+          for (const raw of content) {
+            if (budget <= 0 || lines.length >= 10_000) { textClipped = true; break; }
+            const part = asRecord(raw);
+            if (part.type === "text" && typeof part.text === "string") push(`[${role}${tag}] ${part.text}`);
+            else if (part.type === "tool" || part.type === "tool-call") {
+              const tool = typeof part.name === "string" ? part.name : typeof part.tool === "string" ? part.tool : "unknown";
+              const state = asRecord(part.state);
+              let input = "";
+              try {
+                const value = safeToolInput(part.input ?? state.input);
+                input = value === undefined ? "" : ` ${JSON.stringify(value)}`;
+              } catch { input = " [tool input omitted]"; }
+              push(`[tool ${tool}]${input}`);
+              if (typeof state.output === "string" && !/auth|settings|config/i.test(tool)) push(`[tool result] ${state.output}`);
+              else if (state.output && typeof state.output === "object") push(`[tool result] ${JSON.stringify(safeToolInput(state.output))}`);
+            } else if (part.type === "tool-result") {
+              const tool = typeof part.tool === "string" ? part.tool : "unknown";
+              if (/auth|settings|config/i.test(tool)) continue;
+              const value = part.output ?? part.text;
+              const result = typeof value === "string" ? value
+                : value === undefined ? "[result unavailable]" : JSON.stringify(safeToolInput(value));
+              push(`[tool result${part.isError === true ? " error" : ""}] ${result}`);
+            }
+          }
+        }
+        // Pin already-rendered bytes, not the whole growing history: appending
+        // output must not restart paging. Changes before the cursor do restart
+        // it, so the client can replace stale text instead of combining sources.
+        const outputLines = lines;
+        const prefix = `ocapi2:${dispatchId}:${binding.sessionId}:`;
+        let sourceChanged = Boolean(opts.cursor && !opts.cursor.startsWith(prefix));
+        let offset = 0;
+        if (opts.cursor && !sourceChanged) {
+          const match = /^(\d+):([a-f0-9]{16})$/.exec(opts.cursor.slice(prefix.length));
+          if (!match || !Number.isSafeInteger(Number(match[1]))) {
+            throw new OrcaCliError("Invalid OpenCode API cursor", "invalid_cursor");
+          }
+          offset = Number(match[1]);
+          if (offset > outputLines.length || openCodeOutputPrefixHash(outputLines, offset) !== match[2]) {
+            sourceChanged = true;
+            offset = 0;
+          }
+        }
+        const limit = Math.max(1, Math.min(200, opts.limit ?? 40));
+        const page = outputLines.slice(offset, offset + limit);
+        const clipped = textClipped || !read.complete || offset + page.length < outputLines.length;
+        return {
+          dispatchId, source: "opencode-api",
+          cursor: `${prefix}${offset + page.length}:${openCodeOutputPrefixHash(outputLines, offset + page.length)}`,
+          lines: page, contentComplete: !clipped && read.status === "exited" && !read.userOwned,
+          clipped, sourceChanged,
+          warnings: [
+            `OpenCode API exact bound session: ${read.status}; provider state is separate from Orca fleet liveness and Task outcome.`,
+            ...(read.status !== "exited" ? ["OpenCode has not positively confirmed execution exit; transcript is not complete."] : []),
+            ...(!read.complete ? ["OpenCode history reached the bounded read budget; absence is not proof."] : []),
+            ...(textClipped ? ["OpenCode output reached the viewer text budget; transcript is partial."] : []),
+            ...(read.userOwned ? ["Additional user-owned prompts exist; only the original Dispatch turn is shown."] : []),
+          ],
+        };
+      }
+    }
   }
   const buildArgs = (cursor?: string): string[] => {
     const args = ["orchestration", "worker-read", "--dispatch", dispatchId];
@@ -4370,6 +4517,7 @@ export async function retainOpenCodeTui(dispatchId: string): Promise<void> {
     await new ProviderSessionStore(currentWorkspace().dir).recordOpenCodeLaunch({ ...launch, state: "retained" });
   }
 }
+
 
 interface OpenCodeStartOptions {
   taskId: string; runId: string; from: string; worktree: string;

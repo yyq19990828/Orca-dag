@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { realpath } from "node:fs/promises";
+import type { ProviderSessionBinding } from "./providerSessions";
 
 const execute = promisify(execFile);
 const TOKEN = /^[A-Za-z0-9._-]{1,128}$/;
@@ -147,6 +148,102 @@ export async function verifyOpenCodeSession(launch: OpenCodeLaunch): Promise<Rec
   }
   return data;
 }
+export interface OpenCodeBoundRead {
+  status: "active" | "idle" | "exited" | "unknown" | "unavailable";
+  statusDetail: string;
+  model: OpenCodeModel | null;
+  modelSource: "assistant-message" | "session" | null;
+  messages: Record<string, unknown>[];
+  complete: boolean;
+  userOwned: boolean;
+}
+
+function marker(text: string, id: string): boolean {
+  return new RegExp(`(^|[^A-Za-z0-9_])${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^A-Za-z0-9_]|$)`).test(text);
+}
+
+export function safeToolInput(value: unknown, depth = 0): unknown {
+  if (depth > 5) return "[depth limited]";
+  if (Array.isArray(value)) return value.slice(0, 40).map(item => safeToolInput(item, depth + 1));
+  if (!value || typeof value !== "object") return typeof value === "string" ? value.slice(0, 2_000) : value;
+  const result: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>).slice(0, 40)) {
+    if (/auth|token|secret|password|credential|api.?key|setting/i.test(key)) continue;
+    result[key] = safeToolInput(item, depth + 1);
+  }
+  return result;
+}
+
+/** Read only an already-bound one-shot session; never discover by recency. */
+export async function readOpenCodeBoundSession(binding: ProviderSessionBinding): Promise<OpenCodeBoundRead> {
+  const title = `orca-dag:${binding.runId}:${binding.taskId}:${binding.dispatchId}`;
+  const workspace = await realpath(binding.workspace).catch(() => null);
+  if (binding.harness !== "opencode" || binding.host !== "local:local" || workspace !== binding.workspace) {
+    throw new Error("Bound OpenCode session is not on this canonical local workspace.");
+  }
+  const session = record(record(await openCodeApi(workspace, "GET", `/api/session/${encodeURIComponent(binding.sessionId)}`)).data);
+  const directory = record(session.location).directory;
+  if (session.id !== binding.sessionId || session.title !== title || typeof directory !== "string" ||
+      await realpath(directory).catch(() => null) !== workspace) {
+    throw new Error("OpenCode session identity, title, or workspace did not match its durable binding.");
+  }
+  const messages: Record<string, unknown>[] = [];
+  const seen = new Set<string>();
+  const deadline = Date.now() + 8_000;
+  let cursor: string | null = null;
+  let complete = false;
+  // CLI 2.2.0 can exit successfully with truncated JSON on large history
+  // responses. Small pages keep ordinary tool-heavy sessions readable; the
+  // same 800-message/time bounds still make oversized history explicit.
+  for (let page = 0; page < 160 && Date.now() < deadline; page++) {
+    const path = `/api/session/${encodeURIComponent(binding.sessionId)}/message?limit=5` +
+      (cursor ? `&cursor=${encodeURIComponent(cursor)}` : "&order=asc");
+    const response = record(await openCodeApi(workspace, "GET", path));
+    if (!Array.isArray(response.data) || !response.cursor || typeof response.cursor !== "object") {
+      throw new Error("OpenCode returned a malformed message page.");
+    }
+    messages.push(...response.data.map(record));
+    const next = record(response.cursor).next;
+    if (next === null) { complete = true; break; }
+    if (typeof next !== "string" || seen.has(next)) throw new Error("OpenCode returned an invalid message cursor.");
+    seen.add(next);
+    cursor = next;
+  }
+  const users = messages.filter(message => message.type === "user");
+  const assigned = users.filter(message => typeof message.text === "string" &&
+    marker(message.text, binding.taskId) && marker(message.text, binding.dispatchId));
+  if (assigned.length !== 1) throw new Error("OpenCode history did not prove exactly one assigned Task/Dispatch preamble.");
+  const assignedIndex = messages.indexOf(assigned[0]);
+  const laterUser = messages.findIndex((message, index) => index > assignedIndex && message.type === "user");
+  const userOwned = laterUser >= 0 || users.length > 1;
+  const scoped = messages.slice(assignedIndex + 1, laterUser < 0 ? undefined : laterUser);
+  const assistant = scoped.find(message => message.type === "assistant" && message.model);
+  let model: OpenCodeModel | null = null;
+  let modelSource: OpenCodeBoundRead["modelSource"] = null;
+  if (assistant) {
+    try { model = validateOpenCodeModel(assistant.model); modelSource = "assistant-message"; } catch { /* effective model remains unknown */ }
+  }
+  if (!model && session.model) {
+    try { model = validateOpenCodeModel(session.model); modelSource = "session"; } catch { /* effective model remains unknown */ }
+  }
+  const activeResponse = record(await openCodeApi(workspace, "GET", "/api/session/active"));
+  if (!activeResponse.data || typeof activeResponse.data !== "object" || Array.isArray(activeResponse.data)) {
+    throw new Error("OpenCode returned a malformed active-session map.");
+  }
+  const active = record(record(activeResponse.data)[binding.sessionId]);
+  let status: OpenCodeBoundRead["status"] = "unknown";
+  let statusDetail = "OpenCode returned no conclusive state for this exact session.";
+  const activeState = typeof active.type === "string" ? active.type.toLowerCase() : typeof active.status === "string" ? active.status.toLowerCase() : "";
+  if (["running", "busy", "retry"].includes(activeState)) {
+    status = "active"; statusDetail = `OpenCode reports the exact session as ${activeState}.`;
+  } else if (activeState === "idle") {
+    status = "idle"; statusDetail = "OpenCode reports this exact session as idle; Task outcome remains separate.";
+  } else if (complete && !Object.keys(active).length && ["succeeded", "failed", "interrupted", "cancelled"].includes(String(session.outcome).toLowerCase())) {
+    status = "exited"; statusDetail = `OpenCode reports this exact session execution as ${String(session.outcome).toLowerCase()}.`;
+  }
+  return { status, statusDetail, model, modelSource, messages: scoped, complete, userOwned };
+}
+
 
 export function validateOpenCodeLaunch(value: unknown): OpenCodeLaunch {
   const row = record(value);
@@ -168,10 +265,6 @@ export function validateOpenCodeLaunch(value: unknown): OpenCodeLaunch {
   const requestedModel = row.requestedModel === undefined ? model :
     row.requestedModel === null ? null : validateOpenCodeModel(row.requestedModel);
   return { ...row, frontend: row.frontend ?? "tui", requestedModel, model } as unknown as OpenCodeLaunch;
-}
-
-function marker(text: string, id: string): boolean {
-  return new RegExp(`(^|[^A-Za-z0-9_])${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^A-Za-z0-9_]|$)`).test(text);
 }
 
 /** Bounded, ascending history. Hitting a budget is uncertainty, not absence. */

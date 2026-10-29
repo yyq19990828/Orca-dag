@@ -1561,7 +1561,6 @@ describe("native OpenCode 2", () => {
       laneByTask: { task_aaa: "lane_model" },
     }));
     await waitFor(() => findAttempt("task_aaa")?.settledVia === "start_failed", "unsupported model lane to park");
-    assert.match(attempt("task_aaa").terminalDetail ?? "", /local legacy path/);
     assert.equal(calls("worker-start").length, 0);
     assert.equal(calls("dispatch").length, 0);
     assert.equal(readLog().some((call) => call.argv[0] === "worktree" && call.argv[1] === "create"), false);

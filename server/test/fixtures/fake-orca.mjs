@@ -385,7 +385,7 @@ if (ns === "orchestration" && verb === "run-list") {
     observation: { status: d.terminalConnected === false ? "exited" : "live", exactWorker: true },
     ...(state.openCodeTui ? {
       observation: { status: "live", exactWorker: true },
-      projection: { ...workerRows(d.run_id).find(row => row.dispatchId === d.id),
+      projection: { ...workerRows(d.run_id).find(row => row.dispatchId === d.id)?.projection,
         terminalState: undefined, resource: { state: "external", terminalState: d.terminalState } },
     } : {}),
   });
