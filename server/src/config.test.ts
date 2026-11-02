@@ -86,6 +86,23 @@ describe("config: effortByTask (Phase 5)", () => {
   });
 });
 
+describe("config: opaque native preferences", () => {
+  it("retains native selectors on sparse patches and does not hide unsupported effort", async () => {
+    writeFileSync(join(dir, CONFIG_FILE), JSON.stringify({
+      defaultHarness: "omp", harnessByTask: { task_agy: "antigravity", task_claude: "claude" },
+    }));
+    const model = " provider/model#variant:opaque value ";
+    await saveConfig(dir, { modelByTask: { task_omp: model, task_agy: model, task_claude: " opus " },
+      effortByTask: { task_omp: " ", task_agy: "high" } });
+    await saveConfig(dir, { runId: "run_native" });
+    const config = await loadConfig(dir);
+    assert.deepEqual(config.modelByTask, { task_omp: model, task_agy: model, task_claude: "opus" });
+    assert.deepEqual(config.effortByTask, { task_omp: " ", task_agy: "high" });
+    // Do not leak this scenario's harness into the shared fixture's later tests.
+    writeFileSync(join(dir, CONFIG_FILE), JSON.stringify({ defaultHarness: "claude" }));
+  });
+});
+
 /**
  * Phase 6 fields: `environmentByTask` (saved-environment selectors) and
  * `placementByTask` (exact placement specs). The compatibility guarantee is

@@ -4,6 +4,7 @@ import {
   assertDiscoveredWorktreeAudience,
   assertEnvironmentPlacementCompatibility,
   assertOpenCodeUiPlacement,
+  assertNativePresetConstraints,
   assertLanePlacementDisjoint,
   assertLaneReferences,
   createSecurityPolicy,
@@ -133,7 +134,7 @@ describe("validateText", () => {
 
 describe("validateHarness", () => {
   it("lets known Orca agent ids through with zero setup", () => {
-    for (const h of ["claude", "codex", "opencode"]) {
+    for (const h of ["claude", "codex", "opencode", "omp", "antigravity"]) {
       assert.equal(validateHarness(h, FLAG_OFF), h);
     }
   });
@@ -157,6 +158,16 @@ describe("validateHarness", () => {
 });
 
 describe("validateModel", () => {
+  it("preserves opaque native selectors without applying another provider's grammar", () => {
+    for (const harness of ["omp", "antigravity"]) {
+      for (const selector of ["openai-codex/gpt-6.1-sol", "gemini-4-argon-low", " provider/model#variant:opaque value "]) {
+        assert.equal(validateModel(selector, harness), selector);
+      }
+      for (const bad of ["", "   ", "model\nnext", "model\u0000", "x".repeat(513)]) {
+        assert.throws(() => validateModel(bad, harness), ValidationError);
+      }
+    }
+  });
   it("enforces the provider/model grammar for opencode (same as enumeration)", () => {
     assert.equal(validateModel("zai-coding-plan/glm-5.3-flash", "opencode"), "zai-coding-plan/glm-5.3-flash");
     assert.equal(validateModel("openai/gpt-4o.mini_2", "opencode"), "openai/gpt-4o.mini_2");
@@ -196,7 +207,7 @@ describe("validateModel", () => {
     assertThrowsWith(() => validateModel(`zai-coding-plan/glm-5.3-flash#${"x".repeat(65)}`, "opencode"), "invalid_model");
   });
 
-  it("keeps the #variant suffix opencode-only (plain harness grammar unchanged)", () => {
+  it("keeps plain Claude/Codex model grammar unchanged", () => {
     assertThrowsWith(() => validateModel("zai-coding-plan/glm-5.3-flash#high", "claude"), "invalid_model");
     assert.equal(validateModel("gpt-5.1-codex-max", "codex"), "gpt-5.1-codex-max");
   });
@@ -208,6 +219,31 @@ describe("validateModel", () => {
     assertThrowsWith(() => validateModel("opus; rm -rf /", "claude"), "invalid_model");
     assertThrowsWith(() => validateModel("a b", "claude"), "invalid_model");
   });
+});
+
+describe("native preset execution boundaries", () => {
+  for (const harness of ["omp", "antigravity"]) {
+    it(`limits ${harness} to fresh local Linux current/exact-existing starts and rejects all effort`, () => {
+      assert.doesNotThrow(() => assertNativePresetConstraints(harness, {}, "linux"));
+      for (const selector of ["path:/ws/exact", "id:repo::/ws/exact", "repo::/ws/exact"]) {
+        assert.doesNotThrow(() => assertNativePresetConstraints(harness, { placement: { kind: "existing", selector } }, "linux"));
+      }
+      for (const effort of ["high", "xhigh", "max", "auto", "default", " ", "model-specific"]) {
+        assertThrowsWith(() => assertNativePresetConstraints(harness, { effort }, "linux"), "unsupported_effort");
+      }
+      for (const options of [
+        { environment: "env_remote" }, { lane: "lane_1" }, { terminal: "term_old" },
+        { placement: { kind: "new-child", setup: "run" } as const },
+        { placement: { kind: "new-top-level", repo: "id:repo", setup: "skip" } as const },
+        ...["active", "current", "name:old", "branch:main", "new-child"].map(selector => ({ placement: { kind: "existing" as const, selector } })),
+      ]) {
+        assertThrowsWith(() => assertNativePresetConstraints(harness, options, "linux"), "invalid_placement");
+      }
+      for (const platform of ["win32", "darwin"] as const) {
+        assertThrowsWith(() => assertNativePresetConstraints(harness, {}, platform), "invalid_placement");
+      }
+    });
+  }
 });
 
 describe("validateTaskValueMap", () => {
@@ -269,7 +305,7 @@ describe("validateGroupAudience (Phase 6)", () => {
   });
 
   it("accepts known harness groups and nothing harness-shaped beyond the allowlist", () => {
-    for (const harness of ["claude", "codex", "opencode"]) {
+    for (const harness of ["claude", "codex", "opencode", "omp", "antigravity"]) {
       assert.equal(validateGroupAudience(`@${harness}`), `@${harness}`);
     }
     for (const harness of ["gemini", "grok", "cursor", "droid", "kimi"]) {

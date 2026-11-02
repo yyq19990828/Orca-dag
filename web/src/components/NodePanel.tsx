@@ -242,8 +242,10 @@ export function NodePanel({
   // Discovery is advisory and scoped to the local viewer workspace. The
   // editable value remains local draft state until it is a complete model ID.
   const effHarness = effectiveHarness(node.id);
+  const nativeAgent = effHarness === "omp" || effHarness === "antigravity";
   const picker = MODEL_PICKER[effHarness] ?? "none";
   const model = getNodeModel(node.id);
+  const effort = getNodeEffort(node.id);
   const [openCodeDiscovery, setOpenCodeDiscovery] = useState<ModelDiscoveryResult | null>(null);
   const [modelDraft, setModelDraft] = useState(model ?? "");
   useEffect(() => setModelDraft(model ?? ""), [model, node.id, effHarness]);
@@ -507,14 +509,22 @@ export function NodePanel({
           {UNVERIFIED_HARNESSES[effHarness] === true && (
             <span className="node-panel__hint">{t("exec.unverifiedHarnessHint", { harness: effHarness })}</span>
           )}
+          {nativeAgent && (
+            <>
+              <span className="node-panel__hint">{t("nativeAgent.requirements")}</span>
+              <span className="node-panel__hint">{t("nativeAgent.surfaceHint")}</span>
+            </>
+          )}
           {sel === CUSTOM && !customOk && !storedIsUnverified && (
             <span className="node-panel__hint">{t("exec.customOffHint")}</span>
           )}
         </div>
 
-        {/* A model belongs to the harness above. A remote peer that does not
-            advertise model/effort forwarding cannot accept either control. */}
-        {picker !== "none" && peerModelEffort && (
+        {/* A model belongs to the harness above. Remote forwarding controls
+            require peer support. The Linux-only native presets keep their
+            saved model visible even on an unsupported placement; preflight
+            rejects that plan rather than silently erasing its preferences. */}
+        {picker !== "none" && (peerModelEffort || nativeAgent) && (
           <div className="node-panel__field">
             <label className="node-panel__key" htmlFor={`node-model-${node.id}`}>
               {t("node.modelKey", { harness: effHarness })}{model ? null : t("node.modelDefaultSuffix")}
@@ -564,6 +574,23 @@ export function NodePanel({
                 {model && <span className="node-panel__hint">{t("node.openCodeModelLaunchHint")}</span>}
               </>
             )}
+            {nativeAgent && <span className="node-panel__hint">{t("nativeAgent.modelHint")}</span>}
+          </div>
+        )}
+
+        {/* Unsupported saved effort is evidence, not a migration opportunity.
+            Keep it visible even without a model, with only explicit removal. */}
+        {nativeAgent && effort && (
+          <div className="node-panel__field">
+            <label className="node-panel__key" htmlFor={`node-effort-${node.id}`}>
+              {t("node.effortKey", { harness: effHarness })}
+            </label>
+            <input id={`node-effort-${node.id}`} className="node-panel__custom" value={effort} readOnly aria-invalid />
+            <span className="node-panel__hint">{t("nativeAgent.effortUnsupported", { harness: effHarness, effort, task: node.id })}</span>
+            <button type="button" className="btn" disabled={launchLocked}
+              onClick={() => { if (!launchLocked) setNodeEffort(node.id, null); }}>
+              {t("node.clearEffort")}
+            </button>
           </div>
         )}
 

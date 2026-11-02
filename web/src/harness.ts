@@ -449,13 +449,15 @@ export function getNodeModel(taskId: string): string | null {
 
 export function setNodeModel(taskId: string, model: string | null): void {
   const modelByTask = { ...config.modelByTask };
-  // Effort only exists alongside a model (Phase 5): clearing the model clears
-  // the effort so the stored pair can never dangle.
+  // Existing adapters pair effort with a model. OMP/Antigravity accept no
+  // effort at all: preserve an old unsupported value until the user explicitly
+  // clears it, so resetting the model cannot silently repair a rejected plan.
   const effortByTask = { ...config.effortByTask };
   if (model) modelByTask[taskId] = model;
   else {
     delete modelByTask[taskId];
-    delete effortByTask[taskId];
+    const harness = effectiveHarness(taskId);
+    if (harness !== "omp" && harness !== "antigravity") delete effortByTask[taskId];
   }
   update({ modelByTask, effortByTask });
 }

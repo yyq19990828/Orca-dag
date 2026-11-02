@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, extname, isAbsolute, join, normalize } from "node:path";
 import {
   OrcaCliError,
+  assertNativePresetSupport,
   RESPONSE_LOST,
   WORKTREE_ARCHIVE_HOOK_FAILED,
   abandonWorkerReceipt,
@@ -85,9 +86,11 @@ import {
   assertDiscoveredWorktreeAudience,
   assertEnvironmentPlacementCompatibility,
   assertOpenCodeUiPlacement,
+  assertNativePresetConstraints,
   assertLanePlacementDisjoint,
   assertLaneReferences,
   KNOWN_HARNESSES,
+  isNativeFreshPreset,
   validateBooleanTaskMap,
   validateConcurrency,
   validateEffort,
@@ -172,7 +175,8 @@ function fail(res: express.Response, err: unknown): void {
   }
   const e = err as OrcaCliError;
   const code = e?.code ?? null;
-  const status = code === "unverified_harness" ? 400 :
+  const status = code === "execution_disabled" ? 503 :
+    code === "unverified_harness" || code === "invalid_placement" || code === "unsupported_effort" ? 400 :
     code === "run_required" || code === "run_not_found"
       ? 409
       : code === "coordinator_conflict"
@@ -1166,7 +1170,10 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         req.body?.effortByTask ?? saved.effortByTask,
         "effortByTask",
         { maxKeys: 500, valueKind: "effort" },
-        (value) => validateEffort(value),
+        (value, key) => {
+          assertNativePresetConstraints(harnessByTask[key] ?? defaultHarness, { effort: String(value) });
+          return validateEffort(value);
+        },
       ) ?? {};
       for (const taskId of Object.keys(effortByTask)) {
         if (!modelByTask[taskId]) throw new ValidationError(
@@ -1181,6 +1188,22 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       assertLanePlacementDisjoint(placementByTask, laneByTask);
       assertEnvironmentPlacementCompatibility(environmentByTask, placementByTask);
       const tasks = await listTasks(runId);
+      const nativeCandidates = tasks.filter(task =>
+        !["completed", "failed", "dispatched"].includes(task.status) &&
+        isNativeFreshPreset(harnessByTask[task.id] ?? defaultHarness));
+      // A blocked Task can still own a pending/unknown native Dispatch even
+      // without task.dispatch_id. Today's launch preference never replaces it.
+      const nativeFleet = nativeCandidates.length ? await listWorkers(runId, { includeRemote: true }) : [];
+      const nativeTasks = nativeCandidates.filter(task => !nativeFleet.some(row =>
+        row.runId === runId && row.taskId === task.id &&
+        (row.dispatchStatus === "pending" || row.dispatchStatus === "dispatched")));
+      const nativeReadiness = nativeTasks.length ? await checkReadiness(true) : undefined;
+      for (const task of nativeTasks) {
+        await assertNativePresetSupport(harnessByTask[task.id] ?? defaultHarness, {
+          effort: effortByTask[task.id], environment: environmentByTask[task.id],
+          lane: laneByTask[task.id], placement: placementByTask[task.id],
+        }, nativeReadiness);
+      }
       for (const [taskId, ui] of Object.entries(openCodeUiByTask)) {
         const task = tasks.find((candidate) => candidate.id === taskId);
         if (!task || ["completed", "failed", "dispatched"].includes(task.status)) continue;
@@ -1305,15 +1328,13 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       }
       // Strict validation happens here — before any Orca terminal exists — so a
       // bad harness or model string can never reach the CLI/shell boundary.
-      const defaultHarness = req.body?.defaultHarness
-        ? validateHarness(req.body.defaultHarness, policy)
-        : "claude";
       const storedConfig = await loadConfig(workspaceDir);
+      const defaultHarness = validateHarness(req.body?.defaultHarness ?? storedConfig.defaultHarness ?? "claude", policy);
       const defaultOpenCodeUi = req.body?.defaultOpenCodeUi === undefined
         ? storedConfig.defaultOpenCodeUi ?? "auto" : validateOpenCodeUi(req.body.defaultOpenCodeUi);
       const openCodeUiByTask = validateOpenCodeUiTaskMap(req.body?.openCodeUiByTask) ?? storedConfig.openCodeUiByTask ?? {};
       const harnessByTask = validateTaskValueMap(
-        req.body?.harnessByTask,
+        req.body?.harnessByTask ?? storedConfig.harnessByTask,
         "harnessByTask",
         { maxKeys: 500, valueKind: "harness" },
         (v) => validateHarness(v, policy),
@@ -1321,7 +1342,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       // A model is validated against its task's EFFECTIVE harness (override
       // else default) — that's the harness whose launch path will consume it.
       const modelByTask = validateTaskValueMap(
-        req.body?.modelByTask,
+        req.body?.modelByTask ?? storedConfig.modelByTask,
         "modelByTask",
         { maxKeys: 500, valueKind: "model" },
         (v, key) => validateModel(v, harnessByTask?.[key] ?? defaultHarness),
@@ -1331,10 +1352,13 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       // `--model`, so an unpaired effort is a request bug, rejected here
       // (before any Orca work) instead of silently dropped later.
       const effortByTask = validateTaskValueMap(
-        req.body?.effortByTask,
+        req.body?.effortByTask ?? storedConfig.effortByTask,
         "effortByTask",
         { maxKeys: 500, valueKind: "effort" },
-        (v) => validateEffort(v),
+        (v, key) => {
+          assertNativePresetConstraints(harnessByTask?.[key] ?? defaultHarness, { effort: String(v) });
+          return validateEffort(v);
+        },
       );
       if (effortByTask) {
         const models = modelByTask ?? {};
@@ -1352,8 +1376,8 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       // here (charset, kinds, required fields); whether an environment really
       // exists is checked at start time (environment_unknown start failure),
       // and the adapter re-refuses remote current/new-child as the last gate.
-      const environmentByTask = validateEnvironmentTaskMap(req.body?.environmentByTask, "environmentByTask");
-      const placementByTask = validatePlacementTaskMap(req.body?.placementByTask, "placementByTask");
+      const environmentByTask = validateEnvironmentTaskMap(req.body?.environmentByTask ?? storedConfig.environmentByTask, "environmentByTask");
+      const placementByTask = validatePlacementTaskMap(req.body?.placementByTask ?? storedConfig.placementByTask, "placementByTask");
       // Workspace lanes (worktree-lanes epic): the full lane shapes are
       // validated here with the same strictness as placement, plus the two
       // semantic cross-checks — every laneByTask reference must name a
@@ -1361,8 +1385,8 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       // both. Whether a lane's seed workspace really exists is checked at
       // start time (exact-selector revalidation in the coordinator), exactly
       // like environment existence.
-      const worktreeLanes = validateWorktreeLaneMap(req.body?.worktreeLanes, "worktreeLanes");
-      const laneByTask = validateLaneTaskMap(req.body?.laneByTask, "laneByTask");
+      const worktreeLanes = validateWorktreeLaneMap(req.body?.worktreeLanes ?? storedConfig.worktreeLanes, "worktreeLanes");
+      const laneByTask = validateLaneTaskMap(req.body?.laneByTask ?? storedConfig.laneByTask, "laneByTask");
       assertLaneReferences(laneByTask, worktreeLanes);
       assertLanePlacementDisjoint(placementByTask, laneByTask);
       assertEnvironmentPlacementCompatibility(environmentByTask, placementByTask);

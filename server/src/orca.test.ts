@@ -1223,6 +1223,36 @@ describe("readWorkerOutput", () => {
 // --- Phase 5 foundations: launch-preference argv contract --------------------
 
 describe("startSupervisedWorker launch preferences", () => {
+  for (const agent of ["omp", "antigravity"]) {
+    it(`refuses unsupported ${agent} preferences and placement at the final adapter gate`, async () => {
+      useRuntime({ workspace: root });
+      const callsBefore = readLog().length;
+      const base = { taskId: "task_native", agent, runId: "run_native", from: "term_coord" };
+      for (const model of [undefined, "opaque/provider-model#variant"]) {
+        await assert.rejects(startSupervisedWorker({ ...base, model, effort: "high" }), { code: "unsupported_effort" });
+      }
+      for (const preference of [{ terminal: "term_existing" }, { on: "env_remote" },
+        { worktree: "new-child" }, { worktree: "active" }, { worktree: "name:ambiguous" }]) {
+        await assert.rejects(startSupervisedWorker({ ...base, ...preference }), { code: "invalid_placement" });
+      }
+      assert.equal(readLog().length, callsBefore, "unsupported requests do not even probe or prestart a terminal");
+    });
+
+    it(`will not start ${agent} in a missing or remote-owned existing workspace`, { skip: process.platform !== "linux" }, async () => {
+      useRuntime({ workspace: root });
+      const selector = "id:repo::/ws/existing";
+      const base = { taskId: "task_native", agent, runId: "run_native", from: "term_coord", worktree: selector };
+      writeScript({ version: "1.4.245", worktrees: [] });
+      let before = readLog().length;
+      await assert.rejects(startSupervisedWorker(base), { code: "workspace_not_found" });
+      assert.equal(readLog().slice(before).some(call => call.argv[1] === "worker-start"), false);
+      writeScript({ version: "1.4.245", worktrees: [{ id: selector, path: "/ws/existing", hostId: "remote-host" }] });
+      before = readLog().length;
+      await assert.rejects(startSupervisedWorker(base), { code: "workspace_unverifiable" });
+      assert.equal(readLog().slice(before).some(call => call.argv[1] === "worker-start"), false);
+    });
+  }
+
   it("sends --model and --effort together when both are requested", async () => {
     useRuntime({ workspace: root });
     writeScript({ workerStart: { dispatchId: "ctx_m1", status: "ready" } });

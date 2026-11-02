@@ -20,6 +20,7 @@ Orca DAG 将「与 Agent 对话规划」和「可视化调度与执行」拆分�
 - **工作区已纳管**：当前项目目录必须已通过 `orca repo add <path>` 或 `orca worktree` 纳入 Orca 纳管。
 - **环境依赖**：Node.js ≥ 20，或独立发布二进制；两种方式都需要可用的 Orca CLI。
 - **执行 Agent**：所选 worker agent 必须已在 Orca 中安装、配置和授权，能自主执行工具并发送 `worker_done`。
+- **内置预设**：`claude`、`codex`、`opencode`、`omp`、`antigravity`，须遵守各自的[版本与放置限制](docs/reference/compatibility_zh.md)。其他 5 个未验证 agent ID 仍不可用，即使开启自定义命令也不能启动。
 
 ## 安装与启动
 
@@ -60,6 +61,7 @@ npx orca-orchestration-launcher
 - **任务定义不可变**：spec、标题与依赖不能原地修改，状态和结果仍可更新。调整定义须新建 Run；不要用 `reset --tasks` 重绘，它会清空所有 Run。
 - **未知不等于死亡**：unknown 或断连的 worker 仍占用并发槽位；不确定性不能授权自动重试、取消或替代启动。
 - **本地控制面**：服务监听 `127.0.0.1`，不启用 CORS，变更请求需要 `X-Orca-Dag-Token`。自定义命令须显式启用。
+- **OMP / Antigravity**：要求运行中的 Orca 和解析后的 CLI 均 ≥ **1.4.245**，仅支持本地 Linux 的 Current 或精确 Existing 放置，不能使用 lane。原生 `worker-start --agent` 遵循 Orca 的 Chat/Terminal 偏好，viewer 不检查或覆盖该偏好。Terminal TUI 基线使用 **OMP 18.15.0 / Antigravity 1.4.12**；Native Chat 尚未实测，但不会被拦截。模型覆盖原样作为原生 selector 传递，留空使用已配置的默认值，所有非空 effort 均拒绝。[输出、Stop 与历史设计限制](docs/reference/compatibility_zh.md#验证边界与限制说明)仍明确保留。
 
 ## 文档导航
 

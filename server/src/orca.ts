@@ -15,7 +15,8 @@ import {
 } from "./openCode";
 // The audience allowlist is a security-boundary concept, so the adapter
 // consumes it from security.ts (which never imports this module — no cycle).
-import { KNOWN_HARNESSES, WORKTREE_AUDIENCE_PREFIX } from "./security";
+import { assertNativePresetConstraints, isNativeFreshPreset, KNOWN_HARNESSES, WORKTREE_AUDIENCE_PREFIX,
+  type NativePresetConstraints } from "./security";
 // The creation-metadata grammar lives in config.ts next to the stored
 // placement shape; the adapter re-checks it as the LAST gate before Orca.
 import {
@@ -1328,6 +1329,8 @@ export const MIN_NATIVE_CODEX_VERSION = "1.4.217";
 export const MIN_NATIVE_OPENCODE_VERSION = "1.4.220";
 /** Expanded execution-host model verification plus startup-prompt exclusions. */
 export const MIN_NATIVE_OPENCODE_MODEL_VERSION = "1.4.241";
+/** Native OMP/Antigravity launch, model omission and lifecycle evidence floor. */
+const MIN_NATIVE_FRESH_PRESET_VERSION = "1.4.245";
 /** Oldest Orca whose Run/Task/Dispatch model the viewer can still render. */
 export const MIN_VIEW_VERSION = "1.4.160";
 
@@ -1474,6 +1477,45 @@ export async function checkReadiness(force = false): Promise<OrcaReadiness> {
     ...verdict,
   };
   return readinessCache;
+}
+
+/**
+ * One guard for preview, coordinator admission, retry and the final adapter.
+ * These presets have no viewer-owned prestart/surface/provider adapter: only
+ * native --agent can preserve custody. A newer executable cannot certify an
+ * older/unreachable runtime, and a refused start never authorizes a fallback.
+ * Callers may share ONE fresh read-only readiness probe across a plan; actual
+ * starts always re-probe at the last gate. Existing Dispatch recovery does not
+ * call this launch gate and therefore never replaces a worker on version drift.
+ */
+export async function assertNativePresetSupport(
+  harness: string, opts: NativePresetConstraints, readiness?: OrcaReadiness,
+): Promise<void> {
+  assertNativePresetConstraints(harness, opts);
+  if (!isNativeFreshPreset(harness)) return;
+  const probe = readiness ?? await checkReadiness(true);
+  if (!probe.executionEnabled || probe.runtimeState !== "ready" ||
+      !probe.version || !/^\d+\.\d+\.\d+$/.test(probe.version) ||
+      !probe.cliVersion || !/^\d+\.\d+\.\d+$/.test(probe.cliVersion) ||
+      compareVersions(probe.version, MIN_NATIVE_FRESH_PRESET_VERSION) < 0 ||
+      compareVersions(probe.cliVersion, MIN_NATIVE_FRESH_PRESET_VERSION) < 0) {
+    throw new OrcaCliError(
+      `${harness} requires the resolved CLI and a ready running Orca runtime >= ${MIN_NATIVE_FRESH_PRESET_VERSION} ` +
+        `(CLI ${probe.cliVersion ?? "unknown"}, runtime ${probe.version ?? "unknown"}, state ${probe.runtimeState ?? "unknown"}).`,
+      "execution_disabled",
+    );
+  }
+  if (opts.placement?.kind === "existing") {
+    let row: OrcaWorktreeRow | null;
+    try { row = await showWorktree(opts.placement.selector); }
+    catch {
+      throw new OrcaCliError(`${harness} exact existing workspace could not be verified; no replacement is started`, "workspace_unverifiable");
+    }
+    if (!row) throw new OrcaCliError(`${harness} exact existing workspace was not found`, "workspace_not_found");
+    if (!row.path?.startsWith("/") || (row.hostId && row.hostId !== "local")) {
+      throw new OrcaCliError(`${harness} exact existing workspace has no verified local Linux path`, "workspace_unverifiable");
+    }
+  }
 }
 
 // --- Coordinator inbox + worker lifecycle (Phase 3) -------------------------
@@ -4816,6 +4858,11 @@ export interface WorkerStartRequest {
 }
 
 export function assertValidWorkerStart(opts: WorkerStartRequest): void {
+  assertNativePresetConstraints(opts.agent ?? "", {
+    effort: opts.effort, environment: opts.on, terminal: opts.terminal,
+    placement: !opts.worktree || opts.worktree === "current" ? { kind: "current" }
+      : { kind: "existing", selector: opts.worktree },
+  });
   if (opts.terminal && (opts.model || opts.effort)) {
     throw new OrcaCliError(
       "worker-start: --model/--effort cannot combine with --terminal (a reused terminal keeps its original launch).",
@@ -5100,6 +5147,11 @@ export async function startSupervisedWorker(opts: {
   // unpaired effort, creation-flag misuse, and malformed metadata all refuse
   // WITHOUT a spawn.
   assertValidWorkerStart(request);
+  await assertNativePresetSupport(request.agent, {
+    effort: request.effort, environment: request.on, terminal: request.terminal,
+    placement: !request.worktree || request.worktree === "current" ? { kind: "current" }
+      : { kind: "existing", selector: request.worktree },
+  });
   const requestId = opts.retryRequestId ?? newRequestId();
   const buildArgs = (): string[] => buildWorkerStartArgv(request, requestId);
 

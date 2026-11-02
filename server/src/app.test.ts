@@ -1,4 +1,4 @@
-import { after, before, describe, it } from "node:test";
+import { after, before, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -362,6 +362,22 @@ describe("Phase 5: per-task effort validation", () => {
 // boundary and can never become argv.
 
 describe("Phase 6: environment/placement validation", () => {
+  beforeEach(async () => {
+    // Sparse Run requests now inherit saved preferences. Start each request
+    // boundary case from valid config, not another suite's orphan effort.
+    const clean = await call("PUT", "/api/config", {
+      defaultHarness: "claude",
+      harnessByTask: {},
+      modelByTask: {},
+      effortByTask: {},
+      environmentByTask: {},
+      placementByTask: {},
+      worktreeLanes: {},
+      laneByTask: {},
+    }, policy.token);
+    assert.equal(clean.status, 200);
+  });
+
   it("rejects a remote-ambiguous new-child placement with invalid_placement", async () => {
     // Local new-child is a legal placement; the ambiguity only exists when
     // the same task is placed on a SAVED ENVIRONMENT (another server), and

@@ -29,7 +29,8 @@ export interface ViewerConfig {
   /**
    * Per-task reasoning effort (Phase 5). Only meaningful when the same task
    * has a model AND the harness supports effort (`worker-start --effort`
-   * requires `--model`); the coordinator drops it otherwise.
+   * requires `--model`); the coordinator drops it otherwise. Native OMP and
+   * Antigravity retain every nonempty value so launch validation can refuse it.
    */
   effortByTask?: Record<string, string>;
   /**
@@ -292,7 +293,8 @@ export async function loadConfig(workspaceDir: string): Promise<ViewerConfig> {
 
 /** Merge a patch into the stored config and write it back (tmp + rename). */
 export async function saveConfig(workspaceDir: string, patch: unknown): Promise<ViewerConfig> {
-  const next = { ...(await loadConfig(workspaceDir)), ...sanitize(patch) };
+  const previous = await loadConfig(workspaceDir);
+  const next = { ...previous, ...sanitize(patch, previous) };
   prepareWorkspaceStateFile(workspaceDir, CONFIG_FILE, true);
   const file = configPath(workspaceDir);
   // The shared directory also contains authored planning work. Reserve an
@@ -320,7 +322,7 @@ export async function saveConfig(workspaceDir: string, patch: unknown): Promise<
  * sanitizer's allowlist is the enforcement — unknown keys (including anything
  * credential-shaped a future contributor might add) are dropped here.
  */
-function sanitize(raw: unknown): ViewerConfig {
+function sanitize(raw: unknown, previous?: ViewerConfig): ViewerConfig {
   if (!raw || typeof raw !== "object") return {};
   const r = raw as Record<string, unknown>;
   const out: ViewerConfig = {};
@@ -338,10 +340,17 @@ function sanitize(raw: unknown): ViewerConfig {
     }
     out.harnessByTask = map;
   }
+  // A model-only patch must still use the persisted effective harness; otherwise
+  // patch sanitization would normalize an opaque native selector before merge.
+  const harnessForTask = (key: string) => (out.harnessByTask ?? previous?.harnessByTask)?.[key] ??
+    out.defaultHarness ?? previous?.defaultHarness;
   if (r.modelByTask && typeof r.modelByTask === "object" && !Array.isArray(r.modelByTask)) {
     const map: Record<string, string> = {};
     for (const [k, v] of Object.entries(r.modelByTask as Record<string, unknown>)) {
-      if (typeof v === "string" && v.trim()) map[k] = v.trim();
+      const harness = harnessForTask(k);
+      // Native selectors are opaque execution-host CLI values, not provider/
+      // model components to split or normalize (including significant spaces).
+      if (typeof v === "string" && v.trim()) map[k] = harness === "omp" || harness === "antigravity" ? v : v.trim();
     }
     out.modelByTask = map;
   }
@@ -351,7 +360,10 @@ function sanitize(raw: unknown): ViewerConfig {
   if (r.effortByTask && typeof r.effortByTask === "object" && !Array.isArray(r.effortByTask)) {
     const map: Record<string, string> = {};
     for (const [k, v] of Object.entries(r.effortByTask as Record<string, unknown>)) {
-      if (typeof v === "string" && v.trim()) map[k] = v.trim();
+      const harness = harnessForTask(k);
+      if (harness === "omp" || harness === "antigravity") {
+        if (typeof v === "string" && v !== "") map[k] = v;
+      } else if (typeof v === "string" && v.trim()) map[k] = v.trim();
     }
     out.effortByTask = map;
   }

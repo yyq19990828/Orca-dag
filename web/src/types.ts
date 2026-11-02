@@ -145,6 +145,8 @@ export const HARNESSES = [
   "claude",
   "codex",
   "opencode",
+  "omp",
+  "antigravity",
 ] as const;
 export type Harness = (typeof HARNESSES)[number] | (string & {});
 
@@ -868,11 +870,12 @@ export interface ViewerConfig {
   harnessByTask: Record<string, string>;
   /**
    * Per-task model override. Only meaningful for harnesses that support model
-   * selection (opencode via `-m`, claude/codex via `worker-start
-   * --model`); empty string / absent means the agent's default model.
+   * selection (OpenCode via its selected adapter; claude/codex/omp/antigravity
+   * via native `--model` within their path limits). Absent means the configured
+   * agent default, not a viewer-selected substitute.
    */
   modelByTask: Record<string, string>;
-  /** Per-task reasoning effort — only ever set alongside a model (Phase 5). */
+  /** Supported effort pairs with a model; unsupported saved intent stays visible for explicit removal. */
   effortByTask: Record<string, string>;
   /**
    * Per-task retain-for-debugging: a settled worker's terminal is kept alive
@@ -904,7 +907,8 @@ export interface ViewerConfig {
  * Harness → model-selection capability. opencode gets an enumerable dropdown
  * (`opencode models`); explicit models use a guarded native opencode start or
  * one-shot/API compatibility, while the configured default can use native
- * opencode2. claude/codex get free-text; other harnesses have no model control.
+ * opencode2. claude/codex/omp/antigravity get free-text; the latter two pass an
+ * opaque selector to native worker-start, never the OpenCode model grammar.
  */
 export type ModelPickerKind = "select" | "text" | "none";
 
@@ -912,12 +916,15 @@ export const MODEL_PICKER: Record<string, ModelPickerKind> = {
   opencode: "select",
   claude: "text",
   codex: "text",
+  omp: "text",
+  antigravity: "text",
 };
 
 /**
  * Harnesses that accept `worker-start --effort` (Phase 5). Orca's contract:
  * effort requires a model, and opencode (the legacy path) has no effort flag —
  * so the effort picker renders only for these, and only when a model is set.
+ * OMP and Antigravity reject every nonempty effort, including saved values.
  */
 export const EFFORT_SUPPORTED: Readonly<Partial<Record<string, true>>> = { claude: true, codex: true };
 

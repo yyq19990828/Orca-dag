@@ -1,7 +1,9 @@
-import { isUnverifiedHarness, KNOWN_HARNESSES } from "./security";
+import { isNativeFreshPreset, isUnverifiedHarness, KNOWN_HARNESSES } from "./security";
 import {
   OrcaCliError,
+  assertNativePresetSupport,
   bindRun,
+  checkReadiness,
   checkInbox,
   closeTerminal,
   closeTerminalStrict,
@@ -1078,6 +1080,23 @@ export async function startCoordinator(opts: StartOpts): Promise<void> {
     //      never "fixed" by dropping members or splitting lanes behind the
     //      user's back.
     const planTasks = await listTasks(opts.runId);
+    // Refuse unsupported native launches before coordinator creation/binding,
+    // Task resumption or any lane/Stage mutation. Already dispatched/settled
+    // work remains recoverable on its exact identity even if today's launcher
+    // versions or preferences changed; this is an admission gate, not custody.
+    const nativeCandidates = planTasks.filter(task =>
+      !["completed", "failed", "dispatched"].includes(task.status) &&
+      isNativeFreshPreset(opts.harnessByTask[task.id] ?? opts.defaultHarness));
+    const nativeFleet = nativeCandidates.length ? await listWorkers(opts.runId, { includeRemote: true }) : [];
+    const nativeLaunchTasks = nativeCandidates.filter(task => !nativeFleet.some(row =>
+      row.runId === opts.runId && row.taskId === task.id && activeDispatch(row)));
+    const nativeReadiness = nativeLaunchTasks.length ? await checkReadiness(true) : undefined;
+    for (const task of nativeLaunchTasks) {
+      await assertNativePresetSupport(opts.harnessByTask[task.id] ?? opts.defaultHarness, {
+        effort: opts.effortByTask?.[task.id], environment: opts.environmentByTask?.[task.id],
+        lane: opts.laneByTask?.[task.id], placement: opts.placementByTask?.[task.id],
+      }, nativeReadiness);
+    }
     if (opts.laneByTask && Object.keys(opts.laneByTask).length > 0) {
       const laneTasks = planTasks;
       const laneIssues = validateLaneTotalOrder(laneTasks, opts.laneByTask);
@@ -3721,9 +3740,11 @@ async function decideTerminalOwnership(attempt: Attempt, opts: StartOpts, readyT
   const placementCurrent = (attempt.requested?.worktree ?? "current") === "current";
   const settledLocal = !attempt.requested?.on;
   // OpenCode's pinned model and explicit frontends have separate session
-  // ownership. Keep all OpenCode workers off generic reuse, including after
-  // recovery when the original requested model may no longer be available.
-  if (handle && placementCurrent && settledLocal && attempt.harness !== "opencode") {
+  // ownership. Native OMP/Antigravity also need a fresh native session for each
+  // Task, including default-after-explicit and recovered historical workers.
+  // Never turn their native-owned resource into an external --terminal bind.
+  if (handle && placementCurrent && settledLocal && attempt.harness !== "opencode" &&
+      !isNativeFreshPreset(attempt.harness)) {
     const candidate = readyTasks.find((t) => {
       if (state.attempts.has(t.id)) return false; // already attempted/parked
       if (state.delegatedTaskIds.has(t.id)) return false;
@@ -4195,7 +4216,7 @@ async function startOne(
   attempt.requested = {
     agent: attempt.harness,
     model,
-    effort: model ? opts.effortByTask?.[task.id] ?? null : null,
+    effort: model || isNativeFreshPreset(attempt.harness) ? opts.effortByTask?.[task.id] ?? null : null,
     worktree:
       lane?.selector ??
       (placement.kind === "existing"
@@ -4217,6 +4238,10 @@ async function startOne(
         "unverified_harness",
       );
     }
+    await assertNativePresetSupport(attempt.harness, {
+      effort: opts.effortByTask?.[task.id], environment, lane: laneId, placement,
+      terminal: reuseTerminal,
+    });
     // This protection remains even if the experimental flag/harness changed
     // after a crash. Disabling the adapter must not authorize a duplicate
     // one-shot (or another harness) over an unresolved preparation.

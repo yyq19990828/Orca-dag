@@ -19,7 +19,8 @@ viewer 作为一个具有直接控制 Orca 运行时能力的管理面进程，�
    - 只读请求（`GET` 路由）不需要携带 Token。
    - 任何未携带或携带无效 Token 的写请求，在进入具体业务逻辑之前即被直接拒绝并返回 HTTP `403 Forbidden`。
 4. **已验证 Harness 与未验证 Harness 明确拒绝**：
-   - viewer 内置支持的受监督调度 harness 仅限已完成真实运行时验证的 `claude`、`codex` 与 `opencode`。
+   - 内置选项为 `claude`、`codex`、`opencode`、`omp`、`antigravity`，须遵守各自[有记录的执行范围](compatibility_zh.md)。
+   - **OMP / Antigravity 原生边界**：运行时与解析后的 CLI 均须 ≥ 1.4.245，仅本地 Linux 的 Current/精确 Existing、非 lane，拒绝所有非空 effort（包括同时指定模型）。模型文本是完整原生 selector，不要求 OpenCode 的 `provider/model[#variant]` 语法；未覆盖时省略 `--model`。原生 `worker-start --agent` 遵循 Orca 的 Chat/Terminal 偏好，viewer 不检查或覆盖，未实测的 Native Chat 不作为拒绝条件。不增加预启动绑定、提供方后端、通用终端复用或拒绝/未知后的回退；原生回执与英文诊断保持原文。
    - 未经验证的 harness（`gemini`、`grok`、`cursor`、`droid`、`kimi`）缺乏具体的 supervised worker 运行验证，不可用于 viewer 调度启动。任何在调度启动（`POST /api/run`）或重试（`POST /api/workers/:id/retry`）中使用这 5 个 harness 的请求均被前置拦截并返回 HTTP 400 `unverified_harness` 拒绝，绝不进行静默替换或自动迁移；历史已落定的 worker 数据与账本记录在读取接口（如 `GET /api/workers`）中保持只读可查。
 5. **自定义 Harness 命令限制**：
    - 任意用户自定义命令属于实验性逃生通道，不构成已验证支持承诺；默认状态下会被服务端拒绝并返回 HTTP 400 `custom_commands_disabled` 错误。

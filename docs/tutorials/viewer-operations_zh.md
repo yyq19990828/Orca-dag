@@ -66,10 +66,10 @@ Orca Task 没有 harness、模型、放置位置或画布布局字段。viewer �
 | 设置 | 默认值或允许值 | 效果和限制 |
 | --- | --- | --- |
 | OpenCode 启动界面 | `auto` | 自动保留当前路由；可显式选择 Mini TUI / 完整 TUI，节点支持覆盖或继承。 |
-| 默认 harness | `claude` | Stage 没有单独覆盖时使用。内置可选 harness 严格限定于已完成真实运行时验证的 `claude`、`codex`、`opencode`。未经验证的 harness（`gemini`、`grok`、`cursor`、`droid`、`kimi`）不再提供内置预设；若节点保存了这些未验证 harness，启动与重试均被前置拦截并以 `unverified_harness` 明确拒绝（绝不进行静默替换或自动迁移），历史记录保持只读可查。 |
-| Stage harness | 继承默认值 | 选择启动适配器（`claude`、`codex`、`opencode`）；自定义命令属于实验性逃生通道且不构成已验证支持承诺，需要显式设置 `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1`（仅走本地兼容路径，不支持隔离放置；即使开启该开关，5 个未验证 bare ID 仍被拒绝）。 |
-| Stage 模型 | agent 默认值 | OpenCode 提供来自本地工作区建议性发现的下拉候选项，同时支持手动输入合法的 `provider/model[#variant]`；Claude 和 Codex 可填写模型名。已保存但未在列表中的模型予以保留；开始执行后锁定。 |
-| Stage effort | 不设置 | Claude、Codex 的界面选项是 `low`、`medium`、`high`；同一个 Stage 必须已设置模型，远端还须通告相应能力。 |
+| 默认 harness | `claude` | Stage 没有单独覆盖时使用。内置选项为 `claude`、`codex`、`opencode`、`omp`、`antigravity`，须遵守各自版本/放置限制。未经验证的 harness（`gemini`、`grok`、`cursor`、`droid`、`kimi`）不再提供内置预设；若节点保存了这些未验证 harness，启动与重试均被前置拦截并以 `unverified_harness` 明确拒绝（绝不进行静默替换或自动迁移），历史记录保持只读可查。 |
+| Stage harness | 继承默认值 | 选择启动适配器（`claude`、`codex`、`opencode`、`omp`、`antigravity`）；自定义命令属于实验性逃生通道且不构成已验证支持承诺，需要显式设置 `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1`（仅走本地兼容路径，不支持隔离放置；即使开启该开关，5 个未验证 bare ID 仍被拒绝）。 |
+| Stage 模型 | agent 默认值 | OpenCode 提供来自本地工作区建议性发现的下拉候选项，同时支持手动输入合法的 `provider/model[#variant]`；Claude 和 Codex 可填写模型名。OMP/Antigravity 接受自由文本形式的完整原生 selector，不拆 provider 或映射后缀；留空省略 `--model`，使用已配置默认值。已保存但未在列表中的模型予以保留；开始执行后锁定。 |
+| Stage effort | 不设置 | Claude、Codex 的界面选项是 `low`、`medium`、`high`；同一个 Stage 必须已设置模型，远端还须通告相应能力。OMP/Antigravity 拒绝所有非空 effort，有无模型均相同；已保存值保持可见，必须明确清除。 |
 | Max parallel | `4`，整数 `1`–`16` | 限制同时启动的 worker 数；DAG 依赖和 lane 可能使实际并行数更低。 |
 | Stage 环境/放置 | 本地 / Current | 已保存的远端环境需要精确 Existing 工作区或显式命名的新顶层工作树。见[放置参数](worktree-isolation_zh.md#创建字段及限制)。 |
 | 工作区 lane | 无 | 让一串依赖有序的 Task 复用一个非 Current 本地工作区。 |
@@ -77,6 +77,8 @@ Orca Task 没有 harness、模型、放置位置或画布布局字段。viewer �
 | 布局 / Lead Stage | 已保存布局 / 无 | 只影响 viewer 呈现，不改变 Task 就绪或 coordinator 绑定。 |
 
 点击 Run 后，这些设置会被快照。coordinator 运行期间，即使 Stage 尚未启动，也会锁定到这份快照。Stage 第一次产生 Dispatch 后，启动设置在 viewer 重启后仍锁定；安全重试会使用原有 harness、模型、effort 和放置位置。如果读取 worker 历史失败，界面也会保持锁定，不能假定从未执行。
+
+**OMP / Antigravity 遵循 Orca 设置。**两者均要求运行中的 Orca 和解析后的 CLI ≥ **1.4.245**，仅本地 Linux 的 Current 或精确 Existing 放置，不能使用 lane。viewer 调用原生 `worker-start --agent omp` / `--agent antigravity`，不检查或更改用户的 Chat/Terminal 偏好、不强制界面、不预启动再绑定，也不通用复用终端。Native Chat 尚未实测，但不会被拦截。OpenCode 启动界面选择器只影响 OpenCode。原生拒绝或结果未知后绝不启动替代 worker；请求/effective、存活、归属及未知回执仍以原生证据为准。
 
 **启动前检查**是只读操作，启动设置锁定时仍可使用。它展示当前配置，而不是既有 Dispatch 的启动回执：逐 Task 的请求模型、worker 放置位置、实际选择的适配器及限制。OpenCode Auto 配合 `#xhigh` 等模型变体可能选择 **CLI run 兼容路径**，并不等于原生 TUI。选择 Mini / 完整 TUI 仍须经过现有严格 API 适配器的执行主机版本、权限与启动身份检查，预览不会绕过这些条件。点击 Run 会先刷新已落盘配置，预览同一份计划，确认后才转移协调器权限；取消不会绑定 viewer。
 
@@ -176,6 +178,20 @@ Run health 还包含可选的 `removedWork` 移除工作摘要（`coverage` 为 
 两种界面都在 `sessions.json` 保存精确 API/session/terminal 身份；viewer 的界面记录不是 Orca effective launch 回显。接受 Task 结算且确认 provider 退出后才允许关闭自建终端。后续用户输入或来源不明的消息保留终端，不能仅凭熟悉的 nudge 文案豁免。Stop 先中断精确 provider execution，再沿用 external `worker-abandon` 记账。当前版本能兼容旧 journal，但旧二进制可能拒绝新字段；软件降级前应结算新 preparation 并备份历史，通常只需把未来启动改回自动来回退本功能。
 
 **2026-11-02**，**Orca 1.4.245 + OpenCode 2.2.0** 在工作区默认界面为 **Mini**、模型固定 **`openai/gpt-6.1-sol#xhigh`** 时，通过精确启动身份门。当前工作区场景排他创建一个文件、独立复算 `2+3+5+7=17`、获得接受的 `worker_done`，并在无清理债务时关闭自建 pane（`run_0e5b949ffb1b`）。冷启动 viewer 在 Run 请求省略两个前端字段时仍继承保存的 Mini，完成另一份排他文件、求和 `24` 后关闭 pane（`run_dee4d21b8c0c`）。已有工作区场景经故意崩溃的 viewer 重启后恢复同一 Dispatch/session，再停止精确活动执行和前台工具子进程，未写入完成文件（`run_e86a2745afe1`）。Orca 取消使用 `worker-abandon` 记账；fencing 后 release 返回 `identity_unproven`，pane 保留供检查。这只验证 Mini，不是完整 TUI 或多账户认证，也没有解释或抹掉下文 1.4.243 的历史启动拒绝。这些检查没有打开 Orca 桌面或原生 Chat。
+
+### OMP / Antigravity 原生证据与输出限制
+
+**2026-11-02** 的独立原生基线使用 **Orca 运行时/CLI 1.4.245、OMP 18.15.0、Antigravity 1.4.12**，沿用已有 Terminal TUI 偏好。已观察 Current/精确 Existing、已配置默认模型/显式模型、写文件并读回、独立复算、获接受的 `worker_done`、正常原生释放和 owned 活动 Stop。OMP 提供有界 transcript/工具输出及正常释放时的 transcript 归档。Antigravity 明确提供 terminal fallback（`provider_unsupported`）及正常释放时的 terminal 归档，不冒充结构化提供方 transcript 或已验证的提供方会话身份。两者活动 Stop 后归档均不可用。Antigravity 的早期 1.4.10 版本证据漂移到实际执行的 1.4.12；根因与 1.4.10 执行均未验证。
+
+Run `run_8713a6b6ebfe` 中更早的强制 Terminal 预启动绑定认证未通过归属、Stop 和归档门；失败结论保留为被拒绝的**设计**证据，不代表原生 agent 不可用。历史边界及当前策略见[兼容矩阵](../reference/compatibility_zh.md#验证边界与限制说明)。
+
+**2026-11-02** 新增 viewer 实测单独记录于 `.orca-dag/20261102T084604Z/`：
+
+- `run_f94b248416ff`：Current 默认模型 OMP 与精确 Existing 显式模型 Antigravity 均写入/读回产物，独立复算通过（和分别为 **38**、**60**）并获得接受的 `worker_done`。Antigravity 释放并捕获 terminal 归档；OMP 按原生 `user_takeover` 判断保留 pane，没有强关。
+- `run_19ca9da2a106`：Existing 显式模型 OMP 与 Current 默认模型 Antigravity 运行真实前台 Node 子进程。仅使 viewer 崩溃后，重启恢复两个原有 Dispatch 和终端，未启动替代。原生 Stop 返回 owned `closed_agent_terminal`；两个子进程 PID 均退出，未写入完成文件。获授权的释放成功，Stop 后归档明确为 `unavailable`。
+- `run_1c6712c54ee8`：真实英文/中文网页提供两个预设及完整模型 selector。已保存的孤立 effort 在启动前被拒绝，清空模型后仍保留，仅经**清除不支持的 effort**按钮移除。点击 Run 并确认预览后启动两个原生 agent；独立求和分别为 **10**、**31**，报告均获接受、终端均释放。网页在关闭后读取 OMP transcript 与 Antigravity terminal 归档，保留裁剪/来源提示。
+
+原生启动回执明确为 `mode: terminal`、`preferred: terminal`、`reason: user_default`；viewer 没有强制界面或更改 Orca 偏好。这些验证证明 viewer 的 TUI 执行与 viewer 重启恢复，不证明 Native Chat、Orca 运行时重启或其他未实测放置。
 
 ## 已知局限
 

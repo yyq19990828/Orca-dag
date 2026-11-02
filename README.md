@@ -20,6 +20,7 @@ CLI examples use `orca` inside managed Orca terminals; on Linux outside them, us
 - **Experimental features:** Orchestration experimental feature must be enabled (**Settings → Experimental**).
 - **Managed workspace:** Project must be an Orca-managed worktree (`orca repo add <path>` or `orca worktree ...`).
 - **Agents:** Selected worker agents must be installed and configured in Orca, and able to execute tools and report `worker_done` autonomously.
+- **Presets:** `claude`, `codex`, `opencode`, `omp`, and `antigravity`, within their [version and placement limits](docs/reference/compatibility.md). The other five unverified agent IDs remain unavailable, even with custom commands enabled.
 - **Runtime:** **Node.js ≥ 20** for npm, or a standalone binary; both need the resolved Orca CLI on PATH.
 
 ## Installation
@@ -62,6 +63,7 @@ After installation:
 - **Task definitions are immutable:** Specs, titles, and dependencies cannot be edited in place; status/results can change. Replan in a fresh Run. Never use `reset --tasks` for this: it wipes all Runs.
 - **Unknown ≠ dead:** Unknown or disconnected workers keep their concurrency slots; uncertainty never authorizes automatic retry, cancellation, or replacement.
 - **Local control plane:** The server binds `127.0.0.1`, has no CORS, and requires `X-Orca-Dag-Token` for mutations. Custom commands are opt-in.
+- **OMP / Antigravity:** Require running Orca and resolved CLI ≥ **1.4.245**, local Linux, Current or exact Existing placement, and no lane. Native `worker-start --agent` follows Orca's Chat/Terminal preference without inspecting or overriding it. Terminal TUI baselines used **OMP 18.15.0 / Antigravity 1.4.12**; Native Chat is not yet exercised, but is not blocked. Model overrides are opaque native selectors; empty means configured default, and every nonempty effort is rejected. [Output, Stop, and historical design limits](docs/reference/compatibility.md#path-boundaries-and-historical-findings) remain explicit.
 
 ## Documentation
 

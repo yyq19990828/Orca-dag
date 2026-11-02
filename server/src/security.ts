@@ -156,7 +156,47 @@ export const KNOWN_HARNESSES: ReadonlySet<string> = new Set([
   "claude",
   "codex",
   "opencode",
+  "omp",
+  "antigravity",
 ]);
+
+/** Native fresh-session presets; Orca settings, not the viewer, choose their surface. */
+export function isNativeFreshPreset(harness: string): boolean {
+  return harness === "omp" || harness === "antigravity";
+}
+
+export interface NativePresetConstraints {
+  effort?: string | null;
+  environment?: string | null;
+  lane?: string | null;
+  placement?: PlacementSpec;
+  terminal?: string | null;
+}
+
+/**
+ * Recorded native execution covers only local Linux current/exact-existing
+ * starts. In particular, --terminal makes launch-bind resources external and
+ * loses native Stop/custody; it is NOT an alternative launcher for these ids.
+ * Effort is unverified even when a model is supplied (model-id suffixes do not
+ * advertise effort). Check raw presence before any generic model-gated drop.
+ */
+export function assertNativePresetConstraints(
+  harness: string, opts: NativePresetConstraints, platform = process.platform,
+): void {
+  if (!isNativeFreshPreset(harness)) return;
+  if (opts.effort !== undefined && opts.effort !== null && opts.effort !== "") {
+    throw new ValidationError(`${harness} does not support a nonempty effort override in this viewer`, "unsupported_effort");
+  }
+  const placement: PlacementSpec = opts.placement ?? { kind: "current" };
+  const exactExisting = placement.kind === "existing" && /^(?:path:\/|(?:id:)?[^:]+::\/)/.test(placement.selector);
+  if (platform !== "linux" || opts.environment || opts.lane || opts.terminal ||
+      (placement.kind !== "current" && !exactExisting)) {
+    throw new ValidationError(
+      `${harness} supports only fresh native workers on local Linux current/exact-existing non-lane workspaces`,
+      "invalid_placement",
+    );
+  }
+}
 
 export function isUnverifiedHarness(harness: string): boolean {
   return UNVERIFIED_HARNESSES[harness] === true;
@@ -247,6 +287,16 @@ export function validateHarness(raw: unknown, policy: SecurityPolicy): string {
 export function validateModel(raw: unknown, harness: string): string {
   const v = String(raw ?? "").trim();
   if (!v) throw new ValidationError("model value must not be empty");
+  if (isNativeFreshPreset(harness)) {
+    // This selector belongs to the execution-host CLI, not OpenCode's grammar
+    // or the viewer's model catalog. It is one shell:false argv value: preserve
+    // provider prefixes, variants, punctuation and spacing without parsing it.
+    const opaque = String(raw);
+    if (opaque.length > 512 || /[\u0000-\u001f\u007f]/.test(opaque)) {
+      throw new ValidationError("native model selector must be a bounded single line without control characters", "invalid_model");
+    }
+    return opaque;
+  }
   if (harness === "opencode") {
     if (!OPENCODE_MODEL_PATTERN.test(v)) {
       throw new ValidationError(

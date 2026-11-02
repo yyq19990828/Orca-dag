@@ -26,7 +26,7 @@
   - Stop 请求停止本 viewer 负责的 worker，并逐项汇报结果；委派归属或未知状态不会被当成可以一并强杀的依据。
 - **落定 Worker 终端的生命周期管理**：
   - `worker_done` 获 Orca 接受后，viewer 归档输出并默认请求释放；运行时归属判定仍可能保留窗格，不保证自动关窗；
-  - 若存在可兼容的后续即刻就绪任务（相同 harness、相同工作区且模型一致），且具备新鲜精确的已连接 PTY 证据，支持通过 `worker-start --terminal` 实现**终端复用**；
+  - 若存在可兼容的后续即刻就绪任务（相同 harness、相同工作区且模型一致），且具备新鲜精确的已连接 PTY 证据，支持通过 `worker-start --terminal` 实现**终端复用**；OpenCode、OMP、Antigravity 均不参与，以保留新会话与模型身份；
   - 若勾选 **Retain for debugging**，则显式保留 worker 终端供开发者事后排查，绝不强行关闭。
 - **启动参数不可变锁**：任务一旦产生首次 Dispatch，其 harness、模型、effort、运行环境和放置模式即永久锁定。锁状态在 viewer 重启后依然生效，后续重试强制沿用原启动配置。协调者运行期间，尚未启动的任务也会暂时冻结，停止执行后未启动任务重新开放编辑。
 - **调度器与就绪队列面板（Scheduler）**：提供紧凑卡片实时展示当前就绪波次、协调者可用容量以及各等待阶段的阻断证据（明确指明依赖的上游任务及状态、阻塞的决策门、槽位耗尽或状态未知）。
@@ -34,7 +34,7 @@
 
 ## Harness 适配、模型与推理力度
 
-- **已验证 Harness 矩阵**：内置可选 harness 严格限定于已完成真实运行时验证的 `claude`、`codex`、`opencode`，并遵守各版本与路径约束。未单独配置的节点继承顶栏默认 harness（`claude`）。
+- **已验证 Harness 矩阵**：`claude`、`codex`、`opencode`、`omp`、`antigravity` 在各自[有记录的版本与放置范围](compatibility_zh.md)内可选。未单独配置的节点继承顶栏默认 harness（`claude`）。原生基线不代表尚未运行的 viewer/重启检查已通过。
 - **未验证 Harness 明确拒绝**：`gemini`、`grok`、`cursor`、`droid`、`kimi` 尚未获得具体的 supervised worker 运行时验证，viewer 不再提供内置预设，亦不暴露可用于启动的选项。若节点配置或已保存设置尝试以这些未验证 harness 启动，将被前端与服务端以前置错误 `unverified_harness` 明确拒绝，绝不进行静默替换或自动迁移；历史已落定的 worker 数据与相关记录在 viewer 中保持只读可查。
 - **实验性自定义命令**：需显式设置环境变量 `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1` 方可解锁自定义命令，且仅走本地兼容路径、不支持隔离放置。自定义命令属于实验性逃生通道，**不构成**已验证支持承诺；即使开启该开关，上述 5 个未验证 bare ID（`gemini`、`grok`、`cursor`、`droid`、`kimi`）依然被直接拒绝并报错 `unverified_harness`，严禁将其作为 bare ID 绕过验证机制。
 - **技能安装与规划能力独立保留**：Agent 的 skill 安装（如 Claude Code、Codex、Cursor、OpenCode、Gemini、Grok、Droid、Kimi）和阅读 `SKILL.md` 的建图规划支持依然完整保留，因为建图端与 skill 生态能力与 worker 执行验证相互独立。
@@ -47,7 +47,8 @@
     - **启动锁定（Launch-Locked）**：任务一旦派发过首次 Dispatch 或协调者处于运行中，模型下拉选单与手动输入文本框连同 harness、effort、placement 一同置灰禁用（`disabled={launchLocked}`）。
   - `claude` 通过 `worker-start --model` 传递模型；
   - 本地 POSIX Codex 在当前/已有工作区、运行中的 Orca ≥ 1.4.217 时使用原生模型启动；旧版/未知运行时及本地新建工作区保留预启动绑定路径，远程与 Windows 使用原生路径。详见[Codex 启动边界](../tutorials/viewer-operations_zh.md#codex-原生启动与兼容路径)。
-- **推理力度（Effort）**：`claude`、`codex` 可选择各自支持的力度，且必须同时设置模型；清空模型会清空 effort。原生启动传递 `--effort`，兼容预启动 Codex 则在启动命令中设置。
+  - **OMP / Antigravity**：自由文本形式的完整 selector，原样作为单个原生 `--model` 参数传递，或省略以使用已配置默认模型。要求运行中的 Orca 与解析后的 CLI 均 ≥ 1.4.245，仅本地 Linux 的 Current/精确 Existing，不能使用 lane。原生 `worker-start --agent` 将 Chat/Terminal 选择留给 Orca 设置，viewer 不检查或覆盖偏好。Terminal TUI 基线使用 OMP 18.15.0 与 Antigravity 1.4.12；Native Chat 尚未实测，但不拦截。不提供预启动绑定、回退、通用复用、新工作树、远程或 Windows 路径。
+- **推理力度（Effort）**：`claude`、`codex` 可选择各自支持的力度，且必须同时设置模型；清空模型会清空 effort。原生启动传递 `--effort`，兼容预启动 Codex 则在启动命令中设置。OMP/Antigravity 拒绝所有非空 effort，即使同时指定模型；已保存的不支持值保持可见并提供明确清除入口，清空模型不会静默删除它们。
 - **OpenCode 启动模式与原生路由边界**：
   - **自动模式（默认）**：未指定模型且 Orca ≥ 1.4.220 时使用原生 `opencode2`；纯净显式模型（不含 `#variant`、不带 effort、非 lane、非 Windows、当前/已有放置、非 TUI 模式）在运行中 Orca ≥ 1.4.241+ 上使用独立的 Orca 原生 `opencode` 启动器。本地目录发现仅具建议性，不代表执行宿主真实可用。
   - **兼容路径保留**：显式 Mini TUI、Full TUI、模型变体（`#variant`）、推理力度（effort）、lanes、新建工作树（new child/top-level）及远程放置均保留各自适配器与兼容路径。

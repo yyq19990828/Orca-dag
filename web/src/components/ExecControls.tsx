@@ -195,6 +195,16 @@ export function ExecControls({
     if (!customOk && [launchDefault, ...Object.values(harnessByTask)].some((harness) => !KNOWN.includes(harness))) {
       throw new Error(t(CUSTOM_OFF_HINT_KEY));
     }
+    // effortMap historically pairs effort with a model. Check raw saved intent
+    // first so these native agents cannot silently lose an unsupported effort
+    // when the model override is absent. The server repeats this boundary.
+    for (const id of taskIdsRef.current) {
+      const harness = harnessByTask[id] ?? launchDefault;
+      const effort = launchConfig.effortByTask[id];
+      if ((harness === "omp" || harness === "antigravity") && effort) {
+        throw new Error(t("nativeAgent.effortUnsupported", { harness, effort, task: id }));
+      }
+    }
     const laneProblems = lanePlanProblems(
       launchConfig.laneByTask, launchConfig.worktreeLanes, launchConfig.placementByTask,
       launchConfig.environmentByTask, edges,
@@ -444,6 +454,12 @@ export function ExecControls({
             {storedIsUnverified ? (
               <span className="exec__hint">{t("exec.unverifiedHarnessHint", { harness: config.defaultHarness })}</span>
             ) : defHarness === CUSTOM && !customOk && <span className="exec__hint">{t(CUSTOM_OFF_HINT_KEY)}</span>}
+            {(resolvedDefault === "omp" || resolvedDefault === "antigravity") && (
+              <>
+                <span className="exec__hint">{t("nativeAgent.requirements")}</span>
+                <span className="exec__hint">{t("nativeAgent.surfaceHint")}</span>
+              </>
+            )}
           </div>
 
           <label className="exec__field">

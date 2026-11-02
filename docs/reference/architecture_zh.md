@@ -67,7 +67,7 @@ Orca 1.4.226 沿确切的 `--retry-of` 链累计启动失败的 `worker-start`�
 - **FIFO 投递确认**：每个通过验证的 FIFO Delivery 均会被 ACK 确认，包括常规通知及过期生命周期报告。未回复的问题及尚未落定的终端归属决策将阻止 ACK。`check --ack` 批次处理时，后续有数据批次不再额外等待轮询节流；空批次、错误或未解决批次则保留轮询节流保护。
 - **清理债务核验**：可回收的清理债务（reclaimable debt）严格根据新鲜的 fleet 记录重新核验，在 viewer 外部完成的 release 同样能抵消旧债务；未知的清理结果将持续阻止标记完成。
 - **Helper 管理与谱系隔离**：同 Run 内的 helper worker 严格归其活动创建者管理。viewer 读取精确的 Dispatch lineage，不将 `parent_id` 视为所有权；仅在证实创建者已落定后方才接管 helper，归属不可读时保持等待。Stop 命令如实报告委派工作，绝不擅自终止它。可见的活动 worker 占用派工预算，但 helper 可在 viewer 外部启动，因此 **Max parallel 不是整个 Orca 运行时的全局硬上限**。
-- **终端精确复用**：自动终端复用必须具备相同 agent、相同工作区且新鲜、已连接的 PTY 证据。仅凭 Chat handle 不能证明 PTY 存活；OpenCode 实例因需保留指定模型及 session 归属，不参与通用复用。
+- **终端精确复用**：自动终端复用必须具备相同 agent、相同工作区且新鲜、已连接的 PTY 证据。仅凭 Chat handle 不能证明 PTY 存活；OpenCode、OMP、Antigravity 因需保留前端、新会话与模型身份，均不参与通用复用。
 - **并发读取共享与免缓存**：DAG、Workers、Activity、Health 的并发 GET 请求在底层 task/fleet/gate 读取未完成时共享请求，并严格按 Run 和参数隔离。不引入过期结果缓存，关键操作的前置检查始终强制读取最新证据。
 
 ## 权限模型：为什么 viewer 要占一个终端
