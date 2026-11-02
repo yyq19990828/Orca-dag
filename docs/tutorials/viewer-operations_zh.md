@@ -175,6 +175,8 @@ Run health 还包含可选的 `removedWork` 移除工作摘要（`coverage` 为 
 
 两种界面都在 `sessions.json` 保存精确 API/session/terminal 身份；viewer 的界面记录不是 Orca effective launch 回显。接受 Task 结算且确认 provider 退出后才允许关闭自建终端。后续用户输入或来源不明的消息保留终端，不能仅凭熟悉的 nudge 文案豁免。Stop 先中断精确 provider execution，再沿用 external `worker-abandon` 记账。当前版本能兼容旧 journal，但旧二进制可能拒绝新字段；软件降级前应结算新 preparation 并备份历史，通常只需把未来启动改回自动来回退本功能。
 
+**2026-11-02**，**Orca 1.4.245 + OpenCode 2.2.0** 在工作区默认界面为 **Mini**、模型固定 **`openai/gpt-6.1-sol#xhigh`** 时，通过精确启动身份门。当前工作区场景排他创建一个文件、独立复算 `2+3+5+7=17`、获得接受的 `worker_done`，并在无清理债务时关闭自建 pane（`run_0e5b949ffb1b`）。冷启动 viewer 在 Run 请求省略两个前端字段时仍继承保存的 Mini，完成另一份排他文件、求和 `24` 后关闭 pane（`run_dee4d21b8c0c`）。已有工作区场景经故意崩溃的 viewer 重启后恢复同一 Dispatch/session，再停止精确活动执行和前台工具子进程，未写入完成文件（`run_e86a2745afe1`）。Orca 取消使用 `worker-abandon` 记账；fencing 后 release 返回 `identity_unproven`，pane 保留供检查。这只验证 Mini，不是完整 TUI 或多账户认证，也没有解释或抹掉下文 1.4.243 的历史启动拒绝。这些检查没有打开 Orca 桌面或原生 Chat。
+
 ## 已知局限
 
 在自动模式下，viewer 的 `opencode` 选择运行的就是 OpenCode 2。在运行中的 Orca ≥ 1.4.220 且未设置逐节点模型时，Task 使用原生 `worker-start --agent opencode2`。在 OpenCode 2.0.22 上，这条路径已送达只读 Task，并在隔离工作树中自主写入、读回一个文件；Orca 接受 `worker_done`、报告 `agent_status` 并释放终端。显式模型遵循下方新增门槛，或保留一次性兼容路径。原生启动失败后绝不再启动第二个 worker。当前 `worker-read --source auto` 对 OpenCode 2 会回退到终端输出，无法得到精确的 provider transcript。
@@ -268,7 +270,9 @@ Orca 1.4.217 修复了 Codex 就绪检测，并默认隔离每个新终端的后
 
 完整 TUI 准备使用请求独立的 `OPENCODE_TUI_CHANNEL`，避免共享 tab 恢复选中旧会话。它只隔离 TUI 持久化，不改变后端服务发现，也不重写 OpenCode 全局配置。绑定前，viewer 先等待会话生成的精确 `OC | odag:<request>` 标题，再检查 TUI idle；启动 shell 的空闲不算就绪。OpenCode V2 可能把未指定的模型 variant 回显为 `default`：这两种形式等价，但 provider、模型 ID 和显式选择的 variant 仍必须精确匹配。
 
-Output 将有限 assistant 文本标为 `opencode-api` 来源，关闭终端后仍可读取，不复制工具输入或推理。默认清理要求有效落定、明确 external release、精确终端身份和 provider execution 退出；retain 或后续用户输入会保留终端。Stop 先中断精确共享服务会话，再做 Orca 编排记账；服务失败、身份变化或退出未知都不算成功。即使关闭开关，未知准备记录仍会阻止重新派工：应检查保存的 request/session/terminal 与请求审计，不是再次启动。首版仍禁用自动复用、新工作区、lane、远程与 Windows；未设置开关时，自动模式按版本门槛选择原生或兼容路径。
+Output 将有界的 assistant 文本、工具进度与工具结果标为 `opencode-api` 来源，关闭终端后仍可读取；过滤工具输入的敏感键、隐藏 auth/settings/config 工具结果并排除推理。Mini/完整 TUI 与 CLI-run 共用渲染器，包含 OpenCode 2.2 的 `state.content` 结果和错误。向前游标固定已渲染内容：游标之前的工具从运行变为完成时会明确重置输出，不会静默漏掉结果；旧游标格式也通过 `sourceChanged` 重置。这些 API 历史不冒充 Orca transcript 归档。默认清理要求有效落定、明确 external release、精确终端身份和 provider execution 退出；retain 或后续用户输入会保留终端。Stop 先中断精确共享服务会话，再做 Orca 编排记账；服务失败、身份变化或退出未知都不算成功。即使关闭开关，未知准备记录仍会阻止重新派工：应检查保存的 request/session/terminal 与请求审计，不是再次启动。首版仍禁用自动复用、新工作区、lane、远程与 Windows；未设置开关时，自动模式按版本门槛选择原生或兼容路径。
+
+输出读取完整后，面板将**加载更多**替换为**读取输出**，按当前选择的来源重新开始一次有界读取。读到输出窗口末尾不等于 Task 已结算。
 
 在一次性兼容路径上，viewer 用 `opencode run --auto` 启动 OpenCode，并创建 Orca Dispatch 记录任务。这条路径标记为 `unsupervised`，没有受监督的 worker 资源，也没有 `agent_status` fleet 证据。在 Orca 1.4.209 的并行只读对照中，OpenCode 通过 `worker_done` 完成了 Task，但运行时的 `worker-list` 显示 `unverifiable / missing_status`，落定后变为 `unverifiable / unsupervised_settled`。运行期间，`worker-show` 另外观察到精确的 OpenCode 终端仍然存活。这些 fleet 值符合兼容路径的设计，不能单独证明 OpenCode 钩子损坏。对此路径应核对 Task/Dispatch 的结果与精确终端观察，也不能把 `unverifiable` 当作进程已退出的证据。
 

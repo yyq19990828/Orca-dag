@@ -36,7 +36,7 @@
 
 ## 有记录的真实运行时验证
 
-**截至 2026-10-29，有记录的真实运行时验证历史如下：**
+**截至 2026-11-02，有记录的真实运行时验证历史如下：**
 
 | Orca app | Agent 版本 | 已验证内容 |
 |---|---|---|
@@ -47,6 +47,7 @@
 | **1.4.241** | **OpenCode 2.1.2** | 隔离 Linux headless 运行时，原生 `opencode` + `deepseek/deepseek-flash`：写文件并读回、接受 `worker_done`、effective 模型回显及终端释放；viewer 重启后恢复相同 Dispatch 并完成依赖 Task，无重复 worker、无清理债务。profile 的嵌套深度上限为 1，真实 helper 启动被拒绝；helper 归属/交回由回归套件覆盖，不宣称已通过真实 provider 验证。 |
 | **1.4.242** | **Codex 0.164.0** | 隔离 Linux 原生 worker：写文件并读回、显示 provider transcript、跨多个有界页面向前翻页、获接受的 `worker_done`、终端释放及释放后仍可读的 transcript 归档。另一次真实桌面 viewer A/B → C 流程观察到两个根 worker 并行存活，三个 Task 全部完成、结果为 `51`，恰好三个 Dispatch，终端完成复用/保留归属决策且无清理债务。不代表已覆盖远程/Windows，也未在真实 provider 上复现启动后期报错竞态。 |
 | **1.4.243** | **OpenCode 2.2.0** | 隔离 Linux 原生 worker（`opencode` + `deepseek/deepseek-flash`）：写文件并读回 `{"verified":243,"frontend":"native"}`、获接受的 `worker_done`、恰好 1 个 Dispatch、终端释放且无清理债务。在本地 viewer 模型发现失败（`opencode models` 退出码 23）下原生执行依然成功，证明发现仅为建议性质而非执行宿主失败。心跳 preamble 预览按 5分/关闭/15分 正确生成（关闭时不含心跳命令）。显式 Mini 与 Full TUI 实测均未通过启动身份就绪门（终端标题在 60 秒内未更新为 `OC | odag:<request>`，在 Task 输入/Dispatch 前安全拒绝并按 `start_failed` 结算，无清理债务，无 provider 任务执行覆盖）。不代表已覆盖远程/Windows、新工作树模型覆盖、variant、effort 或真实多账户认证。 |
+| **1.4.245** | **OpenCode 2.2.0** | Linux viewer 选择 Mini，固定 `openai/gpt-6.1-sol#xhigh`：当前工作区排他创建文件及独立复算、获接受的 `worker_done`、成功关闭自建 pane、关闭后读取 API 工具输出并向前翻页。已有工作区的活动执行经 viewer 崩溃/重启后恢复同一 session 与 Dispatch；Stop 经 provider 确认退出，前台工具子进程结束且未写入完成文件，再执行 Orca `worker-abandon` 记账。Fencing 后 pane 因 `identity_unproven` 保留供检查，不自动关闭。不代表 Full TUI、远程/Windows、lane、新建工作区放置或托管多账户已验证。 |
 
 ### 验证边界与限制说明
 

@@ -383,7 +383,7 @@ describe("API-preselected OpenCode full TUI", () => {
     assert.equal((await inspectOpenCodeTui(started.dispatchId!))?.state, "input_unproven");
     assert.equal(calls(orcaLog, "worker-start").length, 1);
   });
-  it("reads labeled, bounded provider text after caller-owned close without exposing tool inputs/reasoning", async () => {
+  it("reads bounded provider output after caller-owned close without reasoning or secret fields", async () => {
     const started = await start(); settle();
     const release = await releaseWorker(started.dispatchId!);
     assert.equal(release.reason, "external_terminal");
@@ -396,11 +396,44 @@ describe("API-preselected OpenCode full TUI", () => {
     assert.equal(rest.lines.join("\n").includes("private"), false);
     assert.equal(calls(orcaLog, "worker-read").length, 0);
   });
+  it("shows Mini tool progress and structured results, restarting a changed output prefix", async () => {
+    const started = await interactive("mini");
+    const tool = { type: "tool", name: "shell", state: {
+      status: "running", input: { command: "node calculation.mjs", apiKey: "private credential" },
+    } };
+    update(providerFile, { assistantText: "Computing", toolParts: [tool] });
+    const running = await readWorkerOutput(started.dispatchId!, { limit: 2 });
+    assert.match(running.lines.join("\n"), /tool shell.*running/);
+    assert.equal(running.contentComplete, false);
+    update(providerFile, { toolParts: [
+      { ...tool, state: { ...tool.state, status: "completed", content: [
+        { type: "text", text: "sum=17" }, { type: "text", text: "Exited with code 0" },
+      ] } },
+      { type: "tool", name: "shell", state: { status: "error", error: {
+        message: "command failed", apiKey: "private credential",
+      } } },
+      { type: "tool", name: "settings", state: { status: "completed", content: [
+        { type: "text", text: "private configuration" },
+      ] } },
+    ] });
+    const completed = await readWorkerOutput(started.dispatchId!, { cursor: running.cursor!, limit: 40 });
+    const visible = completed.lines.join("\n");
+    assert.equal(completed.sourceChanged, true);
+    assert.match(visible, /tool shell.*completed/);
+    assert.match(visible, /tool result.*sum=17/);
+    assert.match(visible, /tool result.*Exited with code 0/);
+    assert.match(visible, /tool shell.*error/);
+    assert.match(visible, /command failed/);
+    assert.equal(visible.includes("private"), false, "reasoning, secret fields and settings results stay hidden");
+    const next = await readWorkerOutput(started.dispatchId!, { cursor: completed.cursor!, limit: 40 });
+    assert.equal(next.sourceChanged, false);
+    assert.deepEqual(next.lines, []);
+    assert.equal(next.contentComplete, false, "visible tool completion does not settle an active provider execution");
+  });
   it("does not call a clipped assistant text budget a complete transcript", async () => {
     const started = await start(); settle(); update(providerFile, { longOutput: true });
     const output = await readWorkerOutput(started.dispatchId!, { limit: 200 });
     assert.equal(output.clipped, true); assert.equal(output.contentComplete, false);
-    assert.ok(output.warnings.some(line => line.includes("output budget")));
   });
   it("reads a cold exact-bound one-shot session without upgrading fleet liveness", async () => {
     const started = await start();

@@ -26,7 +26,7 @@ This document records the supported version floors, runtime verification gates, 
 
 ## Recorded Real-Runtime Verification
 
-As of **2026-10-29**, the following combinations have been verified against real running runtimes:
+As of **2026-11-02**, the following combinations have been verified against real running runtimes:
 
 | Orca app | Agent version | What was verified |
 |---|---|---|
@@ -37,6 +37,7 @@ As of **2026-10-29**, the following combinations have been verified against real
 | **1.4.241** | **OpenCode 2.1.2** | Isolated Linux headless runtime, native `opencode` + `deepseek/deepseek-flash`: file write/readback, accepted `worker_done`, effective-model receipt, and terminal release; viewer restart recovered the same Dispatch and completed a dependent Task with no duplicate workers or cleanup debt. Nested-helper execution was refused by the profile's depth limit of 1; helper custody/handback is covered by the regression suite, not claimed as live-provider verified. |
 | **1.4.242** | **Codex 0.164.0** | Isolated Linux native worker: file write/readback, rendered provider transcript, forward cursor paging over multiple bounded pages, accepted `worker_done`, terminal release, and readable transcript archive after release. A separate live desktop viewer A/B → C flow observed parallel root workers, completed all three Tasks with result `51`, and used exactly three Dispatches with reuse/retention decisions and no cleanup debt. This does not establish remote/Windows coverage or reproduce the late-start-error race on a live provider. |
 | **1.4.243** | **OpenCode 2.2.0** | Isolated Linux native worker (`opencode` + `deepseek/deepseek-flash`): file write/readback of `{"verified":243,"frontend":"native"}`, accepted `worker_done`, exact 1 Dispatch, terminal release, and no cleanup debt. Verified execution succeeded even when local viewer model discovery failed (`opencode models` exit 23), proving discovery is advisory rather than an execution-host failure. Heartbeat preamble preview generated across 5m/off/15m profiles without commands when off. Explicit Mini and Full TUI both failed the startup identity ready gate (terminal title did not update to `OC | odag:<request>` within 60s, safely refusing before Task input/Dispatch and settling via `start_failed` with no cleanup debt; no provider task execution coverage). Does not verify remote/Windows, new worktree model override, variant, effort, or live multiaccount authentication. |
+| **1.4.245** | **OpenCode 2.2.0** | Linux viewer-selected Mini with `openai/gpt-6.1-sol#xhigh`: current-workspace exclusive file creation and independent arithmetic check, accepted `worker_done`, successful caller-owned pane cleanup, API tool output and forward paging after pane close. An existing-workspace active execution survived a viewer crash/restart with the same session and Dispatch; provider-confirmed Stop killed its foreground tool child before the completion file was written, then used Orca `worker-abandon` accounting. The post-fence pane remained retained for inspection (`identity_unproven`), not automatically closed. This does not certify Full TUI, remote/Windows, lanes, new-worktree placement or managed multiaccount behavior. |
 
 ---
 

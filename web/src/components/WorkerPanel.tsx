@@ -896,15 +896,15 @@ export const WorkerPanel = memo(function WorkerPanel({
                   )}
 
                   <div className="gate__actions">
-                    {output?.dispatchId !== row.dispatchId && (
+                    {(output?.dispatchId !== row.dispatchId || output?.contentComplete) && (
                       <button
                         className="btn btn--gate"
-                        onClick={() => row.dispatchId && void loadOutput(row.dispatchId, undefined, "auto")}
+                        onClick={() => row.dispatchId && void loadOutput(row.dispatchId, undefined, source)}
                       >
                         {t("worker.readOutput")}
                       </button>
                     )}
-                    {output?.dispatchId === row.dispatchId && output.cursor && (
+                    {output?.dispatchId === row.dispatchId && output.cursor && !output.contentComplete && (
                       <button
                         className="btn btn--gate"
                         onClick={() =>

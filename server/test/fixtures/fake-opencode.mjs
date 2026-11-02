@@ -54,7 +54,7 @@ if (path.includes("/message")) {
     { id: "msg_user", type: "user", text: `${dispatch.task_id} ${dispatch.id}` },
     ...(!state.noAssistant ? [{ id: "msg_assistant", type: "assistant", model: session.model,
       content: [{ type: "text", text: state.longOutput ? "x".repeat(17_000) : state.assistantText ?? "verified worker output\nsecond line" },
-        { type: "reasoning", text: "private reasoning" }, { type: "tool", tool: "read_file", state: { input: { path: "README.md", secret: "do not store" }, output: "tool result content" } }] }] : []),
+        { type: "reasoning", text: "private reasoning" }, ...(state.toolParts ?? [{ type: "tool", tool: "read_file", state: { input: { path: "README.md", secret: "do not store" }, output: "tool result content" } }])] }] : []),
     ...(state.userOwned ? [{ id: "msg_owned", type: "user", text: "new user work" }] : []),
   ] : [];
   if (state.loopCursor) reply({ data: messages, cursor: { next: "same_cursor" } });

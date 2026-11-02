@@ -2769,6 +2769,68 @@ function openCodeOutputPrefixHash(lines: string[], end: number): string {
   return hash.digest("hex").slice(0, 16);
 }
 
+/** Mini/TUI and CLI-run share API messages, including live tool state.
+ * Tool results in OpenCode 2.2 live in state.content rather than state.output.
+ * Ignore reasoning/native payloads, bound visible text, and keep auth/config
+ * tool results out of this general-purpose output surface.
+ */
+function formatOpenCodeOutput(messages: Record<string, unknown>[]): { lines: string[]; clipped: boolean } {
+  const lines: string[] = [];
+  let clipped = false;
+  let budget = 160_000;
+  const push = (text: string) => {
+    if (budget <= 0 || lines.length >= 10_000) { clipped = true; return; }
+    const count = Math.min(16_000, budget);
+    if (text.length > count) clipped = true;
+    const value = text.slice(0, count);
+    budget -= value.length;
+    const chunks = value.split("\n");
+    const remaining = 10_000 - lines.length;
+    lines.push(...chunks.slice(0, remaining));
+    if (chunks.length > remaining) clipped = true;
+  };
+  const result = (tool: string, value: unknown) => {
+    if (/auth|settings|config/i.test(tool) || value === undefined) return;
+    if (typeof value === "string") push(`[tool result] ${value}`);
+    else if (Array.isArray(value)) {
+      for (const item of value) {
+        const part = asRecord(item);
+        if (part.type === "text" && typeof part.text === "string") push(`[tool result] ${part.text}`);
+      }
+    } else push(`[tool result] ${JSON.stringify(safeToolInput(value))}`);
+  };
+  for (const message of messages) {
+    if (budget <= 0 || lines.length >= 10_000) { clipped = true; break; }
+    const role = typeof message.type === "string" ? message.type : "unknown";
+    const model = asRecord(message.model);
+    const tag = role === "assistant" && model.providerID && model.id
+      ? ` · ${String(model.providerID)}/${String(model.id)}${model.variant ? `#${String(model.variant)}` : ""}`
+      : "";
+    if (typeof message.text === "string") push(`[${role}] ${message.text}`);
+    for (const raw of Array.isArray(message.content) ? message.content : []) {
+      if (budget <= 0 || lines.length >= 10_000) { clipped = true; break; }
+      const part = asRecord(raw);
+      if (part.type === "text" && typeof part.text === "string") push(`[${role}${tag}] ${part.text}`);
+      else if (part.type === "tool" || part.type === "tool-call") {
+        const tool = typeof part.name === "string" ? part.name : typeof part.tool === "string" ? part.tool : "unknown";
+        const state = asRecord(part.state);
+        let input = "";
+        try {
+          const value = safeToolInput(part.input ?? state.input);
+          input = value === undefined ? "" : ` ${JSON.stringify(value)}`;
+        } catch { input = " [tool input omitted]"; }
+        const status = typeof state.status === "string" ? ` ${state.status}` : "";
+        push(`[tool ${tool}]${status}${input}`);
+        result(tool, state.output ?? state.content);
+        if (state.error !== undefined) result(tool, state.error);
+      } else if (part.type === "tool-result") {
+        result(typeof part.tool === "string" ? part.tool : "unknown", part.output ?? part.text ?? part.content);
+      }
+    }
+  }
+  return { lines, clipped };
+}
+
 /**
  * Read a bounded page of one worker's output (`orchestration worker-read`).
  *
@@ -2789,34 +2851,33 @@ export async function readWorkerOutput(
     // Orca 1.4.222 cannot report this precreated session's transcript. Keep the
     // API source labeled and cursor-pinned; never pass our cursor to Orca.
     const execution = await readOpenCodeExecution(launch);
-    let textClipped = false;
-    const rawLines = execution.messages.flatMap(message => {
-      if (message.type !== "assistant" || !Array.isArray(message.content)) return [];
-      const model = asRecord(message.model);
-      const label = `[OpenCode API ${String(message.id)} · ${String(model.providerID)}/${String(model.id)}${model.variant ? `#${model.variant}` : ""}]`;
-      return message.content.flatMap(value => {
-        const part = asRecord(value);
-        if (part.type !== "text" || typeof part.text !== "string") return [];
-        if (part.text.length > 16_000) textClipped = true;
-        return [label, ...part.text.slice(0, 16_000).split("\n")];
-      });
-    });
-    const lines = rawLines.slice(0, 10_000);
-    const budgetClipped = textClipped || rawLines.length > lines.length;
-    const prefix = `ocapi1:${dispatchId}:${launch.sessionId}:`;
-    const offset = opts.cursor?.startsWith(prefix) ? Number(opts.cursor.slice(prefix.length)) : 0;
+    const { lines, clipped: budgetClipped } = formatOpenCodeOutput(execution.messages);
+    // Tool states can change in place while the session runs. As in CLI-run,
+    // pin bytes before the cursor so a changed prefix is explicitly restarted.
+    const prefix = `ocapi2:${dispatchId}:${launch.sessionId}:`;
+    let sourceChanged = Boolean(opts.cursor && !opts.cursor.startsWith(prefix));
+    let offset = 0;
+    if (opts.cursor && !sourceChanged) {
+      const match = /^(\d+):([a-f0-9]{16})$/.exec(opts.cursor.slice(prefix.length));
+      if (!match || !Number.isSafeInteger(Number(match[1]))) throw new OrcaCliError("Invalid OpenCode API cursor", "invalid_cursor");
+      offset = Number(match[1]);
+      if (offset > lines.length || openCodeOutputPrefixHash(lines, offset) !== match[2]) {
+        sourceChanged = true;
+        offset = 0;
+      }
+    }
     if (!Number.isSafeInteger(offset) || offset < 0) throw new OrcaCliError("Invalid OpenCode API cursor", "invalid_cursor");
     const limit = Math.max(1, Math.min(200, opts.limit ?? 40));
     const page = lines.slice(offset, offset + limit);
     return {
-      dispatchId, source: "opencode-api", cursor: `${prefix}${offset + page.length}`,
-      lines: page, contentComplete: !budgetClipped && execution.complete && execution.exited && offset + page.length >= lines.length,
+      dispatchId, source: "opencode-api", cursor: `${prefix}${offset + page.length}:${openCodeOutputPrefixHash(lines, offset + page.length)}`,
+      lines: page, contentComplete: !budgetClipped && execution.complete && execution.exited && !execution.evidence.userOwned && offset + page.length >= lines.length,
       clipped: budgetClipped || !execution.complete || offset + page.length < lines.length,
-      sourceChanged: Boolean(opts.cursor && !opts.cursor.startsWith(prefix)),
+      sourceChanged,
       warnings: [
         `OpenCode API: ${execution.evidence.state}; model evidence comes from assistant turns, not Orca launch.effective`,
         ...(!execution.complete ? ["OpenCode history reached the bounded read budget; absence is not proof"] : []),
-        ...(budgetClipped ? ["OpenCode assistant text reached the viewer output budget; this page is not a complete transcript"] : []),
+        ...(budgetClipped ? ["OpenCode output reached the viewer text budget; this page is not a complete transcript"] : []),
         ...(execution.evidence.userOwned ? ["Later user-owned work is excluded; automatic terminal cleanup is disabled"] : []),
       ],
     };
@@ -2827,52 +2888,7 @@ export async function readWorkerOutput(
       const binding = await exactOpenCodeBinding(detail);
       if (binding) {
         const read = await readOpenCodeBoundSession(binding);
-        const lines: string[] = [];
-        let textClipped = false;
-        let budget = 160_000;
-        const push = (text: string) => {
-          if (text.length > budget || lines.length >= 10_000) textClipped = true;
-          const value = text.slice(0, Math.max(0, budget));
-          budget -= value.length;
-          const remainingLines = 10_000 - lines.length;
-          const chunks = value.split("\n");
-          lines.push(...chunks.slice(0, remainingLines));
-          if (chunks.length > remainingLines) textClipped = true;
-        };
-        for (const message of read.messages) {
-          if (budget <= 0 || lines.length >= 10_000) { textClipped = true; break; }
-          const role = typeof message.type === "string" ? message.type : "unknown";
-          const model = asRecord(message.model);
-          const tag = role === "assistant" && model.providerID && model.id
-            ? ` · ${String(model.providerID)}/${String(model.id)}${model.variant ? `#${String(model.variant)}` : ""}`
-            : "";
-          const content = Array.isArray(message.content) ? message.content : [];
-          if (typeof message.text === "string") push(`[${role}] ${message.text}`);
-          for (const raw of content) {
-            if (budget <= 0 || lines.length >= 10_000) { textClipped = true; break; }
-            const part = asRecord(raw);
-            if (part.type === "text" && typeof part.text === "string") push(`[${role}${tag}] ${part.text}`);
-            else if (part.type === "tool" || part.type === "tool-call") {
-              const tool = typeof part.name === "string" ? part.name : typeof part.tool === "string" ? part.tool : "unknown";
-              const state = asRecord(part.state);
-              let input = "";
-              try {
-                const value = safeToolInput(part.input ?? state.input);
-                input = value === undefined ? "" : ` ${JSON.stringify(value)}`;
-              } catch { input = " [tool input omitted]"; }
-              push(`[tool ${tool}]${input}`);
-              if (typeof state.output === "string" && !/auth|settings|config/i.test(tool)) push(`[tool result] ${state.output}`);
-              else if (state.output && typeof state.output === "object") push(`[tool result] ${JSON.stringify(safeToolInput(state.output))}`);
-            } else if (part.type === "tool-result") {
-              const tool = typeof part.tool === "string" ? part.tool : "unknown";
-              if (/auth|settings|config/i.test(tool)) continue;
-              const value = part.output ?? part.text;
-              const result = typeof value === "string" ? value
-                : value === undefined ? "[result unavailable]" : JSON.stringify(safeToolInput(value));
-              push(`[tool result${part.isError === true ? " error" : ""}] ${result}`);
-            }
-          }
-        }
+        const { lines, clipped: textClipped } = formatOpenCodeOutput(read.messages);
         // Pin already-rendered bytes, not the whole growing history: appending
         // output must not restart paging. Changes before the cursor do restart
         // it, so the client can replace stale text instead of combining sources.
