@@ -4,7 +4,7 @@
 
 > [返回文档索引](../README_zh.md) · [返回 README](../../README_zh.md)
 
-本参考文档记录 orca-dag viewer 与 Orca 运行时的最低版本门槛、启动路径限制以及截至 2026-10-29 的完整真实运行时验证历史。
+本参考文档记录 orca-dag viewer 与 Orca 运行时的最低版本门槛、启动路径限制以及截至 2026-11-02 已记录的真实运行时验证历史。
 
 ## 最低运行要求
 
@@ -59,6 +59,10 @@
   - **显式 Mini / Full TUI 与后端可见性丢失边界**：本次 OpenCode 2.2.0 实测中，API 预建会话的模型与位置正确，但两个前端均未在 60 秒内通过精确 session 派生标题检查。适配器在 Task 输入或 Dispatch 前拒绝，记录 `settledVia=start_failed`，最终安全关闭 preparation，清理债务为空。这不代表所有 2.2.0 环境绝对不支持，根因未证实，也未放宽就绪检查。当前无 Orca 托管 OpenCode 账户，不能宣称真实多账户通过；仅有独立回归 fixture 验证 API 可见性丢失时保留 `prepared` 记录与原 pane，不发送 Task 输入、不关闭 pane、不启动替代。
   - **非 worker 支持扩展**：不要把上游 PR 32006（nativeChat 模型）或新顶层工作树修复视为 `opencode2`、新工作树或远程/Windows 的 worker 支持扩展。保留既有兼容矩阵与旧版本记录。
   - **CLI-run 只读观测：**已从既有精确绑定的 `openai/gpt-6.1-sol#xhigh` session 读回 provider `active` 与 `exited`、助手消息中的模型证据及 `opencode-api` 输出；原生 fleet 仍保留 `unverifiable`。这只证明观测路径，不是新增 Task 成功、Mini/TUI 或 worker harness 认证。Provider 证据不扩大重试、Stop、释放权限；历史达到上限或不可读时明确保留限制。
+- **Orca 1.4.245 CLI-only 认证——OMP / Antigravity 仍不可用：**主 Run `run_8713a6b6ebfe` 的两个认证 Task 均已按失败结算；provider 成功计算不能覆盖必要的生命周期门。
+  - **OMP 18.15.0：**独立的当前/已有工作区 native 基线执行了首条 Task、复算文件并验证模型、接受 `worker_done`，正常释放且捕获 transcript 归档。但强制 Terminal 路径（`agent launch --surface terminal` → `worker-start --terminal`）仍为 `external_terminal`：结算后释放保留 pane 且无归档，活动 Stop 返回 `stop_unknown / processAction: none`。正常 native 释放/归档成功不代表活动 Stop 后可归档；该探针返回 `unavailable`。
+  - **Antigravity：**默认/显式模型、当前/已有工作区共八个数值探针均获接受结算。实际 pane 使用 **1.4.12**，初始 CLI 证据为 **1.4.10**；版本漂移根因未验证，不认证 1.4.10。强制 Terminal 绑定仍为 external，活动 Stop 返回 `stop_unknown`；之后目标自行报告 failed，不算 Stop 成功。原生输出是 terminal fallback（`provider_unsupported`），不是结构化 provider transcript；正常 native 释放捕获 terminal 归档，但活动 Stop 后归档不可用。
+  - 正面的 native `worker-start --agent` 基线依赖各 profile 已有的 terminal 偏好，既不能证明强制 CLI，也不授权生产 fallback 或修改全局偏好。External 保留 pane 与 Stop 不确定身份均明确记账，不根据缺席关闭。运行时重启恢复及其他未实测项保持 unverified；两个 viewer 预设均未开放。
 - **Task 就绪前置条件：**普通审批 gate 仅接受精确的已解决决定 `approve` 或 `approved`；`integrated` 仍是独立且精确的集成决定。Task 必须满足所有 gate 及同一 Run 内的全部依赖后才可运行，即使 Orca 的 Task 行已标记为 `ready`。
 2. **已验证的内置 Worker Harness 与 Claude Code**：viewer 内置支持的受监督调度 harness 仅限已完成真实运行时验证的 `claude`、`codex`、`opencode`，并遵守各版本与放置约束。Claude Code 有 Orca **1.4.209** 上的历史端到端验证，但当时未记录精确 CLI 版本。
 3. **未经验证的 Harness 明确拒绝**：`gemini`、`grok`、`cursor`、`droid`、`kimi` 尚未获得具体的 supervised worker 运行时验证，viewer 不再提供内置预设，亦不可用于调度启动。若节点配置或已保存设置尝试使用这些 harness，启动与重试均被前置拦截并明确返回 `unverified_harness` 拒绝，绝不进行静默替换或自动迁移；历史已落定的运行记录与账本在 viewer 中保持只读可查。
