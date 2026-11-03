@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createRun, fetchRunById, fetchRunsPage } from "../api";
 import { useT } from "../i18n";
 import { useReadiness } from "../harness";
@@ -27,11 +27,17 @@ import { useDecisionDialog } from "./DecisionDialog";
 
 const PAGE_SIZE = 25;
 
+export interface RunListReadState {
+  loaded: boolean;
+  error: string | null;
+}
+
 export function RunPicker({
   runId,
   onPick,
   autoPick = true,
   disabled = false,
+  onReadStateChange,
 }: {
   runId: string;
   onPick: (id: string) => void;
@@ -39,6 +45,8 @@ export function RunPicker({
    *  hydrated — auto-picking before that would overwrite the saved choice. */
   autoPick?: boolean;
   disabled?: boolean;
+  /** First-read failure is not an empty workspace; App uses this for recovery. */
+  onReadStateChange?: (state: RunListReadState) => void;
 }) {
   const dialog = useDecisionDialog();
   const t = useT();
@@ -55,20 +63,34 @@ export function RunPicker({
   const [pinned, setPinned] = useState<OrcaRun[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [listRead, setListRead] = useState<RunListReadState>({ loaded: false, error: null });
+  const loadPending = useRef(false);
   const [err, setErr] = useState<string | null>(null);
   const [exactId, setExactId] = useState("");
   const [exactBusy, setExactBusy] = useState(false);
   const [creating, setCreating] = useState(false);
   const combined = dedupeById([...pinned, ...firstPage, ...older]);
 
+  useEffect(() => {
+    onReadStateChange?.(listRead);
+  }, [listRead, onReadStateChange]);
+
   const load = useCallback(async () => {
+    // Polling must not make every slow response obsolete. Keep one read in
+    // flight so an 11-second request still lands with the 10-second timer.
+    if (loadPending.current) return;
+    loadPending.current = true;
     try {
       const page = await fetchRunsPage({ limit: PAGE_SIZE });
       setFirstPage(page.runs);
       setNextCursor(page.nextCursor);
       setErr(null);
+      setListRead((previous) => previous.loaded && !previous.error ? previous : { loaded: true, error: null });
     } catch (e) {
-      setErr(String((e as Error).message ?? e));
+      const error = String((e as Error).message ?? e);
+      setListRead((previous) => previous.error === error ? previous : { ...previous, error });
+    } finally {
+      loadPending.current = false;
     }
   }, []);
 
@@ -154,6 +176,10 @@ export function RunPicker({
   }
 
   const current = combined.find((r) => r.id === runId);
+  const placeholder = runId || (listRead.error
+    ? t("picker.unavailable")
+    : !listRead.loaded ? t("picker.loadingRuns") : t("picker.noRuns"));
+  const displayedError = err ?? listRead.error;
 
   return (
     <div className="runpick">
@@ -162,8 +188,9 @@ export function RunPicker({
         value={runId}
         onChange={onPick}
         disabled={disabled || combined.length === 0}
-        placeholder={t("picker.noRuns")}
-        emptyText={t("picker.noRuns")}
+        placeholder={placeholder}
+        loading={!listRead.loaded && !listRead.error}
+        emptyText={placeholder}
         title={
           current
             ? `${current.id}\n${current.objective || t("picker.noObjective")}`
@@ -183,6 +210,13 @@ export function RunPicker({
           <span aria-hidden="true">⋯</span>
         </summary>
         <div className="runpick__menu-panel" role="group" aria-label={t("picker.actionsAria")}>
+          <button className="btn btn--ghost menu-close" type="button" onClick={(event) => {
+            const menu = event.currentTarget.closest("details");
+            if (menu) {
+              menu.open = false;
+              menu.querySelector<HTMLElement>("summary")?.focus();
+            }
+          }}>{t("dialog.close")}</button>
           <button
             type="button"
             className="btn btn--ghost"
@@ -231,9 +265,9 @@ export function RunPicker({
           </span>
         </div>
       </details>
-      {err && (
-        <span className="runpick__error" role="status" title={err}>
-          ⚠ {err}
+      {displayedError && (
+        <span className="runpick__error" role="status" title={displayedError}>
+          {err ? `⚠ ${err}` : t("picker.readFailed")}
         </span>
       )}
     </div>

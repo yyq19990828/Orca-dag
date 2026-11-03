@@ -474,7 +474,7 @@ function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
       <Handle type="target" position={isTB ? Position.Top : Position.Left} />
       <div className="task-node__title" title={data.label}>{data.label}</div>
       <div className="task-node__row">
-        <div className="task-node__status" style={{ color: meta.ink }}>
+        <div className="task-node__status">
           <span className="dot" style={{ background: meta.color }} />
           {statusLabel}
         </div>
@@ -1031,11 +1031,24 @@ function Flow({
         onEdgesChange={onEdgesChange}
         onNodeDragStart={onNodeDragStart}
         onNodeDragStop={onNodeDragStop}
+        onKeyDownCapture={(event) => {
+          if ((event.key !== "Enter" && event.key !== " ") || !(event.target instanceof HTMLElement)) return;
+          const node = event.target.closest<HTMLElement>(".react-flow__node");
+          // React Flow retains arrow-key positioning. Only the node itself
+          // activates details; future controls inside a node keep their keys.
+          if (!node || event.target !== node || !node.dataset.id) return;
+          event.preventDefault();
+          event.stopPropagation();
+          onSelect(node.dataset.id);
+        }}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
         fitView
         nodesDraggable
         nodesConnectable={false}
+        /* The canvas is a projection, not a task/dependency editor. Native
+           Delete/Backspace must not make authoritative records vanish locally. */
+        deleteKeyCode={null}
         elementsSelectable
         minZoom={0.2}
         /* Cull to the viewport: a dense, zoomed-out graph mounts only what is

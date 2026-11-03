@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchEnvironments, fetchModels, fetchWorkerDetail, type ModelDiscoveryResult } from "../api";
 import { useT, type Translator } from "../i18n";
 import { lanePlanProblems, laneLabel, laneProblemPrefix } from "../placement";
@@ -121,6 +121,10 @@ export function NodePanel({
 }: NodePanelProps) {
   // Status copy is translated; STATUS_META keeps owning only the palette.
   const t = useT();
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    headingRef.current?.focus();
+  }, []);
   const meta = STATUS_META[node.status];
   const config = useConfig();
   const { customCommandsAllowed: customOk, platform } = useFlags();
@@ -304,16 +308,21 @@ export function NodePanel({
   const worktreeError = workerWorktree?.dispatchId === dispatchId && workerWorktree.error;
 
   return (
-    <aside className="node-panel">
+    <aside className="node-panel" aria-labelledby="node-panel-title" onKeyDown={(event) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+    }}>
       <button className="node-panel__close" onClick={onClose} aria-label={t("dialog.close")}>
         ✕
       </button>
 
-      <div className="node-panel__status" style={{ color: meta.ink }}>
+      <div className="node-panel__status">
         <span className="dot" style={{ background: meta.color }} />
         {t(`status.${node.status}`)}
       </div>
-      <h3 className="node-panel__title">{node.label}</h3>
+      <h3 className="node-panel__title" id="node-panel-title" ref={headingRef} tabIndex={-1}>{node.label}</h3>
       <div className="node-panel__id">
         <code>{node.id}</code>
       </div>

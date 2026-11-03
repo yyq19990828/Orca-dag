@@ -191,7 +191,7 @@
 }
 
 .app .topbar__progress-failed {
-  color: var(--coral);
+  color: var(--coral-ink);
 }
 
 .app .topbar__status {
@@ -558,4 +558,68 @@
   width: auto;
   min-width: 0;
   box-shadow: none;
+}
+/* Floating controls switch to viewport-bound sheets below desktop widths.
+   One shared placement avoids edge-specific collisions in the compact header
+   and toolbar; the sheet itself scrolls when text scaling increases its height. */
+@media (max-width: 1024px) {
+  /* A fixed child cannot escape the toolbar's stacking context. Lift the
+     open View sheet above the header so its Close button remains clickable. */
+  .app .dag-toolbar:has(.view-menu[open]) {
+    z-index: 40;
+  }
+  .app .runpick__menu-panel,
+  .app .view-menu__panel,
+  .app .exec__settings-panel {
+    position: fixed;
+    z-index: 60;
+    inset-block-start: max(8px, env(safe-area-inset-top));
+    inset-inline: max(8px, env(safe-area-inset-left)) max(8px, env(safe-area-inset-right));
+    inset-block-end: auto;
+    width: auto;
+    max-width: none;
+    max-height: calc(100vh - 16px);
+    max-height: calc(100dvh - 16px);
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .app .runpick__menu-panel *,
+  .app .view-menu__panel *,
+  .app .exec__settings-panel * {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .app .runpick__menu-panel .btn,
+  .app .view-menu__panel .btn,
+  .app .exec__settings-panel .btn {
+    min-height: 44px;
+  }
+}
+
+@media (max-width: 760px) {
+  .app .dag-toolbar__left {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+  }
+
+  .app .dag-toolbar__left > .btn,
+  .app .dag-toolbar__left > .view-menu > summary {
+    flex-shrink: 0;
+    min-height: 44px;
+    padding: 6px 10px;
+    font-size: 14px;
+    white-space: nowrap;
+  }
+}
+
+@media (pointer: coarse) {
+  .app .runpick__menu > summary,
+  .app .view-menu > summary,
+  .app .exec__settings > summary {
+    min-height: 44px;
+  }
 }

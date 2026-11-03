@@ -1,0 +1,244 @@
+.launch-preview {
+  display: grid;
+  gap: 1rem;
+  max-height: min(62vh, 620px);
+  min-width: 0;
+  overflow-y: auto;
+  padding: 2px 4px 2px 0;
+  color: var(--ink);
+  font: 14px / 1.55 ui-sans-serif, system-ui, sans-serif;
+}
+
+.decision-dialog__content {
+  min-width: 0;
+}
+
+.decision-dialog__content .launch-preview {
+  max-height: min(50vh, 460px);
+}
+
+.decision-dialog :is(button, input, summary, [tabindex]):focus-visible {
+  outline: 3px solid var(--sky-ink);
+  outline-offset: 2px;
+}
+
+.launch-preview__coordinator-copy {
+  margin: 0 0 0.75rem;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  line-height: 1.45;
+}
+
+.launch-preview__requested {
+  margin-top: 0.75rem;
+  padding-top: 0.6rem;
+  border-top: 1px dashed var(--line-strong);
+}
+
+.launch-preview__requested h4 {
+  margin-bottom: 0.35rem;
+}
+
+.launch-preview h3,
+.launch-preview h4 {
+  margin: 0 0 0.45rem;
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: 0.98rem;
+  font-weight: 600;
+}
+
+.launch-preview__shared,
+.launch-preview__task-body {
+  min-width: 0;
+  padding: 0;
+}
+
+.launch-preview dl {
+  display: grid;
+  grid-template-columns: minmax(7rem, 0.35fr) minmax(0, 1fr);
+  gap: 0.35rem 0.8rem;
+  margin: 0;
+}
+
+.launch-preview dl > div {
+  display: contents;
+}
+
+.launch-preview dt {
+  color: var(--ink-soft);
+}
+
+.launch-preview dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.launch-preview__tasks,
+.launch-preview__task-list,
+.launch-preview__task-body {
+  min-width: 0;
+}
+
+.launch-preview__task-list {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.launch-preview__task-list > li {
+  padding: 0;
+  border-top: 1px solid var(--line-strong);
+  overflow-wrap: anywhere;
+}
+
+.launch-preview__tasks details {
+  min-width: 0;
+}
+
+.launch-preview__tasks summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0.65rem 0;
+  cursor: pointer;
+}
+
+.launch-preview__tasks summary:focus-visible,
+.launch-preview__copy:focus-visible {
+  outline: 2px solid var(--sky-ink);
+  outline-offset: 2px;
+}
+
+.launch-preview__task-name {
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.launch-preview__task-route {
+  display: grid;
+  flex: 0 1 auto;
+  gap: 3px;
+  color: var(--ink-soft);
+  font-size: 13px;
+  text-align: end;
+  overflow-wrap: anywhere;
+}
+
+.launch-preview__task-route strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.launch-preview__chevron {
+  width: 14px;
+  height: 9px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+
+.launch-preview details[open] > summary .launch-preview__chevron {
+  transform: rotate(180deg);
+}
+
+.launch-preview__copy-status {
+  margin: 0 0 8px;
+  color: var(--ink);
+}
+
+.launch-preview__task-body {
+  margin: 0.25rem 0 0.5rem;
+}
+
+.launch-preview__identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.55rem;
+}
+
+.launch-preview code {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.launch-preview__copy {
+  min-height: 44px;
+  padding: 0.3rem 0.65rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px 11px 8px 10px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+}
+
+.launch-preview__limitations ul {
+  margin: 0;
+  padding-inline-start: 1.25rem;
+}
+
+.launch-preview__caveat,
+.launch-preview__notice {
+  margin: 0;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+
+.launch-preview__caveat {
+  padding: 0.65rem 0;
+  border-top: 1px solid var(--line-strong);
+  color: var(--ink);
+}
+
+.launch-preview__notice {
+  color: var(--ink-soft);
+}
+
+@media (max-width: 520px) {
+  .launch-preview {
+    max-height: min(58vh, 520px);
+  }
+
+  .launch-preview dl {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.1rem;
+  }
+
+  .launch-preview dd + dt {
+    margin-top: 0.4rem;
+  }
+
+  .launch-preview__tasks summary {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.35rem 0.75rem;
+  }
+
+  .launch-preview__task-name {
+    grid-column: 1;
+  }
+
+  .launch-preview__task-route {
+    grid-column: 1;
+    grid-row: 2;
+    text-align: start;
+  }
+
+  .launch-preview__chevron {
+    grid-column: 2;
+    grid-row: 1 / 3;
+  }
+}
