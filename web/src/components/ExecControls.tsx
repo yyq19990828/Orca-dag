@@ -1,6 +1,7 @@
-import { fetchLaunchPreview, startRun, stopRun, type LaunchPlanRequest, type LaunchPreviewResponse } from "../api";
+import { fetchLaunchPreview, startRun, stopRun, type LaunchPlanRequest } from "../api";
 import { useT, type TranslationKey } from "../i18n";
 import { DoodleSelect } from "./DoodleSelect";
+import { LaunchPreview } from "./LaunchPreview";
 import { useDecisionDialog } from "./DecisionDialog";
 import {
   effortMap,
@@ -65,6 +66,7 @@ const CUSTOM_OFF_HINT_KEY = "exec.customOffHint";
  */
 export function ExecControls({
   runId,
+  labelsById,
   taskIds,
   edges = [],
   readyCount = 0,
@@ -78,6 +80,8 @@ export function ExecControls({
 }: {
   /** Run to execute. Mutations are Run-scoped since Orca 1.4.160. */
   runId: string;
+  /** Display-only DAG names; preview falls back to the exact task ID. */
+  labelsById: Record<string, string>;
   taskIds: string[];
   /** Dependency edges — the lane-plan preflight reads them (Phase 7). */
   edges?: DagEdge[];
@@ -228,22 +232,20 @@ export function ExecControls({
   }
 
   async function inspectPlan() {
-    if (!runId || busy) return;
+    if (!runId || taskIds.length === 0 || busy) return;
     const generation = previewGeneration.current;
     setBusy(true);
     setErr(null);
     try {
       // The standalone control reads the editor snapshot without flushing
       // config writes; Run repeats preview after refreshing the saved plan.
-      const next = await fetchLaunchPreview(await prepareLaunchPlan(false));
+      const plan = await prepareLaunchPlan(false);
+      const next = await fetchLaunchPreview(plan);
       if (generation !== previewGeneration.current) return;
       await dialog.alert({
         title: t("exec.previewTitle"),
-        message: [
-          formatPreview(next),
-          t("exec.previewNotProof"),
-          t("exec.previewExternalRuntime"),
-        ].join("\n\n"),
+        message: t("exec.previewDescription"),
+        content: <LaunchPreview preview={next} plan={plan} labelsById={labelsById} />,
       });
     } catch (error) {
       setErr(String((error as Error).message ?? error));
@@ -252,45 +254,6 @@ export function ExecControls({
     }
   }
 
-  function formatPreview(value: LaunchPreviewResponse): string {
-    const routeName: Record<string, TranslationKey> = {
-      "native-default": "exec.previewNativeDefault",
-      "native-model": "exec.previewNativeModel",
-      "api-mini": "exec.previewMini",
-      "api-tui": "exec.previewTui",
-      "cli-run": "exec.previewCliRun",
-      "custom-command": "exec.previewCustomCommand",
-      unsupported: "exec.previewUnsupported",
-      supervised: "exec.previewSupervised",
-    };
-    return value.tasks.map((task) => {
-      const workspace = task.placement.kind === "existing"
-        ? t("exec.previewWorkspaceExisting", { selector: task.placement.selector ?? "" })
-        : task.placement.kind === "new-child"
-          ? t("exec.previewWorkspaceNewChild")
-          : task.placement.kind === "new-top-level"
-            ? t("exec.previewWorkspaceNewTopLevel")
-            : t("exec.previewWorkspaceCurrent");
-      const placement = t("exec.previewPlacement", {
-        environment: task.placement.environment ?? t("exec.previewLocal"),
-        lane: task.placement.laneId ?? t("exec.previewNoLane"),
-        workspace,
-      });
-      const reason = t(`exec.routeReason.${task.reasonCode}` as TranslationKey);
-      const limitations = task.limitations.map(code =>
-        t(`exec.routeLimitation.${code}` as TranslationKey),
-      ).join("; ");
-      return t("exec.previewTask", {
-        id: task.taskId,
-        harness: task.harness,
-        model: task.model ?? t("exec.previewDefaultModel"),
-        placement,
-        route: t(routeName[task.route] ?? "exec.previewUnsupported"),
-        reason,
-        limitations,
-      });
-    }).join("\n\n");
-  }
 
   async function run() {
     if (busy) return;
@@ -327,14 +290,15 @@ export function ExecControls({
       const latestPreview = await fetchLaunchPreview(plan);
       const ok = await dialog.confirm({
         title: t("exec.previewTitle"),
-        message: [
-          t("dialog.confirmRunMessage", { id: runId }),
-          t("exec.previewReady"),
-          formatPreview(latestPreview),
-          t("exec.previewWarning"),
-          t("exec.previewNotProof"),
-          t("exec.previewExternalRuntime"),
-        ].join("\n\n"),
+        message: t("exec.previewConfirmDescription"),
+        content: (
+          <>
+            <p className="launch-preview__coordinator-copy">{t("dialog.confirmRunMessage", { id: runId })}</p>
+            <p className="launch-preview__notice">{t("exec.previewReady")}</p>
+            <p className="launch-preview__notice">{t("exec.previewWarning")}</p>
+            <LaunchPreview preview={latestPreview} plan={plan} labelsById={labelsById} />
+          </>
+        ),
         confirmLabel: t("dialog.startRun"),
         cancelLabel: t("dialog.notNow"),
       });
@@ -402,6 +366,18 @@ export function ExecControls({
           </span>
         </summary>
         <div className="exec__settings-panel" role="group" aria-label={t("exec.groupAria")}>
+          <button
+            type="button"
+            className="menu-close"
+            onClick={(event) => {
+              const details = event.currentTarget.closest("details");
+              if (!details) return;
+              details.open = false;
+              details.querySelector<HTMLElement>(":scope > summary")?.focus();
+            }}
+          >
+            {t("dialog.close")}
+          </button>
           {(config.defaultHarness === "opencode" || taskIds.some(id => (config.harnessByTask[id] ?? config.defaultHarness) === "opencode")) && (
             <div className="exec__field">
               <span className="exec__label">{t("openCode.uiLabel")}</span>
@@ -484,7 +460,7 @@ export function ExecControls({
         type="button"
         className="btn"
         onClick={inspectPlan}
-        disabled={!runId}
+        disabled={!runId || taskIds.length === 0}
         aria-disabled={busy}
         aria-busy={busy}
       >

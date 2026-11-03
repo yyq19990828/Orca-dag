@@ -170,6 +170,13 @@ export function DoodleSelect({
   }
 
   function onTriggerKeyDown(e: React.KeyboardEvent) {
+    if (e.key === "Escape" && open) {
+      e.preventDefault();
+      e.stopPropagation();
+      setOpen(false);
+      triggerRef.current?.focus();
+      return;
+    }
     if (e.key === "Enter" || e.key === " " || e.key === "ArrowDown") {
       e.preventDefault();
       setOpen(true);
@@ -177,6 +184,15 @@ export function DoodleSelect({
   }
 
   function onInputKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Escape") {
+      // A selector portalled out of an inspector still bubbles through its
+      // React parent. Consume the first Escape here, not at the outer panel.
+      e.preventDefault();
+      e.stopPropagation();
+      setOpen(false);
+      triggerRef.current?.focus();
+      return;
+    }
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setActive((i) => Math.min(i + 1, filtered.length - 1));

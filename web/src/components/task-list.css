@@ -1,0 +1,152 @@
+.task-list {
+  display: none;
+}
+
+.task-list__items {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 12px;
+  list-style: none;
+}
+
+.task-list__row {
+  min-width: 0;
+}
+
+.task-list__item {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 48px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1.5px dashed var(--line-strong);
+  border-radius: 12px 10px 13px 9px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.task-list__item:hover,
+.task-list__item[aria-pressed="true"] {
+  border-color: var(--sky-ink);
+  background: var(--sky-wash);
+}
+
+.task-list__item:focus-visible {
+  outline: 3px solid var(--sky-ink);
+  outline-offset: 2px;
+}
+
+.task-list__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.task-list__name {
+  min-width: 0;
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.task-list__status {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  max-width: 46%;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-align: end;
+  overflow-wrap: anywhere;
+}
+
+.task-list__status-dot {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 9px;
+  border: 1px solid rgba(53, 50, 62, 0.42);
+  border-radius: 50%;
+}
+
+.task-list__reason {
+  display: block;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.task-list__empty {
+  margin: 0;
+  padding: 20px 16px;
+  color: var(--ink);
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+@media (max-width: 760px) {
+  .dag-canvas:not(.dag-canvas--task-list) .dag-graph {
+    display: flex;
+    flex: 1 1 auto;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    position: relative;
+  }
+
+  .dag-canvas--task-list .dag-graph {
+    display: none;
+  }
+
+  .dag-canvas .task-list {
+    position: relative;
+    z-index: 2;
+    display: block;
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
+  }
+
+  .dag-canvas:not(.dag-canvas--task-list) .task-list {
+    display: none;
+  }
+
+  .task-view-switch {
+    display: flex;
+  }
+}
+
+@media (min-width: 761px) {
+  .dag-graph {
+    display: flex;
+    flex: 1 1 auto;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    position: relative;
+  }
+
+  .dag-canvas .task-list,
+  .task-view-switch {
+    display: none;
+  }
+}

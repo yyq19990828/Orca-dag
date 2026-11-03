@@ -17,6 +17,7 @@ type DialogTone = "default" | "danger";
 interface DialogCopy {
   title: string;
   message: string;
+  content?: ReactNode;
   confirmLabel?: string;
   tone?: DialogTone;
 }
@@ -143,8 +144,13 @@ export function DecisionDialogProvider({ children }: { children: ReactNode }) {
     }
     if (event.key !== "Tab" || !cardRef.current) return;
     const focusable = [...cardRef.current.querySelectorAll<HTMLElement>(
-      'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex="-1"])',
-    )];
+      'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), [href], details > summary, [tabindex]:not([tabindex="-1"])',
+    )].filter((element) => {
+      const closedDetails = element.closest("details:not([open])");
+      if (!closedDetails) return true;
+      const summary = closedDetails.querySelector(":scope > summary");
+      return element === summary || Boolean(summary?.contains(element));
+    });
     if (focusable.length === 0) return;
     const first = focusable[0];
     const last = focusable.at(-1)!;
@@ -185,6 +191,7 @@ export function DecisionDialogProvider({ children }: { children: ReactNode }) {
                 <h2 id="decision-dialog-title">{active.title}</h2>
               </header>
               <p id="decision-dialog-message" className="decision-dialog__message" tabIndex={0}>{active.message}</p>
+              {active.content && <div className="decision-dialog__content">{active.content}</div>}
               {active.kind === "prompt" && (
                 <label className="decision-dialog__field">
                   <span>{active.fieldLabel}</span>

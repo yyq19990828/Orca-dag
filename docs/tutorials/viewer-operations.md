@@ -64,12 +64,27 @@ Unchanged content preserves its mtime. The installer never follows symlinked con
 | Surface | What it tells you | What you can do |
 | --- | --- | --- |
 | Run picker and health badge | Workspace-scoped Run history; `viewer-owned`, `external`, `unbound`, or `inconsistent` coordinator state, plus nullable `removedWork` summary and on-demand pagination without reset controls. | Pick or create a Run, page older Runs, inspect removed-work history, or look up an exact Run ID. |
-| DAG and Stage card | Task spec, dependency arrows, separate parent links, status, result, and actual worker workspace. | Select a Stage; choose its launch preferences before they lock. |
+| DAG, Stage card, and Task list | Task spec, dependency arrows, separate parent links, status, result, and actual worker workspace; accessible vertical task list default on mobile (≤760px). | Select a Stage (click or keyboard Enter/Space); choose its launch preferences before they lock; toggle between task list and graph on mobile. |
 | Scheduler | Ready wave, capacity, and a reason for each waiting Stage. | Distinguish an unmet dependency, gate, full capacity, or unknown state. |
 | Chat / Activity | Assignments, replies, durable sends, coordinator checks, and an event timeline. | Answer a question or send guidance to an Orca-verified active Dispatch. |
 | Operational details | Workers, gates, workspace lanes, Recovery, capabilities, and Request audit. | Inspect evidence before retry, stop, abandon, integration, or removal. |
 
 The DAG refreshes every two seconds. Moving a node changes only canvas position; layout can be layered horizontal/vertical or force-directed. One optional **Lead Stage** marks semantic main-agent ownership in the drawing; it does not grant Orca coordinator authority. UI language is English or Simplified Chinese and persists per browser.
+
+The UI distinguishes loading, first-read failure, confirmed empty and stale data.
+When task data has not been read, a failed initial request shows technical details
+and a **Reload page** action instead of claiming an empty project; launch preview
+and execution require task data. A failed refresh retains the same Run's last
+successful tasks and counts. **Retry read** updates projections without replaying
+mutations or reloading the page. Run list reads are single-flight, so the
+10-second poll cannot continually discard a slower successful response.
+
+Use Tab to focus a DAG node, then `Enter` or `Space` to open its inspector.
+Focus moves to the title; `Escape` closes the inspector and returns to its trigger.
+Nested selectors consume the first `Escape`, closing only their own dropdown.
+Task definitions and relationships remain read-only in the viewer.
+
+At narrow screen widths (≤760px), the viewer defaults to an accessible vertical **Task list** showing task labels, status dots, and blocked/readiness reasons, bypassing mobile canvas navigation. A toolbar switch allows toggling between the Task list and the DAG canvas. At ≤1024px, floating menus (Run options, View, and Execution settings) adapt into fixed, viewport-bound sheets with explicit **Close** buttons, and the View toolbar elevates its stacking context so its close button remains clickable. Note that execution planning and controls remain **desktop-first**; the mobile interface is intended for readable inspection and triage, not promised full execution parity.
 
 ## Launch settings and their design
 
@@ -92,7 +107,21 @@ The Run button snapshots these settings. While the coordinator is active, even a
 
 **OMP / Antigravity follow Orca settings.** Both require running Orca and resolved CLI ≥ **1.4.245**, local Linux Current or exact Existing placement, and no lane. The viewer calls native `worker-start --agent omp` / `--agent antigravity`; it does not inspect or change the user's Chat/Terminal preference, force a surface, prelaunch-and-bind, or reuse a generic terminal. Native Chat has not yet been exercised, but is not blocked. OpenCode's interface selector applies only to OpenCode. Native refusal or an unknown result never starts a fallback worker; native requested/effective, liveness, custody and unknown receipts remain authoritative.
 
-**Preview launch** is read-only and remains available when launch editing is locked. It describes the current configuration, not an existing Dispatch receipt: each Task's requested model, worker placement, selected adapter and limits. OpenCode Auto with a model variant such as `#xhigh` can select **CLI run compatibility**, not a native TUI. Selecting Mini / Full TUI requests the existing strict API adapter; preview never bypasses its execution-host version, permissions or startup-identity checks. Run flushes pending configuration, refreshes it, previews that exact plan, and asks for confirmation before transferring authority. Cancelling does not bind the viewer.
+**Preview launch** is read-only and remains available when launch editing is locked. It presents a structured preflight summary of current configuration intent, not an existing Dispatch receipt:
+- Requested defaults (harness and max parallel) appear once; the default OpenCode interface appears only when applicable.
+- Common limitations shared across all tasks are deduplicated and summarized once at the top, avoiding repetitive noise.
+- The task list displays full task names alongside exact task IDs (`task.taskId`), with an accessible **Copy ID** button that provides visual feedback or fallback instructions if clipboard permissions are denied.
+- Each task details its resolved harness, model, placement, and route reason, clearly separating resolved values from requested overrides (such as model, effort, or retention). Tasks with unsupported routes, unknown route/limitation codes, or task-specific constraints are flagged for review and automatically expanded (`open={needsReview || undefined}`).
+- OpenCode Auto with a model variant such as `#xhigh` can select **CLI run compatibility**, not a native TUI. Selecting Mini / Full TUI requests the existing strict API adapter; preview never bypasses its execution-host version, permissions or startup-identity checks.
+
+**Safe confirmation and execution boundaries.** **Run with Orca** flushes pending
+configuration, refreshes it and previews the same plan before authority transfer.
+Tab / Shift+Tab stays within visible dialog controls, including disclosure summaries.
+**Not now**, `Escape` or backdrop dismissal never issues `POST /api/run`;
+preferences already saved while preparing the plan remain saved.
+**Preview does not verify execution**: it cannot establish execution-host model
+availability, agent readiness or actual worker startup. Placement does not provision
+external test runtimes.
 
 **Prepare external resources before dispatch.** Worker placement does not create an arbitrary isolated test runtime, account or service. Prepare those resources first, or add a preparation Task dependency that supplies the owner, exact paths/selectors, runtime identity, access method, allowed changes and cleanup responsibility. A gate approval is not resource provisioning. Once a Dispatch exists, disabled placement controls cannot relocate that worker; safely hand it additional test resources or use explicit evidence-gated recovery.
 

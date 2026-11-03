@@ -9,7 +9,7 @@ import { RecoveryPanel } from "./components/RecoveryPanel";
 import { RequestAuditPanel } from "./components/RequestAuditPanel";
 import { SchedulerPanel } from "./components/SchedulerPanel";
 import { WorkerPanel } from "./components/WorkerPanel";
-import { RunPicker } from "./components/RunPicker";
+import { RunPicker, type RunListReadState } from "./components/RunPicker";
 import { RunHealthBadge } from "./components/RunHealthBadge";
 import { LangToggle } from "./components/LangToggle";
 import { useT } from "./i18n";
@@ -22,6 +22,8 @@ import { OperationsAttention, countActionableOperations, countKnownActionableOpe
 import { focusOperation, type OperationFocus } from "./operation-navigation";
 import "./compact-header.css";
 import "./operations-nav.css";
+import "./read-state.css";
+import { TaskList } from "./components/TaskList";
 import {
   LAYOUTS,
   STATUS_META,
@@ -216,13 +218,14 @@ export default function App() {
   const [showHierarchy, setShowHierarchy] = useState(true);
   const [activityPending, setActivityPending] = useState(0);
   const [activitySnapshot, setActivitySnapshot] = useState<ActivitySnapshot>(EMPTY_ACTIVITY);
-  const [connError, setConnError] = useState<string | null>(null);
+  const [dagFailure, setDagFailure] = useState<{ runId: string; message: string } | null>(null);
   const config = useConfig();
   // The View menu's status legend and layout buttons are translated copy, so
   // this component subscribes to the UI language (useT) like every other
   // translated surface; the palette itself stays in STATUS_META.
   const t = useT();
   const runId = config.runId;
+  const connError = dagFailure?.runId === runId ? dagFailure.message : null;
   // Execution gate (Phase 2): when the server's readiness probe says this
   // Orca runtime can't execute (missing, or 1.4.160–1.4.204 view-only), the
   // mutation controls disable themselves with the reason. Reads stay live.
@@ -234,6 +237,9 @@ export default function App() {
   // Unlike reorgNonce, this asks React Flow to reframe the current positions
   // without discarding nodes the user has manually dragged.
   const [canvasFitNonce, setCanvasFitNonce] = useState(0);
+  const [mobileTaskView, setMobileTaskView] = useState<"tasks" | "graph">("tasks");
+  const [retryingRead, setRetryingRead] = useState(false);
+  const stageReturnFocus = useRef<HTMLElement | null>(null);
   const communicationRef = useRef<HTMLElement | null>(null);
   const communicationResize = useRef<{
     pointerId: number;
@@ -271,12 +277,28 @@ export default function App() {
   // once; RunPicker must not auto-pick a Run until this has settled, or its
   // fallback would overwrite the stored choice with "newest"
   const [hydrated, setHydrated] = useState(false);
+  const [runListRead, setRunListRead] = useState<RunListReadState>({ loaded: false, error: null });
   useEffect(() => {
     initConfig()
       .catch(() => {
         /* defaults + localStorage mirror still apply */
       })
       .finally(() => setHydrated(true));
+  }, []);
+
+  // Nested selectors and modal dialogs own their first dismissal. In
+  // particular, a Run dialog must return to its still-visible menu trigger.
+  useEffect(() => {
+    const dismiss = (event: PointerEvent) => {
+      if (!(event.target instanceof Element) || event.target.closest(".doodle-select__panel, .decision-dialog__backdrop")) return;
+      for (const menu of document.querySelectorAll<HTMLDetailsElement>(
+        ".runpick__menu[open], .view-menu[open], .exec__settings[open]",
+      )) {
+        if (!menu.contains(event.target)) menu.open = false;
+      }
+    };
+    document.addEventListener("pointerdown", dismiss);
+    return () => document.removeEventListener("pointerdown", dismiss);
   }, []);
 
   function pickLayout(kind: LayoutKind) {
@@ -364,10 +386,10 @@ export default function App() {
       // page does. Identical payloads must keep the SAME state object so
       // React bails out and a no-op poll never repaints the canvas.
       setDag((prev) => (sameJson(prev, next) ? prev : next));
-      setConnError(null);
+      setDagFailure(null);
     } catch (e) {
       if (selectedRunRef.current === requestedRun && seq >= dagAppliedSeq.current) {
-        setConnError(String((e as Error).message ?? e));
+        setDagFailure({ runId: requestedRun, message: String((e as Error).message ?? e) });
       }
     }
   }, [runId]);
@@ -462,13 +484,28 @@ export default function App() {
     // Do not leave the previous Run's graph visible during the new Run's
     // request. `visibleDag` below also guards the render in the same frame.
     setDag(EMPTY);
-    setConnError(null);
+    setDagFailure(null);
+  }, []);
+
+  const closeStage = useCallback(() => {
+    setStageOpen(false);
+    window.requestAnimationFrame(() => {
+      if (stageReturnFocus.current?.isConnected) stageReturnFocus.current.focus();
+    });
   }, []);
 
   const selectStage = useCallback((id: string | null) => {
+    if (!id) {
+      closeStage();
+      return;
+    }
+    const active = document.activeElement;
+    stageReturnFocus.current = active instanceof HTMLElement && active !== document.body && !active.closest(".node-panel")
+      ? active
+      : document.querySelector<HTMLElement>(`.react-flow__node[data-id="${CSS.escape(id)}"]`);
     setSelectedId(id);
-    setStageOpen(Boolean(id));
-  }, []);
+    setStageOpen(true);
+  }, [closeStage]);
 
   const onRunStarting = useCallback((id: string) => {
     setStartingRunId(id);
@@ -494,6 +531,25 @@ export default function App() {
   // is not displayable under the new Run. This complements the request guards
   // above for the one render between setRunId and the effect cleanup.
   const visibleDag = dag.runId === runId ? dag : EMPTY;
+  // A successful empty response is still a snapshot. Never infer "no tasks"
+  // from EMPTY while the first request is loading or has failed.
+  const hasDagSnapshot = Boolean(runId && dag.runId === runId);
+  const readError = connError ?? (!runId ? runListRead.error : null);
+  const connectionError = connError ?? runListRead.error;
+  const waitingForData = !hydrated || (runId
+    ? !hasDagSnapshot && !connError
+    : !runListRead.loaded && !runListRead.error);
+
+  async function retryRead() {
+    if (retryingRead) return;
+    setRetryingRead(true);
+    try {
+      // Reads only: retrying a projection never replays a launch or approval.
+      await Promise.all([refresh(), refreshExecutionState()]);
+    } finally {
+      setRetryingRead(false);
+    }
+  }
   const counts = visibleDag.nodes.reduce<Record<string, number>>((acc, n) => {
     acc[n.status] = (acc[n.status] ?? 0) + 1;
     return acc;
@@ -552,12 +608,12 @@ export default function App() {
   // hears the same detail a mouse user sees on hover. The readiness `reason`
   // is the server's own wording and stays English, like other server strings.
   const connDetail =
-    connError ??
+    connectionError ??
     (execOff
       ? readiness?.reason ?? t("topbar.connDetailViewOnly")
       : readiness
         ? t("topbar.connDetailReady", { version: readiness.version ?? "", cli: readiness.cli })
-        : t("topbar.connDetailConnected"));
+        : t("topbar.connDetailChecking"));
 
   // the toolbar's bottom edge doubles as a crayon progress strip
   const total = visibleDag.nodes.length || 1;
@@ -580,7 +636,17 @@ export default function App() {
   // (New Run).
 
   return (
-    <div className="app">
+    <div className="app" onKeyDown={(event) => {
+      if (event.key !== "Escape" || event.defaultPrevented || !(event.target instanceof Element)) return;
+      const menu = event.target.closest<HTMLDetailsElement>(
+        ".runpick__menu[open], .view-menu[open], .exec__settings[open]",
+      );
+      if (!menu) return;
+      event.preventDefault();
+      event.stopPropagation();
+      menu.open = false;
+      menu.querySelector<HTMLElement>("summary")?.focus();
+    }}>
       <HandDrawnDefs />
       {/* The header is one Run line on desktop: brand → objective selector →
           progress → health/connection → execution controls. Narrow layouts
@@ -621,9 +687,9 @@ export default function App() {
         {/* RunPicker keeps the selected objective in the main line; creation,
             exact-ID navigation, and older pages live in its Run options menu. */}
         <div className="topbar__run">
-          <RunPicker runId={runId} onPick={pickRun} autoPick={hydrated} />
+          <RunPicker runId={runId} onPick={pickRun} autoPick={hydrated} onReadStateChange={setRunListRead} />
         </div>
-        {runId && (
+        {hasDagSnapshot && (
           <div className="topbar__progress" role="group" aria-label={progressGroupAria}>
             <span
               className="topbar__progress-track"
@@ -650,17 +716,18 @@ export default function App() {
           <LangToggle />
           <RunHealthBadge runId={runId} />
           <div
-            className={`conn ${connError ? "conn--bad" : execOff ? "conn--warn" : "conn--ok"}`}
+            className={`conn ${connectionError ? "conn--bad" : execOff || !readiness ? "conn--warn" : "conn--ok"}`}
             role="status"
             tabIndex={0}
             title={connDetail}
             aria-label={connDetail}
           >
-            {connError ? t("topbar.fetchFailed") : execOff ? t("topbar.viewOnly") : t("topbar.orcaConnected")}
+            {connectionError ? t("topbar.fetchFailed") : !readiness ? t("topbar.connectionUnknown") : execOff ? t("topbar.viewOnly") : t("topbar.orcaConnected")}
           </div>
         </div>
         <ExecControls
           runId={runId}
+          labelsById={labelsById}
           taskIds={visibleDag.nodes.map((n) => n.id)}
           edges={visibleDag.edges}
           readyCount={counts.ready ?? 0}
@@ -718,6 +785,13 @@ export default function App() {
                   <span aria-hidden="true">⌘</span> {t("toolbar.view")}
                 </summary>
                 <div className="view-menu__panel">
+                  <button className="btn btn--ghost menu-close" type="button" onClick={(event) => {
+                    const menu = event.currentTarget.closest("details");
+                    if (menu) {
+                      menu.open = false;
+                      menu.querySelector<HTMLElement>("summary")?.focus();
+                    }
+                  }}>{t("dialog.close")}</button>
                   <div className="legend" role="group" aria-label={t("toolbar.statusLegendAria")}>
                     {(Object.keys(STATUS_META) as TaskStatus[]).map((s) => (
                       <span
@@ -783,11 +857,24 @@ export default function App() {
                   </div>
                 </div>
               </details>
+              {hasDagSnapshot && visibleDag.nodes.length > 0 && (
+                <div className="task-view-switch" role="group" aria-label={t("taskView.label")}>
+                  <button type="button" aria-pressed={mobileTaskView === "tasks"} onClick={() => setMobileTaskView("tasks")}>
+                    {t("taskView.tasks")}
+                  </button>
+                  <button type="button" aria-pressed={mobileTaskView === "graph"} onClick={() => {
+                    setMobileTaskView("graph");
+                    requestCanvasFit();
+                  }}>
+                    {t("taskView.graph")}
+                  </button>
+                </div>
+              )}
             </div>
             <div className="dag-toolbar__right">
-              <span className="dag-toolbar__meta">
+              {hasDagSnapshot && <span className="dag-toolbar__meta">
                 {t("toolbar.taskDepCount", { tasks: visibleDag.nodes.length, deps: visibleDag.edges.length })}
-              </span>
+              </span>}
             </div>
 
             {/* the toolbar's bottom rule fills in with crayon as work lands */}
@@ -798,11 +885,10 @@ export default function App() {
             </div>
           </div>
 
-          {runId && (
+          {hasDagSnapshot && (
             <div className="run-overview" role="group" aria-label={t("overview.title")}>
               <span className="run-overview__label">{t("overview.title")}</span>
-              {visibleDag.runId !== runId ? <span>{t("overview.loading")}</span> :
-                (Object.keys(STATUS_META) as TaskStatus[]).map((status) => (
+              {(Object.keys(STATUS_META) as TaskStatus[]).map((status) => (
                   <span key={status} className="run-overview__stat" data-empty={!counts[status]}>
                     <span className="legend__dot" style={{ background: STATUS_META[status].color }} />
                     {t(`status.${status}`)} <b>{counts[status] ?? 0}</b>
@@ -997,34 +1083,73 @@ export default function App() {
                 />
             </aside>
 
-            <div className="dag-canvas">
-              <DagView
-                dag={visibleDag}
-                leadTaskId={leadTaskId}
-                selectedId={selectedId}
-                onSelect={selectStage}
-                layout={layout}
-                reorgNonce={reorgNonce}
-                fitNonce={canvasFitNonce}
-                showHierarchy={showHierarchy}
-                workerRows={workerRows}
-                  attempts={runStatus?.runId === runId ? runStatus.attempts : EMPTY_ATTEMPTS}
-              />
+            <div className={`dag-canvas${mobileTaskView === "tasks" && visibleDag.nodes.length > 0 ? " dag-canvas--task-list" : ""}`}>
+              {!hasDagSnapshot && (waitingForData || readError) && (
+                <section className="dag-read-state" aria-labelledby="dag-read-title">
+                  <h2 id="dag-read-title">{readError
+                    ? t(runId ? "read.tasksFailed" : "read.runsFailed")
+                    : t(runId ? "read.loadingTasks" : "read.loadingRuns")}</h2>
+                  <p role="status">{t(readError ? "read.failedBody" : "read.loadingBody")}</p>
+                  {readError && (
+                    <>
+                      <button className="btn" type="button" onClick={() => window.location.reload()}>
+                        {t("read.reload")}
+                      </button>
+                      <details className="dag-read-details">
+                        <summary>{t("read.technicalDetails")}</summary>
+                        <pre>{readError}</pre>
+                      </details>
+                    </>
+                  )}
+                </section>
+              )}
+              {hasDagSnapshot && connError && (
+                <section className="dag-read-notice" aria-label={t("read.staleTitle")}>
+                  <div>
+                    <strong>{t("read.staleTitle")}</strong>
+                    <p role="status">{t("read.staleBody")}</p>
+                    <details className="dag-read-details">
+                      <summary>{t("read.technicalDetails")}</summary>
+                      <pre>{connError}</pre>
+                    </details>
+                  </div>
+                  <button className="btn btn--ghost" type="button" disabled={retryingRead} onClick={() => void retryRead()}>
+                    {t(retryingRead ? "read.retrying" : "read.retry")}
+                  </button>
+                </section>
+              )}
+              {hasDagSnapshot && (
+                <div className="dag-graph">
+                  <DagView
+                    dag={visibleDag}
+                    leadTaskId={leadTaskId}
+                    selectedId={stageOpen ? selectedId : null}
+                    onSelect={selectStage}
+                    layout={layout}
+                    reorgNonce={reorgNonce}
+                    fitNonce={canvasFitNonce}
+                    showHierarchy={showHierarchy}
+                    workerRows={workerRows}
+                    attempts={runStatus?.runId === runId ? runStatus.attempts : EMPTY_ATTEMPTS}
+                  />
 
-              {/* Compact scheduler surface (Phase 4): intentionally its own
-                  panel — separate from Activity/Chat, which answer "what
-                  happened", while this answers "what runs next and why is the
-                  rest waiting". */}
-              {runId && visibleDag.nodes.length > 0 && (
-                <SchedulerPanel
-                  dag={visibleDag}
-                  runStatus={runStatus}
-                  runId={runId}
-                  onSelectTask={(id) => selectStage(id)}
-                />
+                  {/* The scheduler answers what may run next. Communication
+                      remains separate: its records explain what happened. */}
+                  {visibleDag.nodes.length > 0 && (
+                    <SchedulerPanel
+                      dag={visibleDag}
+                      runStatus={runStatus}
+                      runId={runId}
+                      onSelectTask={selectStage}
+                    />
+                  )}
+                </div>
+              )}
+              {hasDagSnapshot && visibleDag.nodes.length > 0 && (
+                <TaskList dag={visibleDag} selectedId={stageOpen ? selectedId : null} onSelect={selectStage} />
               )}
 
-              {!runId && (
+              {!runId && hydrated && runListRead.loaded && !runListRead.error && (
                 <div className="empty-run">
                   <p className="empty-run__title">{t("empty.pickRunTitle")}</p>
                   <p className="empty-run__body">
@@ -1065,7 +1190,7 @@ export default function App() {
                     setStageOpen(false);
                     openOperation(target);
                   }}
-                  onClose={() => setStageOpen(false)}
+                  onClose={closeStage}
                 />
               )}
             </div>

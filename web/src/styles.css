@@ -9,8 +9,8 @@
   --paper-2: #f5f1e6;
   --paper-3: #efe9db;
   --ink: #4a4754;
-  --ink-soft: #8b8798;
-  --ink-faint: #aaa5b2;
+  --ink-soft: #6f6a78;
+  --ink-faint: #77727f;
   --line: #e3ddcd;
   --line-strong: #d3ccb8;
 
@@ -23,6 +23,7 @@
   --meadow: #7fc98c;
   --butter: #f0b94e;
   --coral: #ea6b5e;
+  --coral-ink: #a13f35;
   --flame: #f0975e;
   --lilac: #b79fe0;
   --lilac-ink: #6f5aa4;
@@ -844,6 +845,7 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
+  color: var(--ink);
   font-size: 12px;
   font-weight: 600;
 }
@@ -1570,6 +1572,7 @@ body {
   display: flex;
   align-items: center;
   gap: 7px;
+  color: var(--ink);
   font-family: var(--font-display);
   font-size: 12.5px;
 }
@@ -1584,6 +1587,7 @@ body {
   font-size: 17px;
   color: var(--ink);
   letter-spacing: 0.3px;
+  overflow-wrap: anywhere;
 }
 .node-panel__id {
   margin-bottom: 15px;
@@ -5456,4 +5460,70 @@ body {
   border-radius: 8px 10px 9px 11px;
   padding: 1px 7px;
   white-space: nowrap;
+}
+.react-flow__node:focus-visible {
+  outline: 3px solid var(--sky-ink);
+  outline-offset: 4px;
+}
+
+.task-view-switch {
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0;
+  margin-inline-start: auto;
+  overflow: hidden;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 10px 8px 11px 9px;
+  background: var(--paper);
+}
+
+.task-view-switch button {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink);
+  font: 500 14px / 1.3 var(--font-body);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.task-view-switch button[aria-pressed="true"] {
+  background: var(--sky-wash);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.task-view-switch button:focus-visible {
+  outline: 3px solid var(--sky-ink);
+  outline-offset: -3px;
+}
+
+.node-panel__relation--ready {
+  color: #327342;
+}
+
+.conn--ok {
+  color: #387946;
+}
+
+.conn--warn {
+  color: #87600d;
+}
+
+.node-panel__field,
+.scheduler-panel,
+.scheduler-panel__waiting,
+.scheduler-panel__queue {
+  min-width: 0;
+}
+
+.node-panel__field,
+.scheduler-panel__waiting-row,
+.scheduler-panel__hint,
+.scheduler-panel__capacity,
+.scheduler-panel__chip {
+  overflow-wrap: anywhere;
 }
