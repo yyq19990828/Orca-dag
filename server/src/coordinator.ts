@@ -1094,7 +1094,9 @@ export async function startCoordinator(opts: StartOpts): Promise<void> {
     for (const task of nativeLaunchTasks) {
       await assertNativePresetSupport(opts.harnessByTask[task.id] ?? opts.defaultHarness, {
         effort: opts.effortByTask?.[task.id], environment: opts.environmentByTask?.[task.id],
-        lane: opts.laneByTask?.[task.id], placement: opts.placementByTask?.[task.id],
+        lane: opts.laneByTask?.[task.id],
+        placement: opts.laneByTask?.[task.id]
+          ? opts.worktreeLanes?.[opts.laneByTask[task.id]]?.placement : opts.placementByTask?.[task.id],
       }, nativeReadiness);
     }
     if (opts.laneByTask && Object.keys(opts.laneByTask).length > 0) {

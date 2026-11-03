@@ -1201,7 +1201,9 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       for (const task of nativeTasks) {
         await assertNativePresetSupport(harnessByTask[task.id] ?? defaultHarness, {
           effort: effortByTask[task.id], environment: environmentByTask[task.id],
-          lane: laneByTask[task.id], placement: placementByTask[task.id],
+          lane: laneByTask[task.id],
+          placement: laneByTask[task.id]
+            ? worktreeLanes[laneByTask[task.id]]?.placement : placementByTask[task.id],
         }, nativeReadiness);
       }
       for (const [taskId, ui] of Object.entries(openCodeUiByTask)) {

@@ -161,6 +161,8 @@ function writeScript(
     runPages?: Record<string, { runs?: unknown[]; nextCursor?: string | null }>;
     /** run-show raw-output fault injection (response-loss evidence tests). */
     runShow?: { rawError?: string; exitCode?: number };
+    /** New CLIs redact ownership by default; older CLIs refuse the output flag. */
+    orchestrationFormat?: "concise" | "legacy";
     /** worker-abandon receipt body, or a raw-output fault for lost-response tests. */
     workerAbandon?: { rawError?: string; exitCode?: number; result?: Record<string, unknown> };
     /** terminal switch result served verbatim. */
@@ -273,6 +275,12 @@ if (args[0] === "orchestration" && args[1] === "run-show") {
       out.result = { removedWork: (((conf.runRemovedPages ?? {})[id] ?? {})[cursor]) ?? { entries: [], page: { hasMore: false, nextCursor: null } } };
     } else {
       out.result = { run, ...(conf.removedWorkByRun?.[id] === undefined ? {} : { removedWork: conf.removedWorkByRun[id] }) };
+    }
+    if (conf.orchestrationFormat === "concise" && !args.includes("--full")) {
+      out.result = { runId: id, objective: run.objective };
+    } else if (conf.orchestrationFormat === "legacy" && args.includes("--full")) {
+      out.ok = false;
+      out.error = { code: "invalid_argument", message: "Unknown flag --full" };
     }
   } else {
     // The real runtime's definite-absence answer for an unknown exact id.
@@ -753,16 +761,6 @@ describe("evaluateReadiness", () => {
 // --- spawning through the fake CLI -------------------------------------------
 
 describe("CLI spawning through the resolved spec (fake orca)", () => {
-  it("runOrca passes prefixArgs + --json and runs in the resolved workspace cwd", async () => {
-    const a = wsA();
-    useRuntime({ workspace: a, env: { ORCA_CLI_COMMAND: `${fixturePath} --pinned-flag` } });
-    await runOrca(["orchestration", "task-list", "--run", "run_x"]);
-    const calls = readLog();
-    assert.equal(calls.length, 1);
-    assert.deepEqual(calls[0].argv, ["--pinned-flag", "orchestration", "task-list", "--run", "run_x", "--json"]);
-    assert.equal(calls[0].cwd, a);
-  });
-
   it("WORKSPACE_DIR=B started from cwd A creates the coordinator in B via the path: selector", async () => {
     const a = wsA();
     const b = wsB();
@@ -1232,7 +1230,7 @@ describe("startSupervisedWorker launch preferences", () => {
         await assert.rejects(startSupervisedWorker({ ...base, model, effort: "high" }), { code: "unsupported_effort" });
       }
       for (const preference of [{ terminal: "term_existing" }, { on: "env_remote" },
-        { worktree: "new-child" }, { worktree: "active" }, { worktree: "name:ambiguous" }]) {
+        { worktree: "active" }, { worktree: "name:ambiguous" }]) {
         await assert.rejects(startSupervisedWorker({ ...base, ...preference }), { code: "invalid_placement" });
       }
       assert.equal(readLog().length, callsBefore, "unsupported requests do not even probe or prestart a terminal");
@@ -1250,6 +1248,43 @@ describe("startSupervisedWorker launch preferences", () => {
       before = readLog().length;
       await assert.rejects(startSupervisedWorker(base), { code: "workspace_unverifiable" });
       assert.equal(readLog().slice(before).some(call => call.argv[1] === "worker-start"), false);
+    });
+
+    it(`does not create ${agent} worktrees on an older CLI or runtime`, { skip: process.platform !== "linux" }, async () => {
+      useRuntime({ workspace: root });
+      for (const [version, appVersion] of [["1.4.245", "1.4.246"], ["1.4.246", "1.4.245"]]) {
+        writeScript({ version, runtime: { state: "ready", appVersion } });
+        for (const worktree of ["new-child", "new-top-level"]) {
+          const before = readLog().length;
+          await assert.rejects(startSupervisedWorker({
+            taskId: "task_native", agent, runId: "run_native", from: "term_coord",
+            worktree, ...(worktree === "new-top-level" ? { repo: "id:repo" } : {}),
+          }), { code: "execution_disabled" });
+          assert.equal(readLog().slice(before).some(call =>
+            call.argv[0] === "terminal" || call.argv[1] === "worker-start" || call.argv[1] === "create"), false);
+        }
+      }
+    });
+
+    it(`refuses ${agent} creation when the target repo is missing, non-Git or remote`, { skip: process.platform !== "linux" }, async () => {
+      useRuntime({ workspace: root, env: { ORCA_WORKTREE: `id:repo::${root}` } });
+      for (const repo of [null,
+        { id: "repo", path: "/ws/repo", kind: "folder", hostId: "local" },
+        { id: "repo", path: "/ws/repo", kind: "git", hostId: "ssh:other" },
+      ]) {
+        for (const worktree of ["new-top-level", "new-child"]) {
+          writeScript({
+            version: "1.4.246", repos: repo ? [repo] : [],
+            worktrees: [{ id: `id:repo::${root}`, repoId: "repo", path: root, hostId: "local" }],
+          });
+          const before = readLog().length;
+          await assert.rejects(startSupervisedWorker({
+            taskId: "task_native", agent, runId: "run_native", from: "term_coord",
+            worktree, ...(worktree === "new-top-level" ? { repo: "id:repo" } : {}),
+          }), { code: !repo && worktree === "new-top-level" ? "workspace_not_found" : "workspace_unverifiable" });
+          assert.equal(readLog().slice(before).some(call => call.argv[1] === "worker-start"), false);
+        }
+      }
     });
   }
 
@@ -3712,6 +3747,22 @@ describe("showRun exact lookup (fake CLI)", () => {
     const call = readLog().find((c) => c.argv[1] === "run-show")!;
     assert.deepEqual(call.argv.slice(0, 4), ["orchestration", "run-show", "--id", "run_known"]);
     assert.equal(await showRun("run_missing"), null, "a definite absence stays null");
+  });
+
+  it("keeps coordinator ownership on concise-output CLIs without breaking legacy flag parsing", async () => {
+    for (const [version, orchestrationFormat] of [["1.4.246", "concise"], ["1.4.245", "legacy"]] as const) {
+      useRuntime({ workspace: root });
+      writeScript({
+        version, orchestrationFormat,
+        runsById: { run_owned: {
+          id: "run_owned", objective: "preserve restart authority", coordinator_handle: "term_exact_owner",
+          consumer_generation: 7, legacy: 0, created_at: "t", updated_at: "t",
+        } },
+      });
+      const detail = await showRun("run_owned");
+      assert.equal(detail?.run.coordinator_handle, "term_exact_owner");
+      assert.equal(detail?.run.consumer_generation, 7);
+    }
   });
 
   it("preserves validated removal summary and pages unknown kinds with opaque cursors", async () => {

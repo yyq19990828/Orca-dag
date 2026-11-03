@@ -557,7 +557,16 @@ export async function runOrca<T = unknown>(
   opts: { timeoutMs?: number } = {},
 ): Promise<T> {
   const { command, workspace } = getOrcaRuntime();
-  const fullArgs = args.includes("--json") ? args : [...args, "--json"];
+  let fullArgs = args.includes("--json") ? args : [...args, "--json"];
+  if (args[0] === "orchestration" && !args.includes("--full")) {
+    // 1.4.246 makes even --json concise by default: Run ownership, Task specs
+    // and launch receipts disappear. Request the machine contract before the
+    // first mutation, never recover by repeating a concise mutation. Older
+    // CLIs reject --full; use their own version, not the selected host's.
+    // The shared readiness probe calls only --version/status, so cannot recurse.
+    const { cliVersion } = await checkReadiness();
+    if (cliVersion && compareVersions(cliVersion, "1.4.246") >= 0) fullArgs = [...fullArgs, "--full"];
+  }
   let stdout: string;
   try {
     const res = await pExecFile(command.executable, [...command.prefixArgs, ...fullArgs], {
@@ -1331,6 +1340,8 @@ export const MIN_NATIVE_OPENCODE_VERSION = "1.4.220";
 export const MIN_NATIVE_OPENCODE_MODEL_VERSION = "1.4.241";
 /** Native OMP/Antigravity launch, model omission and lifecycle evidence floor. */
 const MIN_NATIVE_FRESH_PRESET_VERSION = "1.4.245";
+/** New Git worktrees and workspace-only lanes have separate execution evidence. */
+const MIN_NATIVE_FRESH_PLACEMENT_VERSION = "1.4.246";
 /** Oldest Orca whose Run/Task/Dispatch model the viewer can still render. */
 export const MIN_VIEW_VERSION = "1.4.160";
 
@@ -1493,27 +1504,42 @@ export async function assertNativePresetSupport(
 ): Promise<void> {
   assertNativePresetConstraints(harness, opts);
   if (!isNativeFreshPreset(harness)) return;
+  const creating = opts.placement?.kind === "new-child" || opts.placement?.kind === "new-top-level";
+  const required = creating || opts.lane ? MIN_NATIVE_FRESH_PLACEMENT_VERSION : MIN_NATIVE_FRESH_PRESET_VERSION;
   const probe = readiness ?? await checkReadiness(true);
   if (!probe.executionEnabled || probe.runtimeState !== "ready" ||
       !probe.version || !/^\d+\.\d+\.\d+$/.test(probe.version) ||
       !probe.cliVersion || !/^\d+\.\d+\.\d+$/.test(probe.cliVersion) ||
-      compareVersions(probe.version, MIN_NATIVE_FRESH_PRESET_VERSION) < 0 ||
-      compareVersions(probe.cliVersion, MIN_NATIVE_FRESH_PRESET_VERSION) < 0) {
+      compareVersions(probe.version, required) < 0 ||
+      compareVersions(probe.cliVersion, required) < 0) {
     throw new OrcaCliError(
-      `${harness} requires the resolved CLI and a ready running Orca runtime >= ${MIN_NATIVE_FRESH_PRESET_VERSION} ` +
+      `${harness} requires the resolved CLI and a ready running Orca runtime >= ${required} ` +
         `(CLI ${probe.cliVersion ?? "unknown"}, runtime ${probe.version ?? "unknown"}, state ${probe.runtimeState ?? "unknown"}).`,
       "execution_disabled",
     );
   }
-  if (opts.placement?.kind === "existing") {
-    let row: OrcaWorktreeRow | null;
-    try { row = await showWorktree(opts.placement.selector); }
-    catch {
-      throw new OrcaCliError(`${harness} exact existing workspace could not be verified; no replacement is started`, "workspace_unverifiable");
+  if ((opts.placement?.kind === "existing" && opts.placement.selector) || creating) {
+    let row: OrcaWorktreeRow | OrcaRepoRow | null;
+    let repo: OrcaRepoRow | null = null;
+    try {
+      row = opts.placement?.kind === "new-top-level"
+        ? await showRepo(opts.placement.repo!)
+        : await showWorktree(opts.placement?.kind === "existing"
+          ? opts.placement.selector! : getOrcaRuntime().worktree);
+      // A folder workspace also has a repoId: that proves registration, not
+      // Git. Resolve the parent's exact repository before allowing creation;
+      // never let native launch implicitly initialize a folder as Git.
+      if (creating && row) {
+        repo = "kind" in row ? row : row.repoId ? await showRepo(`id:${row.repoId}`) : null;
+      }
+    } catch {
+      throw new OrcaCliError(`${harness} workspace/repository could not be verified; no replacement is started`, "workspace_unverifiable");
     }
-    if (!row) throw new OrcaCliError(`${harness} exact existing workspace was not found`, "workspace_not_found");
-    if (!row.path?.startsWith("/") || (row.hostId && row.hostId !== "local")) {
-      throw new OrcaCliError(`${harness} exact existing workspace has no verified local Linux path`, "workspace_unverifiable");
+    if (!row) throw new OrcaCliError(`${harness} workspace/repository was not found`, "workspace_not_found");
+    if (!row.path?.startsWith("/") || (row.hostId && row.hostId !== "local") ||
+        (creating && (!repo || repo.kind !== "git" || !repo.path?.startsWith("/") ||
+          (repo.hostId && repo.hostId !== "local")))) {
+      throw new OrcaCliError(`${harness} target has no verified local Linux ${creating ? "Git repository" : "workspace"}`, "workspace_unverifiable");
     }
   }
 }
@@ -4857,11 +4883,18 @@ export interface WorkerStartRequest {
   setup?: string;
 }
 
+/** Placement identity only; creation metadata is validated separately and kept on the original request. */
+function nativePresetPlacement(opts: WorkerStartRequest): NonNullable<NativePresetConstraints["placement"]> {
+  const kind = opts.worktree ?? "current";
+  if (kind === "current" || kind === "new-child") return { kind };
+  if (kind === "new-top-level") return { kind, repo: opts.repo };
+  return { kind: "existing", selector: kind };
+}
+
 export function assertValidWorkerStart(opts: WorkerStartRequest): void {
   assertNativePresetConstraints(opts.agent ?? "", {
     effort: opts.effort, environment: opts.on, terminal: opts.terminal,
-    placement: !opts.worktree || opts.worktree === "current" ? { kind: "current" }
-      : { kind: "existing", selector: opts.worktree },
+    placement: nativePresetPlacement(opts),
   });
   if (opts.terminal && (opts.model || opts.effort)) {
     throw new OrcaCliError(
@@ -5149,8 +5182,7 @@ export async function startSupervisedWorker(opts: {
   assertValidWorkerStart(request);
   await assertNativePresetSupport(request.agent, {
     effort: request.effort, environment: request.on, terminal: request.terminal,
-    placement: !request.worktree || request.worktree === "current" ? { kind: "current" }
-      : { kind: "existing", selector: request.worktree },
+    placement: nativePresetPlacement(request),
   });
   const requestId = opts.retryRequestId ?? newRequestId();
   const buildArgs = (): string[] => buildWorkerStartArgv(request, requestId);

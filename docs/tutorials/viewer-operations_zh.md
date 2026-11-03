@@ -33,7 +33,7 @@ env -u ORCA_TERMINAL_HANDLE -u ORCA_TAB_ID -u ORCA_WORKSPACE_ID -u ORCA_WORKTREE
 | `--no-workspace-init` 或 `ORCA_DAG_NO_WORKSPACE_INIT=1` | 初始化 `.orca-dag/` 忽略规则 | 跳过向工作区 `.gitignore` 添加规划产物管理规则；规划前请自行确认 `.orca-dag/` 已被忽略。 |
 | `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1` | 关闭 | 允许实验性自定义 harness 命令（实验性逃生通道，不构成已验证支持承诺）。它们走兼容性本地路径，不能使用隔离放置。即使开启该开关，未验证 bare ID（`gemini`、`grok`、`cursor`、`droid`、`kimi`）依然被直接拒绝。 |
 
-CLI 自动选择顺序为：`ORCA_CLI_COMMAND` → 设置了 `ORCA_DEV_REPO_ROOT` 时的 `orca-dev` → Linux 且不在 Orca 终端内时的 `orca-ide` → `orca`。读取和修改都使用同一个已解析的 CLI。`GET /api/readiness` 分别报告 `cliVersion`、所选运行时的 `version` 与 `runtimeState`；较新的可执行文件不能证明目标正在运行或已升级。执行要求 CLI 1.4.205+，以及明确处于 ready 状态、稳定 appVersion 为 1.4.205+ 的运行时；状态未知、断连或启动中的运行时保持只读。Orca 1.4.160–1.4.204 仍可查看 Run。viewer 和 skill 可以通过 `npx orca-orchestration-launcher` 一起安装，也有独立发布的二进制文件。
+CLI 自动选择顺序为：`ORCA_CLI_COMMAND` → 设置了 `ORCA_DEV_REPO_ROOT` 时的 `orca-dev` → Linux 且不在 Orca 终端内时的 `orca-ide` → `orca`。读取和修改都使用同一个已解析的 CLI。从 CLI 1.4.246 开始，编排相关的机器调用在 `--json` 之外需要带上 `--full` 才会返回完整的 Run、Task 及启动回执结构体，否则默认返回精简摘要；viewer 在修改调用前会依据解析出的 CLI 版本自动决定是否添加该参数，而 CLI 1.4.245 及更早版本会在编排动词上拒绝 `--full`。真实的 1.4.246 验收验证了单次 `POST /api/runs` 无重试成功创建并解析完整 Run（`run_2a67b90e6a94`），消除了精简输出因缺失 Run 所有权结构而引发的 500 假错。`GET /api/readiness` 分别报告 `cliVersion`、所选运行时的 `version` 与 `runtimeState`；较新的可执行文件不能证明目标正在运行或已升级。执行要求 CLI 1.4.205+，以及明确处于 ready 状态、稳定 appVersion 为 1.4.205+ 的运行时；状态未知、断连或启动中的运行时保持只读。Orca 1.4.160–1.4.204 仍可查看 Run。viewer 和 skill 可以通过 `npx orca-orchestration-launcher` 一起安装，也有独立发布的二进制文件。
 
 启动时还会提示 `.orca-dag/<timestamp>/{PRD.md,TECH_SPEC.md}` 及默认 `.gitignore` 初始化是否成功。skill 为每个新计划创建独立的 UTC 时间戳目录，记录 Run id，并保留旧计划。这些忽略的文档不提交 Git，也不会自动复制到隔离工作树；Task spec 必须包含 worker 所需信息。旧版 `.orca/` 文档及其忽略管理块原样保留；新规划产物只使用 `.orca-dag/`。
 
@@ -78,9 +78,11 @@ Orca Task 没有 harness、模型、放置位置或画布布局字段。viewer �
 
 点击 Run 后，这些设置会被快照。coordinator 运行期间，即使 Stage 尚未启动，也会锁定到这份快照。Stage 第一次产生 Dispatch 后，启动设置在 viewer 重启后仍锁定；安全重试会使用原有 harness、模型、effort 和放置位置。如果读取 worker 历史失败，界面也会保持锁定，不能假定从未执行。
 
-**OMP / Antigravity 遵循 Orca 设置。**两者均要求运行中的 Orca 和解析后的 CLI ≥ **1.4.245**，仅本地 Linux 的 Current 或精确 Existing 放置，不能使用 lane。viewer 调用原生 `worker-start --agent omp` / `--agent antigravity`，不检查或更改用户的 Chat/Terminal 偏好、不强制界面、不预启动再绑定，也不通用复用终端。Native Chat 尚未实测，但不会被拦截。OpenCode 启动界面选择器只影响 OpenCode。原生拒绝或结果未知后绝不启动替代 worker；请求/effective、存活、归属及未知回执仍以原生证据为准。
+**OMP / Antigravity 遵循 Orca 设置。**仅支持本地 Linux（不支持远程环境、macOS 与 Windows）。Current 或精确 Existing 放置要求运行中的 Orca 和解析后的 CLI 均 ≥ **1.4.245**；创建新 Git 工作树（`new-child`、`new-top-level`）或工作区 lane 则要求两者均 ≥ **1.4.246**。新 child 工作树需要已确认的本地受管 Git 父工作区；新 top-level 工作树需要精确 `id:` 或绝对 `path:` 的 Git 仓库（拒绝歧义名称、普通裸文件夹与非本地主机仓库，且不执行自动 git-init）。
 
-**启动前检查**是只读操作，启动设置锁定时仍可使用。它展示当前配置，而不是既有 Dispatch 的启动回执：逐 Task 的请求模型、worker 放置位置、实际选择的适配器及限制。OpenCode Auto 配合 `#xhigh` 等模型变体可能选择 **CLI run 兼容路径**，并不等于原生 TUI。选择 Mini / 完整 TUI 仍须经过现有严格 API 适配器的执行主机版本、权限与启动身份检查，预览不会绕过这些条件。点击 Run 会先刷新已落盘配置，预览同一份计划，确认后才转移协调器权限；取消不会绑定 viewer。
+工作区 lane 仅在依赖有序的任务链之间共享隔离工作目录，而不共享 agent 会话或终端。首个 Task 使用其 seed 放置创建或接纳工作区；后续依赖有序的 Task 复用该精确已有工作区 selector。每个 Task 均启动独立的原生 agent 进程与独立 Dispatch。viewer 绝不通用复用终端，绝不传入 `--terminal`（这会将归属权移出 Orca），绝不使用 `--surface` 覆盖界面，且在被拒绝后绝不尝试未经验证的 fallback。viewer 调用原生 `worker-start --agent omp` / `--agent antigravity`，严格遵循用户在 Orca 中的 Chat/Terminal 设置。模型覆盖原样作为原生 selector 传递（留空省略 `--model` 使用配置默认值）；所有非空 effort 无论是否指定模型均直接拒绝。OMP Native Chat 有单独的验证记录与 [fleet 状态局限](#已知局限)；Antigravity Native Chat 仍未验证，但不因偏好而拦截。OpenCode 启动界面选择器只影响 OpenCode。原生拒绝或结果未知后绝不启动替代 worker；请求/effective、存活、归属及未知回执仍以原生证据为准。
+
+**启动前检查**是只读操作，启动设置锁定时仍可使用。它展示当前配置，而不是既有 Dispatch 的启动回执：逐 Task 的请求模型、worker 放置位置、实际选择的适配器及限制。对于工作区 lane，预览会预先校验 lane 的 seed 放置，若运行时或 CLI 版本不足、或父工作区/仓库不合法，会在修改前直接报错。OpenCode Auto 配合 `#xhigh` 等模型变体可能选择 **CLI run 兼容路径**，并不等于原生 TUI。选择 Mini / 完整 TUI 仍须经过现有严格 API 适配器的执行主机版本、权限与启动身份检查，预览不会绕过这些条件。点击 Run 会先刷新已落盘配置，预览同一份计划，确认后才转移协调器权限；取消不会绑定 viewer。
 
 **外部资源必须在派工前准备。** Worker 放置设置不负责创建任意独立测试 runtime、账户或服务。应先准备资源，或添加准备 Task 依赖，交付资源所有者、精确路径/selector、runtime 身份、访问方法、允许修改范围与清理责任。Gate 批准不等于资源已分配；已有 Dispatch 后，不能要求用户通过锁定的放置控件搬迁 worker，而应安全交付额外测试资源，或遵守明确且基于证据的恢复流程。
 
@@ -193,11 +195,33 @@ Run `run_8713a6b6ebfe` 中更早的强制 Terminal 预启动绑定认证未通�
 
 原生启动回执明确为 `mode: terminal`、`preferred: terminal`、`reason: user_default`；viewer 没有强制界面或更改 Orca 偏好。这些验证证明 viewer 的 TUI 执行与 viewer 重启恢复，不证明 Native Chat、Orca 运行时重启或其他未实测放置。
 
+**2026-11-03**，在 **Orca 运行时/CLI 1.4.246** 上完成了原生 Git 工作树与工作区 lane 的端到端实测验证（实测证据保存在 `.orca-dag/20261103T024111Z/`）：
+
+- `run_67072641a11a`：在 4 个独立精确路径上运行 4 条工作区 lane，每条 lane 包含 2 个依赖有序的 Task（共 8 个 Task）。8 个 Task 全部成功，阶段达到 `completed`，清理债务为零。
+  - OMP child lane（`native_omp_new_child`，`new-child`）：求和 **20**（数值 `[2, 7, 11]`，计数 3）。
+  - OMP top-level lane（`native_omp_new_top_level`，`new-top-level`）：求和 **21**（数值 `[3, 5, 13]`，计数 3）。
+  - Antigravity child lane（`native_antigravity_new_child`，`new-child`）：求和 **59**（数值 `[17, 19, 23]`，计数 3）。
+  - Antigravity top-level lane（`native_antigravity_new_top_level`，`new-top-level`）：求和 **97**（数值 `[29, 31, 37]`，计数 3）。
+  - **串行工作区接力与独立会话**：在每条 lane 中，首个 Task 创建或接纳隔离 Git 工作树；后续 Task 复用该精确 selector。每个 Task 均获得独立的原生句柄（共 8 个全新句柄：OMP 为 `structworker_*`，Antigravity 为 agent 终端句柄）与独立 Dispatch ID（`ctx_*`），未发生通用终端复用。
+  - **产物与工作树血统**：独立文件读回验证了 nonce、数值数组、求和、计数和 cwd，并核验了确切父工作树血统与 Git 基础 SHA。
+  - **启动模式**：OMP 原生回执明确为 `mode: structured`、`preferred: structured`、`reason: user_default`（Chat）；Antigravity 原生回执明确为 `mode: terminal`、`preferred: terminal`、`reason: user_default`（Terminal）。全部 8 个 worker 均以获接受的 `worker_done` 结束并实现正常原生释放。
+  - **验证范围与否定边界**：本次实测仅使用 `setup: skip` 和配置默认模型。它证明了本地 Linux 下 OMP Chat 与 Antigravity Terminal 的新放置创建、串行工作区接力与正常释放。它**不**证明新放置下的活动 Stop 或重启、Antigravity Chat（仍未验证）、Orca 运行时重启、setup `run`/`inherit`，或新放置下的显式模型指定。本次未重新采集 agent 可执行文件版本；上文 1.4.245 基线中的版本仍属于历史证据。
+
 ## 已知局限
 
 在自动模式下，viewer 的 `opencode` 选择运行的就是 OpenCode 2。在运行中的 Orca ≥ 1.4.220 且未设置逐节点模型时，Task 使用原生 `worker-start --agent opencode2`。在 OpenCode 2.0.22 上，这条路径已送达只读 Task，并在隔离工作树中自主写入、读回一个文件；Orca 接受 `worker_done`、报告 `agent_status` 并释放终端。显式模型遵循下方新增门槛，或保留一次性兼容路径。原生启动失败后绝不再启动第二个 worker。当前 `worker-read --source auto` 对 OpenCode 2 会回退到终端输出，无法得到精确的 provider transcript。
 
 后续运行时发现可继续加在这里，写清受影响的启动路径、可观察的现象和已验证的处理方式。Codex TUI 可见、Task 已完成与 Orca 的 worker 存活状态是不同的证据。
+
+### Native Chat 的 fleet 状态
+
+**Orca 运行时/CLI 1.4.245、OMP 18.15.0 上的实测现象：**原生 Chat worker 正在执行工具，`worktree ps` 报告 `working`，`worker-show` 确认精确 worker 为 `live` 且可寻址，但 fleet 仍报告 `unverifiable / missing_status`、provider 为 `null`、活动为 `unknown`、无观测时间。这个上游身份关联缺口会让运行中的 worker 在 viewer 中显得不可观测；它不证明启动失败、worker 已死亡或 OMP hook 未安装。
+
+fleet 证据路径通过终端/PTY 身份关联状态，而 `structworker_*` Chat worker 没有对应 PTY；单独的 Chat 存活补偿只接受 `orca_session_id:` 地址，不接受这种结构化 worker 句柄。上游 [PR #34068 — Let fleet status and transcript reads follow structured workers](https://github.com/stablyai/orca/pull/34068) 跟踪的正是该问题，**截至 2026-11-03 核查仍为 Open、未合并**。[v1.4.246 发行版](https://github.com/stablyai/orca/releases/tag/v1.4.246)的源码检查与内存函数复现仍出现该缺口；该排查仅针对 fleet 状态逻辑，与 1.4.246 真实运行环境下的工作树放置与 lane 端到端实测不同。单纯升级到该版本并不能修复 fleet 状态缺口。
+
+**已验证行为不等于完整 fleet 可观测性。**OMP Native Chat 已完成独立复算的工作、获得接受的 `worker_done`，并读回有界 transcript（`run_1add447bb085`）。另一次活动执行在 viewer 崩溃后恢复同一 Dispatch/session，随后原生 Stop 结束前台工具子进程，未生成完成文件；释放成功，但 Stop 后归档不可用（`run_553bb0bda95c`）。该故意取消的 Task 经显式操作结算为 failed/cancelled，不是启动失败。证据分别保存在 `.orca-dag/20261102T095434Z/` 与 `.orca-dag/20261102T100646Z/`。这些检查不代表 Antigravity Native Chat、Orca 运行时重启、其他 agent 或未实测放置已通过验证。
+
+**安全处理：**保留 fleet 原始判断，将精确 worker/session 观测与活动、获接受的 Task 结算分别看待。仅凭 fleet 状态缺失，绝不自动重试、替代启动、取消或清理；仅凭 `live` 也不能宣告 Task 成功。viewer 仍遵循 Orca 的 Chat/Terminal 偏好，不强制切换 Terminal，也不把 unknown 改写为 live。须在包含上游修复的发行版上重新验证，才能宣称 Native Chat 的 fleet 状态完整可观测。
 
 ### Orca 1.4.243 发现、心跳与已移除工作边界
 

@@ -437,8 +437,8 @@ describe("native OMP and Antigravity workers", { skip: process.platform !== "lin
         } });
         for (const path of ["/api/launch-preview", "/api/run"]) {
           const result = await call("POST", path, { runId });
-          assert.equal(result.status, 400);
-          assert.equal(result.json.code, "invalid_placement");
+          assert.equal(result.status, 503);
+          assert.equal(result.json.code, "execution_disabled", "new worktrees require both CLI and runtime 1.4.246");
         }
         await saveConfig(workspace, { placementByTask: {} });
         await mutateState(s => { s.version = "1.4.244"; });
@@ -496,6 +496,63 @@ describe("native OMP and Antigravity workers", { skip: process.platform !== "lin
         assert.equal(calls("dispatch").length, 0);
         assert.equal(readLog().filter(c => c.argv[0] === "terminal" && c.argv[1] === "create").length, 1,
           "only the coordinator pane is viewer-created; Orca owns worker launch/custody");
+      });
+    }
+
+    for (const kind of ["new-child", "new-top-level"] as const) {
+      it(`runs ${harness} lane members in one ${kind} workspace with distinct native sessions`, async () => {
+        const runId = `run_native_lane_${harness}_${kind}`;
+        await mutateState(s => {
+          s.version = "1.4.246";
+          s.runs = { [runId]: { id: runId, objective: "native lane custody", legacy: 0 } };
+          s.tasks = {
+            task_aaa: { id: "task_aaa", run_id: runId, status: "pending", deps: "[]" },
+            task_bbb: { id: "task_bbb", run_id: runId, status: "pending", deps: '["task_aaa"]' },
+          };
+          s.repos = [{ id: "repoL", path: workspace, kind: "git", hostId: "local" }];
+          s.worktrees = [{ id: `id:repoL::${workspace}`, repoId: "repoL", path: workspace, hostId: "local" }];
+        });
+        const placement = kind === "new-child"
+          ? { kind, setup: "skip" as const }
+          : { kind, setup: "skip" as const, repo: "id:repoL" };
+        const opts = baseOpts(runId, {
+          defaultHarness: harness, modelByTask: { task_aaa: "native/explicit-model" },
+          worktreeLanes: { lane_native: { placement } },
+          laneByTask: { task_aaa: "lane_native", task_bbb: "lane_native" },
+        });
+        const previous = await loadConfig(workspace);
+        const { call } = await startApp();
+        try {
+          await saveConfig(workspace, opts);
+          const preview = await call("POST", "/api/launch-preview", { runId });
+          assert.equal(preview.status, 200, "preview validates the lane seed, not absent per-Task placement");
+          await startCoordinator(opts);
+          const first = await dispatchIdOf("task_aaa");
+          assert.equal(findAttempt("task_bbb"), undefined, "dependency/lane admission does not dispatch the successor early");
+          await settleViaWorkerDone("task_aaa", "succeeded", "msg_native_lane_first");
+          const second = await dispatchIdOf("task_bbb");
+          assert.notEqual(first, second);
+          const lane = coordinatorStatus().worktreeLanes.find(row => row.laneId === "lane_native")!;
+          assert.equal(lane.selector, `id:repoL::/ws/${deriveWorktreeName(runId, "lane_native")}`);
+          const starts = calls("worker-start").map(row => row.argv);
+          assert.equal(starts.length, 2);
+          assert.ok(starts[0].includes(kind));
+          assert.ok(starts[1].includes(lane.selector!));
+          assert.equal(starts[1].includes("--name") || starts[1].includes("--repo") || starts[1].includes("--model"), false,
+            "follow-up creates nothing and omits the previous explicit model");
+          for (const argv of starts) {
+            assert.equal(argv[argv.indexOf("--agent") + 1], harness);
+            assert.equal(argv.includes("--terminal") || argv.includes("--surface"), false);
+          }
+          assert.equal(attempt("task_aaa").terminalDecision, "released", "workspace reuse never takes external-terminal custody");
+          await settleViaWorkerDone("task_bbb", "succeeded", "msg_native_lane_second");
+          await waitFor(() => coordinatorStatus().phase === "completed", "native lane settlement");
+          assert.equal(getState().worktrees.length, 2, "one parent plus one lane worktree, not a worktree per Task");
+          assert.deepEqual(coordinatorStatus().cleanupDebt, []);
+        } finally {
+          await stopCoordinator();
+          writeFileSync(join(workspace, CONFIG_FILE), JSON.stringify(previous));
+        }
       });
     }
 

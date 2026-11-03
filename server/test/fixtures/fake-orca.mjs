@@ -878,6 +878,12 @@ if (ns === "orchestration" && verb === "run-list") {
   ok({ environment: env });
 } else if (ns === "repo" && verb === "list") {
   ok({ repos: state.repos ?? [] });
+} else if (ns === "repo" && verb === "show") {
+  const selector = flag("--repo");
+  const bare = selector?.startsWith("id:") ? selector.slice(3) : selector;
+  const row = (state.repos ?? []).find(repo => repo.id === bare || `path:${repo.path}` === selector);
+  if (!row) fail("repo_not_found", `no repo matches ${selector}`);
+  ok({ repo: row });
 } else if (ns === "worktree" && verb === "create") {
   const name = flag("--name");
   if (!name) fail("invalid_argument", "worktree create requires --name");
@@ -918,7 +924,7 @@ if (ns === "orchestration" && verb === "run-list") {
   // an unknown selector is `selector_not_found` (the refusal evidence).
   const sel = flag("--worktree");
   const row = (state.worktrees ?? []).find((w) => w.id === sel || w.path === sel ||
-    (state.openCodeTui && (sel === "current" || sel === `path:${w.path}`)));
+    sel === `path:${w.path}` || (state.openCodeTui && sel === "current"));
   if (!row) fail("selector_not_found", `no workspace matches ${sel}`);
   ok({ worktree: row });
 } else if (ns === "project" && verb === "list") {

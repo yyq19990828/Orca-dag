@@ -61,7 +61,8 @@ npx orca-orchestration-launcher
 - **任务定义不可变**：spec、标题与依赖不能原地修改，状态和结果仍可更新。调整定义须新建 Run；不要用 `reset --tasks` 重绘，它会清空所有 Run。
 - **未知不等于死亡**：unknown 或断连的 worker 仍占用并发槽位；不确定性不能授权自动重试、取消或替代启动。
 - **本地控制面**：服务监听 `127.0.0.1`，不启用 CORS，变更请求需要 `X-Orca-Dag-Token`。自定义命令须显式启用。
-- **OMP / Antigravity**：要求运行中的 Orca 和解析后的 CLI 均 ≥ **1.4.245**，仅支持本地 Linux 的 Current 或精确 Existing 放置，不能使用 lane。原生 `worker-start --agent` 遵循 Orca 的 Chat/Terminal 偏好，viewer 不检查或覆盖该偏好。Terminal TUI 基线使用 **OMP 18.15.0 / Antigravity 1.4.12**；Native Chat 尚未实测，但不会被拦截。模型覆盖原样作为原生 selector 传递，留空使用已配置的默认值，所有非空 effort 均拒绝。[输出、Stop 与历史设计限制](docs/reference/compatibility_zh.md#验证边界与限制说明)仍明确保留。
+- **OMP / Antigravity**：本地 Linux 的 Current 或精确 Existing 要求运行中的 Orca 与解析后的 CLI 均 ≥ **1.4.245**；新建 Git 工作树（`new-child`、`new-top-level`）和工作区 lane 要求两者均 ≥ **1.4.246**。Lane 只共享工作区，不复用 agent 会话。原生 `worker-start --agent` 遵循 Orca 的 Chat/Terminal 设置；模型 selector 原样传递，拒绝非空 effort。详见[放置、输出、Stop 与验证边界](docs/reference/compatibility_zh.md#验证边界与限制说明)。
+- **Native Chat 状态局限**：正在工作的结构化 worker 在 Orca fleet 中仍可能显示 `unverifiable / missing_status`、provider 为空、活动未知。已在 **1.4.245** 的 OMP 上复现；**1.4.246** 源码与函数级复现仍存在该缺口。上游 [PR #34068](https://github.com/stablyai/orca/pull/34068) 截至 **2026-11-03** 仍未合并。缺失状态不证明启动失败，也不授权替代启动；详见[已验证行为与安全处理](docs/tutorials/viewer-operations_zh.md#已知局限)。
 
 ## 文档导航
 

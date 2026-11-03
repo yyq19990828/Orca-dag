@@ -223,18 +223,13 @@ describe("validateModel", () => {
 
 describe("native preset execution boundaries", () => {
   for (const harness of ["omp", "antigravity"]) {
-    it(`limits ${harness} to fresh local Linux current/exact-existing starts and rejects all effort`, () => {
-      assert.doesNotThrow(() => assertNativePresetConstraints(harness, {}, "linux"));
-      for (const selector of ["path:/ws/exact", "id:repo::/ws/exact", "repo::/ws/exact"]) {
-        assert.doesNotThrow(() => assertNativePresetConstraints(harness, { placement: { kind: "existing", selector } }, "linux"));
-      }
+    it(`rejects ${harness} effort, external terminals, remote placement and ambiguous lane seeds`, () => {
       for (const effort of ["high", "xhigh", "max", "auto", "default", " ", "model-specific"]) {
         assertThrowsWith(() => assertNativePresetConstraints(harness, { effort }, "linux"), "unsupported_effort");
       }
       for (const options of [
         { environment: "env_remote" }, { lane: "lane_1" }, { terminal: "term_old" },
-        { placement: { kind: "new-child", setup: "run" } as const },
-        { placement: { kind: "new-top-level", repo: "id:repo", setup: "skip" } as const },
+        { placement: { kind: "new-top-level", repo: "name:ambiguous" } as const },
         ...["active", "current", "name:old", "branch:main", "new-child"].map(selector => ({ placement: { kind: "existing" as const, selector } })),
       ]) {
         assertThrowsWith(() => assertNativePresetConstraints(harness, options, "linux"), "invalid_placement");

@@ -47,7 +47,7 @@
     - **启动锁定（Launch-Locked）**：任务一旦派发过首次 Dispatch 或协调者处于运行中，模型下拉选单与手动输入文本框连同 harness、effort、placement 一同置灰禁用（`disabled={launchLocked}`）。
   - `claude` 通过 `worker-start --model` 传递模型；
   - 本地 POSIX Codex 在当前/已有工作区、运行中的 Orca ≥ 1.4.217 时使用原生模型启动；旧版/未知运行时及本地新建工作区保留预启动绑定路径，远程与 Windows 使用原生路径。详见[Codex 启动边界](../tutorials/viewer-operations_zh.md#codex-原生启动与兼容路径)。
-  - **OMP / Antigravity**：自由文本形式的完整 selector，原样作为单个原生 `--model` 参数传递，或省略以使用已配置默认模型。要求运行中的 Orca 与解析后的 CLI 均 ≥ 1.4.245，仅本地 Linux 的 Current/精确 Existing，不能使用 lane。原生 `worker-start --agent` 将 Chat/Terminal 选择留给 Orca 设置，viewer 不检查或覆盖偏好。Terminal TUI 基线使用 OMP 18.15.0 与 Antigravity 1.4.12；Native Chat 尚未实测，但不拦截。不提供预启动绑定、回退、通用复用、新工作树、远程或 Windows 路径。
+  - **OMP / Antigravity**：自由文本形式的完整 selector，原样作为单个原生 `--model` 参数传递，或省略以使用已配置默认模型。Current 或精确 Existing 放置要求运行中的 Orca 与解析后的 CLI 均 ≥ 1.4.245。创建新建 Git 工作树（`new-child`、`new-top-level`）或任何工作区 Lane 则要求运行中的 Orca 与解析后的 CLI 均 ≥ 1.4.246。仅限本地 Linux；远程环境、macOS 与 Windows 均被拒绝。新建 child 放置必须具有明确正向识别的本地被托管 Git 父工作区；新建 top-level 放置要求精确的仓库标识符（`id:...` 或绝对路径 `path:/...`）指向已验证的本地 Git 仓库（拒绝模糊名称、普通目录、异构主机仓库且不自动 git-init）。工作区 Lane 仅共享工作区：首个 Task 创建或接纳工作区，后续依赖有序 Task 复用精确 Existing。每个 Task 均分配全新的原生 agent 会话与 Dispatch（绝不进行通用终端复用、禁止 `--terminal` 或 `--surface` 覆盖，拒绝后绝不回退）。原生 `worker-start --agent` 严格遵循用户的 Orca Chat/Terminal 设置，viewer 不检查或覆盖偏好。保留 1.4.245 的 Terminal TUI 与 OMP Native Chat 验证基线；1.4.246 上的真实端到端 Run `run_67072641a11a` 验证了 OMP 用户默认 Chat 与 Antigravity 用户默认 Terminal 在 4 条 Lane 下的串行工作区交接（共 8 个 Task、全新原生会话、零清理债务、setup `skip` 与配置默认模型）。不代表已实测新放置下的活动 Stop/重启、Antigravity Chat、Orca 运行时重启、setup `run`/`inherit` 或显式模型新放置。所有非空 effort 均被拒绝，即使同时指定模型。
 - **推理力度（Effort）**：`claude`、`codex` 可选择各自支持的力度，且必须同时设置模型；清空模型会清空 effort。原生启动传递 `--effort`，兼容预启动 Codex 则在启动命令中设置。OMP/Antigravity 拒绝所有非空 effort，即使同时指定模型；已保存的不支持值保持可见并提供明确清除入口，清空模型不会静默删除它们。
 - **OpenCode 启动模式与原生路由边界**：
   - **自动模式（默认）**：未指定模型且 Orca ≥ 1.4.220 时使用原生 `opencode2`；纯净显式模型（不含 `#variant`、不带 effort、非 lane、非 Windows、当前/已有放置、非 TUI 模式）在运行中 Orca ≥ 1.4.241+ 上使用独立的 Orca 原生 `opencode` 启动器。本地目录发现仅具建议性，不代表执行宿主真实可用。
@@ -73,7 +73,8 @@
   4. `New Top-Level`：随 worker 启动在指定仓库下新建独立的顶层 worktree。
   新建模式允许配置确定性名称、setup 脚本策略（`run / skip / inherit`）、基准分支、显示名称与备注；现有工作区严禁携带创建类参数，亦绝不重跑环境初始化。
 - **远程放置支持**：针对已配置的远程环境（`orca environment list`），支持将任务放置于远端已有工作区或新建顶层工作树；跨主机的模糊放置（远程 current 或 new-child）在接口层面强制禁止。
-- **工作区 Lane（串行复用工作区）**：支持将一组依赖有序的任务绑定至一条共享的本地非 current 工作区 Lane。同一 Lane 内的任务严格串行执行（同一时刻仅允许一个活动 Dispatch），不同 Lane 之间受 Max parallel 约束并行。若工作区身份证据不足，Lane 冻结为 `unverifiable`，绝不盲目挪移或随意重置。
+- **工作区 Lane（串行复用工作区）**：支持将一组依赖有序的任务绑定至一条共享的本地非 current 工作区 Lane。同一 Lane 内的任务严格串行执行（同一时刻仅允许一个活动 Dispatch），不同 Lane 之间受 Max parallel 约束并行。若工作区身份证据不足，Lane 冻结为 `unverifiable`，绝不盲目挪移或随意重置。原生 OMP 与 Antigravity 在本地 Linux、运行中的 Orca 与已解析 CLI 均 ≥ 1.4.246 时支持工作区 Lane 与新建 Git 工作树。准入检查与计划预览会评估 Lane 的种子放置，若版本低于 1.4.246 则在发起任何变更前直接拒绝。Lane 仅共享工作区：每个 Task 均分配全新的原生 agent 会话与 Dispatch，绝不复用终端进程或在拒绝后降级回退。
+- **CLI 编排兼容性**：当解析后的 CLI ≥ 1.4.246 时，`runOrca` 会根据缓存的就绪探针为编排命令追加 `--full` 参数，防止 1.4.246 默认的精简 JSON 导致数据缺失；CLI 1.4.245 拒绝 `--full`，因此在调用前完成版本判断，遇到不确定响应绝不重试变更。真实验收证实单次 `POST /api/runs` 即可创建 Run（`run_2a67b90e6a94`），避免了因精简响应误报 500 或重复变更的问题。
 - **跨 Lane 汇合集成门**：当某个任务的上游依赖分布于不同的工作区 Lane 时，即使上游任务全部成功，也并不代表代码已经合并。协调者会自动建立幂等的跨 Lane 集成门（`[orca-dag:integration]`），强制要求人工介入并在确认代码集成后标记 `integrated`，viewer 自身绝不擅自执行 Git 分支合并或提交。
 - **原生代码审阅与清理**：任务完成后，支持直接在 Orca 编辑器中打开精确工作区的改动文件和 diff 对比；工作树清理强制调用 `orca worktree rm`，且必须在 worker 归属落定并经人工确认后方可执行。
 

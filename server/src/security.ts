@@ -169,14 +169,14 @@ export interface NativePresetConstraints {
   effort?: string | null;
   environment?: string | null;
   lane?: string | null;
-  placement?: PlacementSpec;
+  placement?: Pick<PlacementSpec, "kind"> & { selector?: string; repo?: string };
   terminal?: string | null;
 }
 
 /**
- * Recorded native execution covers only local Linux current/exact-existing
- * starts. In particular, --terminal makes launch-bind resources external and
- * loses native Stop/custody; it is NOT an alternative launcher for these ids.
+ * Native starts retain Orca's custody across current/exact-existing and
+ * locally created Git worktrees. Lanes share a workspace, never an agent:
+ * --terminal makes resources external and loses native Stop/custody.
  * Effort is unverified even when a model is supplied (model-id suffixes do not
  * advertise effort). Check raw presence before any generic model-gated drop.
  */
@@ -187,12 +187,17 @@ export function assertNativePresetConstraints(
   if (opts.effort !== undefined && opts.effort !== null && opts.effort !== "") {
     throw new ValidationError(`${harness} does not support a nonempty effort override in this viewer`, "unsupported_effort");
   }
-  const placement: PlacementSpec = opts.placement ?? { kind: "current" };
-  const exactExisting = placement.kind === "existing" && /^(?:path:\/|(?:id:)?[^:]+::\/)/.test(placement.selector);
-  if (platform !== "linux" || opts.environment || opts.lane || opts.terminal ||
-      (placement.kind !== "current" && !exactExisting)) {
+  const placement: NonNullable<NativePresetConstraints["placement"]> = opts.placement ?? { kind: "current" };
+  const exactExisting = placement.kind === "existing" && typeof placement.selector === "string" &&
+    /^(?:path:\/|(?:id:)?[^:]+::\/)/.test(placement.selector);
+  const creating = placement.kind === "new-child" || placement.kind === "new-top-level";
+  const exactRepo = placement.kind !== "new-top-level" || typeof placement.repo === "string" &&
+    /^(?:id:[A-Za-z0-9][A-Za-z0-9._:-]*$|path:\/)/.test(placement.repo);
+  if (platform !== "linux" || opts.environment || opts.terminal || !exactRepo ||
+      (opts.lane && placement.kind === "current") ||
+      (placement.kind !== "current" && !exactExisting && !creating)) {
     throw new ValidationError(
-      `${harness} supports only fresh native workers on local Linux current/exact-existing non-lane workspaces`,
+      `${harness} requires fresh native workers on local Linux with current, exact-existing or new Git worktrees; lanes must supply their non-current seed`,
       "invalid_placement",
     );
   }
