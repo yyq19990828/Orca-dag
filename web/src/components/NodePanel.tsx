@@ -52,6 +52,7 @@ const INHERIT = "__inherit__";
 const CUSTOM = "__custom__";
 const NEW_LANE = "__new_lane__";
 const KNOWN = HARNESSES as readonly string[];
+const OPEN_CODE_MODEL = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(?:#[A-Za-z0-9._-]{1,64})?$/;
 
 /** Short seed summary for a lane picker row (never the raw placement JSON). */
 function laneSpecOf(laneId: string, t: Translator): string {
@@ -253,6 +254,14 @@ export function NodePanel({
   const [openCodeDiscovery, setOpenCodeDiscovery] = useState<ModelDiscoveryResult | null>(null);
   const [modelDraft, setModelDraft] = useState(model ?? "");
   useEffect(() => setModelDraft(model ?? ""), [model, node.id, effHarness]);
+  const [manualModel, setManualModel] = useState(false);
+  const modelInputRef = useRef<HTMLInputElement>(null);
+  const invalidModelDraft = effHarness === "opencode" && Boolean(modelDraft.trim()) &&
+    !OPEN_CODE_MODEL.test(modelDraft.trim());
+  useEffect(() => setManualModel(false), [node.id, effHarness]);
+  useEffect(() => {
+    if (manualModel && !launchLocked) modelInputRef.current?.focus();
+  }, [manualModel, launchLocked]);
   useEffect(() => {
     if (effHarness !== "opencode") {
       setOpenCodeDiscovery(null);
@@ -314,13 +323,14 @@ export function NodePanel({
       event.stopPropagation();
       onClose();
     }}>
-      <button className="node-panel__close" onClick={onClose} aria-label={t("dialog.close")}>
-        ✕
-      </button>
-
-      <div className="node-panel__status">
-        <span className="dot" style={{ background: meta.color }} />
-        {t(`status.${node.status}`)}
+      <div className="node-panel__topline">
+        <div className="node-panel__status">
+          <span className="dot" style={{ background: meta.color }} />
+          {t(`status.${node.status}`)}
+        </div>
+        <button className="node-panel__close" onClick={onClose} aria-label={t("dialog.close")}>
+          ✕
+        </button>
       </div>
       <h3 className="node-panel__title" id="node-panel-title" ref={headingRef} tabIndex={-1}>{node.label}</h3>
       <div className="node-panel__id">
@@ -452,32 +462,15 @@ export function NodePanel({
         </div>
       )}
 
-      <section className="node-panel__group" aria-label={t("node.agentGroupAria")}>
+      <section className="node-panel__group node-panel__group--agent" aria-label={t("node.agentGroupAria")}>
         <h4 className="node-panel__group-title">{t("node.agentGroup")}</h4>
-        {effHarness === "opencode" && (
-          <div className="node-panel__field">
-            <span className="node-panel__key">{t("openCode.uiLabel")}</span>
-            <DoodleSelect value={config.openCodeUiByTask[node.id] ?? INHERIT} disabled={launchLocked}
-              onChange={value => { if (!launchLocked) setNodeOpenCodeUi(node.id, isOpenCodeUi(value) ? value : null); }}
-              options={[
-                { value: INHERIT, label: t("openCode.uiInherit", { mode: t(`openCode.ui.${config.defaultOpenCodeUi}`) }) },
-                ...OPEN_CODE_UIS.map(value => ({ value, label: t(`openCode.ui.${value}`),
-                  disabled: value !== "auto" && Boolean(platform && platform !== "linux" || config.environmentByTask[node.id] ||
-                    config.laneByTask[node.id] || ["new-child", "new-top-level"].includes(config.placementByTask[node.id]?.kind ?? "current")),
-                  hint: value === "auto" ? undefined : t("openCode.uiRequirements") })),
-              ]} />
-            <span className="node-panel__hint">{t("openCode.uiRequirements")}</span>
-            {(config.openCodeUiByTask[node.id] ?? config.defaultOpenCodeUi) === "mini" && (
-              <span className="node-panel__hint">{t("openCode.miniPermissions")}</span>
-            )}
-          </div>
-        )}
         <div className="node-panel__field">
           <span className="node-panel__key">{t("node.harnessKey")}</span>
           <DoodleSelect
             value={sel}
             onChange={pick}
             disabled={launchLocked}
+            ariaLabel={t("node.harnessKey")}
             title={launchLocked ? lockReason ?? t("node.launchLockedTitle") : undefined}
             options={[
               {
@@ -513,16 +506,11 @@ export function NodePanel({
               placeholder={t("node.customPlaceholder")}
               onChange={(e) => pickCustom(e.target.value)}
               disabled={!customOk || launchLocked || storedIsUnverified}
+              aria-label={t("node.harnessKey")}
             />
           )}
           {UNVERIFIED_HARNESSES[effHarness] === true && (
             <span className="node-panel__hint">{t("exec.unverifiedHarnessHint", { harness: effHarness })}</span>
-          )}
-          {nativeAgent && (
-            <>
-              <span className="node-panel__hint">{t("nativeAgent.requirements")}</span>
-              <span className="node-panel__hint">{t("nativeAgent.surfaceHint")}</span>
-            </>
           )}
           {sel === CUSTOM && !customOk && !storedIsUnverified && (
             <span className="node-panel__hint">{t("exec.customOffHint")}</span>
@@ -535,31 +523,36 @@ export function NodePanel({
             rejects that plan rather than silently erasing its preferences. */}
         {picker !== "none" && (peerModelEffort || nativeAgent) && (
           <div className="node-panel__field">
-            <label className="node-panel__key" htmlFor={`node-model-${node.id}`}>
-              {t("node.modelKey", { harness: effHarness })}{model ? null : t("node.modelDefaultSuffix")}
-            </label>
+            <span className="node-panel__key">
+              {t("node.modelKey", { harness: effHarness })}
+            </span>
             {picker === "select" && (
               <DoodleSelect
                 ariaLabel={t("node.modelKey", { harness: effHarness })}
-                value={model ?? ""}
+                value={manualModel ? CUSTOM : model ?? ""}
                 onChange={(value) => {
                   if (launchLocked) return;
+                  setManualModel(value === CUSTOM);
+                  if (value === CUSTOM) return;
                   setNodeModel(node.id, value || null);
                   setModelDraft(value);
                 }}
                 disabled={launchLocked}
-                loading={openCodeDiscovery === null}
                 options={[
                   { value: "", label: t("node.defaultModel") },
-                  ...((model && !openCodeDiscovery?.models.includes(model)) ? [{ value: model, label: model }] : []),
-                  ...(openCodeDiscovery?.models ?? []).filter((entry) => entry !== model).map((entry) => ({ value: entry, label: entry })),
+                  ...((model && !openCodeDiscovery?.models.includes(model)) ? [{ value: model, label: model, hint: t("node.savedModel") }] : []),
+                  ...(openCodeDiscovery?.models ?? []).map((entry) => ({ value: entry, label: entry })),
+                  { value: CUSTOM, label: t("node.customModel") },
                 ]}
               />
             )}
-            <input
+            {(picker !== "select" || manualModel) && <input
+              ref={modelInputRef}
               id={`node-model-${node.id}`}
               className="node-panel__custom"
               value={modelDraft}
+              aria-label={picker === "select" ? t("node.customModel") : t("node.modelKey", { harness: effHarness })}
+              aria-describedby={`node-model-hint-${node.id}${invalidModelDraft ? ` node-model-error-${node.id}` : ""}`}
               placeholder={t("node.modelPlaceholder", { example: effHarness === "opencode" ? "provider/model[#variant]" : effHarness === "claude" ? "opus" : effHarness === "codex" ? "o3" : "<model>" })}
               onChange={(event) => {
                 const value = event.target.value;
@@ -567,23 +560,28 @@ export function NodePanel({
                 if (launchLocked) return;
                 const normalized = value.trim();
                 if (!normalized) setNodeModel(node.id, null);
-                else if (effHarness !== "opencode" || /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(?:#[A-Za-z0-9._-]{1,64})?$/.test(normalized)) setNodeModel(node.id, normalized);
+                else if (effHarness !== "opencode" || OPEN_CODE_MODEL.test(normalized)) setNodeModel(node.id, normalized);
               }}
               disabled={launchLocked}
-              aria-invalid={effHarness === "opencode" && Boolean(modelDraft.trim()) && !/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(?:#[A-Za-z0-9._-]{1,64})?$/.test(modelDraft.trim())}
-            />
-            {effHarness === "opencode" && (
-              <>
-                <span className="node-panel__hint">
-                  {openCodeDiscovery === null ? t("node.modelDiscoveryLoading")
-                    : openCodeDiscovery.status === "unavailable" ? t("node.modelDiscoveryUnavailable", { diagnostic: openCodeDiscovery.diagnostic ?? "" })
-                      : openCodeDiscovery.models.length === 0 ? t("node.modelDiscoveryEmpty") : t("node.modelDiscoveryReady")}
-                  {" "}{t("node.modelDiscoveryScope")}
-                </span>
-                {model && <span className="node-panel__hint">{t("node.openCodeModelLaunchHint")}</span>}
-              </>
+              aria-invalid={invalidModelDraft}
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+            />}
+            {(picker !== "select" || manualModel) && (
+              <span id={`node-model-hint-${node.id}`} className="node-panel__hint">{t("node.modelInputHint")}</span>
             )}
-            {nativeAgent && <span className="node-panel__hint">{t("nativeAgent.modelHint")}</span>}
+            {invalidModelDraft && (
+              <span id={`node-model-error-${node.id}`} className="node-panel__hint node-panel__model-error">
+                {t("node.modelInvalid", { model: model ?? t("node.defaultModel") })}
+              </span>
+            )}
+            {effHarness === "opencode" && (openCodeDiscovery === null || openCodeDiscovery.status === "unavailable") && (
+              <span className="node-panel__hint" role="status">
+                {openCodeDiscovery === null ? t("node.modelDiscoveryLoading")
+                  : t("node.modelDiscoveryUnavailable", { diagnostic: openCodeDiscovery.diagnostic ?? "" })}
+              </span>
+            )}
           </div>
         )}
 
@@ -614,6 +612,7 @@ export function NodePanel({
                 if (!launchLocked) setNodeEffort(node.id, v || null);
               }}
               disabled={launchLocked}
+              ariaLabel={t("node.effortKey", { harness: effHarness })}
               options={[
                 { value: "", label: t("node.defaultEffort") },
                 ...EFFORT_LEVELS.map((e) => ({ value: e, label: e })),
@@ -621,6 +620,47 @@ export function NodePanel({
             />
             <span className="node-panel__hint">{t("node.effortHint")}</span>
           </div>
+        )}
+        {effHarness === "opencode" && (
+          <div className="node-panel__field">
+            <span className="node-panel__key">{t("openCode.uiLabel")}</span>
+            <DoodleSelect value={config.openCodeUiByTask[node.id] ?? INHERIT} disabled={launchLocked}
+              ariaLabel={t("openCode.uiLabel")}
+              onChange={value => { if (!launchLocked) setNodeOpenCodeUi(node.id, isOpenCodeUi(value) ? value : null); }}
+              options={[
+                { value: INHERIT, label: t("openCode.uiInherit", { mode: t(`openCode.ui.${config.defaultOpenCodeUi}`) }) },
+                ...OPEN_CODE_UIS.map(value => ({ value, label: t(`openCode.ui.${value}`),
+                  disabled: value !== "auto" && Boolean(platform && platform !== "linux" || config.environmentByTask[node.id] ||
+                    config.laneByTask[node.id] || ["new-child", "new-top-level"].includes(config.placementByTask[node.id]?.kind ?? "current")),
+                  hint: value === "auto" ? undefined : t("openCode.uiRequirements") })),
+              ]} />
+            {(config.openCodeUiByTask[node.id] ?? config.defaultOpenCodeUi) === "mini" && (
+              <span className="node-panel__hint">{t("openCode.miniPermissions")}</span>
+            )}
+          </div>
+        )}
+        {(effHarness === "opencode" || nativeAgent) && (
+          <details className="node-panel__launch-notes">
+            <summary>{t("node.launchNotes")}</summary>
+            <div>
+              {effHarness === "opencode" ? (
+                <>
+                  <p>{t("openCode.uiRequirements")}</p>
+                  <p>{t("node.modelDiscoveryScope")}</p>
+                  {openCodeDiscovery && openCodeDiscovery.status !== "unavailable" && <p>
+                    {openCodeDiscovery.models.length === 0 ? t("node.modelDiscoveryEmpty") : t("node.modelDiscoveryReady")}
+                  </p>}
+                  {model && <p>{t("node.openCodeModelLaunchHint")}</p>}
+                </>
+              ) : (
+                <>
+                  <p>{t("nativeAgent.requirements")}</p>
+                  <p>{t("nativeAgent.surfaceHint")}</p>
+                  <p>{t("nativeAgent.modelHint")}</p>
+                </>
+              )}
+            </div>
+          </details>
         )}
       </section>
 

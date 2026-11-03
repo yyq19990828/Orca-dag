@@ -1517,7 +1517,7 @@ body {
   background: var(--paper);
   border: 2px solid var(--line-strong);
   border-radius: 18px 15px 18px 14px;
-  padding: 18px;
+  padding: 0 18px 18px;
   z-index: 5;
   box-shadow: var(--shadow-soft);
 }
@@ -1552,10 +1552,22 @@ body {
   from { opacity: 0; transform: translateY(7px); }
   to { opacity: 1; transform: translateY(0); }
 }
+.node-panel__topline {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 -18px;
+  padding: 8px 10px 8px 18px;
+  background: var(--paper);
+}
 .node-panel__close {
-  position: absolute;
-  top: 12px;
-  right: 14px;
+  min-width: 36px;
+  min-height: 36px;
+  flex: none;
   background: transparent;
   border: none;
   color: var(--ink-soft);
@@ -2169,11 +2181,24 @@ body {
 }
 
 /* ---------- task-grouped coordinator chat ------------------------------ */
+/* Keep sketchbook lettering for titles, not sustained conversation reading.
+   The rem scale also respects browser text-size preferences in a resized rail. */
+.chat,
+.chat__empty {
+  --chat-text-size: 1rem;
+  --chat-note-size: 0.875rem;
+  --chat-meta-size: 0.8125rem;
+  --chat-link-color: color-mix(in srgb, var(--sky-ink) 65%, var(--ink));
+  --ink-faint: var(--ink-soft);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: var(--chat-text-size);
+  line-height: 1.6;
+}
 .chat {
   display: grid;
   height: 100%;
   min-height: 0;
-  grid-template-columns: minmax(164px, 34%) minmax(0, 1fr);
+  grid-template-columns: minmax(180px, 28%) minmax(0, 1fr);
   overflow: hidden;
 }
 .chat__empty {
@@ -2183,7 +2208,7 @@ body {
   background: var(--paper-2);
   border: 1.5px dashed var(--line-strong);
   border-radius: 12px 9px 13px 8px;
-  font-size: 18px;
+  font-size: var(--chat-text-size);
   line-height: 1.55;
 }
 .chat__threads {
@@ -2192,16 +2217,16 @@ body {
   min-height: 0;
   flex-direction: column;
   background: rgba(245, 241, 230, 0.55);
-  border-right: 2px dashed var(--line);
+  border-right: 1px dashed var(--line-strong);
 }
 .chat__threads-title {
   display: flex;
   flex: none;
   justify-content: space-between;
-  padding: 10px 11px 8px;
+  padding: 12px 14px 8px;
   color: var(--ink-soft);
   font-family: var(--font-display);
-  font-size: 15.75px;
+  font-size: 1rem;
   letter-spacing: 0.02em;
 }
 .chat__thread-list {
@@ -2212,10 +2237,9 @@ body {
   padding: 7px 11px 5px;
   color: var(--ink-soft);
   border-top: 1.5px dashed var(--line);
-  font-size: 11.25px;
+  font-size: var(--chat-meta-size);
   font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  line-height: 1.4;
 }
 .chat-thread {
   position: relative;
@@ -2223,7 +2247,7 @@ body {
   width: 100%;
   grid-template-columns: 30px minmax(0, 1fr);
   gap: 8px;
-  padding: 10px 11px;
+  padding: 12px 14px;
   color: var(--ink);
   text-align: left;
   background: transparent;
@@ -2237,6 +2261,10 @@ body {
 }
 .chat-thread:active {
   transform: scale(0.99);
+}
+.chat-thread:focus-visible {
+  outline: 2px solid var(--chat-link-color);
+  outline-offset: -3px;
 }
 .chat-thread--active {
   background: rgba(183, 159, 224, 0.16);
@@ -2307,7 +2335,7 @@ body {
   width: 30px;
   height: 30px;
   place-items: center;
-  color: var(--sky-ink);
+  color: var(--chat-link-color);
   background: var(--sky-wash);
   border: 1.5px solid var(--sky);
   border-radius: 48% 52% 45% 55%;
@@ -2386,29 +2414,36 @@ body {
 }
 .chat-thread__topline {
   display: flex;
-  align-items: baseline;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
 }
 .chat-thread__topline strong {
+  display: -webkit-box;
   overflow: hidden;
-  flex: 1;
+  min-width: 0;
+  flex: 1 1 100%;
   font-family: var(--font-display);
-  font-size: 16.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: 1rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 .chat-thread__topline time {
   color: var(--ink-soft);
-  font-size: 12.75px;
+  margin-left: auto;
+  font-size: var(--chat-meta-size);
+  font-variant-numeric: tabular-nums;
 }
 .chat-thread__system-label {
   flex: none;
   padding: 1px 4px;
-  color: var(--sky-ink);
+  color: var(--chat-link-color);
   background: rgba(123, 183, 224, 0.12);
   border: 1px solid rgba(62, 123, 166, 0.24);
   border-radius: 5px 4px 6px 3px;
-  font-size: 10.5px;
+  font-size: 0.75rem;
   font-weight: 600;
   letter-spacing: 0.04em;
   line-height: 1.25;
@@ -2419,7 +2454,8 @@ body {
   overflow: hidden;
   margin-top: 3px;
   color: var(--ink-soft);
-  font-size: 14.25px;
+  font-size: var(--chat-note-size);
+  line-height: 1.5;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2447,37 +2483,46 @@ body {
 .chat__conversation-head {
   display: flex;
   flex: none;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  padding: 9px 13px;
+  padding: 14px 18px;
   border-bottom: 1.5px dashed var(--line);
+}
+.chat__conversation-head > div {
+  min-width: 0;
+  flex: 1;
 }
 .chat__conversation-title {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px 8px;
+  flex-wrap: wrap;
   font-family: var(--font-display);
-  font-size: 18px;
+  font-size: 1.125rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 .chat__conversation-title span {
   color: #5147b8;
-  font-size: 14.25px;
+  font-size: var(--chat-note-size);
 }
 .chat__conversation-title .chat__conversation-system {
   padding: 1px 5px;
-  color: var(--sky-ink);
+  color: var(--chat-link-color);
   background: rgba(123, 183, 224, 0.12);
   border: 1px solid rgba(62, 123, 166, 0.24);
   border-radius: 5px 4px 6px 3px;
-  font-size: 12px;
+  font-size: 0.75rem;
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 .chat__conversation-head p {
-  margin: 2px 0 0;
+  margin: 6px 0 0;
   color: var(--ink-soft);
-  font-size: 14.25px;
+  font-size: var(--chat-meta-size);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 .chat-presence {
   display: grid;
@@ -2526,28 +2571,32 @@ body {
   box-shadow: 0 0 0 2px rgba(234, 107, 94, 0.2);
 }
 .chat__conversation-head button {
-  padding: 4px 7px;
-  color: var(--sky-ink);
+  min-height: 36px;
+  flex: none;
+  padding: 6px 10px;
+  color: var(--chat-link-color);
   background: transparent;
   border: 1.5px dashed var(--sky);
   border-radius: 8px 6px 9px 5px;
   cursor: pointer;
   font: inherit;
-  font-size: 15px;
+  font-size: var(--chat-note-size);
 }
 .chat__messages {
   display: flex;
   min-height: 0;
   flex: 1;
   flex-direction: column;
-  gap: 9px;
+  gap: 16px;
   overflow-y: auto;
-  padding: 13px;
+  overscroll-behavior-y: contain;
+  padding: 18px;
 }
 .chat-message {
+  min-width: 0;
   width: fit-content;
-  max-width: min(82%, 520px);
-  padding: 8px 10px;
+  max-width: min(94%, 65ch);
+  padding: 14px 16px;
   border: 1.5px solid var(--line);
   border-radius: 12px 12px 12px 5px;
 }
@@ -2557,98 +2606,117 @@ body {
 }
 .chat-message--outgoing {
   align-self: flex-end;
-  background: rgba(123, 183, 224, 0.2);
+  background: var(--sky-wash);
   border-color: rgba(62, 123, 166, 0.38);
   border-radius: 12px 12px 5px;
 }
 .chat-message--brief {
   border-style: dashed;
 }
-.chat-message--worker_done {
+.chat-message--worker_done.chat-message--success {
   border-color: rgba(62, 154, 85, 0.34);
   background: rgba(235, 247, 238, 0.72);
+}
+.chat-message--worker_done.chat-message--error {
+  border-color: var(--coral);
+  background: var(--blush-wash);
 }
 .chat-message__meta {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 4px 6px;
+  gap: 6px 10px;
+  margin-bottom: 8px;
   color: var(--ink-soft);
-  font-size: 12.75px;
+  font-size: var(--chat-meta-size);
+  line-height: 1.5;
 }
 .chat-message__meta strong {
   color: var(--ink);
-  font-family: var(--font-display);
-  font-size: 15px;
+  font-size: var(--chat-note-size);
+  font-weight: 600;
 }
 .chat-message h3 {
-  margin: 4px 0 2px;
+  margin: 0 0 6px;
   color: var(--ink);
   font-family: var(--font-display);
-  font-size: 16.5px;
-  line-height: 1.35;
+  font-size: 1.0625rem;
+  line-height: 1.45;
+  text-wrap: balance;
 }
 .chat-message p {
   margin: 0;
-  color: var(--ink-soft);
-  font-size: 15.75px;
-  line-height: 1.5;
+  color: var(--ink);
+  font-size: var(--chat-text-size);
+  line-height: 1.65;
+  text-wrap: pretty;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 .chat-message small,
 .chat-message__waiting {
   display: inline-block;
-  margin-top: 5px;
-  color: var(--sky-ink);
-  font-size: 12.75px;
+  margin-top: 8px;
+  color: var(--chat-link-color);
+  font-size: var(--chat-meta-size);
+  line-height: 1.5;
 }
 .chat-message__waiting {
   margin-left: 7px;
   color: #a44338;
 }
 .chat-message__details {
-  margin-top: 6px;
+  margin-top: 12px;
   color: var(--ink-soft);
-  font-size: 13.5px;
+  font-size: var(--chat-note-size);
 }
 .chat-message__details summary {
   cursor: pointer;
-  color: var(--sky-ink);
+  width: fit-content;
+  max-width: 100%;
+  min-height: 32px;
+  padding: 4px 0;
+  color: var(--chat-link-color);
+  text-underline-offset: 3px;
 }
 .chat-message__details p {
-  max-height: 150px;
-  margin-top: 5px;
+  max-height: 24rem;
+  margin-top: 8px;
   overflow-y: auto;
-  padding-top: 5px;
+  padding: 10px 0;
   border-top: 1px dashed var(--line);
 }
 .chat-message--system {
   align-self: center;
-  max-width: 88%;
+  max-width: min(100%, 65ch);
   color: var(--ink-soft);
-  text-align: center;
+  text-align: left;
   background: rgba(245, 241, 230, 0.72);
   border-style: dashed;
   border-radius: 9px 7px 10px 6px;
 }
 .chat-message--system > span {
   color: var(--ink);
-  font-family: var(--font-display);
-  font-size: 14.25px;
+  font-weight: 600;
+  font-size: var(--chat-note-size);
 }
-.chat-message--system p,
+.chat-message--system p {
+  margin-top: 4px;
+  font-size: var(--chat-note-size);
+  line-height: 1.6;
+}
 .chat-message--system time {
-  display: inline;
-  margin-left: 6px;
-  font-size: 12.75px;
+  display: block;
+  margin-top: 6px;
+  font-size: var(--chat-meta-size);
+  font-variant-numeric: tabular-nums;
 }
 .chat-message--system.chat-message--warning { border-color: var(--butter); }
 .chat-message--system.chat-message--error { border-color: var(--coral); }
 .chat-checkpoint-group {
   display: grid;
-  width: min(84%, 460px);
+  width: min(100%, 65ch);
   max-width: 100%;
   align-self: center;
   gap: 4px;
@@ -2662,7 +2730,7 @@ body {
   gap: 7px;
   padding: 2px 0;
   color: var(--ink-soft);
-  font-size: 12px;
+  font-size: var(--chat-meta-size);
 }
 .chat-checkpoint__rail {
   position: relative;
@@ -2701,7 +2769,7 @@ body {
   display: grid;
   min-width: 0;
   gap: 3px;
-  padding: 5px 7px 6px;
+  padding: 8px 10px;
   background: rgba(245, 241, 230, 0.48);
   border: 1px dashed rgba(211, 204, 184, 0.82);
   border-radius: 7px 5px 8px 4px;
@@ -2716,13 +2784,13 @@ body {
 .chat-checkpoint__head strong {
   overflow: hidden;
   color: var(--ink-soft);
-  font-size: 12.75px;
+  font-size: var(--chat-meta-size);
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .chat-checkpoint--important .chat-checkpoint__head strong {
-  color: var(--sky-ink);
+  color: var(--chat-link-color);
 }
 .chat-checkpoint__summary {
   overflow: hidden;
@@ -2739,13 +2807,14 @@ body {
   max-width: 100%;
   align-items: center;
   gap: 4px;
-  padding-top: 5px;
-  color: var(--sky-ink);
+  min-height: 32px;
+  padding: 4px 0;
+  color: var(--chat-link-color);
   background: transparent;
   border: 0;
   cursor: pointer;
   font: inherit;
-  font-size: 12px;
+  font-size: var(--chat-meta-size);
 }
 .chat-checkpoint__toggle:hover,
 .chat-checkpoint__toggle:focus-visible {
@@ -2774,7 +2843,7 @@ body {
   justify-self: start;
   margin-left: 21px;
   padding: 3px 6px;
-  color: var(--sky-ink);
+  color: var(--chat-link-color);
   background: rgba(123, 183, 224, 0.12);
   border: 1px dashed rgba(62, 123, 166, 0.4);
   border-radius: 6px 4px 7px 3px;
@@ -2800,9 +2869,11 @@ body {
 .chat-checkpoint__receipt-details > summary {
   width: max-content;
   max-width: 100%;
-  color: var(--sky-ink);
+  min-height: 32px;
+  padding: 4px 0;
+  color: var(--chat-link-color);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--chat-meta-size);
 }
 .chat-checkpoint__receipt-details > summary:focus-visible {
   outline: 1px dashed currentColor;
@@ -2818,9 +2889,9 @@ body {
   gap: 8px;
 }
 .chat-checkpoint__receipt > header > span {
-  color: var(--sky-ink);
-  font-family: var(--font-display);
-  font-size: 13.5px;
+  color: var(--chat-link-color);
+  font-size: var(--chat-meta-size);
+  font-weight: 600;
 }
 .chat-checkpoint__receipt > header > time {
   color: var(--ink-faint);
@@ -2859,9 +2930,9 @@ body {
   width: max-content;
   align-items: center;
   gap: 4px;
-  color: var(--sky-ink);
+  color: var(--chat-link-color);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--chat-meta-size);
   list-style: none;
 }
 .chat-checkpoint__messages > summary::-webkit-details-marker {
@@ -2894,7 +2965,7 @@ body {
   border-left: 2px solid rgba(211, 204, 184, 0.82);
 }
 .chat-checkpoint__message-type {
-  color: var(--sky-ink);
+  color: var(--chat-link-color);
   white-space: nowrap;
 }
 .chat-checkpoint__message-subject {
@@ -2947,7 +3018,7 @@ body {
 }
 .chat-checkpoint__agent > small {
   color: var(--ink-faint);
-  font-size: 11.25px;
+  font-size: var(--chat-meta-size);
   text-align: right;
   white-space: nowrap;
 }
@@ -2978,7 +3049,8 @@ body {
   background: rgba(245, 241, 230, 0.62);
   border: 1px dashed rgba(211, 204, 184, 0.9);
   border-radius: 8px 6px 9px 5px;
-  font-size: 12.75px;
+  font-size: var(--chat-meta-size);
+  line-height: 1.5;
 }
 /* The pulse dot must agree with the status words beside it: a state-driven
    colour (palette mirrors STATUS_META in web/src/types.ts, so the DAG canvas
@@ -3026,8 +3098,8 @@ body {
   overflow: hidden;
   min-width: 0;
   color: var(--ink);
-  font-family: var(--font-display);
-  font-size: 13.5px;
+  font-size: var(--chat-note-size);
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -3037,13 +3109,16 @@ body {
   white-space: nowrap;
 }
 .chat-runtime-summary__meta {
-  color: var(--sky-ink);
+  color: var(--chat-link-color);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 .chat__composer {
   flex: none;
-  padding: 9px 12px 11px;
+  max-height: 45%;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  padding: 14px 18px;
   background: rgba(245, 241, 230, 0.48);
   border-top: 1.5px dashed var(--line);
 }
@@ -3055,28 +3130,57 @@ body {
 }
 .chat__compose-row textarea {
   min-width: 0;
-  resize: none;
-  padding: 7px 9px;
+  min-height: 84px;
+  max-height: 12rem;
+  resize: vertical;
+  padding: 12px 14px;
   color: var(--ink);
   background: #fff;
   border: 1.5px solid var(--line-strong);
   border-radius: 10px 8px 11px 7px;
   font: inherit;
-  font-size: 15.75px;
+  font-size: var(--chat-text-size);
+  line-height: 1.6;
+  caret-color: var(--chat-link-color);
 }
 .chat__compose-row .btn {
-  font-size: 21px;
+  min-height: 44px;
+  font-family: inherit;
+  font-size: var(--chat-text-size);
+}
+.chat__compose-row textarea::placeholder,
+.chat__group-subject::placeholder {
+  color: var(--ink-faint);
+  opacity: 1;
+}
+.chat__compose-row textarea:focus-visible,
+.chat__group-subject:focus-visible,
+.chat__conversation-head button:focus-visible,
+.chat-message__details > summary:focus-visible {
+  outline: 2px solid var(--chat-link-color);
+  outline-offset: 2px;
+}
+.chat__compose-row textarea:disabled,
+.chat__group-subject:disabled {
+  color: var(--ink-soft);
+  background: var(--paper-2);
+  cursor: not-allowed;
+}
+.chat ::selection {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--sky) 40%, var(--paper));
 }
 .chat__composer-idle {
   margin: 0;
   color: var(--ink-soft);
-  font-size: 14.25px;
-  text-align: center;
+  font-size: var(--chat-note-size);
+  line-height: 1.6;
 }
 .chat__error {
   margin-bottom: 6px;
   color: #a44338;
-  font-size: 15px;
+  font-size: var(--chat-note-size);
+  line-height: 1.6;
 }
 
 /* Phase 6: Run-control group composer. A sticker-row of doodle selects
@@ -3104,7 +3208,7 @@ body {
   flex-direction: column;
   gap: 3px;
   color: var(--ink-soft);
-  font-size: 12.75px;
+  font-size: var(--chat-meta-size);
 }
 .chat__group-field > span {
   padding-left: 2px;
@@ -3115,27 +3219,30 @@ body {
 .chat__group-estimate {
   margin: 0;
   color: var(--ink-soft);
-  font-size: 13.5px;
+  font-size: var(--chat-meta-size);
   line-height: 1.45;
 }
 .chat__group-estimate strong {
-  color: var(--sky-ink);
-  font-family: var(--font-display);
+  color: var(--chat-link-color);
+  font-weight: 600;
 }
 .chat__group-subject {
   width: 100%;
-  padding: 6px 9px;
+  min-height: 44px;
+  padding: 10px 12px;
   color: var(--ink);
   background: #fff;
   border: 1.5px solid var(--line-strong);
   border-radius: 9px 7px 10px 6px;
   font: inherit;
-  font-size: 15px;
+  font-size: var(--chat-text-size);
+  line-height: 1.6;
+  caret-color: var(--chat-link-color);
 }
 .chat__group-note {
   margin: 0;
   color: var(--ink-soft);
-  font-size: 12.75px;
+  font-size: var(--chat-meta-size);
   line-height: 1.45;
 }
 
@@ -3152,10 +3259,12 @@ body {
 .chat-message__audience {
   padding: 1px 5px;
   border-radius: 5px 4px 6px 3px;
-  color: var(--sky-ink);
+  color: var(--chat-link-color);
   background: rgba(123, 183, 224, 0.24);
   border: 1px solid rgba(62, 123, 166, 0.45);
-  font-size: 10.5px;
+  max-width: 100%;
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
   font-weight: 600;
   letter-spacing: 0.04em;
   line-height: 1.25;
@@ -3163,8 +3272,8 @@ body {
 .chat-message__enqueue {
   display: block;
   margin-top: 5px;
-  color: var(--sky-ink);
-  font-size: 12.75px;
+  color: var(--chat-link-color);
+  font-size: var(--chat-meta-size);
   font-style: italic;
 }
 
@@ -3184,66 +3293,122 @@ body {
   }
 }
 
-@media (max-width: 620px) {
-  .chat {
-    grid-template-columns: 132px minmax(0, 1fr);
-  }
-  .chat-thread {
-    grid-template-columns: 1fr;
-  }
-  .chat-thread__avatar {
-    display: none;
-  }
-  .chat-message {
-    max-width: 94%;
-  }
-  .chat__conversation-head,
-  .chat__messages {
-    padding-right: 9px;
-    padding-left: 9px;
-  }
-}
 
 /* The communication rail can reach this width on a large desktop too.
    Keep conversations available above the message pane instead of squeezing
    both columns until message metadata and controls spill out. */
-@container chat-panel (max-width: 520px) {
+@container chat-panel (max-width: 640px) {
   .chat {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: 101px minmax(0, 1fr);
+    grid-template-rows: 8.5rem minmax(0, 1fr);
   }
   .chat__threads {
     border-right: 0;
-    border-bottom: 2px dashed var(--line);
+    border-bottom: 1px dashed var(--line-strong);
   }
   .chat__threads-title {
-    padding: 4px 10px 2px;
-    font-size: 12px;
+    padding: 6px 12px 2px;
+    font-size: var(--chat-note-size);
   }
   .chat__thread-list {
     display: flex;
     min-width: 0;
+    flex: 1;
     overflow-x: auto;
     overflow-y: hidden;
   }
   .chat-thread__section,
-  .chat-thread__avatar,
-  .chat-thread__system-label {
+  .chat-thread__avatar {
     display: none;
   }
   .chat-thread {
-    width: 150px;
+    width: 12.5rem;
+    max-width: 90%;
     height: 100%;
-    flex: 0 0 150px;
+    flex: 0 0 12.5rem;
     grid-template-columns: minmax(0, 1fr);
-    padding: 7px 9px;
+    align-content: start;
+    padding: 6px 12px;
   }
   .chat-thread__topline time {
     flex: none;
-    font-size: 11px;
+    font-size: var(--chat-meta-size);
   }
   .chat-thread__preview {
-    font-size: 12px;
+    font-size: var(--chat-meta-size);
+  }
+}
+@container chat-panel (max-width: 400px) {
+  .chat__conversation-head,
+  .chat__messages,
+  .chat__composer {
+    padding: 12px;
+  }
+  .chat-message {
+    max-width: 100%;
+    padding: 12px;
+  }
+  .chat__conversation-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+  }
+  .chat__conversation-head > div {
+    display: contents;
+  }
+  .chat__conversation-title {
+    grid-column: 1 / -1;
+  }
+  .chat__conversation-head p {
+    margin: 0;
+  }
+  .chat-runtime-summary {
+    grid-template-columns: 7px minmax(0, 1fr);
+  }
+  .chat-runtime-summary__detail,
+  .chat-runtime-summary__meta {
+    grid-column: 2;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .chat__compose-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .chat__compose-row .btn {
+    justify-self: end;
+  }
+}
+/* Phones, landscape and zoomed narrow windows need space for conversation
+   rather than stacked app chrome. Covered controls are also hidden from
+   keyboard navigation; closing the view or opening a stage restores the
+   original app, without a modal trap. */
+@media (max-width: 620px), (max-width: 900px) and (max-height: 600px) {
+  .app:has(.communication-center:not(.communication-center--closed) .communication-center__tabs) > .topbar,
+  .pane--dag:has(.communication-center:not(.communication-center--closed) .communication-center__tabs) > .dag-toolbar,
+  .pane--dag:has(.communication-center:not(.communication-center--closed) .communication-center__tabs) > .run-overview,
+  .dag-workspace:not(:has(.node-panel)):has(.communication-center:not(.communication-center--closed) .communication-center__tabs) > .dag-canvas {
+    visibility: hidden;
+    /* Hidden wide controls must not widen the page. Paint containment keeps
+       the underlying DAG's layout and dragged positions intact. */
+    contain: paint;
+  }
+  .communication-center:not(.communication-center--closed):has(.communication-center__tabs) {
+    position: fixed;
+    inset: 8px;
+    z-index: 20;
+    width: auto;
+    min-width: calc(100% - 16px);
+    max-width: calc(100% - 16px);
+    height: calc(100dvh - 16px);
+    max-height: calc(100dvh - 16px);
+    border-radius: 14px;
+  }
+  .communication-center:not(.communication-center--closed):has(.communication-center__tabs) .communication-center__resize {
+    display: none;
+  }
+  .communication-center:not(.communication-center--closed):has(.communication-center__tabs) .communication-center__close {
+    min-width: 44px;
+    min-height: 44px;
   }
 }
 .node-panel__custom {
@@ -3281,6 +3446,137 @@ body {
   font-size: 11px;
   color: var(--ink-soft);
   line-height: 1.5;
+}
+
+/* Launch controls are reading/editing tools, not display lettering. Keep the
+   paper frame, but make long opaque model selectors and locked plans legible.
+   The portal stays scoped to this group through the open trigger below. */
+.node-panel__group--agent {
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+}
+.node-panel__group--agent .node-panel__field {
+  gap: 6px;
+  margin-bottom: 20px;
+  min-width: 0;
+}
+.node-panel__group--agent .node-panel__key {
+  margin: 0;
+  font: inherit;
+  font-weight: 600;
+  letter-spacing: normal;
+  color: var(--ink);
+}
+.node-panel__group--agent .doodle-select,
+.node-panel__group--agent .node-panel__custom {
+  min-height: 44px;
+  margin-top: 0;
+  font: inherit;
+}
+.node-panel__group--agent .node-panel__custom {
+  font-size: 16px;
+}
+.node-panel__group--agent .node-panel__custom::placeholder {
+  color: var(--ink-soft);
+  opacity: 1;
+}
+.node-panel__group--agent .doodle-select {
+  transform: none;
+}
+.node-panel__group--agent .doodle-select__value {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.node-panel__group--agent .doodle-select:disabled,
+.node-panel__group--agent input:disabled {
+  opacity: 1;
+  color: var(--ink);
+  background: var(--paper-2);
+  border-style: dashed;
+  box-shadow: none;
+}
+.node-panel__group--agent .doodle-select:disabled .doodle-select__chev {
+  display: none;
+}
+.node-panel__group--agent .node-panel__hint {
+  margin-top: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.node-panel__group--agent .node-panel__model-error {
+  color: var(--coral-ink);
+}
+.node-panel__launch-notes {
+  margin: 0 0 18px;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+.node-panel__launch-notes summary {
+  cursor: pointer;
+  min-height: 36px;
+  padding-block: 7px;
+  color: var(--ink);
+  text-underline-offset: 3px;
+}
+.node-panel__launch-notes summary:hover {
+  text-decoration: underline;
+}
+.node-panel__launch-notes summary:focus-visible {
+  outline: 2px solid var(--sky-ink);
+  outline-offset: 2px;
+}
+.node-panel__launch-notes p {
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__panel {
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt {
+  min-height: 44px;
+}
+body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-label {
+  font: inherit;
+  font-size: 14px;
+}
+body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__search input {
+  font: inherit;
+  font-size: 16px;
+}
+body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__search input::placeholder {
+  opacity: 1;
+}
+body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hint {
+  font: inherit;
+  font-size: 13px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* A phone inspector is the current reading/editing surface. Do not squeeze
+   its form into the strip left by the wrapped toolbar, or leave covered
+   background controls in keyboard navigation. Canvas geometry is preserved. */
+@media (max-width: 620px), (max-width: 900px) and (max-height: 600px) {
+  .node-panel {
+    position: fixed;
+    inset: 8px;
+    width: auto;
+    max-width: calc(100% - 16px);
+    max-height: calc(100dvh - 16px);
+    z-index: 20;
+  }
+  .node-panel__close {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .app:has(.node-panel) :is(.topbar, .dag-toolbar, .run-overview),
+  .app:has(.node-panel) .dag-workspace > :not(.dag-canvas),
+  .app:has(.node-panel) .dag-canvas > :not(.node-panel) {
+    visibility: hidden;
+    contain: paint;
+  }
 }
 
 /* Phase 4: scheduler state + ownership relations on the node card. */
@@ -4887,7 +5183,7 @@ body {
   background: rgba(240, 185, 78, 0.14);
   border: 1.5px dashed rgba(179, 127, 22, 0.45);
   border-radius: 11px 8px 12px 8px;
-  font-size: 13.5px;
+  font-size: var(--chat-note-size);
   line-height: 1.45;
 }
 .chat-history-warning strong {
@@ -4921,7 +5217,7 @@ body {
 .chat-message__provenance {
   padding: 1px 5px;
   border-radius: 5px 4px 6px 3px;
-  font-size: 10.5px;
+  font-size: 0.75rem;
   font-weight: 600;
   letter-spacing: 0.04em;
   line-height: 1.25;
@@ -4953,13 +5249,13 @@ body {
   overflow: hidden;
   margin: 4px 0 1px;
   padding: 3px 8px;
-  color: var(--sky-ink);
+  color: var(--chat-link-color);
   text-overflow: ellipsis;
   white-space: nowrap;
   background: rgba(123, 183, 224, 0.1);
   border-left: 2.5px solid rgba(62, 123, 166, 0.4);
   border-radius: 4px;
-  font-size: 12.75px;
+  font-size: var(--chat-note-size);
 }
 
 /* Activity log variants of the same evidence. */

@@ -153,3 +153,78 @@ every legacy stylesheet is detector-clean.
 
 Rollback is limited to frontend source and this check/documentation. No database,
 configuration schema, release, commit or external state migration is required.
+
+## Chat reading refinement
+
+The communication center keeps the paper palette and hand-drawn headings, while
+conversation text and inputs use a local system reading font. Body text is
+`1rem` (normally 16px) with 1.65 line height; metadata is `0.8125rem` (13px),
+secondary copy is `0.875rem` (14px), and conversation titles remain 18px.
+Message width is capped at 65ch rather than squeezing every bubble to a narrow
+fraction of the conversation. Full task briefs and reports remain expandable,
+with a larger internally scrollable reading area.
+
+- At rail widths up to 640px, conversations form a horizontally scrollable strip
+  above the message area; wider rails keep the two-column layout. Long thread
+  titles show up to two lines and retain their full accessible text and tooltip.
+- On phones up to 620px, or short windows up to 900px wide and 600px high, an open
+  Activity/Chat view uses the viewport. Covered app controls are excluded from
+  keyboard navigation without discarding the DAG layout. Closing returns focus
+  to the entry control; opening a stage gives its inspector the screen, and
+  closing that inspector restores the conversation and its focus. Desktop keeps
+  the existing side-by-side inspection behavior.
+- The composer retains its current send, reply, permission and shortcut behavior.
+  Inputs use 16px text, visible focus and a bounded, scrollable footer so long
+  group-send controls do not consume the whole message area. Only successful
+  `worker_done` messages receive the completion wash; failure reports use the
+  existing error palette.
+
+Verification used real stored Orca conversations in English and Chinese at
+1440×1000, 1024×900, 720×500, 390×844 and 320×640, plus actual rail resizing.
+Checks covered horizontal overflow, long briefs, evidence expansion, keyboard
+close/focus return, and phone stage-inspector handoff/return. Input states and
+mixed-language unbroken identifiers used immediately removed local DOM probes;
+they did not send messages, modify Run data or start workers. Sampled message
+text, metadata, links and placeholders met 4.5:1 contrast. This is Chromium
+viewport evidence, not physical-device, Safari or full WCAG certification.
+The mechanical scan still reports inherited state accents and crayon easing;
+those existing identity/status treatments were not introduced by this pass.
+
+## Node launch controls
+
+The node inspector presents launch intent in dependency order: Agent/harness,
+model, supported effort, then the OpenCode interface. It does not change launch
+routing, verification floors, or the immutable plan of a dispatched Task.
+
+- OpenCode normally has one searchable model picker. “Enter a model manually”
+  opens the text input and focuses it; choosing a suggestion or the default
+  closes that input. The selected value remains represented whether or not
+  discovery lists it. Discovery is still advisory and local-workspace scoped.
+- Default/manual choices remain available while discovery is loading, empty or
+  unavailable. Incomplete OpenCode input has associated format feedback and
+  does not replace the saved selection. Opaque model/variant values are kept
+  intact. Clearing an OMP model still preserves unsupported saved effort until
+  the user explicitly clears the effort.
+- Launch fields use a local system reading font: 14px controls, 16px text/search
+  inputs, and 13px explanations. Locked fields remain disabled, but use readable
+  text and dashed frames instead of faded dropdowns. The lock reason stays
+  visible. Compatibility, discovery scope and model-route details are expandable;
+  the Mini permission reminder and blocking effort warning remain in the form.
+- The status/close row stays available while scrolling. Phones up to 620px and
+  short windows up to 900px wide and 600px high use the viewport for inspection,
+  with covered controls removed from keyboard navigation. Inspection takes
+  precedence over an already-open chat during resizing; ordinary desktop
+  inspection remains side-by-side.
+
+Verification covered real read-only nodes in both languages at 1440×1000,
+1024×900, 720×900, 720×500, 390×844 and 320×640: no horizontal overflow,
+viewport-safe panel bounds, and a visible close control after scrolling.
+Real phone Task-list and Chat entry/return paths restored their focus, and
+desktop-to-phone resizing retained a visible inspector. Editable states used
+browser-isolated responses with every configuration write intercepted; checks
+included keyboard search/selection, manual entry, invalid drafts, defaults,
+Agent changes, loading/empty/unavailable discovery, and OMP effort retention
+and explicit clearing. The live configuration was unchanged and no worker was
+launched. Sampled input, placeholder and helper text met 4.5:1 contrast. These
+are Chromium UI checks, not new agent/runtime certification or full WCAG proof.
+

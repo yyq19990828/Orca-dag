@@ -240,7 +240,9 @@ export default function App() {
   const [mobileTaskView, setMobileTaskView] = useState<"tasks" | "graph">("tasks");
   const [retryingRead, setRetryingRead] = useState(false);
   const stageReturnFocus = useRef<HTMLElement | null>(null);
+  const stageReturnToCommunication = useRef(false);
   const communicationRef = useRef<HTMLElement | null>(null);
+  const communicationReturnFocus = useRef<HTMLElement | null>(null);
   const communicationResize = useRef<{
     pointerId: number;
     startX: number;
@@ -311,6 +313,10 @@ export default function App() {
 
   function openCommunication() {
     if (!communicationOpen) {
+      const active = document.activeElement;
+      communicationReturnFocus.current = active instanceof HTMLElement &&
+        active !== document.body && !active.closest(".communication-center")
+        ? active : document.querySelector<HTMLElement>(".btn--activity");
       if (communicationWidth === null) setCommunicationWidth(clampCommunicationWidth(620));
       requestCanvasFit();
     }
@@ -320,6 +326,11 @@ export default function App() {
   function closeCommunication() {
     if (communicationOpen) requestCanvasFit();
     setCommunicationOpen(false);
+    stageReturnToCommunication.current = false;
+    const target = communicationReturnFocus.current;
+    window.requestAnimationFrame(() => {
+      if (target?.isConnected) target.focus();
+    });
   }
 
   function clampCommunicationWidth(width: number): number {
@@ -477,6 +488,7 @@ export default function App() {
   const pickRun = useCallback((id: string) => {
     setRunId(id);
     setSelectedId(null);
+    stageReturnToCommunication.current = false;
     setStageOpen(false);
     setOperationFocus(null);
     setActivityPending(0);
@@ -489,6 +501,10 @@ export default function App() {
 
   const closeStage = useCallback(() => {
     setStageOpen(false);
+    if (stageReturnToCommunication.current) {
+      stageReturnToCommunication.current = false;
+      setCommunicationOpen(true);
+    }
     window.requestAnimationFrame(() => {
       if (stageReturnFocus.current?.isConnected) stageReturnFocus.current.focus();
     });
@@ -503,6 +519,20 @@ export default function App() {
     stageReturnFocus.current = active instanceof HTMLElement && active !== document.body && !active.closest(".node-panel")
       ? active
       : document.querySelector<HTMLElement>(`.react-flow__node[data-id="${CSS.escape(id)}"]`);
+    // The CSS-owned phone/short-window reading view covers the canvas.
+    // Hand a stage link to its inspector, then restore this conversation and
+    // its exact focus target when the inspector closes. Desktop keeps both.
+    const fullCommunication = communicationRef.current !== null &&
+      window.getComputedStyle(communicationRef.current).position === "fixed";
+    stageReturnToCommunication.current = fullCommunication;
+    if (fullCommunication) {
+      if (!communicationRef.current!.contains(stageReturnFocus.current)) {
+        stageReturnFocus.current = communicationRef.current!.querySelector<HTMLElement>(
+          '[role="tab"][aria-selected="true"]',
+        );
+      }
+      setCommunicationOpen(false);
+    }
     setSelectedId(id);
     setStageOpen(true);
   }, [closeStage]);

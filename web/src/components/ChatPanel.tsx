@@ -870,7 +870,7 @@ export const ChatPanel = memo(function ChatPanel({
                   </span>
                   <span className="chat-thread__copy">
                     <span className="chat-thread__topline">
-                      <strong>{conversation.label}</strong>
+                      <strong title={conversation.label}>{conversation.label}</strong>
                       {isSystem && <span className="chat-thread__system-label">{t("chat.thread.system")}</span>}
                       {conversation.unread && (
                         <span
