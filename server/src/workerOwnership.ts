@@ -4,6 +4,8 @@ export interface WorkerCreatorEvidence {
   checkedAt: number;
   /** Undefined is unreadable/older protocol, not a root-worker assertion. */
   creatorId: string | null | undefined;
+  /** This read positively identified a settled, disposed historical Dispatch. */
+  historical?: boolean;
 }
 
 export interface WorkerOwnershipSnapshot {
@@ -49,14 +51,11 @@ export async function readWorkerOwnership(
   // an active creator. Only positively settled, already-decided history drops out.
   const relevant = rows.filter(row => row.runId === runId &&
     !(SETTLED_DISPATCH[row.dispatchStatus] === true && ["released", "retained"].includes(row.terminalState)));
-  const relevantIds = new Set(relevant.map(row => row.dispatchId));
-  for (const id of cache.keys()) if (!relevantIds.has(id)) cache.delete(id);
+  for (const evidence of cache.values()) evidence.historical = false;
 
-  // Reads are needed only for hierarchical workers with unresolved custody,
-  // not every historical Dispatch on every three-second coordinator tick.
+  // Inspect exact Dispatches, not Task parentage: an unparented Task can still
+  // have a creator, and an unreadable creator must remain under custody.
   for (const row of relevant) {
-    const task = taskById.get(row.taskId);
-    if (!task?.parent_id && !row.projection?.parent && !cache.has(row.dispatchId)) continue;
     let evidence = cache.get(row.dispatchId);
     if (!evidence || evidence.creatorId === undefined && Date.now() - evidence.checkedAt >= CREATOR_RECHECK_MS) {
       const exact = await detail(row.dispatchId);
@@ -70,6 +69,9 @@ export async function readWorkerOwnership(
       };
       cache.set(row.dispatchId, evidence);
     }
+    // Older runtimes omit creator metadata even for ordinary root workers.
+    // Retain the existing conservative hint for unreadable hierarchical rows.
+    if (evidence.creatorId === undefined && !taskById.get(row.taskId)?.parent_id && !row.projection?.parent) continue;
     if (evidence.creatorId === null) continue;
     let settled = false;
     if (evidence.creatorId) {
@@ -88,5 +90,28 @@ export async function readWorkerOwnership(
       result.heldDispatchIds.add(row.dispatchId);
     }
   }
+  // Follow only exact same-Run creator links through disposed history. These
+  // identities are lineage evidence, never active attempts or occupancy.
+  const visited = new Set<string>();
+  const pending = relevant.map(row => cache.get(row.dispatchId)?.creatorId).filter((id): id is string => !!id);
+  while (pending.length) {
+    const id = pending.pop()!;
+    if (visited.has(id)) continue;
+    visited.add(id);
+    const row = rowById.get(id);
+    if (row && (row.runId !== runId || SETTLED_DISPATCH[row.dispatchStatus] !== true ||
+        !["released", "retained"].includes(row.terminalState))) continue;
+    const exact = await detail(id);
+    if (exact?.dispatch?.id !== id || exact.dispatch.runId !== runId ||
+        (row && exact.dispatch.taskId !== row.taskId)) continue;
+    if (!row && (SETTLED_DISPATCH[exact.dispatch.status ?? ""] !== true ||
+        !["released", "retained"].includes(exact.fleet?.terminalState ?? ""))) continue;
+    const creatorId = exact.dispatch.creatorDispatchId ??
+      (exact.dispatch.creatorDispatchId === null || exact.dispatch.depth === 1 ? null : undefined);
+    cache.set(id, { checkedAt: Date.now(), creatorId, historical: true });
+    if (creatorId) pending.push(creatorId);
+  }
+  const keep = new Set([...relevant.map(row => row.dispatchId), ...visited]);
+  for (const id of cache.keys()) if (!keep.has(id)) cache.delete(id);
   return result;
 }

@@ -10,6 +10,7 @@ import { createSecurityPolicy, type SecurityPolicy } from "./security";
 import { coordinatorStatus as liveCoordinatorStatus } from "./coordinator";
 import { initOrcaRuntime, type OrcaReadiness } from "./orca";
 import { WORKSPACE_STATE_FILES } from "./workspaceState";
+import { ProviderSessionStore } from "./providerSessions";
 
 /**
  * Security/API coverage for the control plane (Phase 1 acceptance).
@@ -1021,6 +1022,81 @@ process.stdout.write(JSON.stringify(out));
     await rm(ws, { recursive: true, force: true });
   });
 
+  it("scopes restored follow-up launch evidence to the actual worker, not its parent or another Task", async () => {
+    const requestId = "request_launch_evidence";
+    const now = new Date().toISOString();
+    const store = new ProviderSessionStore(wsReal);
+    await store.recordGuidanceSend({
+      requestId, runId: "run_launch_evidence", requestedTaskId: "task_parent", requestedDispatchId: "ctx_parent",
+      from: "term_creator", state: "follow_up", creationProven: true,
+      receipt: {
+        kind: "follow_up", runId: "run_launch_evidence", taskId: "task_child", dispatchId: "ctx_child",
+        requestedTaskId: "task_parent", requestedDispatchId: "ctx_parent", followUpOf: "ctx_parent", requestId,
+      },
+      startEvidence: { status: "ready", launchMode: {
+        mode: "terminal", preferred: "structured", reason: "reused_terminal", detail: "Reused the existing chat.",
+      } },
+      createdAt: now, updatedAt: now, error: null,
+    });
+    writeScript({ workerShow: {
+      ctx_child: workerShowReceipt({ runId: "run_launch_evidence", taskId: "task_child", dispatchId: "ctx_child" }),
+      ctx_parent: workerShowReceipt({ runId: "run_launch_evidence", taskId: "task_parent", dispatchId: "ctx_parent" }),
+    } });
+    const child = await rpc("GET", "/api/workers/ctx_child?run=run_launch_evidence");
+    assert.equal(child.status, 200);
+    const childDetail = child.json.detail;
+    assert.ok(childDetail && typeof childDetail === "object" && "launchMode" in childDetail);
+    const mode = childDetail.launchMode;
+    assert.ok(mode && typeof mode === "object" && "mode" in mode && "preferred" in mode);
+    assert.equal(mode.mode, "terminal");
+    assert.equal(mode.preferred, "structured", "preserve native evidence, not the viewer's current defaults");
+    const parent = await rpc("GET", "/api/workers/ctx_parent?run=run_launch_evidence");
+    const parentDetail = parent.json.detail;
+    assert.ok(parentDetail && typeof parentDetail === "object" && "launchMode" in parentDetail);
+    assert.equal(parentDetail.launchMode, null);
+    writeScript({ workerShow: {
+      ctx_child: workerShowReceipt({ runId: "run_launch_evidence", taskId: "task_other", dispatchId: "ctx_child" }),
+    } });
+    const mismatch = await rpc("GET", "/api/workers/ctx_child?run=run_launch_evidence");
+    const mismatchedDetail = mismatch.json.detail;
+    assert.ok(mismatchedDetail && typeof mismatchedDetail === "object" && "launchMode" in mismatchedDetail);
+    assert.equal(mismatchedDetail.launchMode, null);
+    assert.equal((await rpc("GET", "/api/workers/ctx_child?run=run_foreign")).status, 404);
+  });
+
+  it("rejects unsafe legacy merge preview while supporting V3 without execution effects", async () => {
+    const plan = {
+      runId: "run_preview_merge",
+      defaultHarness: "claude",
+      worktreeLanes: { merge_lane: { placement: { kind: "existing", selector: "path:/ws/lane" } } },
+      laneByTask: { task_merge: "merge_lane", task_develop: "merge_lane" },
+    };
+    const tasks = [
+      { id: "task_source", status: "completed", deps: "[]", spec: "source" },
+      { id: "task_merge", status: "pending", deps: '["task_source"]', spec: "[orca-dag:merge-prep] [orca-dag:merge-inputs-v3]" },
+      { id: "task_develop", status: "blocked", deps: '["task_merge"]', spec: "develop" },
+    ];
+    writeScript({ tasksByRun: { run_preview_merge: tasks } });
+    clearLog();
+    const supported = await rpc("POST", "/api/launch-preview", plan, opsPolicy.token);
+    assert.equal(supported.status, 200);
+    assert.equal((supported.json.tasks as Record<string, unknown>[]).find((task) => task.taskId === "task_merge")?.route, "supervised");
+
+    tasks[1].spec = "[orca-dag:merge-prep]";
+    writeScript({ tasksByRun: { run_preview_merge: tasks } });
+    const rejected = await rpc("POST", "/api/launch-preview", plan, opsPolicy.token);
+    assert.equal(rejected.status, 400);
+    assert.equal(rejected.json.code, "invalid_stage_plan");
+    assert.match(String(rejected.json.error), /task_merge uses unsafe legacy merge input delivery; replan with \[orca-dag:merge-inputs-v3\]/);
+    const executionEffects = readLog().filter(({ argv }) =>
+      (argv[0] === "terminal" && argv[1] === "create") ||
+      (argv[0] === "worktree" && argv[1] === "create") ||
+      (argv[0] === "agent" && argv[1] === "launch") ||
+      (argv[0] === "orchestration" && ["worker-start", "dispatch"].includes(argv[1])),
+    );
+    assert.deepEqual(executionEffects, [], "preview must not create terminals, worktrees, or start workers");
+  });
+
   it("lists local worktrees and repos verbatim from Orca's own discovery", async () => {
     writeScript({
       worktrees: [worktreeRow(), worktreeRow({ id: "id:repoL::/ws/main", path: "/ws/main", isMainWorktree: true, displayName: "main", parentWorktreeId: null })],
@@ -1040,6 +1116,7 @@ process.stdout.write(JSON.stringify(out));
       ["repo list", "worktree list"],
     );
   });
+
 
   it("surfaces a failed discovery read instead of a fake-empty list", async () => {
     writeScript({ worktreeList: { rawError: "transport down", exitCode: 1 } });

@@ -4,11 +4,13 @@ import { mkdir, readFile, rename, writeFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
-import type { OrcaTask } from "./orca";
+import type { OrcaMessage, OrcaTask } from "./orca";
 import type { PlacementSpec } from "./config";
 
 const exec = promisify(execFile);
 export const MERGE_PREP_MARKER = "[orca-dag:merge-prep]";
+export const MERGE_INPUTS_V3_MARKER = "[orca-dag:merge-inputs-v3]";
+export const MERGE_INPUTS_SUBJECT = "orca-dag:merge-inputs";
 export const STAGE_GIT_DIR = "orca-dag/stage-git";
 const SHA = /^[0-9a-f]{40,64}$/;
 
@@ -93,6 +95,15 @@ export function stageWorkspaceKey(
   return `new:${taskId}`;
 }
 
+/** Reject legacy merge-input delivery without inspecting or mutating workspaces. */
+export function validateMergeInputProtocol(task: OrcaTask): string | null {
+  if (task.spec?.includes(MERGE_PREP_MARKER) && task.status !== "completed" &&
+      !task.spec.includes(MERGE_INPUTS_V3_MARKER)) {
+    return `${task.id} uses unsafe legacy merge input delivery; replan with ${MERGE_INPUTS_V3_MARKER}`;
+  }
+  return null;
+}
+
 /** A marked merge Task is the only Task allowed to consume another workspace's code. */
 export function validateStagePlan(
   tasks: OrcaTask[],
@@ -121,6 +132,8 @@ export function validateStagePlan(
       key(dep) !== key(task.id),
     );
     const prep = task.spec?.includes(MERGE_PREP_MARKER) ?? false;
+    const protocolIssue = validateMergeInputProtocol(task);
+    if (protocolIssue) issues.push(protocolIssue);
     if (cross.length && !prep) issues.push(`${task.id} consumes another workspace without ${MERGE_PREP_MARKER}`);
     if (prep && !cross.length) issues.push(`${task.id} is a merge-prep Task but has no cross-workspace dependency`);
     if (prep && !tasks.some((next) =>
@@ -141,6 +154,39 @@ export function validateStagePlan(
     }
   }
   return issues;
+}
+
+/** Marker recognition is not authority: the caller must prove exact ownership,
+ * Run/Task/Dispatch and a pending question before answering. */
+export function isMergeInputsQuestion(message: Pick<OrcaMessage, "type" | "subject" | "payload">): boolean {
+  if (message.type !== "question") return false;
+  if (message.subject === MERGE_INPUTS_SUBJECT || message.subject === MERGE_INPUTS_V3_MARKER) return true;
+  if (!message.payload) return false;
+  try {
+    const value: unknown = JSON.parse(message.payload);
+    return !!value && typeof value === "object" && !Array.isArray(value) &&
+      Object.values(value).some((item) => item === MERGE_INPUTS_V3_MARKER);
+  } catch { return false; }
+}
+
+/** Build only from captured immutable commits, after validating the target's
+ * worktree and Run ancestry; branch names are context, never merge targets. */
+export async function buildMergeInputs(store: StageGit, task: OrcaTask, path: string): Promise<string> {
+  if (!task.spec?.includes(MERGE_PREP_MARKER) || !task.spec.includes(MERGE_INPUTS_V3_MARKER)) {
+    throw new Error("Task does not declare the merge-inputs-v3 protocol");
+  }
+  await store.verifyRepository(path);
+  const artifacts = store.mergeInputs(task);
+  if (!artifacts.length) throw new Error("Merge Task has no captured dependencies");
+  for (const artifact of artifacts) {
+    if (!SHA.test(artifact.sha)) throw new Error(`Invalid captured commit for ${artifact.taskId}`);
+    await git(path, "cat-file", "-e", `${artifact.sha}^{commit}`);
+  }
+  return [
+    "Immutable merge inputs (merge these exact commits, not moving branch tips):",
+    ...artifacts.map((a) => `Task ${JSON.stringify(a.taskId)}; branch ${JSON.stringify(a.branch)}; commit ${a.sha}`),
+    "Preserve history, resolve conflicts, and commit the merge in the assigned worktree before reporting completion.",
+  ].join("\n");
 }
 
 /**

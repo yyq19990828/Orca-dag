@@ -80,7 +80,7 @@ Orca Task 没有 harness、模型、放置位置或画布布局字段。viewer �
 | 默认 harness | `claude` | Stage 没有单独覆盖时使用。内置选项为 `claude`、`codex`、`opencode`、`omp`、`antigravity`，须遵守各自版本/放置限制。未经验证的 harness（`gemini`、`grok`、`cursor`、`droid`、`kimi`）不再提供内置预设；若节点保存了这些未验证 harness，启动与重试均被前置拦截并以 `unverified_harness` 明确拒绝（绝不进行静默替换或自动迁移），历史记录保持只读可查。 |
 | Stage harness | 继承默认值 | 选择启动适配器（`claude`、`codex`、`opencode`、`omp`、`antigravity`）；自定义命令属于实验性逃生通道且不构成已验证支持承诺，需要显式设置 `ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1`（仅走本地兼容路径，不支持隔离放置；即使开启该开关，5 个未验证 bare ID 仍被拒绝）。 |
 | Stage 模型 | agent 默认值 | OpenCode 提供来自本地工作区建议性发现的下拉候选项，同时支持手动输入合法的 `provider/model[#variant]`；Claude 和 Codex 可填写模型名。OMP/Antigravity 接受自由文本形式的完整原生 selector，不拆 provider 或映射后缀；留空省略 `--model`，使用已配置默认值。已保存但未在列表中的模型予以保留；开始执行后锁定。 |
-| Stage effort | 不设置 | Claude、Codex 的界面选项是 `low`、`medium`、`high`；同一个 Stage 必须已设置模型，远端还须通告相应能力。OMP/Antigravity 拒绝所有非空 effort，有无模型均相同；已保存值保持可见，必须明确清除。 |
+| Stage effort | 不设置 | Claude、Codex 的界面选项是 `low`、`medium`、`high`；同一个 Stage 必须已设置模型，远端还须通告相应能力。OpenCode 仅在 CLI 兼容路由（`opencode run --auto -m`）上将独立 effort 映射进精确的 `#variant` 选择器，存在冲突时在启动前直接拒绝；原生 `opencode` 不支持原生 effort。OMP/Antigravity 拒绝所有非空 effort，有无模型均相同；已保存值保持可见，必须明确清除。 |
 | Max parallel | `4`，整数 `1`–`16` | 限制同时启动的 worker 数；DAG 依赖和 lane 可能使实际并行数更低。 |
 | Stage 环境/放置 | 本地 / Current | 已保存的远端环境需要精确 Existing 工作区或显式命名的新顶层工作树。见[放置参数](worktree-isolation_zh.md#创建字段及限制)。 |
 | 工作区 lane | 无 | 让一串依赖有序的 Task 复用一个非 Current 本地工作区。 |
@@ -119,7 +119,9 @@ viewer 创建与工作区对应的 Orca 终端，并绑定为 Run 的 coordinato
 
 ### 消息、会话与审计证据
 
-Chat 可向一个经 Orca 证实仍活跃的 `dispatch:<id>` 发送指导。群发编辑器只提供 `@all` 或新发现的工作树受众，先预览接收者，再由此 Run 的活跃 viewer coordinator 确认发送。`worker_done` 和 `heartbeat` 等生命周期消息不能群发；Orca 对群发受众拒绝这些消息，viewer 也会直接以 `forbidden_group_type`（HTTP 400）拒绝。发送成功只表示 Orca 已持久化入队，不表示 agent 已阅读或接受。
+Chat 可向一个经 Orca 证实仍活跃的 `dispatch:<id>` 发送指导。检查与落定不是原子操作：Orca 可能返回后续 Task/Dispatch，而不是向旧尝试入队。检查实际回执，结果未知时不要用新身份重复发送。群发编辑器只提供 `@all` 或新发现的工作树受众，先预览接收者，再由此 Run 的活跃 viewer coordinator 确认发送。`worker_done` 和 `heartbeat` 等生命周期消息不能群发；Orca 对群发受众拒绝这些消息，viewer 也会直接以 `forbidden_group_type`（HTTP 400）拒绝。投递不表示 agent 已阅读或接受。
+
+指导消息接口返回带类型的 `TaskMessageReceipt`（`ok: true, kind, runId, taskId, dispatchId, requestedTaskId, requestedDispatchId, followUpOf, requestId`），显式区分请求的 ID 与实际返回的 ID，并明确指导是向原 Dispatch 入队还是创建/路由了后续工作（见 [HTTP API 指导生命周期](../reference/http-api_zh.md#指导消息投递恢复与后续任务生命周期)）。同一目标的先前指导若未确认，只读恢复会进行调和；调和成功时抛出 `guidance_reconciled`，提示先前操作已完成，须重新提交新内容。未决指导占用并发配额并阻止盲目重发。
 
 Recovery 能在身份唯一时绑定 Claude、Codex 或 OpenCode 的精确提供方会话，也可由操作者手动提供准确 ID。提供方探测可能返回 `active`、`idle`、`exited`、`unknown` 或 `unavailable`；它只是 Orca Dispatch 状态旁边的一项观察，不能代替落定。未知或断连的尝试继续占用并行槽位。Request audit 会在 CLI 调用前记录 viewer 修改请求的 ID，再通过 `request-show` 区分 `completed`、`pending`、`absent` 和 `unknown`，不会重放操作。
 
@@ -188,7 +190,7 @@ worker 保持展开时，fleet 轮询仍会更新 ownership。若 fleet 与详�
 
 使用 Workspace lanes 的 **Changed files / Diff** 或文件审核操作，在 Orca 中打开精确的本地工作区。只有目标工作区已经包含预期代码，才解决集成门。lane 已落定，且改动和 worker 归属都已处理后，才能在明确确认下通过 `orca worktree rm` 移除工作树。
 
-5 个状态文件都在 `.orca-dag/` 内：`config.json` 保存偏好，`activity.jsonl` 保存有界的解释性活动记录，`requests.jsonl` 保存可审计的修改请求 ID，`sessions.json` 保存精确的提供方会话绑定，`launches.jsonl` 保存历史派工身份。它们都不能代替 Orca 权威的 Run/Task/Dispatch 记录。升级前请停止旧 viewer：启动时将根目录旧 `.orca-dag.*` 文件迁入，绝不覆盖目标，并打印结果。发生冲突时保留两份文件、使用新位置，需人工核对。无法写入迁移时，旧普通文件仍可读取，新写入绝不回退到根目录；不会顺着符号链接读写目录或文件。
+5 个状态文件都在 `.orca-dag/` 内：`config.json` 保存偏好，`activity.jsonl` 保存有界的解释性活动记录，`requests.jsonl` 保存可审计的修改请求 ID，`sessions.json` 保存精确的提供方会话绑定以及关键恢复账本（`mailboxChecks` 与 `guidanceSends`），`launches.jsonl` 保存历史派工身份。它们都不能代替 Orca 权威的 Run/Task/Dispatch 记录。升级前请停止旧 viewer：启动时将根目录旧 `.orca-dag.*` 文件迁入，绝不覆盖目标，并打印结果。发生冲突时保留两份文件、使用新位置，需人工核对。无法写入迁移时，旧普通文件仍可读取，新写入绝不回退到根目录；不会顺着符号链接读写目录或文件。
 
 Run health 还包含可选的 `removedWork` 移除工作摘要（`coverage` 为 `complete` 或 `partial`、记录数量及可空的 `lastRemovedAt`）。旧版本运行时或未提供摘要时保持 `null`（不可用）而非补零。历史 `activeWorkersAtRemoval` 记录移除瞬间可能活跃的 worker 数，并非当前存活进程的探测结果。详细记录支持通过 `GET /api/runs/:runId/removed-work?cursor=` 按需游标分页加载（每页上限 200 条），未知类型标记为 `unreadable` 而不丢弃。查看移除历史绝不会重置编排状态；viewer 明确不提供任何 reset 按钮。
 
@@ -200,7 +202,7 @@ Run health 还包含可选的 `removedWork` 移除工作摘要（`coverage` 为 
 
 显式界面当前要求本机 Linux 当前/已有工作区、无 lane 或通用终端复用，运行中的 Orca ≥ 1.4.222，以及工作区内的 OpenCode ≥ 2.1.2。不支持的放置或未知版本在 worker preparation 前拒绝，不自动换模式。官方工作区默认模型接口解析配置默认值，再通过精确新 session 回读验证；显式 variant 仍严格校验。Mini 使用不带 `--auto` 的 `opencode mini --session`，遵守当前权限并可能等待确认。
 
-两种界面都在 `sessions.json` 保存精确 API/session/terminal 身份；viewer 的界面记录不是 Orca effective launch 回显。接受 Task 结算且确认 provider 退出后才允许关闭自建终端。后续用户输入或来源不明的消息保留终端，不能仅凭熟悉的 nudge 文案豁免。Stop 先中断精确 provider execution，再沿用 external `worker-abandon` 记账。当前版本能兼容旧 journal，但旧二进制可能拒绝新字段；软件降级前应结算新 preparation 并备份历史，通常只需把未来启动改回自动来回退本功能。
+两种界面都在 `sessions.json` 保存精确 API/session/terminal 身份；viewer 的界面记录不是 Orca effective launch 回显。接受 Task 结算且确认 provider 退出后才允许关闭自建终端。后续用户输入或来源不明的消息保留终端，不能仅凭熟悉的 nudge 文案豁免。Stop 先中断精确 provider execution，再沿用 external `worker-abandon` 记账。`sessions.json` 中的新账本字段（`mailboxChecks`、`guidanceSends`）作为恢复权威依据而非普通滚动审计日志。不支持新字段的旧版读取器会直接报错（`session binding store contains unknown fields`）：关键恢复账本无法安全热降级至旧版读取器；降级前须落定新 preparation、排空待处理收件箱并备份历史；将未来启动改回自动是正常的功能回退方式。
 
 **2026-11-02**，**Orca 1.4.245 + OpenCode 2.2.0** 在工作区默认界面为 **Mini**、模型固定 **`openai/gpt-6.1-sol#xhigh`** 时，通过精确启动身份门。当前工作区场景排他创建一个文件、独立复算 `2+3+5+7=17`、获得接受的 `worker_done`，并在无清理债务时关闭自建 pane（`run_0e5b949ffb1b`）。冷启动 viewer 在 Run 请求省略两个前端字段时仍继承保存的 Mini，完成另一份排他文件、求和 `24` 后关闭 pane（`run_dee4d21b8c0c`）。已有工作区场景经故意崩溃的 viewer 重启后恢复同一 Dispatch/session，再停止精确活动执行和前台工具子进程，未写入完成文件（`run_e86a2745afe1`）。Orca 取消使用 `worker-abandon` 记账；fencing 后 release 返回 `identity_unproven`，pane 保留供检查。这只验证 Mini，不是完整 TUI 或多账户认证，也没有解释或抹掉下文 1.4.243 的历史启动拒绝。这些检查没有打开 Orca 桌面或原生 Chat。
 
@@ -246,6 +248,9 @@ fleet 证据路径通过终端/PTY 身份关联状态，而 `structworker_*` Cha
 
 **安全处理：**保留 fleet 原始判断，将精确 worker/session 观测与活动、获接受的 Task 结算分别看待。仅凭 fleet 状态缺失，绝不自动重试、替代启动、取消或清理；仅凭 `live` 也不能宣告 Task 成功。viewer 仍遵循 Orca 的 Chat/Terminal 偏好，不强制切换 Terminal，也不把 unknown 改写为 live。须在包含上游修复的发行版上重新验证，才能宣称 Native Chat 的 fleet 状态完整可观测。
 
+**Opaque 模型选择器仍取决于 agent 与界面。** 在 1.4.247 上，OMP Native Chat 拒绝了 CLI 风格的 `openai-codex/gpt-6.1-terra:xhigh`，原生诊断为 `providerRejected: Unknown ACP model`。viewer 保留失败 Dispatch，没有改用其他界面或 launcher 重试。独立的配置默认模型 Run 验证了原生路径，不是该失败尝试的降级。应使用执行宿主 ACP 目录接受的标识符，或省略覆盖以采用 Orca 配置默认值。viewer 不删除后缀、不翻译 opaque ID，也不新增 OMP 原生 effort 支持。
+
+
 ### Orca 1.4.243 发现、心跳与已移除工作边界
 
 通过 `GET /api/models/:harness` 获取的建议性模型发现运行在本地解析的 viewer 工作区（`scope: "local-workspace"`），而非所选执行主机或远端环境。它明确区分空列表（`status: "available", models: []`）与不可用/失败查询（`status: "unavailable"`，返回脱敏的英文诊断而不泄露 stderr）。Node 面板提供建议下拉列表与 `provider/model[#variant]` 手动输入，未完成的草稿不持久化到 config，已保存的非列表模型予以保留；执行开始后与启动参数一同锁定。
@@ -290,7 +295,7 @@ helper 仍归活动创建者管理，以精确 `worker-show` Dispatch lineage �
 [Orca 1.4.229](https://github.com/stablyai/orca/releases/tag/v1.4.229) 扩大了原生聊天 worker 的范围，但不能据此认定 viewer 单独使用的 `opencode2` 路径已支持原生模型选择。现有 OpenCode 模型适配器，以及 Codex 创建工作区后验证基准再启动的顺序保持不变。
 
 - **原生拒绝不代表可以降级。** 不支持的 model/effort、无效参数或已知 agent 的 launcher 被禁用时，保留原尝试及回执并停车，绝不启动第二个 legacy worker。显式启用的自定义命令会在任何原生启动之前选择本地 legacy 路径。
-- **所有已处理 FIFO 批次都按归属约束确认**，包括只有被拒绝或重复报告的批次。ack 返回的下一批消息也会在 Run 完成前处理；未回答问题和未落定的终端归属仍阻止确认。
+- **旧版 FIFO 批次须按归属约束确认**，包括只有被拒绝或重复报告的批次；ACK 返回的下一批也须处理。V3 消费式 check 则在读取时确认，仍须保留待处理工作并使用同一请求恢复。传输确认并不允许丢弃未回答的问题或未落定的归属。
 - **未决 gate 会阻止完成**，包括没有关联阻塞 Task 的 Run 级 gate。普通审批 gate 仅接受精确的已解决选项 `approve` 或 `approved`；Task 必须满足所有 gate 和同一 Run 内的依赖后才可运行。`integrated` 仍是独立且精确的集成决定。Orca 可能在仅通过一个审批后就报告 `ready`；其余未决 gate，或未完成、失败、阻塞、缺失的依赖，仍会将 Task 排除在就绪波外，并显示在等待原因中。
 - **Orca 可以纠正暂定启动失败。** Orca 接受精确同一 Run/Task/Dispatch 的迟到成功后，viewer 更新尝试结果，同时保留原启动回执和已执行的 release/retain 决策。旧报告、被拒绝报告或其他 Dispatch 都不能清除失败。
 

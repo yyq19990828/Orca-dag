@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
 import { prepareWorkspaceStateFile, workspaceStateReadPath, WORKSPACE_STATE_FILES } from "./workspaceState";
 import { validateOpenCodeLaunch, type OpenCodeLaunch } from "./openCode";
+import type { OrcaDelivery, TaskMessageReceipt, NativeLaunchMode } from "./orca";
 
 const pExecFile = promisify(execFile);
 export const SESSIONS_FILE = WORKSPACE_STATE_FILES.sessions;
@@ -69,10 +70,45 @@ export interface ProbeRecoverySessionInput {
   host: string;
 }
 
+export interface MailboxCheckCheckpoint {
+  requestId: string;
+  runId: string;
+  from: string;
+  ack: string | null;
+  /** A no-wait, unfiltered ordinary check used to drain V3's remaining FIFO. */
+  drain?: boolean;
+  state: "prepared" | "received" | "pending_input" | "completed" | "unknown";
+  delivery: OrcaDelivery | null;
+  processedMessageIds: string[];
+  pendingQuestionIds: string[];
+  replyRequests?: Record<string, { requestId: string; from: string; bodyHash: string; state: "prepared" | "unknown" | "completed" }>;
+  createdAt: string;
+  updatedAt: string;
+  error: string | null;
+}
+
+export interface GuidanceSendCheckpoint {
+  requestId: string;
+  runId: string;
+  requestedTaskId: string;
+  requestedDispatchId: string;
+  from: string;
+  state: "prepared" | "unknown" | "enqueued" | "follow_up" | "refused";
+  receipt: TaskMessageReceipt | null;
+  creationProven: boolean;
+  /** Only bounded native readiness/surface evidence; no send body or effects. */
+  startEvidence?: { status: string | null; launchMode?: NativeLaunchMode | null };
+  createdAt: string;
+  updatedAt: string;
+  error: string | null;
+}
+
 interface SessionStoreFile {
   version: typeof STORE_VERSION;
   bindings: ProviderSessionBinding[];
   openCodeLaunches?: OpenCodeLaunch[];
+  mailboxChecks?: MailboxCheckCheckpoint[];
+  guidanceSends?: GuidanceSendCheckpoint[];
 }
 
 type SessionKey = Pick<ProviderSessionBinding, "runId" | "taskId" | "dispatchId">;
@@ -168,6 +204,81 @@ function isIsoDate(value: unknown): value is string {
   if (typeof value !== "string") return false;
   const timestamp = Date.parse(value);
   return !Number.isNaN(timestamp) && new Date(timestamp).toISOString() === value;
+}
+
+function recordValue(value: unknown, name: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Invalid ${name}`);
+  return value as Record<string, unknown>;
+}
+
+function validateMailboxCheck(value: unknown): MailboxCheckCheckpoint {
+  const row = recordValue(value, "mailbox checkpoint");
+  assertId(row.requestId, "requestId");
+  assertId(row.runId, "runId");
+  assertId(row.from, "from");
+  if (row.ack !== null) assertId(row.ack, "ack");
+  if (row.drain !== undefined && typeof row.drain !== "boolean") throw new Error("Invalid mailbox drain flag");
+  if (!["prepared", "received", "pending_input", "completed", "unknown"].includes(String(row.state))) throw new Error("Invalid mailbox checkpoint state");
+  if (!isIsoDate(row.createdAt) || !isIsoDate(row.updatedAt)) throw new Error("Invalid mailbox checkpoint timestamps");
+  if (row.error !== null && typeof row.error !== "string") throw new Error("Invalid mailbox checkpoint error");
+  for (const key of ["processedMessageIds", "pendingQuestionIds"] as const) {
+    if (!Array.isArray(row[key])) throw new Error(`Invalid mailbox ${key}`);
+    for (const id of row[key] as unknown[]) assertId(id, key);
+    if (new Set(row[key] as string[]).size !== (row[key] as string[]).length) throw new Error(`Duplicate mailbox ${key}`);
+  }
+  if (row.replyRequests !== undefined) {
+    const replies = recordValue(row.replyRequests, "mailbox reply requests");
+    for (const [id, raw] of Object.entries(replies)) {
+      assertId(id, "reply message id");
+      const reply = recordValue(raw, "mailbox reply request");
+      assertId(reply.requestId, "reply requestId");
+      assertId(reply.from, "reply from");
+      if (typeof reply.bodyHash !== "string" || !/^[a-f0-9]{64}$/.test(reply.bodyHash) ||
+          !["prepared", "unknown", "completed"].includes(String(reply.state))) throw new Error("Invalid mailbox reply request");
+    }
+  }
+  if (row.delivery !== null) {
+    const delivery = recordValue(row.delivery, "mailbox delivery");
+    if (delivery.runId !== row.runId || !Array.isArray(delivery.messages)) throw new Error("Mailbox delivery Run or messages invalid");
+    if (delivery.deliveryId !== null) assertId(delivery.deliveryId, "deliveryId");
+    for (const raw of delivery.messages) {
+      const message = recordValue(raw, "mailbox message");
+      assertId(message.id, "message id");
+      if (typeof message.run_id !== "string" || typeof message.type !== "string" || typeof message.subject !== "string" ||
+          typeof message.body !== "string" || typeof message.from_handle !== "string") throw new Error("Invalid mailbox message identity or body");
+    }
+  }
+  if ((row.state === "received" || row.state === "pending_input") && row.delivery === null) throw new Error("Received mailbox checkpoint needs its delivery");
+  return row as unknown as MailboxCheckCheckpoint;
+}
+
+function validateGuidanceSend(value: unknown): GuidanceSendCheckpoint {
+  const row = recordValue(value, "guidance checkpoint");
+  for (const key of ["requestId", "runId", "requestedTaskId", "requestedDispatchId", "from"] as const) assertId(row[key], key);
+  if (!["prepared", "unknown", "enqueued", "follow_up", "refused"].includes(String(row.state))) throw new Error("Invalid guidance checkpoint state");
+  if (!isIsoDate(row.createdAt) || !isIsoDate(row.updatedAt) || typeof row.creationProven !== "boolean" ||
+      (row.error !== null && typeof row.error !== "string")) throw new Error("Invalid guidance checkpoint metadata");
+  if (row.receipt !== null) {
+    const receipt = recordValue(row.receipt, "guidance receipt");
+    if (receipt.runId !== row.runId || receipt.requestedTaskId !== row.requestedTaskId || receipt.requestedDispatchId !== row.requestedDispatchId ||
+        (receipt.kind !== "enqueued" && receipt.kind !== "follow_up")) throw new Error("Guidance receipt lineage mismatch");
+    assertId(receipt.taskId, "receipt taskId");
+    assertId(receipt.dispatchId, "receipt dispatchId");
+    if (receipt.followUpOf !== null) assertId(receipt.followUpOf, "followUpOf");
+    if (receipt.requestId !== null && receipt.requestId !== row.requestId) throw new Error("Guidance request identity mismatch");
+  }
+  if (row.startEvidence !== undefined) {
+    const evidence = recordValue(row.startEvidence, "guidance start evidence");
+    if (evidence.status !== null && typeof evidence.status !== "string") throw new Error("Invalid guidance start state");
+    if (evidence.launchMode !== undefined && evidence.launchMode !== null) {
+      const mode = recordValue(evidence.launchMode, "guidance launch mode");
+      if (typeof mode.mode !== "string" || !["preferred", "reason", "detail"].every(key =>
+        mode[key] === null || typeof mode[key] === "string")) throw new Error("Invalid guidance launch mode");
+    }
+  }
+  if ((row.state === "enqueued" || row.state === "follow_up") && (!row.receipt || (row.receipt as Record<string, unknown>).kind !== row.state)) throw new Error("Guidance outcome requires its matching receipt");
+  if (row.creationProven && (!row.receipt || (row.receipt as Record<string, unknown>).kind !== "follow_up")) throw new Error("Guidance creation proof requires follow-up receipt");
+  return row as unknown as GuidanceSendCheckpoint;
 }
 
 function validateInput(value: ProviderSessionBindingInput): ProviderSessionBindingInput {
@@ -285,7 +396,7 @@ async function readStore(path: string): Promise<SessionStoreFile> {
   ) {
     throw new Error("session binding store has an unsupported format");
   }
-  if (Object.keys(parsed as Record<string, unknown>).some((key) => !["version", "bindings", "openCodeLaunches"].includes(key))) {
+  if (Object.keys(parsed as Record<string, unknown>).some((key) => !["version", "bindings", "openCodeLaunches", "mailboxChecks", "guidanceSends"].includes(key))) {
     throw new Error("session binding store contains unknown fields");
   }
   const bindings = ((parsed as Record<string, unknown>).bindings as unknown[]).map(validateBinding);
@@ -304,11 +415,35 @@ async function readStore(path: string): Promise<SessionStoreFile> {
   if (openCodeLaunches && new Set(openCodeLaunches.map(row => row.requestId)).size !== openCodeLaunches.length) {
     throw new Error("Duplicate OpenCode launch request identities");
   }
-  return { version: STORE_VERSION, bindings, ...(openCodeLaunches ? { openCodeLaunches } : {}) };
+  const inventories = parsed as Record<string, unknown>;
+  if (inventories.mailboxChecks !== undefined && !Array.isArray(inventories.mailboxChecks)) throw new Error("Invalid mailbox checkpoint inventory");
+  if (inventories.guidanceSends !== undefined && !Array.isArray(inventories.guidanceSends)) throw new Error("Invalid guidance checkpoint inventory");
+  const mailboxChecks = (inventories.mailboxChecks as unknown[] | undefined)?.map(validateMailboxCheck);
+  const guidanceSends = (inventories.guidanceSends as unknown[] | undefined)?.map(validateGuidanceSend);
+  for (const rows of [mailboxChecks, guidanceSends]) {
+    if (rows && (rows.length > MAX_BINDINGS || new Set(rows.map(row => row.requestId)).size !== rows.length)) throw new Error("Invalid duplicate or oversized critical checkpoint inventory");
+  }
+  return { version: STORE_VERSION, bindings, ...(openCodeLaunches ? { openCodeLaunches } : {}),
+    ...(mailboxChecks ? { mailboxChecks } : {}), ...(guidanceSends ? { guidanceSends } : {}) };
 }
 
 async function writeStore(path: string, file: SessionStoreFile): Promise<void> {
-  const encoded = `${JSON.stringify(file, null, 2)}\n`;
+  // Only settled history can be discarded. Unresolved checks and every
+  // follow-up receipt are recovery authority, not rotating audit history.
+  const completed = (file.mailboxChecks ?? []).filter(row => row.state === "completed").slice(-100);
+  const settledGuidance = (file.guidanceSends ?? []).filter(row => row.state === "enqueued" || row.state === "refused").slice(-100);
+  const keptChecks = new Set(completed.map(row => row.requestId));
+  const keptGuidance = new Set(settledGuidance.map(row => row.requestId));
+  const compact: SessionStoreFile = { ...file,
+    ...(file.mailboxChecks ? { mailboxChecks: file.mailboxChecks.filter(row => row.state !== "completed" || keptChecks.has(row.requestId)) } : {}),
+    ...(file.guidanceSends ? { guidanceSends: file.guidanceSends.filter(row => !["enqueued", "refused"].includes(row.state) || keptGuidance.has(row.requestId)) } : {}) };
+  let encoded = `${JSON.stringify(compact, null, 2)}\n`;
+  // If payloads fill the store, discard only completed history before failing.
+  if (Buffer.byteLength(encoded) > MAX_STORE_BYTES) {
+    if (compact.mailboxChecks) compact.mailboxChecks = compact.mailboxChecks.filter(row => row.state !== "completed");
+    if (compact.guidanceSends) compact.guidanceSends = compact.guidanceSends.filter(row => !["enqueued", "refused"].includes(row.state));
+    encoded = `${JSON.stringify(compact, null, 2)}\n`;
+  }
   if (Buffer.byteLength(encoded) > MAX_STORE_BYTES) throw new Error("session binding store is full");
   try {
     const info = await lstat(path);
@@ -432,6 +567,71 @@ export class ProviderSessionStore {
         }
       }
       await writeStore(this.path, { ...file, openCodeLaunches: [...launches.filter(v => v.requestId !== row.requestId), row] });
+    });
+  }
+
+  async listMailboxChecks(runId?: string): Promise<MailboxCheckCheckpoint[]> {
+    if (runId !== undefined) assertId(runId, "runId");
+    const file = await readStore(workspaceStateReadPath(this.workspaceDir, SESSIONS_FILE));
+    return (file.mailboxChecks ?? []).filter(row => runId === undefined || row.runId === runId);
+  }
+
+  async recordMailboxCheck(input: MailboxCheckCheckpoint): Promise<void> {
+    const row = validateMailboxCheck(input);
+    await withFileLock(this.path, async () => {
+      prepareWorkspaceStateFile(this.workspaceDir, SESSIONS_FILE, true);
+      const file = await readStore(this.path);
+      const rows = file.mailboxChecks ?? [];
+      const existing = rows.find(item => item.requestId === row.requestId);
+      if (existing) {
+        if (existing.runId !== row.runId || existing.from !== row.from || existing.ack !== row.ack || existing.drain !== row.drain || existing.createdAt !== row.createdAt ||
+            (existing.state === "completed" && row.state !== "completed") ||
+            existing.processedMessageIds.some(id => !row.processedMessageIds.includes(id)) ||
+            (existing.delivery && JSON.stringify(existing.delivery) !== JSON.stringify(row.delivery))) {
+          throw new Error("Mailbox checkpoint identity or processed evidence cannot change");
+        }
+        if (existing.pendingQuestionIds.some(id =>
+          !row.pendingQuestionIds.includes(id) && row.replyRequests?.[id]?.state !== "completed")) {
+          throw new Error("Pending question cannot be cleared without a completed reply");
+        }
+        for (const [id, old] of Object.entries(existing.replyRequests ?? {})) {
+          const next = row.replyRequests?.[id];
+          if (!next || next.requestId !== old.requestId || next.from !== old.from || next.bodyHash !== old.bodyHash ||
+              (old.state === "completed" && next.state !== "completed")) throw new Error("Mailbox reply identity cannot change");
+        }
+      } else if (rows.length >= MAX_BINDINGS) throw new Error("Mailbox checkpoint inventory is full");
+      await writeStore(this.path, { ...file, mailboxChecks: [...rows.filter(item => item.requestId !== row.requestId), row] });
+    });
+  }
+
+  async listGuidanceSends(runId?: string): Promise<GuidanceSendCheckpoint[]> {
+    if (runId !== undefined) assertId(runId, "runId");
+    const file = await readStore(workspaceStateReadPath(this.workspaceDir, SESSIONS_FILE));
+    return (file.guidanceSends ?? []).filter(row => runId === undefined || row.runId === runId);
+  }
+
+  async recordGuidanceSend(input: GuidanceSendCheckpoint): Promise<void> {
+    const row = validateGuidanceSend(input);
+    await withFileLock(this.path, async () => {
+      prepareWorkspaceStateFile(this.workspaceDir, SESSIONS_FILE, true);
+      const file = await readStore(this.path);
+      const rows = file.guidanceSends ?? [];
+      const existing = rows.find(item => item.requestId === row.requestId);
+      if (existing) {
+        if (existing.runId !== row.runId || existing.from !== row.from || existing.requestedTaskId !== row.requestedTaskId ||
+            existing.requestedDispatchId !== row.requestedDispatchId || existing.createdAt !== row.createdAt ||
+            (existing.startEvidence && JSON.stringify(existing.startEvidence) !== JSON.stringify(row.startEvidence)) ||
+            (existing.creationProven && !row.creationProven) ||
+            (existing.receipt && (!row.receipt || existing.receipt.kind !== row.receipt.kind ||
+              existing.receipt.runId !== row.receipt.runId || existing.receipt.taskId !== row.receipt.taskId ||
+              existing.receipt.dispatchId !== row.receipt.dispatchId ||
+              (existing.receipt.followUpOf !== null && existing.receipt.followUpOf !== row.receipt.followUpOf) ||
+              (existing.receipt.requestId !== null && existing.receipt.requestId !== row.receipt.requestId))) ||
+            (["enqueued", "follow_up", "refused"].includes(existing.state) && existing.state !== row.state)) {
+          throw new Error("Guidance checkpoint identity or accepted outcome cannot change");
+        }
+      } else if (rows.length >= MAX_BINDINGS) throw new Error("Guidance checkpoint inventory is full");
+      await writeStore(this.path, { ...file, guidanceSends: [...rows.filter(item => item.requestId !== row.requestId), row] });
     });
   }
 

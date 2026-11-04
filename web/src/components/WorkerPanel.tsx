@@ -21,6 +21,7 @@ import type {
 } from "../types";
 import { terminalStateLabel } from "../format";
 import { workerWorkspaceLabel } from "../workerWorkspace";
+import { NativeLaunchEvidence } from "./NativeLaunchEvidence";
 
 /**
  * Durable worker operations (Phase 2): the panel renders the Run-scoped,
@@ -636,6 +637,9 @@ export const WorkerPanel = memo(function WorkerPanel({
                   {/* --- worker-show evidence (fetched on expand) --- */}
                   {detailLoading && <div className="inbox__body">{t("worker.loadingEvidence")}</div>}
                   {detailErr && <div className="exec__err inbox__err">⚠️ {detailErr}</div>}
+                  {(scopedDetail?.launchMode ?? attempt?.launchMode ?? attempt?.startReceipt?.launchMode) && (
+                    <NativeLaunchEvidence launchMode={(scopedDetail?.launchMode ?? attempt?.launchMode ?? attempt?.startReceipt?.launchMode)!} />
+                  )}
                   {detail && (
                     <>
                       {detail.observation && (
@@ -770,6 +774,7 @@ export const WorkerPanel = memo(function WorkerPanel({
                               terminalResource: detail.terminalResource,
                               requestedLaunch: detail.requestedLaunch,
                               effectiveLaunch: detail.launch,
+                              launchMode: detail.launchMode ?? attempt?.launchMode ?? attempt?.startReceipt?.launchMode,
                               stopOperation: detail.stopOperation,
                               dispatch: detail.dispatch,
                               worker: detail.worker,
@@ -786,7 +791,7 @@ export const WorkerPanel = memo(function WorkerPanel({
                   )}
 
                   {/* --- bounded output (worker-read), explicitly sourced --- */}
-                  {output?.dispatchId === row.dispatchId && output.lines.length > 0 && (
+                  {output?.dispatchId === row.dispatchId && (
                     <>
                       {(() => {
                         // Search runs ONLY over rows already loaded on this
@@ -816,6 +821,17 @@ export const WorkerPanel = memo(function WorkerPanel({
                                 </span>
                               )}
                             </div>
+                            <div className="inbox__body" data-testid="output-provenance">
+                              {t("worker.outputArchive")} <b>{output.archived === true
+                                ? t("worker.outputArchived")
+                                : output.archived === false ? t("worker.outputLive") : t("worker.unknown")}</b>
+                              {output.sourceExact != null && <>{" · "}{output.sourceExact
+                                ? t("worker.outputExact") : t("worker.outputNotExact")}</>}
+                              {output.provider != null && <div>{t("worker.outputProvider")} <code>{output.provider}</code></div>}
+                              {output.sourceIdentity != null && <div>{t("worker.outputIdentity")} <code>{output.sourceIdentity}</code></div>}
+                              {output.fallbackReason != null && <div>{t("worker.outputFallback")} {output.fallbackReason}</div>}
+                              <div className="inbox__meta">{t("worker.outputEvidenceNote")}</div>
+                            </div>
                             <input
                               className="workers__search"
                               type="search"
@@ -825,7 +841,7 @@ export const WorkerPanel = memo(function WorkerPanel({
                               aria-label={t("worker.filterOutputAria")}
                             />
                             <pre className="workers__output" data-testid="output-pre">
-                              {visible.length > 0 ? visible.join("\n") : t("worker.noMatch")}
+                              {visible.length > 0 ? visible.join("\n") : t(q ? "worker.noMatch" : "worker.outputEmpty")}
                               {!q && !output.contentComplete && "\n…"}
                               {!q && output.clipped ? `\n${t("worker.clippedMark")}` : ""}
                             </pre>

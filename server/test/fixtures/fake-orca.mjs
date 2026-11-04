@@ -40,6 +40,18 @@ if (args[0] === "orchestration" && args[1] === "worker-show") {
   }
 }
 
+// Park a check before it takes the state lock, allowing Stop and the test to
+// coordinate the exact response without blocking unrelated CLI operations.
+if (args[0] === "orchestration" && args[1] === "check" && args.includes("--wait") && process.env.FAKE_ORCA_CHECK_BARRIER) {
+  const barrier = JSON.parse(process.env.FAKE_ORCA_CHECK_BARRIER);
+  appendFileSync(barrier.startedFile, "started\n");
+  const deadline = Date.now() + 15_000;
+  while (!existsSync(barrier.releaseFile)) {
+    if (Date.now() >= deadline) { process.stderr.write("fake-orca check barrier timeout\n"); process.exit(1); }
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+}
+
 function busySleep(ms) {
   const t = Date.now();
   while (Date.now() - t < ms) {
@@ -352,6 +364,10 @@ if (ns === "orchestration" && verb === "run-list") {
     page: { total: runs.length, hasMore: false, nextCursor: null },
   });
 } else if (ns === "orchestration" && verb === "task-list") {
+  if (state.taskListFailures > 0) {
+    state.taskListFailures--;
+    fail("injected_read_failure", "scripted task-list failure");
+  }
   deriveReadiness();
   ok({ tasks: Object.values(state.tasks ?? {}).filter(task => !flag("--run") || task.run_id === flag("--run")) });
 } else if (ns === "orchestration" && verb === "worker-show") {
@@ -441,6 +457,7 @@ if (ns === "orchestration" && verb === "run-list") {
   // startCoordinator must fail AND close its provisional pane. Default-off —
   // no existing test sets it.
   if (state.runUseFail) fail("run_use_refused", "scripted: binding refused");
+  state.runId = runId;
   ok({ run: state.runs?.[runId] ?? { id: runId, objective: "", legacy: 0 } });
 } else if (ns === "orchestration" && verb === "run-show") {
   // Read-only: the Run record names its bound coordinator handle — the key a
@@ -468,64 +485,88 @@ if (ns === "orchestration" && verb === "run-list") {
 } else if (ns === "orchestration" && verb === "check") {
   const box = state.mailboxes?.[flag("--terminal")] ?? [];
   const ack = flag("--ack");
+  const requestId = flag("--retry-request");
+  if (requestId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId)) {
+    fail("invalid_argument", "retry-request must be a UUID");
+  }
+  const prior = requestId && state.requests?.[requestId];
+  if (prior?.state === "completed") ok(prior.outcome);
+  function finishCheck(outcome) {
+    if (requestId) {
+      state.requests ??= {};
+      state.requests[requestId] = { state: "completed", method: "orchestration.check", outcome };
+    }
+    if (outcome.deliveryId && state.failTaskListAfterConsume) {
+      state.taskListFailures = state.failTaskListAfterConsume;
+      delete state.failTaskListAfterConsume;
+    }
+    if (outcome.deliveryId && state.loseCheckResponseOnce) {
+      delete state.loseCheckResponseOnce;
+      finishGarbage();
+    }
+    ok(outcome);
+  }
   if (ack) {
     const delivery = box.find((d) => d.deliveryId === ack && d.open !== false);
     if (!delivery) fail("stale_delivery", `delivery ${ack} is no longer pending`);
     delivery.open = false;
-    const next = box.find((d) => d.open !== false);
+    const next = state.ackOnly ? null : box.find((d) => d.open !== false);
     if (next) {
       applyDeliverySettlement(next);
       next.seen = (next.seen ?? 0) + 1;
-      ok(
-        emptyDelivery({
-          acknowledged: ack,
-          deliveryId: next.deliveryId,
-          messages: next.messages,
-          count: next.messages.length,
-          replayed: next.seen > 1,
-        }),
-      );
-    } else {
-      ok(emptyDelivery({ acknowledged: ack }));
+      finishCheck(emptyDelivery({ acknowledged: ack, deliveryId: next.deliveryId,
+        messages: next.messages, count: next.messages.length, replayed: next.seen > 1 }));
     }
+    finishCheck(emptyDelivery({ acknowledged: ack }));
   } else {
     const open = box.find((d) => d.open !== false);
     if (open) {
       applyDeliverySettlement(open);
       open.seen = (open.seen ?? 0) + 1;
-      ok(
-        emptyDelivery({
-          deliveryId: open.deliveryId,
-          messages: open.messages,
-          count: open.messages.length,
-          replayed: open.seen > 1,
-          acknowledged: ack ?? null,
-        }),
-      );
-    } else if (flag("--wait")) {
-      // Block briefly (never the full requested timeout — tests want speed)
-      // and answer with the timedOut batch the real CLI emits on an empty box.
-      busySleep(Math.min(Number(flag("--timeout-ms") ?? 0), 20));
-      ok(emptyDelivery({ timedOut: true }));
-    } else {
-      ok(emptyDelivery());
+      const messages = structuredClone(open.messages);
+      if (state.mailboxV3) open.open = false;
+      finishCheck(emptyDelivery({ deliveryId: open.deliveryId, messages, count: messages.length,
+        replayed: open.seen > 1, acknowledged: null,
+        ...(state.mailboxV3 ? { deliveryAcknowledged: true } : {}) }));
     }
+    if (flag("--wait")) busySleep(Math.min(Number(flag("--timeout-ms") ?? 0), 20));
+    finishCheck(emptyDelivery({ timedOut: !!flag("--wait") }));
   }
 } else if (ns === "orchestration" && verb === "send") {
   const target = flag("--to") ?? "";
   const dispatchId = target.startsWith("dispatch:") ? target.slice("dispatch:".length) : null;
   const dispatch = dispatchId ? state.dispatches?.[dispatchId] : null;
+  const requestId = flag("--retry-request");
+  const previous = requestId && state.requests?.[requestId];
+  if (previous?.state === "completed") ok(previous.outcome);
   if (!dispatch || dispatch.status !== "dispatched") {
     fail("dispatch_not_active", `no active dispatch ${dispatchId ?? target}`);
   }
+  if (state.followUpOnSend) {
+    const spec = state.followUpOnSend;
+    delete state.followUpOnSend;
+    dispatch.status = "completed";
+    if (state.tasks[dispatch.task_id]) state.tasks[dispatch.task_id].status = "completed";
+    state.tasks[spec.taskId] = { id: spec.taskId, run_id: dispatch.run_id, status: "dispatched", deps: "[]", dispatch_id: spec.dispatchId };
+    state.dispatches[spec.dispatchId] = { id: spec.dispatchId, run_id: dispatch.run_id, task_id: spec.taskId,
+      status: "dispatched", workerState: "supervised", terminalState: "active", agentTerminal: `term_${spec.dispatchId}` };
+    const outcome = { runId: dispatch.run_id, taskId: spec.taskId, dispatchId: spec.dispatchId,
+      state: spec.unknown ? "outcome_unknown" : "ready", delivery: "follow_up", followUpOf: dispatchId };
+    state.requests ??= {};
+    state.requests[requestId] = { state: "completed", method: "orchestration.send", outcome };
+    if (spec.loseResponse) finishGarbage();
+    ok(outcome);
+  }
   state.seq ??= {};
   state.seq.message = (state.seq.message ?? 0) + 1;
+  const destination = state.steerDispatchOnSend ? `dispatch:${state.steerDispatchOnSend}` : target;
+  delete state.steerDispatchOnSend;
   const sent = {
     id: `msg_sent_${state.seq.message}`,
     run_id: flag("--run"),
     task_id: flag("--task-id"),
     dispatch_id: flag("--dispatch-id"),
-    to: target,
+    to: destination,
     from: flag("--from"),
     subject: flag("--subject"),
     body: flag("--body"),
@@ -533,17 +574,36 @@ if (ns === "orchestration" && verb === "run-list") {
   };
   state.sentMessages ??= [];
   state.sentMessages.push(sent);
-  ok({ message: sent });
+  const outcome = { message: sent };
+  if (requestId) {
+    state.requests ??= {};
+    state.requests[requestId] = { state: "completed", method: "orchestration.send", outcome };
+  }
+  ok(outcome);
 } else if (ns === "orchestration" && verb === "reply") {
   const id = flag("--id");
+  const requestId = flag("--retry-request");
+  const previous = requestId && state.requests?.[requestId];
+  if (previous?.state === "completed") ok(previous.outcome);
+  const original = Object.values(state.mailboxes ?? {}).flatMap(box => box.flatMap(d => d.messages)).find(message => message.id === id);
   for (const box of Object.values(state.mailboxes ?? {})) {
     for (const d of box) {
       // A replied message is marked handled: it no longer replays.
       d.messages = d.messages.filter((m) => m.id !== id);
-      if (d.messages.length === 0) d.open = false;
     }
   }
-  ok({});
+  const outcome = { message: { run_id: original?.run_id ?? state.runId, reply_to: id } };
+  state.replies ??= [];
+  state.replies.push({ id, body: flag("--body"), requestId });
+  if (requestId) {
+    state.requests ??= {};
+    state.requests[requestId] = { state: "completed", method: "orchestration.reply", outcome };
+  }
+  if (state.loseReplyResponseOnce) {
+    delete state.loseReplyResponseOnce;
+    finishGarbage();
+  }
+  ok(outcome);
 } else if (ns === "orchestration" && verb === "worker-start") {
   if (state.openCodeTui && flag("--terminal")) {
     const terminal = (state.terminals ?? []).find(t => t.handle === flag("--terminal"));
@@ -694,13 +754,20 @@ if (ns === "orchestration" && verb === "run-list") {
         outcome,
       };
     }
+    if (state.keepOpenFailure && args.includes("--keep-open")) {
+      process.stderr.write(`worker started but was not kept open (${state.keepOpenFailure}).`);
+      finish({ ok: true, result: outcome }, 1);
+    }
     ok(outcome);
   }
 } else if (ns === "orchestration" && verb === "request-show") {
   // Read-only probe: did mutation under this retry-request id land?
   const requestId = flag("--request");
   const rec = state.requests?.[requestId];
-  if (rec) ok({ requestId, state: rec.state, interpretation: rec.interpretation ?? null, outcome: rec.outcome ?? null });
+  if (state.hideSendRequests && rec?.method === "orchestration.send") {
+    ok({ requestId, state: "absent", interpretation: "scripted unavailable request", outcome: null });
+  }
+  if (rec) ok({ requestId, state: rec.state, method: rec.method, interpretation: rec.interpretation ?? null, outcome: rec.outcome ?? null });
   else ok({ requestId, state: "absent", interpretation: "no recorded request", outcome: null });
 } else if (ns === "orchestration" && verb === "dispatch") {
   // Tracking dispatch (legacy lane): mints a real dispatch id, no worker.
@@ -797,12 +864,13 @@ if (ns === "orchestration" && verb === "run-list") {
 } else if (ns === "orchestration" && verb === "worker-retain") {
   const dispatchId = flag("--dispatch");
   const d = state.dispatches?.[dispatchId];
-  if (d) d.terminalState = "retained";
+  const mode = state.retainMode?.[dispatchId] ?? "retained";
+  if (d && mode === "retained") d.terminalState = "retained";
   ok({
     dispatchId,
     requestId: flag("--retry-request"),
-    state: "retained",
-    reason: null,
+    state: mode === "no_owned_resource" ? "retained" : mode,
+    reason: mode === "no_owned_resource" ? mode : null,
     processAction: "none",
     warning: null,
     archive: null,

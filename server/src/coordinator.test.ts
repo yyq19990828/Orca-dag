@@ -4,8 +4,11 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, st
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import type { Server } from "node:http";
 import {
+  answerInboxItem,
+  sendTaskGuidance,
   coordinatorStatus,
   noteManualRelease,
   resetCoordinatorForTests,
@@ -18,10 +21,12 @@ import {
   type StartOpts,
   type StopReport,
 } from "./coordinator";
-import { deriveWorktreeName, initOrcaRuntime, workerSupervision, type OrcaReadiness } from "./orca";
+import { checkReadiness, deriveWorktreeName, initOrcaRuntime, workerSupervision, type OrcaReadiness } from "./orca";
 import { createApp, listenLoopback } from "./app";
 import { createSecurityPolicy, type SecurityPolicy } from "./security";
 import { CONFIG_FILE, loadConfig, saveConfig } from "./config";
+import { ProviderSessionStore } from "./providerSessions";
+import { LaunchHistory } from "./launchHistory";
 
 /**
  * Phase 3 acceptance coverage: the closed supervised-worker lifecycle.
@@ -137,6 +142,10 @@ function baseOpts(runId: string, extra: Partial<StartOpts> = {}): StartOpts {
   };
 }
 
+async function recordViewerLaunch(runId: string, taskId: string, dispatchId: string, harness = "claude"): Promise<void> {
+  await new LaunchHistory(workspace).record({ runId, taskId, dispatchId, harness, source: "viewer-launch" });
+}
+
 /** The coordinator terminal the loop created (by its well-known title prefix). */
 function coordinatorTerminal(state: Record<string, any>): Record<string, any> {
   const mine = (state.terminals ?? []).filter((t: any) =>
@@ -208,9 +217,9 @@ async function injectMail(messages: unknown[]): Promise<string> {
 function workerDoneMessage(taskId: string, dispatchId: string, outcome: string, id: string) {
   return {
     id,
-    run_id: "run_t",
+    run_id: coordinatorStatus().runId ?? "run_t",
     delivery_contract: "current_delivery",
-    from_handle: "term_worker",
+    from_handle: getState().dispatches?.[dispatchId]?.agentTerminal ?? "term_worker",
     to_handle: null,
     subject: `done: ${taskId}`,
     body: "",
@@ -328,6 +337,9 @@ beforeEach(async () => {
     throw new Error("coordinator loop did not stop before the next test");
   }
   resetCoordinatorForTests();
+  rmSync(join(workspace, ".orca-dag", "sessions.json"), { force: true });
+  rmSync(join(workspace, ".orca-dag", "launches.jsonl"), { force: true });
+  rmSync(join(workspace, ".orca-dag", "requests.jsonl"), { force: true });
   rmSync(logPath, { force: true });
   writeFileSync(statePath, JSON.stringify({ version: "1.4.205" }));
 });
@@ -625,6 +637,7 @@ describe("native OMP and Antigravity workers", { skip: process.platform !== "lin
           agentTerminal: "term_existing", liveness: "live",
           launch: { agent: harness, model: null, effort: null, worktree: "current", on: null } } };
       });
+      await recordViewerLaunch(runId, "task_aaa", "ctx_existing", harness);
       await startCoordinator(baseOpts(runId, { defaultHarness: harness,
         placementByTask: { task_aaa: { kind: "new-child", setup: "skip" } } }));
       await waitFor(() => findAttempt("task_aaa")?.adopted ? true : null, "native exact adoption");
@@ -741,7 +754,367 @@ describe("two-wave DAG: dependency order, concurrency cap, completion boundary",
   });
 });
 
+describe("guidance custody", () => {
+  it("tracks the actual follow-up created during settlement and stops it", async () => {
+    const runId = "run_guidance_race";
+    await singleTaskState(runId);
+    await startCoordinator(baseOpts(runId));
+    const oldDispatch = await dispatchIdOf("task_aaa");
+    await mutateState(s => { s.followUpOnSend = { taskId: "task_followup", dispatchId: "ctx_followup" }; });
+    const receipt = await sendTaskGuidance({ runId, taskId: "task_aaa", subject: "Guidance", body: "Please refine" });
+    assert.equal(receipt.kind, "follow_up");
+    assert.equal(receipt.requestedDispatchId, oldDispatch);
+    assert.equal(receipt.dispatchId, "ctx_followup");
+    const report = await stopCoordinator();
+    assert.ok(report.results.some(row => row.target === "ctx_followup" && row.result !== "unknown"));
+    assert.equal(getState().dispatches.ctx_followup.status, "stopped");
+  });
+
+  it("holds unknown follow-up readiness, but still stops the journal-owned root", async () => {
+    const runId = "run_guidance_unknown";
+    await singleTaskState(runId);
+    await startCoordinator(baseOpts(runId));
+    await dispatchIdOf("task_aaa");
+    await mutateState(s => { s.followUpOnSend = { taskId: "task_uncertain", dispatchId: "ctx_uncertain", unknown: true }; });
+    await assert.rejects(sendTaskGuidance({ runId, taskId: "task_aaa", subject: "Guidance", body: "Please refine" }));
+    const beforeStop = await new ProviderSessionStore(workspace).listGuidanceSends(runId);
+    assert.equal(beforeStop[0].state, "unknown");
+    const sentBeforeRetry = calls("send").length;
+    await assert.rejects(sendTaskGuidance({
+      runId, taskId: "task_aaa", subject: "New guidance", body: "This draft must wait for the previous outcome.",
+    }), { code: "guidance_unknown" });
+    assert.equal(calls("send").length, sentBeforeRetry, "an unresolved send must not be called reconciled or sent again");
+    const report = await stopCoordinator();
+    assert.ok(report.results.some(row => row.target === "ctx_uncertain" && row.result !== "unknown"));
+    const afterStop = await new ProviderSessionStore(workspace).listGuidanceSends(runId);
+    assert.equal(afterStop[0].state, "follow_up", "positive worker settlement resolves custody");
+    assert.equal(afterStop[0].startEvidence?.status, "outcome_unknown", "the original readiness receipt remains unknown");
+  });
+
+  it("does not claim a clean Stop when a lost send has no recoverable identity", async () => {
+    const runId = "run_guidance_lost_unavailable";
+    await singleTaskState(runId);
+    await startCoordinator(baseOpts(runId));
+    await dispatchIdOf("task_aaa");
+    await mutateState(s => {
+      s.hideSendRequests = true;
+      s.followUpOnSend = { taskId: "task_lost", dispatchId: "ctx_lost", loseResponse: true };
+    });
+    await assert.rejects(sendTaskGuidance({ runId, taskId: "task_aaa", subject: "Guidance", body: "Continue" }));
+    const report = await stopCoordinator();
+    assert.equal(report.clean, false);
+    assert.equal(getState().dispatches.ctx_lost.status, "dispatched");
+    assert.ok(report.results.some(row => row.result === "unknown" && row.detail?.includes("Guidance")));
+  });
+
+  it("does not claim a foreign root when Orca steers guidance to it", async () => {
+    const runId = "run_guidance_steered";
+    await singleTaskState(runId);
+    await startCoordinator(baseOpts(runId, { maxConcurrency: 3 }));
+    await dispatchIdOf("task_aaa");
+    await mutateState(s => {
+      s.tasks.task_foreign = { id: "task_foreign", run_id: runId, status: "dispatched", deps: "[]", dispatch_id: "ctx_steered" };
+      s.dispatches.ctx_steered = { id: "ctx_steered", run_id: runId, task_id: "task_foreign",
+        status: "dispatched", workerState: "supervised", terminalState: "active", agentTerminal: "term_steered" };
+      s.steerDispatchOnSend = "ctx_steered";
+    });
+    const receipt = await sendTaskGuidance({ runId, taskId: "task_aaa", subject: "Guidance", body: "Continue" });
+    assert.equal(receipt.kind, "follow_up");
+    assert.equal(receipt.dispatchId, "ctx_steered");
+    const report = await stopCoordinator();
+    assert.ok(!report.results.some(row => row.target === "ctx_steered"));
+    assert.equal(getState().dispatches.ctx_steered.status, "dispatched");
+    await startCoordinator(baseOpts(runId, { maxConcurrency: 3 }));
+    await waitFor(() => coordinatorStatus().unownedDispatches.some(value => value.includes("ctx_steered")), "steered root remains unowned");
+    assert.equal(findAttempt("task_foreign"), undefined);
+    await stopCoordinator();
+  });
+
+  it("leaves a foreign supervised root visible but neither adopts nor stops it", async () => {
+    const runId = "run_foreign_root";
+    await singleTaskState(runId);
+    await mutateState(s => {
+      s.tasks.task_aaa.status = "dispatched";
+      s.tasks.task_aaa.dispatch_id = "ctx_foreign";
+      s.dispatches = { ctx_foreign: { id: "ctx_foreign", run_id: runId, task_id: "task_aaa",
+        status: "dispatched", workerState: "supervised", terminalState: "active" } };
+    });
+    await startCoordinator(baseOpts(runId));
+    await waitFor(() => coordinatorStatus().unownedDispatches.some(value => value.includes("ctx_foreign")), "foreign root shown");
+    assert.equal(findAttempt("task_aaa"), undefined);
+    const report = await stopCoordinator();
+    assert.ok(!report.results.some(row => row.target === "ctx_foreign"));
+    assert.equal(getState().dispatches.ctx_foreign.status, "dispatched");
+  });
+});
+
 describe("worker_done validation", () => {
+  for (const outcome of ["empty", "batch", "lost", "hung"] as const) {
+    it(`settles Stop against an in-flight ${outcome} mailbox check without another check`, async () => {
+      const runId = `run_stop_check_${outcome}`;
+      const startedFile = join(root, `check-${outcome}-started`);
+      const releaseFile = join(root, `check-${outcome}-release`);
+      const previousBarrier = process.env.FAKE_ORCA_CHECK_BARRIER;
+      rmSync(startedFile, { force: true });
+      rmSync(releaseFile, { force: true });
+      await singleTaskState(runId);
+      await mutateState(s => { s.mailboxV3 = true; });
+      process.env.FAKE_ORCA_CHECK_BARRIER = JSON.stringify({ startedFile, releaseFile });
+      try {
+        await startCoordinator(baseOpts(runId));
+        await waitFor(() => existsSync(startedFile) ? true : null, "native check at barrier");
+        const store = new ProviderSessionStore(workspace);
+        const rows = await store.listMailboxChecks(runId);
+        const pending = rows.find(row => row.state === "prepared");
+        assert.ok(pending);
+        const requestId = pending.requestId;
+        const checksBeforeStop = calls("check").length;
+        const message = { ...workerDoneMessage("task_aaa", "ctx_prior", "succeeded", `msg_stop_${outcome}`),
+          run_id: runId, type: "question", subject: "Decision", body: "Choose", payload: null };
+        if (outcome === "batch" || outcome === "lost") {
+          await mutateState(s => {
+            const handle = coordinatorTerminal(s).handle;
+            s.mailboxes ??= {};
+            s.mailboxes[handle] = [{ deliveryId: `delivery_stop_${outcome}`, messages: [message] }];
+            if (outcome === "lost") s.loseCheckResponseOnce = true;
+          });
+        }
+        const stopping = stopCoordinator();
+        if (outcome !== "hung") writeFileSync(releaseFile, "");
+        const report = await stopping;
+        const saved = (await store.listMailboxChecks(runId)).find(row => row.requestId === requestId);
+        assert.ok(saved);
+        assert.equal(calls("check").length, checksBeforeStop + (outcome === "hung" ? 0 : 1),
+          "Stop must not issue another consuming check or ACK");
+        assert.equal(calls("reply").length, 0);
+        if (outcome === "empty") {
+          assert.equal(saved.state, "completed");
+          assert.deepEqual(saved.delivery?.messages, []);
+          assert.equal(saved.delivery?.timedOut, true);
+          assert.equal(report.clean, true);
+        } else {
+          assert.equal(report.clean, false);
+          assert.ok(report.results.some(row => row.result === "unknown" && row.detail?.includes(requestId)));
+          if (outcome === "hung") {
+            assert.equal(saved.state, "prepared");
+            assert.equal(saved.delivery, null);
+          } else if (outcome === "batch") {
+            assert.equal(saved.state, "received");
+            assert.deepEqual(saved.delivery?.messages, [message]);
+          } else {
+            assert.equal(saved.state, "unknown");
+            assert.equal(saved.delivery, null);
+            assert.equal(getState().requests[requestId].outcome.deliveryId, `delivery_stop_${outcome}`);
+          }
+        }
+      } finally {
+        writeFileSync(releaseFile, "");
+        if (previousBarrier === undefined) delete process.env.FAKE_ORCA_CHECK_BARRIER;
+        else process.env.FAKE_ORCA_CHECK_BARRIER = previousBarrier;
+      }
+    });
+  }
+
+  it("retires only an unsent ACK preparation when Stop interrupts it, and recovers the original batch", async () => {
+    const runId = "run_stop_unsent_ack";
+    await singleTaskState(runId);
+    const originalRecord = ProviderSessionStore.prototype.recordMailboxCheck;
+    let notifyPrepared!: () => void;
+    let resumePreparation!: () => void;
+    const prepared = new Promise<void>(resolve => { notifyPrepared = resolve; });
+    const gate = new Promise<void>(resolve => { resumePreparation = resolve; });
+    let ackRequestId: string | null = null;
+    ProviderSessionStore.prototype.recordMailboxCheck = async function (this: ProviderSessionStore, row) {
+      await originalRecord.call(this, row);
+      if (row.runId === runId && row.ack && row.state === "prepared" && !ackRequestId) {
+        ackRequestId = row.requestId;
+        notifyPrepared();
+        await gate;
+      }
+    };
+    try {
+      await startCoordinator(baseOpts(runId));
+      const dispatchId = await dispatchIdOf("task_aaa");
+      const message = { ...workerDoneMessage("task_aaa", dispatchId, "succeeded", "msg_unsent_ack"),
+        type: "heartbeat", run_id: runId };
+      const deliveryId = await injectMail([message]);
+      await prepared;
+      const stopping = stopCoordinator();
+      resumePreparation();
+      const report = await stopping;
+      const rows = await new ProviderSessionStore(workspace).listMailboxChecks(runId);
+      const cancelled = rows.find(row => row.requestId === ackRequestId);
+      const original = rows.find(row => row.delivery?.deliveryId === deliveryId);
+      assert.equal(cancelled?.state, "completed");
+      assert.equal(cancelled?.delivery, null);
+      assert.equal(original?.state, "pending_input");
+      assert.equal(ackCalls(deliveryId).length, 0);
+      assert.equal(report.clean, false, "the original unacknowledged delivery remains debt");
+      ProviderSessionStore.prototype.recordMailboxCheck = originalRecord;
+      await startCoordinator(baseOpts(runId));
+      await waitFor(() => ackCalls(deliveryId).length === 1 ? true : null, "original batch ACK after restart");
+      await stopCoordinator();
+    } finally {
+      resumePreparation();
+      ProviderSessionStore.prototype.recordMailboxCheck = originalRecord;
+    }
+  });
+
+  it("retains a consumed mixed batch across a transient task read failure", async () => {
+    const runId = "run_v3_mixed_failure";
+    await singleTaskState(runId);
+    await mutateState(s => { s.mailboxV3 = true; });
+    await startCoordinator(baseOpts(runId));
+    const dispatchId = await dispatchIdOf("task_aaa");
+    const question = { ...workerDoneMessage("task_aaa", dispatchId, "succeeded", "msg_v3_fault_question"),
+      type: "question", from_handle: `dispatch:${dispatchId}`, subject: "Need a decision",
+      body: "Which option?", payload: JSON.stringify({ taskId: "task_aaa", dispatchId, question: "Which option?" }) };
+    const done = workerDoneMessage("task_aaa", dispatchId, "succeeded", "msg_v3_fault_done");
+    await mutateState(s => {
+      s.settleOnDelivery ??= {};
+      s.settleOnDelivery.delivery_mixed_fault = { taskId: "task_aaa", dispatchId, outcome: "succeeded" };
+      s.failTaskListAfterConsume = 1;
+      const handle = coordinatorTerminal(s).handle;
+      s.mailboxes ??= {};
+      s.mailboxes[handle] = [...(s.mailboxes[handle] ?? []), { deliveryId: "delivery_mixed_fault", messages: [question, done] }];
+    });
+    await waitFor(() => coordinatorStatus().inbox.pending.some(item => item.messageId === question.id), "question survives failed read");
+    await waitFor(() => findAttempt("task_aaa")?.settled === true, "completion survives failed read");
+    assert.equal(ackCalls("delivery_mixed_fault").length, 0);
+    assert.equal(getState().mailboxes[coordinatorTerminal(getState()).handle].find((d: { deliveryId: string }) => d.deliveryId === "delivery_mixed_fault").open, false);
+    await stopCoordinator();
+  });
+
+  it("replays a lost consuming response with its original request and does not consume twice", async () => {
+    const runId = "run_v3_lost_check";
+    await singleTaskState(runId);
+    await mutateState(s => { s.mailboxV3 = true; });
+    await startCoordinator(baseOpts(runId));
+    const dispatchId = await dispatchIdOf("task_aaa");
+    const question = { ...workerDoneMessage("task_aaa", dispatchId, "succeeded", "msg_v3_lost"),
+      type: "question", from_handle: `dispatch:${dispatchId}`, subject: "Choose", body: "Choose",
+      payload: JSON.stringify({ taskId: "task_aaa", dispatchId, question: "Choose" }) };
+    await mutateState(s => {
+      s.loseCheckResponseOnce = true;
+      const handle = coordinatorTerminal(s).handle;
+      s.mailboxes ??= {};
+      s.mailboxes[handle] = [...(s.mailboxes[handle] ?? []), { deliveryId: "delivery_lost", messages: [question] }];
+    });
+    await waitFor(() => coordinatorStatus().inbox.pending.some(item => item.messageId === question.id), "lost check replayed");
+    const request = Object.entries(getState().requests).find(([, value]) =>
+      !!value && typeof value === "object" && "outcome" in value &&
+      !!value.outcome && typeof value.outcome === "object" && "deliveryId" in value.outcome &&
+      value.outcome.deliveryId === "delivery_lost");
+    assert.ok(request);
+    const matching = calls("check").filter(call => call.argv.includes(request[0]));
+    assert.ok(matching.length >= 2);
+    assert.equal(getState().mailboxes[coordinatorTerminal(getState()).handle].find((d: { deliveryId: string }) => d.deliveryId === "delivery_lost").seen, 1);
+    await stopCoordinator();
+  });
+
+  it("restores a consumed request receipt after a new coordinator terminal binds", async () => {
+    const runId = "run_v3_request_restart";
+    await singleTaskState(runId);
+    const requestId = randomUUID();
+    const question = { ...workerDoneMessage("task_aaa", "ctx_prior", "succeeded", "msg_v3_restart_lost"),
+      run_id: runId, type: "question", subject: "Decision", body: "Choose", payload: null };
+    const outcome = { runId, deliveryId: "delivery_restart_lost", messages: [question], count: 1,
+      replayed: false, deliveryAcknowledged: true, acknowledged: null, timedOut: false, cancelled: false, connectionLost: false };
+    await mutateState(s => { s.requests = { [requestId]: { state: "completed", method: "orchestration.check", outcome } }; });
+    const now = new Date().toISOString();
+    await new ProviderSessionStore(workspace).recordMailboxCheck({ requestId, runId, from: "term_previous", ack: null,
+      state: "unknown", delivery: null, processedMessageIds: [], pendingQuestionIds: [], createdAt: now, updatedAt: now, error: "lost" });
+    await startCoordinator(baseOpts(runId));
+    await waitFor(() => coordinatorStatus().inbox.pending.some(item => item.messageId === question.id), "restart recovered exact check");
+    assert.equal(ackCalls("delivery_restart_lost").length, 0);
+    await stopCoordinator();
+  });
+
+  it("keeps a reply pending until a lost reply receipt is recovered", async () => {
+    const runId = "run_v3_lost_reply";
+    await singleTaskState(runId);
+    await mutateState(s => { s.mailboxV3 = true; });
+    await startCoordinator(baseOpts(runId));
+    const dispatchId = await dispatchIdOf("task_aaa");
+    const question = { ...workerDoneMessage("task_aaa", dispatchId, "succeeded", "msg_reply_lost"),
+      type: "question", subject: "Decision", body: "Choose", payload: null };
+    await mutateState(s => { s.loseReplyResponseOnce = true; });
+    await injectMail([question]);
+    await waitFor(() => coordinatorStatus().inbox.pending.some(item => item.messageId === question.id), "reply question");
+    await assert.rejects(answerInboxItem(question.id, "yes"));
+    await waitFor(() => !coordinatorStatus().inbox.pending.some(item => item.messageId === question.id), "lost reply recovered");
+    assert.equal(getState().replies.length, 1);
+    assert.equal(getState().replies[0].body, "yes");
+    await stopCoordinator();
+  });
+  for (const ackOnly of [true, false]) {
+    it(`processes the next legacy batch when ACK ${ackOnly ? "returns empty" : "returns it"}`, async () => {
+      const runId = `run_legacy_ack_${ackOnly}`;
+      await singleTaskState(runId);
+      await mutateState(s => { s.ackOnly = ackOnly; });
+      await startCoordinator(baseOpts(runId));
+      const dispatchId = await dispatchIdOf("task_aaa");
+      const first = { ...workerDoneMessage("task_aaa", dispatchId, "succeeded", `msg_ack_first_${ackOnly}`),
+        type: "question", subject: "First", body: "First", payload: null };
+      const second = { ...first, id: `msg_ack_second_${ackOnly}`, subject: "Second" };
+      await mutateState(s => {
+        const handle = coordinatorTerminal(s).handle;
+        s.mailboxes ??= {};
+        s.mailboxes[handle] = [...(s.mailboxes[handle] ?? []),
+          { deliveryId: `delivery_first_${ackOnly}`, messages: [first] },
+          { deliveryId: `delivery_second_${ackOnly}`, messages: [second] }];
+      });
+      await waitFor(() => coordinatorStatus().inbox.pending.some(item => item.messageId === first.id), "first legacy question");
+      await answerInboxItem(first.id, "continue");
+      await waitFor(() => coordinatorStatus().inbox.pending.some(item => item.messageId === second.id), "second legacy question");
+      assert.equal(ackCalls(`delivery_first_${ackOnly}`).length, 1);
+      await stopCoordinator();
+    });
+  }
+  it("replays a persisted mixed V3 batch after restart, including rejected reports and questions", async () => {
+    const runId = "run_v3_mixed_replay";
+    await singleTaskState(runId);
+    const timestamp = new Date().toISOString();
+    const stale = { ...workerDoneMessage("missing", "ctx_missing", "succeeded", "msg_mixed_stale"), run_id: runId };
+    const question = { ...stale, id: "msg_mixed_question", type: "question", subject: "Decision", body: "Choose one", payload: null };
+    const store = new ProviderSessionStore(workspace);
+    await store.recordMailboxCheck({ requestId: "request_v3_mixed", runId, from: "term_previous", ack: null, state: "received",
+      delivery: { runId, deliveryId: "delivery_v3_mixed", messages: [stale, question], count: 2, replayed: false,
+        deliveryAcknowledged: true, acknowledged: null, timedOut: false, cancelled: false, connectionLost: false },
+      processedMessageIds: [], pendingQuestionIds: [], createdAt: timestamp, updatedAt: timestamp, error: null });
+    await startCoordinator(baseOpts(runId));
+    await waitFor(() => coordinatorStatus().inbox.pending.some(item => item.messageId === question.id), "replayed question");
+    const saved = await waitFor(() => {
+      const rows = JSON.parse(readFileSync(join(workspace, ".orca-dag", "sessions.json"), "utf8")).mailboxChecks as Array<{ requestId: string; state: string; processedMessageIds: string[]; pendingQuestionIds: string[] }>;
+      const row = rows.find(item => item.requestId === "request_v3_mixed");
+      return row?.state === "pending_input" ? row : null;
+    }, "mixed batch checkpoint");
+    assert.deepEqual(saved.processedMessageIds, [stale.id, question.id]);
+    assert.deepEqual(saved.pendingQuestionIds, [question.id]);
+    assert.equal(ackCalls("delivery_v3_mixed").length, 0);
+    await stopCoordinator();
+  });
+  it("restores a V3 pending question and continues processing newer worker completion", async () => {
+    const runId = "run_v3_restart_question";
+    await singleTaskState(runId);
+    const timestamp = new Date().toISOString();
+    const question = { ...workerDoneMessage("task_aaa", "ctx_earlier", "succeeded", "msg_v3_question"),
+      run_id: runId, type: "question", subject: "Need review", body: "Please decide", payload: null };
+    await new ProviderSessionStore(workspace).recordMailboxCheck({
+      requestId: "request_v3_question", runId, from: "term_previous", ack: null, state: "pending_input",
+      delivery: { runId, deliveryId: "delivery_v3_question", messages: [question], count: 1, replayed: false,
+        deliveryAcknowledged: true, acknowledged: null, timedOut: false, cancelled: false, connectionLost: false },
+      processedMessageIds: [question.id], pendingQuestionIds: [question.id], createdAt: timestamp, updatedAt: timestamp, error: null,
+    });
+    await startCoordinator(baseOpts(runId));
+    await waitFor(() => coordinatorStatus().inbox.pending.some(item => item.messageId === question.id), "restored question");
+    await waitFor(() => findAttempt("task_aaa")?.dispatchId ?? null, "worker started despite pending V3 question");
+    await settleViaWorkerDone("task_aaa", "succeeded", "msg_after_question");
+    await waitFor(() => findAttempt("task_aaa")?.terminalDecision === "released", "newer completion processed");
+    assert.ok(coordinatorStatus().inbox.pending.some(item => item.messageId === question.id));
+    assert.equal(ackCalls("delivery_v3_question").length, 0);
+    await stopCoordinator();
+  });
   it("ignores a duplicate/replayed worker_done: no double release, no state change, run still completes", async () => {
     const runId = "run_replay";
     await singleTaskState(runId);
@@ -935,7 +1308,9 @@ describe("bidirectional coordinator chat", () => {
     const activity = await call("GET", `/api/activity?run=${runId}`);
     assert.equal(activity.status, 200);
     const events = (activity.json.events as Array<Record<string, unknown>>) ?? [];
-    const guidance = events.find((event) => event.title === "Coordinator sent guidance");
+    const guidance = events.find((event) => event.direction === "coordinator_to_agent" &&
+      event.taskId === "task_aaa" && event.dispatchId === dispatchId &&
+      event.summary === "Please add the missing edge-case assertion.");
     assert.ok(guidance, "confirmed outbound guidance must appear in activity");
     assert.equal(guidance.direction, "coordinator_to_agent");
     assert.equal(guidance.taskId, "task_aaa");
@@ -1009,7 +1384,7 @@ describe("questions hold the Delivery open", () => {
               id: "msg_question",
               run_id: runId,
               type: "question",
-              from_handle: "term_worker",
+              from_handle: `dispatch:${dispatchId}`,
               to_handle: null,
               subject: "Which database?",
               body: "postgres or sqlite?",
@@ -1070,7 +1445,7 @@ describe("questions hold the Delivery open", () => {
       id: "msg_stale_first",
       run_id: runId,
       type: "question",
-      from_handle: "term_worker",
+      from_handle: `dispatch:${dispatchId}`,
       to_handle: null,
       subject: "First question",
       body: "First answer?",
@@ -1088,7 +1463,7 @@ describe("questions hold the Delivery open", () => {
       id: "msg_stale_second",
       run_id: runId,
       type: "question",
-      from_handle: "term_worker",
+      from_handle: `dispatch:${dispatchId}`,
       to_handle: null,
       subject: "Second question",
       body: "Second answer?",
@@ -1201,6 +1576,29 @@ describe("questions hold the Delivery open", () => {
     assert.equal(refused.status, 409);
     assert.equal(refused.json.code, "active_dispatch_required");
     assert.equal(calls("send").length, before, "unverifiable Dispatches are refused before send");
+    await stopCoordinator();
+  });
+
+  it("allows capability-gap guidance only for an exact live worker observation", async () => {
+    const runId = "run_guidance_capability_gap";
+    await singleTaskState(runId);
+    await startCoordinator(baseOpts(runId));
+    const dispatchId = await dispatchIdOf("task_aaa");
+    await mutateState(s => {
+      s.livenessOverride = { [dispatchId]: "unverifiable" };
+      s.livenessReason = { [dispatchId]: "missing_status" };
+    });
+    const receipt = await sendTaskGuidance({ runId, taskId: "task_aaa", subject: "Guidance", body: "Continue" });
+    assert.equal(receipt.kind, "enqueued");
+    await mutateState(s => {
+      s.workerShow = { [dispatchId]: {
+        dispatch: { id: dispatchId, runId, task_id: "task_aaa", status: "dispatched" },
+        observation: { status: "live", exactWorker: false },
+      } };
+    });
+    await assert.rejects(sendTaskGuidance({ runId, taskId: "task_aaa", subject: "Guidance", body: "Again" }),
+      { code: "active_dispatch_required" });
+    assert.equal(calls("send").length, 1);
     await stopCoordinator();
   });
 
@@ -1426,6 +1824,48 @@ describe("release_pending and release_unknown", () => {
 });
 
 describe("explicit retain", () => {
+  it("keeps the accepted Dispatch when early keep-open fails", async () => {
+    const runId = "run_early_keep_open_failure";
+    await singleTaskState(runId);
+    await mutateState(s => {
+      s.version = "1.4.247";
+      s.runtime = { state: "ready", reachable: true, appVersion: "1.4.247",
+        capabilities: ["orchestration.worker-keep-open.v1"] };
+      s.keepOpenFailure = "release_pending";
+    });
+    try {
+      await checkReadiness(true);
+      await startCoordinator(baseOpts(runId, { retainByTask: { task_aaa: true } }));
+      const dispatchId = await dispatchIdOf("task_aaa");
+      await waitFor(() => findAttempt("task_aaa")?.startReceipt?.keepOpen === "release_pending", "accepted keep-open failure receipt");
+      assert.equal(attempt("task_aaa").settled, false);
+      assert.equal(calls("worker-start").length, 1);
+      assert.equal(getState().tasks.task_aaa.dispatch_id, dispatchId);
+      const report = await stopCoordinator();
+      assert.ok(report.results.some(row => row.target === dispatchId));
+    } finally {
+      await stopCoordinator();
+      await mutateState(s => { s.version = "1.4.205"; delete s.runtime; delete s.keepOpenFailure; });
+      await checkReadiness(true);
+    }
+  });
+  for (const [mode, decision] of [
+    ["already_released", "released"], ["release_pending", "release_unknown"], ["no_owned_resource", "not_needed"],
+  ] as const) {
+    it(`reports ${mode} honestly after a retained start without replacing it`, async () => {
+      const runId = `run_retain_${mode}`;
+      await singleTaskState(runId);
+      await startCoordinator(baseOpts(runId, { retainByTask: { task_aaa: true } }));
+      const dispatchId = await dispatchIdOf("task_aaa");
+      await mutateState(s => { s.retainMode = { [dispatchId]: mode }; });
+      await settleViaWorkerDone("task_aaa", "succeeded", `msg_retain_${mode}`);
+      await waitFor(() => findAttempt("task_aaa")?.terminalDecision === decision, `retain ${mode} decision`);
+      assert.equal(calls("worker-start").length, 1);
+      assert.equal(calls("worker-release").length, 0);
+      if (mode === "release_pending") assert.ok(coordinatorStatus().cleanupDebt.some(row => row.dispatchId === dispatchId));
+      await stopCoordinator();
+    });
+  }
   it("keeps a settled worker's terminal when retainByTask asks for it", async () => {
     const runId = "run_retain";
     await singleTaskState(runId);
@@ -1828,6 +2268,7 @@ describe("unowned dispatched tasks", () => {
       };
       state.runs = { [runId]: { id: runId, objective: "test", legacy: 0 } };
     });
+    await recordViewerLaunch(runId, "task_zzz", "ctx_preexisting");
     await startCoordinator(baseOpts(runId, { maxConcurrency: 1 }));
     // Recovery adopts the active Dispatch into the projection…
     await waitFor(
@@ -2385,11 +2826,14 @@ describe("Phase 4: ambiguous worker-start recovery", () => {
     await entered;
     const landedDispatch = getState().tasks.task_aaa.dispatch_id as string;
     assert.notEqual(landedDispatch, oldDispatch, "the fake Orca has minted the candidate Dispatch");
-    const stop = await stopCoordinator();
+    const retryRejected = assert.rejects(retryPromise, (error: unknown) =>
+      error instanceof Error && "code" in error && error.code === "not_running");
+    const stopping = stopCoordinator();
+    resumeReceipt();
+    await retryRejected;
+    const stop = await stopping;
     assert.ok(stop.results.some((row) => row.target === landedDispatch && row.result === "stopped"),
       "Stop includes the in-flight retry candidate by its exact identity");
-    resumeReceipt();
-    await assert.rejects(retryPromise, (error: unknown) => (error as { code?: string }).code === "not_running");
     assert.equal(coordinatorStatus().attempts.length, 0, "the late result did not restore a stale Run attempt");
     assert.equal(coordinatorStatus().phase, "idle");
     assert.equal(callsOf("worker-stop", "--dispatch", landedDispatch).length, 1);
@@ -2812,6 +3256,7 @@ describe("late settlement after failed worker-start", () => {
       const accepted = {
         ...workerDoneMessage("task_aaa", dispatchId, "succeeded", "msg_late_accepted"),
         run_id: runId,
+        from_handle: `dispatch:${dispatchId}`,
       };
       const handle = coordinatorTerminal(state).handle;
       state.mailboxes ??= {};
@@ -2911,6 +3356,7 @@ describe("Phase 4: restart projection classes", () => {
       state.dispatches = { [dispatch.id]: { id: dispatch.id, task_id: "task_zzz", run_id: runId, workerState: "supervised", ...dispatch } };
       state.runs = { [runId]: { id: runId, objective: "test", legacy: 0 } };
     });
+    await recordViewerLaunch(runId, "task_zzz", dispatch.id);
   }
 
   for (const workerState of ["ready", "starting"]) {
@@ -3504,8 +3950,9 @@ describe("Phase 6: refusal gates before Orca", () => {
     const created = readLog().filter((c) => c.argv[0] === "terminal" && c.argv[1] === "create" && !(c.argv.includes("--title") && c.argv.join(" ").includes("orca-dag coordinator")));
     assert.equal(created.length, 0, "no worker terminal was created locally either");
     assert.match(attempt("task_aaa").terminalDetail ?? "", /ambiguous across servers/);
-    await new Promise((r) => setTimeout(r, 150));
-    assert.equal(coordinatorStatus().phase, "awaiting_input", "the failed start parks the run");
+    await waitFor(() => coordinatorStatus().phase === "awaiting_input" ? true : null, "the failed start to park the run");
+    assert.equal(calls("worker-start").length, 0, "parking does not retry the refused placement");
+    assert.equal(calls("dispatch").length, 0, "parking does not create a fallback dispatch");
     await stopCoordinator();
   });
 
@@ -4550,7 +4997,7 @@ describe("committed Stage integration before development", () => {
         a: { id: "a", run_id: runId, status: "pending", deps: "[]", spec: "stage a" },
         b: { id: "b", run_id: runId, status: "pending", deps: "[]", spec: "stage b" },
         c: { id: "c", run_id: runId, status: "pending", deps: "[]", spec: "stage c" },
-        merge: { id: "merge", run_id: runId, status: "pending", deps: '["a","b","c"]', spec: "[orca-dag:merge-prep] Merge only" },
+        merge: { id: "merge", run_id: runId, status: "pending", deps: '["a","b","c"]', spec: "[orca-dag:merge-prep] [orca-dag:merge-inputs-v3] Merge only" },
         dev: { id: "dev", run_id: runId, status: "pending", deps: '["merge"]', spec: "Develop after merge" },
       };
       state.runs = { [runId]: { id: runId, objective: "test", legacy: 0 } };
@@ -4575,7 +5022,18 @@ describe("committed Stage integration before development", () => {
     }
     await waitFor(() => (callsOf("worker-start", "--task", "merge").length === 1 ? true : null), "merge preparation to start");
     assert.equal(callsOf("worker-start", "--task", "dev").length, 0);
-    await waitFor(() => (calls("send").some((call) => call.argv.some((arg) => arg.includes(paths.a))) ? true : null), "source paths delivered");
+    const mergeDispatch = await dispatchIdOf("merge");
+    const question = { ...workerDoneMessage("merge", mergeDispatch, "succeeded", "msg_merge_inputs"),
+      type: "question", from_handle: `dispatch:${mergeDispatch}`, subject: "orca-dag:merge-inputs",
+      body: "Please provide immutable inputs",
+      payload: JSON.stringify({ taskId: "merge", dispatchId: mergeDispatch, question: "orca-dag:merge-inputs" }) };
+    await injectMail([{ ...question, id: "msg_spoofed_inputs", from_handle: "dispatch:ctx_foreign" }, question]);
+    await waitFor(() => (getState().replies ?? []).some((row: { id: string }) => row.id === question.id), "immutable inputs replied");
+    const reply = getState().replies.find((row: { id: string }) => row.id === question.id);
+    for (const id of ["a", "b", "c"]) assert.ok(reply.body.includes(git(paths[id], "rev-parse", "HEAD")));
+    assert.ok(!(getState().replies ?? []).some((row: { id: string }) => row.id === "msg_spoofed_inputs"));
+    assert.equal(calls("send").length, 0);
+    await answerInboxItem("msg_spoofed_inputs", "Not authorized");
     await settleViaWorkerDone("merge", "succeeded", "msg_merge");
     await waitFor(() => (coordinatorStatus().stageGit?.errors.merge ? true : null), "missing merge to be rejected");
     assert.equal(callsOf("worker-start", "--task", "dev").length, 0, "worker_done alone cannot start development");
@@ -4600,7 +5058,7 @@ describe("committed Stage integration before development", () => {
     await mutateState((state) => {
       state.tasks = {
         source: { id: "source", run_id: runId, status: "pending", deps: "[]", spec: "source" },
-        merge: { id: "merge", run_id: runId, status: "pending", deps: '["source"]', spec: "[orca-dag:merge-prep] merge" },
+        merge: { id: "merge", run_id: runId, status: "pending", deps: '["source"]', spec: "[orca-dag:merge-prep] [orca-dag:merge-inputs-v3] merge" },
         dev: { id: "dev", run_id: runId, status: "pending", deps: '["merge"]', spec: "develop" },
       };
       state.runs = { [runId]: { id: runId, objective: "test", legacy: 0 } };
@@ -4634,7 +5092,88 @@ describe("same-Run helper custody", () => {
           agentTerminal: "term_helper", creatorDispatchId: "ctx_parent", depth: 2 },
       };
     });
+    await recordViewerLaunch(runId, "task_aaa", "ctx_parent");
   }
+  for (const terminalState of ["released", "retained"] as const) {
+    it(`recovers a running descendant through a ${terminalState} historical helper`, async () => {
+      const runId = `run_helper_history_recovery_${terminalState}`;
+      await seedHelpers(runId, "dispatched");
+      await mutateState(s => {
+        s.tasks.task_helper.status = "completed";
+        delete s.tasks.task_helper.dispatch_id;
+        Object.assign(s.dispatches.ctx_helper, { status: "completed", workerState: "succeeded", terminalState });
+        s.tasks.task_nested = { id: "task_nested", run_id: runId, parent_id: "task_helper", status: "dispatched", deps: "[]", dispatch_id: "ctx_nested" };
+        s.dispatches.ctx_nested = { id: "ctx_nested", task_id: "task_nested", run_id: runId, status: "dispatched",
+          workerState: "ready", terminalState: "active", agentTerminal: "term_nested", creatorDispatchId: "ctx_helper", depth: 3 };
+      });
+      await startCoordinator(baseOpts(runId));
+      assert.equal(findAttempt("task_nested")?.dispatchId, "ctx_nested");
+      assert.equal(findAttempt("task_helper"), undefined, "disposed history does not become an attempt");
+      assert.equal(calls("worker-start").length, 0);
+      await stopCoordinator();
+    });
+
+    it(`stops a running descendant through a ${terminalState} historical helper`, async () => {
+      const runId = `run_helper_history_stop_${terminalState}`;
+      await seedHelpers(runId, "dispatched");
+      await mutateState(s => {
+        s.tasks.task_helper.status = "completed";
+        delete s.tasks.task_helper.dispatch_id;
+        Object.assign(s.dispatches.ctx_helper, { status: "completed", workerState: "succeeded", terminalState });
+        s.tasks.task_nested = { id: "task_nested", run_id: runId, parent_id: "task_helper", status: "dispatched", deps: "[]", dispatch_id: "ctx_nested" };
+        s.dispatches.ctx_nested = { id: "ctx_nested", task_id: "task_nested", run_id: runId, status: "dispatched",
+          workerState: "ready", terminalState: "active", agentTerminal: "term_nested", creatorDispatchId: "ctx_helper", depth: 3 };
+      });
+      await startCoordinator(baseOpts(runId));
+      const report = await stopCoordinator();
+      assert.equal(callsOf("worker-stop", "--dispatch", "ctx_nested").length, 1);
+      assert.equal(report.results.find(row => row.target === "ctx_nested")?.result, "stopped");
+      assert.equal(getState().dispatches.ctx_nested.status, "stopped");
+      assert.equal(callsOf("worker-stop", "--dispatch", "ctx_helper").length, 0);
+    });
+  }
+  it("recovers across multiple disposed exact creators without Task parent hints", async () => {
+    const runId = "run_helper_multi_history";
+    await seedHelpers(runId, "dispatched");
+    await mutateState(s => {
+      s.tasks.task_helper.status = "completed";
+      delete s.tasks.task_helper.dispatch_id;
+      Object.assign(s.dispatches.ctx_helper, { status: "completed", workerState: "succeeded", terminalState: "released" });
+      s.tasks.task_middle = { id: "task_middle", run_id: runId, status: "completed", deps: "[]" };
+      s.dispatches.ctx_middle = { id: "ctx_middle", task_id: "task_middle", run_id: runId, status: "completed",
+        workerState: "succeeded", terminalState: "retained", creatorDispatchId: "ctx_helper", depth: 3 };
+      s.tasks.task_nested = { id: "task_nested", run_id: runId, status: "dispatched", deps: "[]", dispatch_id: "ctx_nested" };
+      s.dispatches.ctx_nested = { id: "ctx_nested", task_id: "task_nested", run_id: runId, status: "dispatched",
+        workerState: "ready", terminalState: "active", creatorDispatchId: "ctx_middle", depth: 4 };
+    });
+    await startCoordinator(baseOpts(runId));
+    assert.equal(findAttempt("task_nested")?.dispatchId, "ctx_nested");
+    assert.equal(findAttempt("task_helper"), undefined);
+    assert.equal(findAttempt("task_middle"), undefined);
+    const report = await stopCoordinator();
+    assert.equal(report.results.find(row => row.target === "ctx_nested")?.result, "stopped");
+  });
+
+  it("reports unknown Stop when a handed-back descendant has an unproven historical chain", async () => {
+    const runId = "run_helper_unknown_history";
+    await seedHelpers(runId, "dispatched");
+    await mutateState(s => {
+      s.tasks.task_helper.status = "completed";
+      delete s.tasks.task_helper.dispatch_id;
+      Object.assign(s.dispatches.ctx_helper, { status: "completed", workerState: "succeeded",
+        terminalState: "released", creatorDispatchId: "ctx_missing" });
+      s.tasks.task_nested = { id: "task_nested", run_id: runId, parent_id: "task_helper",
+        status: "dispatched", deps: "[]", dispatch_id: "ctx_nested" };
+      s.dispatches.ctx_nested = { id: "ctx_nested", task_id: "task_nested", run_id: runId, status: "dispatched",
+        workerState: "ready", terminalState: "active", creatorDispatchId: "ctx_helper", depth: 3 };
+    });
+    await startCoordinator(baseOpts(runId));
+    assert.equal(findAttempt("task_nested"), undefined);
+    const report = await stopCoordinator();
+    assert.equal(callsOf("worker-stop", "--dispatch", "ctx_nested").length, 0);
+    assert.equal(report.results.find(row => row.target === "ctx_nested")?.result, "unknown");
+  });
+
 
   it("leaves a settled helper with its active creator, then adopts and releases it after handback", async () => {
     const runId = "run_helpers";
@@ -4651,16 +5190,16 @@ describe("same-Run helper custody", () => {
     assert.equal(getState().dispatches.ctx_helper.terminalState, "released");
   });
 
-  it("reports an active delegated helper without stopping it when the viewer stops", async () => {
+  it("stops an active helper only after its viewer-owned creator settles during Stop", async () => {
     const runId = "run_helper_stop";
     await seedHelpers(runId, "dispatched");
     await startCoordinator(baseOpts(runId));
     await waitFor(() => coordinatorStatus().checks.length > 0 ? true : null, "active helper custody pass");
     const report = await stopCoordinator();
-    assert.equal(callsOf("worker-stop", "--dispatch", "ctx_helper").length, 0);
-    assert.equal(getState().dispatches.ctx_helper.status, "dispatched");
-    assert.equal(report.clean, false);
-    assert.equal(report.results.find(row => row.target === "ctx_helper")?.result, "unknown");
+    assert.equal(callsOf("worker-stop", "--dispatch", "ctx_helper").length, 1);
+    assert.equal(getState().dispatches.ctx_helper.status, "stopped");
+    assert.equal(report.results.find(row => row.target === "ctx_helper")?.result, "stopped");
+    assert.ok(firstIndexOf("worker-stop", "--dispatch", "ctx_parent") < firstIndexOf("worker-stop", "--dispatch", "ctx_helper"));
   });
 
   it("does not transfer helper custody from a missing creator", async () => {
@@ -4681,7 +5220,7 @@ describe("same-Run helper custody", () => {
   it("keeps an active retained helper under its creator's custody", async () => {
     const runId = "run_helper_retained";
     await seedHelpers(runId, "dispatched");
-    await mutateState(s => { s.dispatches.ctx_helper.terminalState = "retained"; });
+    await mutateState(s => { s.dispatches.ctx_helper.terminalState = "retained"; s.stopMode = { ctx_parent: "fail" }; });
     await startCoordinator(baseOpts(runId));
     await waitFor(() => coordinatorStatus().checks.length > 0 ? true : null, "retained helper inspection");
     assert.equal(findAttempt("task_helper"), undefined);
@@ -4734,10 +5273,11 @@ describe("same-Run helper custody", () => {
         s.tasks.task_new = { id: "task_new", run_id: replacement, status: "ready", deps: "[]" };
       });
       await waitFor(() => existsSync(startedFile) ? true : null, "old exact helper read to block");
-      await stopCoordinator();
+      const stopping = stopCoordinator();
+      writeFileSync(releaseFile, "");
+      await stopping;
       await startCoordinator(baseOpts(replacement));
       await dispatchIdOf("task_new");
-      writeFileSync(releaseFile, "");
       await waitFor(() => callsOf("worker-show", "--dispatch", "ctx_helper").length > 0 ? true : null, "old helper read to return");
       const reconciledAt = coordinatorStatus().lastReconciledAt ?? 0;
       await waitFor(() => (coordinatorStatus().lastReconciledAt ?? 0) > reconciledAt ? true : null, "new Run reconciliation");
@@ -4757,8 +5297,9 @@ describe("same-Run helper custody", () => {
     await seedHelpers(runId);
     await mutateState(s => { s.dispatches.ctx_helper.creatorDispatchId = null; s.dispatches.ctx_helper.depth = 1; });
     await startCoordinator(baseOpts(runId));
-    await waitFor(() => findAttempt("task_helper")?.terminalDecision === "released" ? true : null, "root Dispatch release");
-    assert.equal(attempt("task_helper").dispatchId, "ctx_helper");
+    await waitFor(() => coordinatorStatus().recovery?.unverifiable.includes("task_helper") ?? false, "foreign root remains visible");
+    assert.equal(findAttempt("task_helper"), undefined);
+    assert.equal(callsOf("worker-release", "--dispatch", "ctx_helper").length, 0);
     assert.equal(getState().dispatches.ctx_parent.status, "dispatched");
   });
 });
@@ -4847,9 +5388,10 @@ describe("recovered worker_done ownership acknowledgement", () => {
         status: "completed", workerState: "succeeded", terminalState: "reclaimable", agentTerminal: "term_recovered" } };
       s.seq = { terminal: 0 };
       s.mailboxes = { term_f1: [{ deliveryId, messages: [
-        { ...workerDoneMessage("task_aaa", "ctx_recovered", "succeeded", "msg_recovered"), run_id: runId },
+        { ...workerDoneMessage("task_aaa", "ctx_recovered", "succeeded", "msg_recovered"), run_id: runId, from_handle: "term_recovered" },
       ] }] };
     });
+    await recordViewerLaunch(runId, "task_aaa", "ctx_recovered");
     await startCoordinator(baseOpts(runId));
     await waitFor(() => coordinatorStatus().phase === "completed" ? true : null, "recovered Delivery completion");
     const releaseIndex = firstIndexOf("worker-release", "--dispatch", "ctx_recovered");

@@ -71,7 +71,11 @@ Orca 1.4.226 counts failed `worker-start` invocations along the exact `--retry-o
 
 ## Coordinator Safety and Read Efficiency
 
-- **FIFO Delivery Acknowledgements:** Every validated FIFO Delivery is acknowledged, including notifications and stale lifecycle messages. Pending questions or owed terminal decisions hold the ACK. Batches returned by `check --ack` are drained immediately without polling delay, reconciling between batches. Empty, error, or held batches retain the standard polling floor.
+- **Mailbox protocol:** Legacy FIFO checks replay the oldest unacknowledged Delivery; process every message and drain any next batch returned by ACK. V3 consuming checks acknowledge on read, and ACK alone does not fetch another batch. Transport acknowledgement on read is distinct from local processing completion: durable consuming-check UUIDs, batch deliveries, processed message IDs, and pending questions are checkpointed in `.orca-dag/sessions.json` (`mailboxChecks`) and survive restarts. A lost consuming response is recovered via read-only `request-show` using the original request identity, never a fresh mutation. Acknowledged batches continue draining while human questions remain pending. `--peek` is observation only; never consume a worker's mailbox for monitoring.
+- **Guidance and Follow-Up Lifecycle:** Guidance persists its request and requested worker identity in `guidanceSends` before native effects. Accepted receipts distinguish requested from actual Task/Dispatch IDs and `enqueued` from `follow_up`; the journal records `creationProven` and sanitized immutable start evidence (`status`, `launchMode`). Unknown guidance holds fleet capacity and blocks blind resends. Read-only reconciliation of a prior operation returns `guidance_reconciled`, never acknowledgment of the new body. Run Stop covers every viewer-owned follow-up root and reports unresolved sends or teardown outcomes as explicit debt.
+- **Historical launch-mode reads:** Worker detail can restore an immutable follow-up start-mode tuple from the critical journal after Stop or restart. It must match the actual Run, Task and Dispatch, never the requested parent. Missing/unreadable evidence stays unknown; display recovery does not grant mutation authority.
+- **Committed Stage Merge Handshake:** Cross-workspace merges requiring committed Git handoff declare both `[orca-dag:merge-prep]` and `[orca-dag:merge-inputs-v3]`. Native 1.4.247 `ask` has no `--subject` or `--payload` flags (the native subject is fixed to `'Question'`, and `payload.question` contains the entire question text). The worker asks before any Git edit with the entire question text exactly `[orca-dag:merge-inputs-v3]`. The coordinator verifies current merge Task/Dispatch ownership, sender handle, and clean dependencies before replying with immutable commit SHAs from StageGit. Legacy runnable merge specs are refused at plan validation and must replan in a fresh Run.
+- **Critical Recovery & No Hot Downgrade:** `.orca-dag/sessions.json` stores critical recovery journals (`mailboxChecks` and `guidanceSends`) that serve as recovery authority, not rotating audit logs. Unsupported older readers throw `session binding store contains unknown fields` on these inventories; active `sessions.json` state cannot safely be hot-downgraded across unsupported readers.
 - **Cleanup Debt Reconciliation:** Reclaimable cleanup debt is rechecked against fresh fleet state on every cycle; external releases clear debt automatically. Unknown cleanup states remain blocking.
 - **Helper Custody:** Workers created as helpers within the same Run remain under the custody of their active creator. The viewer verifies exact Dispatch lineage rather than inferring ownership from `parent_id`. Helpers are adopted only after positive creator settlement. Visible active workers consume concurrency admission budget, but external helpers mean **Max parallel is an admission throttle, not a hard runtime-wide cap**.
 - **Terminal Reuse Preconditions:** Automatic terminal reuse requires fresh, exact, connected PTY evidence for the identical agent and workspace. Chat handles do not establish PTY proof. OpenCode, OMP and Antigravity workers are excluded from generic reuse to preserve frontend, fresh-session and model identity.
@@ -135,6 +139,9 @@ server/src/
   app.ts                   Express app (createApp): API route definitions and SPA serving.
   activity.ts              Run-scoped event parser and bounded Activity journal.
   requestLedger.ts         Bounded mutation-request audit ledger (.orca-dag/requests.jsonl).
+  providerSessions.ts      Durable sessions.json store with bindings, mailboxChecks, and guidanceSends.
+  taskGuidance.ts          Proactive worker guidance, typed receipts, and read-only recovery.
+  stageGit.ts              Git Stage evidence, immutable base commit capture, and merge handshake.
   security.ts              Security enforcement: loopback binding, mutation tokens, input validation.
   coordinator.ts           Self-driven coordinator loop: DAG polling, worker-start, placement, settlement.
   orca.ts                  Orca CLI wrapper: command invocation, version detection, discovery, gates.
@@ -146,7 +153,6 @@ server/src/
   planning.ts              Managed .gitignore block handling for .orca-dag/.
   uninstall.ts             Uninstallation logic: unlinks skills, closes stale coordinator terminals.
   webAssets.ts             Build-time asset loader for embedded frontend and skill assets.
-
 web/src/
   App.tsx                  Main UI shell, 2-second polling loop, SVG crayon filter definitions.
   components/

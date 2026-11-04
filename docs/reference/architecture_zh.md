@@ -64,7 +64,11 @@ Orca 1.4.226 沿确切的 `--retry-of` 链累计启动失败的 `worker-start`�
 
 ## Coordinator 安全边界与读取效率
 
-- **FIFO 投递确认**：每个通过验证的 FIFO Delivery 均会被 ACK 确认，包括常规通知及过期生命周期报告。未回复的问题及尚未落定的终端归属决策将阻止 ACK。`check --ack` 批次处理时，后续有数据批次不再额外等待轮询节流；空批次、错误或未解决批次则保留轮询节流保护。
+- **收件箱协议**：旧版 FIFO check 重放最旧未确认 Delivery；处理全部消息，并处理 ACK 返回的后续批次。V3 消费式 check 在读取时确认，单独 ACK 不获取下一批。读取时的传输确认与本地处理完成严格区分：持久化消费式 check UUID、批次投递、已处理消息 ID 以及未决提问均 checkpoint 记录在 `.orca-dag/sessions.json`（`mailboxChecks`）中并支持跨重启恢复。丢失的消费响应通过只读 `request-show` 依据原始请求身份恢复，绝不发起新变更。已确认批次在人工提问未落定时继续流转。`--peek` 仅用于观察；不要为了监控而消费 worker 的收件箱。
+- **指导消息与后续任务生命周期**：产生原生影响前，先将请求及请求目标身份持久化到 `guidanceSends`。接受回执后区分请求与实际 Task/Dispatch ID、`enqueued` 与 `follow_up`；账本记录 `creationProven` 及清洗后的不可变启动证据（`status`, `launchMode`）。未决指导占用并发配额并阻止盲目重发。只读调和先前操作时返回 `guidance_reconciled`，绝不将其当作新内容已投递。Run Stop 覆盖全部 viewer 拥有的后续根任务，并将未决发送或未知清理结果报告为显式债务。
+- **历史启动模式读取**：Stop 或重启后，worker 详情可从关键账本恢复不可变的后续启动模式元组。必须匹配实际 Run、Task 与 Dispatch，不能误用请求目标父任务。证据缺失或不可读时仍为未知；展示证据恢复不授予变更权限。
+- **已提交 Stage 合并握手**：要求跨工作区已提交代码交接的合并点必须同时声明 `[orca-dag:merge-prep]` 与 `[orca-dag:merge-inputs-v3]`。原生 1.4.247 `ask` 不提供 `--subject` 与 `--payload` 参数（原生 subject 固定为 `'Question'`，`payload.question` 包含完整提问文本）。worker 必须在任何 Git 修改前，发起提问文本严格且仅为 `[orca-dag:merge-inputs-v3]` 的提问。coordinator 在校验当前合并 Task/Dispatch 归属、发送方句柄及干净依赖后，通过 StageGit 返回不可变 commit SHA 回执。缺乏 V3 标记的旧可运行合并 spec 在建图校验时会被直接拒绝，须新建 Run 重新规划。
+- **关键状态恢复与热降级防线**：`.orca-dag/sessions.json` 持久化关键恢复账本（`mailboxChecks` 与 `guidanceSends`），作为故障恢复依据而非滚动审计日志。不支持新字段的旧版读取器会直接报错（`session binding store contains unknown fields`）；包含未结算关键账本的 `sessions.json` 无法安全热降级至旧版读取器。
 - **清理债务核验**：可回收的清理债务（reclaimable debt）严格根据新鲜的 fleet 记录重新核验，在 viewer 外部完成的 release 同样能抵消旧债务；未知的清理结果将持续阻止标记完成。
 - **Helper 管理与谱系隔离**：同 Run 内的 helper worker 严格归其活动创建者管理。viewer 读取精确的 Dispatch lineage，不将 `parent_id` 视为所有权；仅在证实创建者已落定后方才接管 helper，归属不可读时保持等待。Stop 命令如实报告委派工作，绝不擅自终止它。可见的活动 worker 占用派工预算，但 helper 可在 viewer 外部启动，因此 **Max parallel 不是整个 Orca 运行时的全局硬上限**。
 - **终端精确复用**：自动终端复用必须具备相同 agent、相同工作区且新鲜、已连接的 PTY 证据。仅凭 Chat handle 不能证明 PTY 存活；OpenCode、OMP、Antigravity 因需保留前端、新会话与模型身份，均不参与通用复用。
@@ -107,6 +111,9 @@ server/src/
   app.ts                 Express API 应用路由与静态 SPA 托管
   activity.ts            Run 作用域事件解析与有界 Activity 日志流
   requestLedger.ts       变更请求持久化账本（.orca-dag/requests.jsonl）与 request-show 对账
+  providerSessions.ts    持久化 sessions.json 存储：管理会话绑定、mailboxChecks 与 guidanceSends
+  taskGuidance.ts        主动 worker 指导消息、带类型回执与只读恢复
+  stageGit.ts            Git Stage 提交证据、不可变基准快照与合并输入握手
   security.ts            回环安全策略：进程级 mutation token、参数校验、自定义命令放行开关
   coordinator.ts         自驱动调度器循环：DAG 轮询、worker 派发、放置/lane 映射、集成门与终端生命周期
   orca.ts                orca CLI 底层调用封装（shell: false）、能力嗅探、工作区与环境发现、worker 交互

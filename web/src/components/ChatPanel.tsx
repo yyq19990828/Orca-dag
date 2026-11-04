@@ -1,5 +1,5 @@
 import { Fragment, memo, useEffect, useMemo, useState } from "react";
-import { fetchAudiencePreview, replyToMessage, sendGroupMessage, sendTaskMessage } from "../api";
+import { ApiError, fetchAudiencePreview, replyToMessage, sendGroupMessage, sendTaskMessage } from "../api";
 import { formatClock, formatDateTime, isUrgent, priorityLabel } from "../format";
 import { t, useLang, useT } from "../i18n";
 import { useDecisionDialog } from "./DecisionDialog";
@@ -12,6 +12,7 @@ import type {
   CoordinatorCheckReceipt,
   DagNode,
   StagePresence,
+  TaskMessageReceipt,
 } from "../types";
 
 const COORDINATOR_THREAD = "__run_coordinator__";
@@ -438,6 +439,8 @@ export const ChatPanel = memo(function ChatPanel({
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [messageReceipt, setMessageReceipt] = useState<TaskMessageReceipt | null>(null);
+  const [uncertainMessages, setUncertainMessages] = useState<Record<string, boolean>>({});
 
   // --- Phase 6: Run-control group composer -----------------------------------
   //
@@ -462,6 +465,8 @@ export const ChatPanel = memo(function ChatPanel({
     setExpandedChecks({});
     setDraft("");
     setError(null);
+    setMessageReceipt(null);
+    setUncertainMessages({});
   }, [runId]);
 
   useEffect(() => {
@@ -601,6 +606,8 @@ export const ChatPanel = memo(function ChatPanel({
     coordinatorActive && selected?.task?.status === "dispatched" && selected.task.dispatchId
       ? selected.task.dispatchId
       : null;
+  const uncertainKey = selected?.taskId ? `${runId}:${selected.taskId}` : null;
+  const messageUncertain = uncertainKey !== null && Boolean(uncertainMessages[uncertainKey]);
   // Shared by the runtime summary's data-state and its label; extracting keeps
   // the pill's title attribute (full text on hover) from drifting from what's
   // rendered.
@@ -792,16 +799,22 @@ export const ChatPanel = memo(function ChatPanel({
     const body = draft.trim();
     const targetId = replyTarget?.actionable?.targetId;
     const taskId = selected?.taskId;
-    if (!body || !runId || disabled || busy || (!targetId && (!taskId || !activeDispatch))) return;
+    if (!body || !runId || disabled || busy || (!targetId && (!taskId || !activeDispatch || messageUncertain))) return;
     setBusy(true);
     setError(null);
+    setMessageReceipt(null);
     try {
       if (targetId) await replyToMessage(targetId, body, runId);
-      else await sendTaskMessage(taskId!, body, runId);
+      else setMessageReceipt(await sendTaskMessage(taskId!, body, runId));
       setDraft("");
       onResolved();
     } catch (err) {
-      setError(String((err as Error).message ?? err));
+      const reconciled = err instanceof ApiError && err.code === "guidance_reconciled";
+      const diagnostic = String((err as Error).message ?? err);
+      setError(reconciled ? `${t("chat.message.reconciled")}\n${diagnostic}` : diagnostic);
+      if (!targetId && taskId && !reconciled) {
+        setUncertainMessages((current) => ({ ...current, [`${runId}:${taskId}`]: true }));
+      }
     } finally {
       setBusy(false);
     }
@@ -1062,6 +1075,21 @@ export const ChatPanel = memo(function ChatPanel({
 
             <footer className="chat__composer">
               {error && <div className="chat__error" role="status">⚠ {error}</div>}
+              {messageUncertain && <div className="inbox__meta" role="status">{t("chat.message.sendUncertain")}</div>}
+              {messageReceipt && messageReceipt.runId === runId && messageReceipt.requestedTaskId === selected.taskId && (
+                <div className="inbox__body" role="status" data-testid="task-message-receipt">
+                  <strong>{t(messageReceipt.kind === "follow_up" ? "chat.message.followUp" : "chat.message.taskEnqueued")}</strong>
+                  <dl className="record-facts">
+                    <dt>{t("record.task")}</dt><dd><code>{messageReceipt.taskId}</code></dd>
+                    <dt>{t("record.dispatch")}</dt><dd><code>{messageReceipt.dispatchId}</code></dd>
+                    <dt>{t("chat.message.requestedTask")}</dt><dd><code>{messageReceipt.requestedTaskId}</code></dd>
+                    <dt>{t("chat.message.requestedDispatch")}</dt><dd><code>{messageReceipt.requestedDispatchId}</code></dd>
+                    {messageReceipt.followUpOf && <><dt>{t("chat.message.followUpOf")}</dt><dd><code>{messageReceipt.followUpOf}</code></dd></>}
+                    {messageReceipt.requestId && <><dt>{t("record.request")}</dt><dd><code>{messageReceipt.requestId}</code></dd></>}
+                  </dl>
+                  <span className="inbox__meta">{t("chat.message.taskReceiptNote")}</span>
+                </div>
+              )}
               {groupError && <div className="chat__error" role="status">⚠ {groupError}</div>}
               {isRunControl && coordinatorActive && !disabled && (
                 <div className="chat__group-composer">
@@ -1184,10 +1212,11 @@ export const ChatPanel = memo(function ChatPanel({
                   <button
                     type="button"
                     className="btn btn--ok"
-                    disabled={disabled || busy || !draft.trim()}
+                    disabled={disabled || busy || !draft.trim() || (!replyTarget && messageUncertain)}
                     title={
                       disabled
                         ? disabledReason ?? t("chat.compose.executionIsUnavailable")
+                        : !replyTarget && messageUncertain ? t("chat.message.sendUncertain")
                         : replyTarget ? t("chat.compose.sendReplyTitle") : t("chat.compose.sendGuidanceTitle")
                     }
                     onClick={() => void sendMessage()}

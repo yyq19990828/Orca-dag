@@ -82,6 +82,38 @@ after(() => {
 });
 
 describe("API-preselected OpenCode full TUI", () => {
+  for (const mode of ["no_owned_resource", "already_released"] as const) {
+    it(`retains an exactly verified caller-owned pane when native retain reports ${mode}`, async () => {
+      const oldFlag = process.env.ORCA_DAG_OPENCODE_TUI;
+      process.env.ORCA_DAG_OPENCODE_TUI = "1";
+      resetCoordinatorForTests();
+      try {
+        await startCoordinator({ ...coordinatorOpts(), defaultOpenCodeUi: "mini", retainByTask: { task_test: true } });
+        await waitFor(() => Boolean(coordinatorStatus().attempts.find(a => a.taskId === "task_test")?.dispatchId));
+        const dispatchId = coordinatorStatus().attempts.find(a => a.taskId === "task_test")!.dispatchId!;
+        for (;;) {
+          try { mkdirSync(`${orcaFile}.lock`); break; } catch { await pause(5); }
+        }
+        try {
+          const data = load(orcaFile);
+          data.retainMode = { [dispatchId]: mode };
+          writeFileSync(orcaFile, JSON.stringify(data));
+        } finally { rmSync(`${orcaFile}.lock`, { recursive: true }); }
+        await settleWithLock();
+        await waitFor(() => coordinatorStatus().attempts.find(a => a.taskId === "task_test")?.terminalDecision === "retained");
+        const attempt = coordinatorStatus().attempts.find(a => a.taskId === "task_test")!;
+        assert.ok(attempt.terminalDetail?.includes(mode === "no_owned_resource" ? "no_owned_resource" : "already_released"));
+        assert.equal((await store.listOpenCodeLaunches()).find(row => row.dispatchId === dispatchId)?.state, "retained");
+        assert.equal(calls(orcaLog, "worker-start").length, 1);
+        assert.equal(calls(orcaLog, "worker-release").length, 0);
+        assert.ok(load(orcaFile).terminals.some((terminal: { handle: string; connected: boolean }) =>
+          terminal.handle === attempt.handle && terminal.connected));
+      } finally {
+        await stopCoordinator(); await pause(150); resetCoordinatorForTests();
+        if (oldFlag === undefined) delete process.env.ORCA_DAG_OPENCODE_TUI; else process.env.ORCA_DAG_OPENCODE_TUI = oldFlag;
+      }
+    });
+  }
   it("preserves an explicit successor frontend after a native model-pinned task", async () => {
     const oldFlag = process.env.ORCA_DAG_OPENCODE_TUI;
     delete process.env.ORCA_DAG_OPENCODE_TUI;

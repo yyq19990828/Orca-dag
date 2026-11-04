@@ -22,7 +22,8 @@
 //   * Atomic: append-only JSONL behind a serialized write chain — the same
 //     durability expectations as ActivityJournal (a torn final line is
 //     skipped, not fatal; rotation keeps the file small; updates are new
-//     lines, and the LAST line for a request id wins on read).
+//     lines, and the LAST line for a request id wins on read). Critical mailbox
+//     and guidance recovery belongs to sessions.json, not this rotating audit.
 
 import { appendFile, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -45,6 +46,9 @@ export type RequestOperation =
   | "worker-retain"
   | "worker-stop"
   | "worker-abandon"
+  | "check"
+  | "send"
+  | "reply"
   | "worktree-remove"
   | "terminal-focus"
   | "file-open"

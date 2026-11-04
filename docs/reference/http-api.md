@@ -56,7 +56,7 @@ All `POST` and `PUT` endpoints require the `X-Orca-Dag-Token` header. `GET` endp
 |---|---|---|
 | `GET` | `/api/session` | Returns `{ token, allowCustomCommands }`. Provides the per-process mutation token to same-origin clients (`Cache-Control: no-store`). |
 | `GET` | `/api/readiness` | Reports the resolved CLI/build version, selected runtime version/state, workspace selector, and execution permission with an actionable disabled reason. |
-| `GET` | `/api/capabilities` | Inspects local Orca capability advertisements and returns parsed support for canonical 1.4.206 orchestration capability IDs. |
+| `GET` | `/api/capabilities` | Returns runtime readiness, raw advertisements and recognized orchestration support, including V3 auto-release, keep-open, implicit-Run advertisement, retained bindings, turn-stop reports and immediate ask receipts. Advertising implicit Run support does not enable implicit creation in the viewer. |
 | `GET` | `/api/health` | Basic health check returning the current workspace directory. |
 
 ---
@@ -163,11 +163,19 @@ All `POST` and `PUT` endpoints require the `X-Orca-Dag-Token` header. `GET` endp
 | `GET` | `/api/activity?run=<id>&after=&limit=` | Fetches readable Activity event timeline, stage presence, and coordinator check receipts. |
 | `GET` | `/api/activity/stream?run=<id>` | Real-time Server-Sent Events (SSE) feed of activity snapshots for the specified Run. |
 | `GET` | `/api/inbox?run=<id>` | Returns pending questions, escalations, and cleanup debt for the Run. |
-| `POST` | `/api/messages/:id/reply` | `{ body, runId }`: Sends a reply to a pending worker question or escalation. |
+| `POST` | `/api/tasks/:taskId/messages` | `{ runId, body, subject?, threadId? }`: Sends guidance to a verified active Task Dispatch under this viewer's live coordinator. Returns typed `TaskMessageReceipt` (`ok: true, kind: "enqueued" | "follow_up", runId, taskId, dispatchId, requestedTaskId, requestedDispatchId, followUpOf, requestId`). |
+| `POST` | `/api/messages/:id/reply` | `{ body, runId }`: Sends a reply to a pending worker question or escalation using a durable request ID. Merge input questions (`[orca-dag:merge-inputs-v3]`) are answered with immutable commit SHAs from StageGit. Native reply does not create follow-up tasks. |
 | `GET` | `/api/audiences?run=<id>` | Previews allowable group-messaging targets (`@all` and discovered worktrees) with discovery health. |
 | `POST` | `/api/messages/group` | `{ runId, audience, body, subject?, type?, priority? }`: Broadcasts a coordinator message. Rejects lifecycle signal types (`forbidden_group_type`). |
 | `POST` | `/api/gates/:id/resolve` | `{ resolution, runId }`: Resolves an approval gate or cross-lane integration gate (`integrated`). |
 
+#### Guidance Delivery, Recovery, and Follow-Up Lifecycle
+
+`POST /api/tasks/:taskId/messages` validates that this viewer owns the live coordinator for `runId`, that the task has an active Dispatch, and that fleet capacity (which includes visible helpers and pending ambiguity) permits the send.
+- **Typed Receipts & Identity Distinction:** The route returns `{ ok: true, ...receipt }`, distinguishing requested IDs (`requestedTaskId`, `requestedDispatchId`) from actual returned IDs (`taskId`, `dispatchId`). `kind: "enqueued"` represents delivery to the same active Dispatch without starting new work, while `kind: "follow_up"` represents a started or routed follow-up task (`followUpOf` captures the parent lineage).
+- **Durable Journaling & Sanitized Start Evidence:** Before calling native Orca, the coordinator persists a `guidanceSends` checkpoint in `.orca-dag/sessions.json` with the request and requested worker identities. An accepted native receipt adds `creationProven` and sanitized immutable `startEvidence` (`status`, `launchMode`); missing evidence is not fabricated.
+- **Reconciliation vs New Delivery (`guidance_reconciled`):** If an earlier send to the same target remains unconfirmed (`prepared` or `unknown`), a subsequent send triggers read-only recovery (`recoverTaskGuidance`) via `request-show` without sending a new body. If that prior send is successfully reconciled, the call throws `guidance_reconciled` ("Previous guidance request was reconciled; submit the new guidance again"). This indicates that the prior operation resolved, NOT that the newly submitted body was delivered. If the prior send remains unresolved, it throws `guidance_unknown`; unresolved guidance holds fleet capacity debt and blocks blind resends.
+- **Stop Ownership & Capacity Debt:** The coordinator tracks only creation-proven follow-up roots (`creationProven: true`) or exact journal-owned roots. `POST /api/run-stop` attempts teardown of all owned roots, including follow-ups, and returns `{ ok: true, clean, results }`. Unresolved sends or teardown outcomes keep `clean: false`; each result names its `target`, `kind`, `result`, and `detail`.
 ---
 
 ### Workers, Supervision, and Interventions
@@ -185,6 +193,7 @@ All `POST` and `PUT` endpoints require the `X-Orca-Dag-Token` header. `GET` endp
 | `POST` | `/api/workers/:id/retry` | Re-places a positively failed attempt using the identical harness, model, effort, and placement. |
 | `POST` | `/api/workers/:dispatchId/resolve-blocked` | `{ runId, result, acknowledgeUnknownProvider: true }`: Manually records an operator-reviewed result on a blocked Task. |
 
+The output response is `{ output: ... }`. Native output receipts can include optional `fallbackReason`, `sourceExact`, `archived`, `provider`, and `sourceIdentity` evidence. Missing or null means unknown, not false; an explicit `false` is meaningful and strictly preserved. These fields describe the returned source, not full history, Task settlement, or authority to clean up. `sourceChanged` indicates a source reset; paging remains bounded. Native start receipts may also include `launchMode` (`mode`, `preferred`, `reason`, `detail`) when Orca provides it. This is surface evidence, distinct from supervised/legacy adapter mode; do not infer a surface from a terminal handle. Start receipts also report `keepOpen` dispositions (`retained`, `already_released`, `release_pending`, `no_owned_resource`, or `unknown`); an accepted start remains accepted even if subsequent retention encounters issues, without fallback launches or unintended release.
 ---
 
 ### Session Recovery and Mutation Audit
@@ -197,6 +206,13 @@ All `POST` and `PUT` endpoints require the `X-Orca-Dag-Token` header. `GET` endp
 | `GET` | `/api/requests?run=<id>` | Returns bounded list of recorded mutation request IDs from `.orca-dag/requests.jsonl`. |
 | `GET` | `/api/requests/:requestId?run=<id>` | Reads a ledger row and runs a live `request-show` probe (`completed`, `pending`, `absent`, `unknown`). |
 
+#### Critical State Recovery and Hot-Downgrade Safeguard
+
+`.orca-dag/sessions.json` stores critical recovery journals in addition to provider session bindings:
+- `mailboxChecks`: Durable checkpoints of consuming checks and legacy ACKs, caching `requestId`, `delivery`, `processedMessageIds`, `pendingQuestionIds`, and per-question `replyRequests`. On restart, pending questions and draining batches are recovered before new checks.
+- `guidanceSends`: Durable checkpoints of coordinator guidance sends, tracking `requestId`, `state` (`prepared`, `unknown`, `enqueued`, `follow_up`, `refused`), `receipt`, `creationProven`, and sanitized `startEvidence`.
+
+These records are **recovery authority**, not rotating audit history. Unsupported older readers will throw `session binding store contains unknown fields` when reading these new inventories; therefore, active `sessions.json` state cannot safely be hot-downgraded across unsupported readers without settling or archiving it first.
 ---
 
 ### Editor and Files

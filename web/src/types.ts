@@ -176,6 +176,14 @@ export interface LaunchPrefsView {
   on: string | null;
 }
 
+/** Native surface receipt, distinct from supervision and OpenCode frontend. */
+export type NativeLaunchMode = {
+  mode: string;
+  preferred: string | null;
+  reason: string | null;
+  detail: string | null;
+};
+
 /** One page of bounded worker output (GET /api/workers/:id/output). */
 export interface WorkerOutputView {
   dispatchId: string;
@@ -187,6 +195,11 @@ export interface WorkerOutputView {
   warnings: string[];
   /** True when the requested cursor pinned to a replaced source — the read restarted. */
   sourceChanged: boolean;
+  fallbackReason?: string | null;
+  sourceExact?: boolean | null;
+  archived?: boolean | null;
+  provider?: string | null;
+  sourceIdentity?: string | null;
 }
 
 /** Terminal custody is independent of supervised lifecycle and agent liveness. */
@@ -317,6 +330,7 @@ export interface WorkerDetailView {
   dispatchId: string;
   runId: string | null;
   taskId: string | null;
+  launchMode?: NativeLaunchMode | null;
   launch: {
     agent: string | null;
     model: string | null;
@@ -388,6 +402,7 @@ export interface RunAttempt {
   taskId: string;
   harness: string;
   mode: "supervised" | "legacy";
+  launchMode?: NativeLaunchMode | null;
   dispatchId: string | null;
   handle: string | null;
   startedAt: number;
@@ -486,6 +501,7 @@ export interface RetryWorkerResult {
 /** Full worker-start receipt (Phase 4 item 1), preserved for the UI. */
 export interface WorkerStartReceiptView {
   ok: boolean;
+  launchMode?: NativeLaunchMode | null;
   taskId: string | null;
   dispatchId: string | null;
   /** Echo of the durable --retry-request id the start ran under. */
@@ -502,6 +518,18 @@ export interface WorkerStartReceiptView {
   residualResources: unknown;
   /** Orca's own prescribed recovery commands, verbatim. */
   recoveryCommands: string[];
+}
+
+/** Exact lineage returned by a task message, including any follow-up. */
+export interface TaskMessageReceipt {
+  kind: "enqueued" | "follow_up";
+  runId: string;
+  taskId: string;
+  dispatchId: string;
+  requestedTaskId: string;
+  requestedDispatchId: string;
+  followUpOf: string | null;
+  requestId: string | null;
 }
 
 /** What startup recovery found and did (Phase 4 items 4-7). */

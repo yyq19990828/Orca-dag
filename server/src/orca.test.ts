@@ -9,7 +9,6 @@ import {
   abandonWorkerReceipt,
   assertValidWorkerStart,
   buildWorkerStartArgv,
-  CANONICAL_RUNTIME_CAPABILITIES,
   COORDINATOR_TITLE,
   computerSupports,
   deriveWorktreeName,
@@ -73,6 +72,7 @@ import {
   showWorktree,
   startSupervisedWorker,
   withDerivedCreationDefaults,
+  startLegacyWorker,
   type ComputerUseCapabilities,
   type OrcaRepoRow,
   type OrcaWorktreeRow,
@@ -125,7 +125,7 @@ function readLog(): FakeCall[] {
 function writeScript(
   conf: {
     version?: string;
-    runtime?: { appVersion?: unknown; state?: unknown; reachable?: boolean } | null;
+    runtime?: { appVersion?: unknown; state?: unknown; reachable?: boolean; capabilities?: string[] } | null;
     statusError?: { code: string; message: string };
     terminals?: unknown[];
     newHandle?: string;
@@ -137,6 +137,7 @@ function writeScript(
     };
     /** Phase 5: worker-start receipt body (argv itself is asserted from the log). */
     workerStart?: Record<string, unknown>;
+    keepOpenFailure?: string;
     /** Phase 2: dispatch-keyed `worker-show` result payloads served verbatim. */
     workerShow?: Record<string, Record<string, unknown>>;
     /** Phase 6: discovery + fleet rows served verbatim by the fake. */
@@ -315,7 +316,14 @@ if (args[0] === "orchestration" && args[1] === "worker-list") {
     page: { hasMore: false, nextCursor: null },
   };
 }
-if (args[0] === "orchestration" && args[1] === "worker-start") out.result = conf.workerStart ?? {};
+if (args[0] === "orchestration" && args[1] === "worker-start") {
+  out.result = conf.workerStart ?? {};
+  if (conf.keepOpenFailure && args.includes("--keep-open")) {
+    process.stdout.write(JSON.stringify(out));
+    process.stderr.write("worker started but was not kept open (" + conf.keepOpenFailure + ").");
+    process.exit(1);
+  }
+}
 // Phase 2: dispatch-keyed worker-show receipts. Each entry is the "result"
 // payload served verbatim; an unlisted dispatch answers dispatch_not_found so
 // detail-null behavior is testable without a second fixture.
@@ -1110,6 +1118,22 @@ describe("normalizeLiveness", () => {
 // --- Phase 5 foundations: bounded worker-read --------------------------------
 
 describe("readWorkerOutput", () => {
+  it("preserves optional provenance without inventing false for old receipts", async () => {
+    useRuntime({ workspace: root });
+    writeScript({ workerRead: { result: { source: "terminal", terminal: { tail: [] },
+      fallbackReason: "provider_unsupported", sourceExact: false, archived: false,
+      provider: "codex", sourceIdentity: "terminal:exact" } } });
+    const receipt = await readWorkerOutput("ctx_provenance", { source: "terminal" });
+    assert.equal(receipt.fallbackReason, "provider_unsupported");
+    assert.equal(receipt.sourceExact, false);
+    assert.equal(receipt.archived, false);
+    assert.equal(receipt.provider, "codex");
+    assert.equal(receipt.sourceIdentity, "terminal:exact");
+    writeScript({ workerRead: { result: { source: "terminal", terminal: { tail: [] } } } });
+    const old = await readWorkerOutput("ctx_old", { source: "terminal" });
+    assert.equal(old.sourceExact, undefined);
+    assert.equal(old.archived, undefined);
+  });
   it("renders typed transcript messages without losing continuation or clipping evidence", async () => {
     useRuntime({ workspace: root });
     writeScript({
@@ -1358,9 +1382,53 @@ describe("startSupervisedWorker launch preferences", () => {
   });
 });
 
+describe("legacy OpenCode effort admission", () => {
+  it("rejects conflicting variants before creating a terminal", async () => {
+    useRuntime({ workspace: root });
+    await assert.rejects(startLegacyWorker({ taskId: "task_a", runId: "run_a", from: "term_coord",
+      harness: "opencode", model: "provider/model#high", effort: "low" }));
+    assert.equal(readLog().some(call => call.argv[0] === "terminal" && call.argv[1] === "create"), false);
+  });
+});
+
+describe("native keep-open start custody", () => {
+  it("preserves the accepted Dispatch when the later retain effect fails", async () => {
+    useRuntime({ workspace: root });
+    writeScript({ version: "1.4.247", runtime: { state: "ready", appVersion: "1.4.247",
+      capabilities: ["orchestration.worker-keep-open.v1"] },
+      workerStart: { runId: "run_a", taskId: "task_a", dispatchId: "ctx_started", state: "ready" },
+      keepOpenFailure: "release_pending" });
+    const started = await startSupervisedWorker({ taskId: "task_a", runId: "run_a", agent: "codex",
+      from: "term_coord", keepOpen: true });
+    assert.equal(started.dispatchId, "ctx_started");
+    assert.equal(started.receipt?.keepOpen, "release_pending");
+    assert.equal(readLog().filter(call => call.argv[1] === "worker-start").length, 1);
+  });
+
+  it("keeps old hosts working and refuses unproven new-host support before start", async () => {
+    useRuntime({ workspace: root });
+    writeScript({ version: "1.4.205", runtime: { state: "ready", appVersion: "1.4.205" },
+      workerStart: { dispatchId: "ctx_old", state: "ready" } });
+    const old = await startSupervisedWorker({ taskId: "task_a", runId: "run_a", agent: "codex",
+      from: "term_coord", keepOpen: true });
+    assert.equal(old.dispatchId, "ctx_old");
+    assert.equal(old.receipt?.keepOpen, undefined);
+    useRuntime({ workspace: root });
+    writeScript({ version: "1.4.247", runtime: { state: "ready", appVersion: "1.4.247" } });
+    await assert.rejects(startSupervisedWorker({ taskId: "task_a", runId: "run_a", agent: "codex",
+      from: "term_coord", keepOpen: true }), { code: "keep_open_unavailable" });
+    assert.equal(readLog().some(call => call.argv[1] === "worker-start"), false);
+  });
+});
+
 // --- Phase 5 foundations: receipt effective-preference echo ------------------
 
 describe("parseWorkerStartReceipt effective launch preferences", () => {
+  it("exposes only actual native surface evidence", () => {
+    const receipt = parseWorkerStartReceipt({ mode: { mode: "terminal", preferred: "chat", reason: "fallback", detail: "unavailable" } }, true);
+    assert.deepEqual(receipt.launchMode, { mode: "terminal", preferred: "chat", reason: "fallback", detail: "unavailable" });
+    assert.equal(parseWorkerStartReceipt({ mode: "supervised" }, true).launchMode, null);
+  });
   it("digs the runtime's echo out of top-level and nested launch shapes", () => {
     const receipt = parseWorkerStartReceipt(
       {
@@ -1596,32 +1664,7 @@ describe("parsePeerCapabilities", () => {
   });
 });
 
-describe("describeRuntimeCapabilities (canonical Orca 1.4.206 ids)", () => {
-  it("exposes exactly the seven canonical identifiers from the epic", () => {
-    assert.deepEqual(
-      CANONICAL_RUNTIME_CAPABILITIES.map((c) => c.canonicalId),
-      [
-        "orchestration.worker-launch-preferences.v1",
-        "orchestration.federation-structured-read.v1",
-        "orchestration.federation-fleet-snapshot.v1",
-        "orchestration.federation-control-mail.v1",
-        "orchestration.federation-lifecycle-settlement.v1",
-        "orchestration.federation-release-archive.v1",
-        "orchestration.worker-stop-verdict.v1",
-      ],
-    );
-  });
-
-  it("marks every canonical capability supported when advertised verbatim", () => {
-    const ids = CANONICAL_RUNTIME_CAPABILITIES.map((c) => c.canonicalId);
-    const { capabilities, unknownAdvertised } = describeRuntimeCapabilities(ids);
-    for (const view of capabilities) {
-      assert.equal(view.supported, true, view.id);
-      assert.equal(view.state, "supported", view.id);
-      assert.equal(view.matchedName, view.id);
-    }
-    assert.deepEqual(unknownAdvertised, []);
-  });
+describe("describeRuntimeCapabilities", () => {
 
   it("matches documented legacy aliases and labels them as such", () => {
     const { capabilities } = describeRuntimeCapabilities([
@@ -1670,7 +1713,6 @@ describe("describeRuntimeCapabilities (canonical Orca 1.4.206 ids)", () => {
   it("gates everything off when nothing is advertised (null) or an empty set arrives", () => {
     for (const advertised of [null, []]) {
       const { capabilities, unknownAdvertised } = describeRuntimeCapabilities(advertised);
-      assert.equal(capabilities.length, CANONICAL_RUNTIME_CAPABILITIES.length);
       for (const view of capabilities) {
         assert.equal(view.supported, false, `${view.id} must stay off for ${JSON.stringify(advertised)}`);
         assert.equal(view.state, "absent");

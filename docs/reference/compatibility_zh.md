@@ -24,6 +24,19 @@
 
 **最低兼容版本不等于完整的实测版本矩阵。** 原生 agent 和实验性 TUI 路径依据的是**运行中的 Orca app 版本**（`orca status --json` 里的 `result.runtime.appVersion`），不能仅凭已安装的 CLI 版本判断。
 
+V3 收件箱与后续任务契约不提高 1.4.160 浏览 / 1.4.205 执行的通用门槛。能力声明本身不授权隐式创建 Run，也不会让未经验证的 agent 可供选择。下方 1.4.247 记录仅证明具体的真实执行与恢复场景，不代表全部 agent、界面、放置方式或历史运行时均已认证。Native Chat 的 fleet 可观测性仍是独立的上游局限。
+
+### V3 契约与实现边界
+
+- **持久化消费式 Check 与待处理状态缓存**：Check 请求在产生底层影响前在 `.orca-dag/sessions.json`（`mailboxChecks`）持久化 UUID。丢失的消费响应通过只读 `request-show` 依据原始请求身份恢复，而非发起新请求。已确认的批次在人工输入待处理期间继续流转，未解决的提问在重启后完整恢复。读取时的传输确认与本地处理完成严格区分。
+- **带类型的指导消息与 Stop 归属**：调用原生接口前先持久化 `guidanceSends` checkpoint，显式区分请求身份（`requestedTaskId`, `requestedDispatchId`）与实际身份（`taskId`, `dispatchId`）。接受结果后记录 `creationProven` 与清洗后的启动证据（`status`, `launchMode`）；HTTP 回执报告 `kind: "enqueued"` 或 `"follow_up"`。未决指导占用并发配额并阻止盲目重发。只读恢复仅在先前操作已解决时返回 `guidance_reconciled`，不表示新内容已投递。Run Stop 覆盖 viewer 拥有的后续根任务；未决发送或未知清理结果以显式债务和 `clean: false` 报告。
+- **安全的合并输入握手**：已提交 Stage 集成必须同时包含 `[orca-dag:merge-prep]` 与 `[orca-dag:merge-inputs-v3]`。由于原生 1.4.247 `ask` 不提供 `--subject` 与 `--payload` 参数（原生 subject 固定为 `'Question'`，`payload.question` 包含完整提问文本），合并 worker 必须在进行任何 Git 修改前，向 coordinator 发起提问，其完整文本严格且仅为 `[orca-dag:merge-inputs-v3]`，不带任何额外说明文字，并等待 StageGit 返回的不可变 commit SHA 回执。缺乏 V3 标记的旧可运行合并 spec 会在建图校验时被直接拒绝，须在全新 Run 中重新规划。
+- **尽早传递 Keep-Open 与精细的 Retention**：原生 `keepOpen` 严格基于已验证的能力支持进行门控。启动回执细分报告 `keepOpen` 状态（`retained`、`already_released`、`release_pending`、`no_owned_resource`、`unknown`）。已接受的启动即使后续保留异常也不会回退启动。Supervised 终端保留与 API 预选会话保留严格区分显式释放与未证实 pane；未证实归属的 pane 保持打开供排查，绝不自动关闭。
+- **OpenCode 独立 Effort**：在兼容性 CLI 路径（`opencode run --auto -m`）上，独立 effort 会编码进精确的 `#variant` 选择器。这不新增原生 `opencode --effort` 支持；冲突的 effort/variant 请求在启动前拒绝。
+- **精确输出与 LaunchMode 证据追溯**：输出回执严格保留布尔值 `false` 与缺失（null/省略表示未知，显式 `false` 具有实际语义），用于 `sourceExact` 与 `archived`。原生 `launchMode`（`mode`、`preferred`、`reason`、`detail`）作为界面证据如实透传，不脑补确定性。
+- **关键状态恢复与热降级防线**：`.orca-dag/sessions.json` 持久化关键恢复账本（`mailboxChecks`, `guidanceSends`），作为权威恢复凭据而非滚动审计日志。旧版读取器读取这些清单时会直接抛出 `session binding store contains unknown fields`；包含未结算关键账本的 `sessions.json` 无法安全热降级至旧版读取器。
+
+能力投影识别 `orchestration.worker-auto-release.v1`、`orchestration.worker-keep-open.v1`、`orchestration.worker-start-implicit-run.v1`、`orchestration.retained-run-bindings.v1`、`orchestration.worker-turn-stop-reports.v1` 和 `orchestration.ask-returns-at-once.v1`。未声明仍表示未知；这些名称不改变 worker 准入，也不授权隐式创建 Run。除非另有决定，viewer 的默认落定策略仍为显式释放。
 | 能力 / 启动路径 | 最低 Orca 版本 | 条件 |
 |---|---|---|
 | 浏览 Run、Task 和 gate | **1.4.160** | 1.4.160–1.4.204 仅支持浏览。 |
@@ -54,6 +67,8 @@
 | **运行时 + CLI 1.4.245** | **OMP 18.15.0 · Native Chat** | 遵循用户的 Chat 偏好。已验证独立复算产物、获接受的 `worker_done`、有界 transcript 读取、viewer 崩溃后恢复同一 Dispatch/session、owned 活动 Stop 及前台工具子进程退出、释放。尽管精确 worker 观测为 live，fleet 仍显示 `unverifiable / missing_status`、provider 为空、活动未知。Antigravity Native Chat 与 Orca 运行时重启仍未验证；详见[已知局限](../tutorials/viewer-operations_zh.md#已知局限)。 |
 | **运行时 + CLI 1.4.245** | **Antigravity 1.4.12** | 原生 Terminal TUI 基线覆盖 Current/精确 Existing 及默认/完整显式模型。新增 viewer 验证完成了 Existing 和 Current 显式模型 Task、独立复算、获接受的 `worker_done`、释放及可读 terminal 归档。Current 配置默认模型的活动执行经 viewer 崩溃/重启恢复同一 Dispatch；原生 Stop 结束 agent 与前台子进程，未生成完成文件。输出是 terminal fallback（`provider_unsupported`），不是结构化 transcript；活动 Stop 后归档不可用。初始 CLI 从 1.4.10 漂移到实际执行的 1.4.12，根因及 1.4.10 执行仍未验证。Native Chat 与 Orca 运行时重启尚未实测。 |
 | **运行时 + CLI 1.4.246** | **OMP Native Chat / Antigravity Terminal；未重新采集 agent 版本** | 真实 Run `run_67072641a11a` 验证本地 Linux 新建 Git 工作树与工作区 Lane，覆盖 4 条 Lane × 2 个依赖有序 Task（共 8 个 Task 全部成功，阶段 completed，清理债务 0）。4 个独立工作区：OMP child（和 `20`）、OMP top-level（`21`）、Antigravity child（`59`）、Antigravity top-level（`97`）。首个 Task 创建工作区，后续 Task 使用精确 Existing，启动全新原生 agent 与 Dispatch。8 个 worker 全部释放。独立读回验证 nonce、数值、求和、计数、cwd、父子关系及 base SHA。用户设置决定 OMP 使用 Chat（`structured`）、Antigravity 使用 Terminal。仅实测 setup `skip` 与配置默认模型；不证明新放置下的活动 Stop/重启、Antigravity Chat、Orca 运行时重启、setup `run`/`inherit` 或显式模型新放置。本地证据为被忽略的 `.orca-dag/20261103T024111Z/verification.json` 与 `plan.json`。 |
+| **运行时 + CLI 1.4.247** | **OpenCode 2.2.0 · Mini 与兼容 CLI** | Mini 使用 `openai/gpt-6.1-terra#xhigh`：混合自动确认的提问/完成批次在注入校验读取失败后恢复；消费响应丢失并终止后端后，同一 Run 使用原 UUID、原 Dispatch 恢复；4 个 Task、3 个工作树的集成通过一次精确 marker 提问/回复获取不可变依赖 SHA，保留 Git 祖先关系并独立算出 `51`。另以 Auto 兼容 CLI 启动普通模型 `openai/gpt-6.1-terra` 加独立 `xhigh` effort，两个依赖 Task 成功，两个精确 provider session 均报告 variant `xhigh`。证据：`.orca-dag/20261103T090133-935Z-v3-migration/`。不证明完整 TUI、远程/Windows 或全部历史运行时均已认证。 |
+| **运行时 + CLI 1.4.247** | **OMP Native Chat · 配置默认模型；未重新采集 ACP 进程版本** | 不覆盖 surface 或模型，遵循用户的 Chat 偏好。确认提前 `keepOpen: retained`；结算竞态返回新的实际 Task/Dispatch，并持久记录创建证明；另一次活动发送返回指向该实际 Dispatch 的 `enqueued`。Stop 覆盖新建的后续根任务；隔离 Stop 验收确认前台子进程在 Stop 前仍存活、Stop 后退出，未写出完成文件，结果 `clean: true`、清理债务 0。原生启动模式元组如实保留，包括 `mode` 为 `terminal`、但 detail 明确指向已有 Chat 的复用回执。不证明所有 opaque 模型选择器、Antigravity Chat 或 Orca 运行时重启均已验证。 |
 
 ### 验证边界与限制说明
 

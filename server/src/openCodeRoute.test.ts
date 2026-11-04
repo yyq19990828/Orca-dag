@@ -28,6 +28,13 @@ describe("OpenCode route decision", () => {
     assert.deepEqual(decision.limitations, ["cliNoFleetHooks", "providerEvidenceSeparate"]);
   });
 
+  it("refuses conflicting or unbound effort before any launch route", () => {
+    assert.equal(route({ model: "openai/example#high", effort: "low" }).route, "unsupported");
+    assert.equal(route({ effort: "high" }).route, "unsupported");
+    assert.equal(route({ ui: "mini", model: "openai/example#high", effort: "high" }).route, "api-mini");
+    assert.equal(route({ model: "openai/example", effort: "high" }).route, "cli-run");
+  });
+
   it("keeps explicit Mini/TUI strict without requiring an explicit model", () => {
     assert.equal(route({ ui: "mini" }).route, "api-mini");
     assert.equal(route({ ui: "tui" }).route, "api-tui");

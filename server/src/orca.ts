@@ -568,6 +568,7 @@ export async function runOrca<T = unknown>(
     if (cliVersion && compareVersions(cliVersion, "1.4.246") >= 0) fullArgs = [...fullArgs, "--full"];
   }
   let stdout: string;
+  let keepOpenFailure: string | null = null;
   try {
     const res = await pExecFile(command.executable, [...command.prefixArgs, ...fullArgs], {
       cwd: workspace.dir,
@@ -591,6 +592,12 @@ export async function runOrca<T = unknown>(
     // JSON receipt, so parse stdout before giving up.
     if (e.stdout && e.stdout.trim().startsWith("{")) {
       stdout = e.stdout;
+      // 1.4.247 prints the accepted start JSON first, then reports the
+      // separate --keep-open failure on stderr and exits nonzero. Keep that
+      // receipt and its actual disposition; retrying would start twice.
+      if (args[1] === "worker-start" && args.includes("--keep-open")) {
+        keepOpenFailure = /started but was not kept open \(([a-z_]+)\)/.exec(e.stderr ?? "")?.[1] ?? null;
+      }
     } else if (e.killed) {
       // The spawn timeout fired and the child was killed mid-flight. It may
       // have already mutated Orca state — the outcome is UNKNOWABLE from here.
@@ -654,6 +661,9 @@ export async function runOrca<T = unknown>(
       recovery,
       parsed, // full envelope — failed mutations carry receipts in here
     );
+  }
+  if (keepOpenFailure && parsed.result && typeof parsed.result === "object" && !Array.isArray(parsed.result)) {
+    return { ...parsed.result, keepOpenFailure } as T;
   }
   return parsed.result as T;
 }
@@ -1550,17 +1560,17 @@ export async function assertNativePresetSupport(
 // explicit worker terminal accounting. These adapters are the only place that
 // knows the wire shapes; the coordinator consumes the typed results.
 //
-// Two contracts drive the design (verified against the 1.4.205 CLI):
+// Delivery semantics depend on the host contract. The 1.4.205 FIFO batch
+// replays until explicit ACK. V3 consuming checks (1.4.246+) acknowledge the
+// returned batch transactionally and report deliveryAcknowledged:true; ACK
+// alone then fetches nothing. The coordinator journals its request identity
+// before consuming and checkpoints local processing separately, so neither a
+// lost response nor a failed handler can strand an already-read batch.
 //
-//  - A consuming `check` returns the OLDEST unacknowledged FIFO Delivery —
-//    always the whole batch, never filtered by `--types` (that flag is only the
-//    wake condition for `--wait`). The same Delivery replays until
-//    `check --ack <deliveryId>`, so callers must process every row before
-//    acknowledging, and must tolerate seeing a batch again (`replayed: true`).
-//  - `worker-release` / `worker-retain` / `worker-stop` / `worker-read` take a
-//    bare `--dispatch` (no `--from`): terminal ownership follows the Dispatch,
-//    not the calling terminal. Only `release_unknown` exits non-zero; every
-//    other release outcome is a 0-exit receipt.
+// worker-release / worker-retain / worker-stop / worker-read take a bare
+// --dispatch: terminal ownership follows the exact Dispatch, not the caller.
+// A zero exit status is not proof of retention or release; inspect the typed
+// state, including pending, unknown and already-released outcomes.
 
 /** One inbox row from `orchestration check`. */
 export interface OrcaMessage {
@@ -1600,6 +1610,8 @@ export interface OrcaDelivery {
   count: number;
   /** True when this is the same unacknowledged batch as a previous check. */
   replayed: boolean;
+  /** V3 consuming checks acknowledge the batch as part of the read. */
+  deliveryAcknowledged?: boolean;
   /** Set when this call acknowledged a prior batch. */
   acknowledged: string | null;
   timedOut: boolean;
@@ -1644,6 +1656,7 @@ export interface CheckInboxOpts {
   waitMs?: number;
   /** Acknowledge this delivery id first (the "process, then ack" second half). */
   ack?: string;
+  requestId?: string;
 }
 
 export const ORCHESTRATION_INBOX_LIMIT = 5_000;
@@ -1741,6 +1754,7 @@ export async function listRunMessages(runId: string): Promise<OrcaMessage[]> {
 export function checkInbox(opts: CheckInboxOpts): Promise<OrcaDelivery> {
   const args = ["orchestration", "check", "--terminal", opts.from];
   if (opts.ack) args.push("--ack", opts.ack);
+  if (opts.requestId) args.push("--retry-request", opts.requestId);
   if (opts.waitMs && opts.waitMs > 0) {
     args.push("--wait", "--timeout-ms", String(Math.round(opts.waitMs)));
   }
@@ -1749,8 +1763,21 @@ export function checkInbox(opts: CheckInboxOpts): Promise<OrcaDelivery> {
 }
 
 /** Reply to a question/escalation from the coordinator (marks it handled). */
-export async function replyToMessage(messageId: string, body: string, from: string): Promise<void> {
-  await runOrca(["orchestration", "reply", "--id", messageId, "--body", body, "--from", from]);
+export async function replyToMessage(messageId: string, body: string, from: string, requestId?: string): Promise<Record<string, unknown>> {
+  const args = ["orchestration", "reply", "--id", messageId, "--body", body, "--from", from];
+  if (requestId) args.push("--retry-request", requestId);
+  return runOrca<Record<string, unknown>>(args);
+}
+
+export interface TaskMessageReceipt {
+  kind: "enqueued" | "follow_up";
+  runId: string;
+  taskId: string;
+  dispatchId: string;
+  requestedTaskId: string;
+  requestedDispatchId: string;
+  followUpOf: string | null;
+  requestId: string | null;
 }
 
 /**
@@ -1769,6 +1796,7 @@ export async function sendCoordinatorMessage(opts: {
   body: string;
   from: string;
   threadId?: string;
+  requestId?: string;
 }): Promise<Record<string, unknown>> {
   const args = [
     "orchestration",
@@ -1791,6 +1819,7 @@ export async function sendCoordinatorMessage(opts: {
     opts.dispatchId,
   ];
   if (opts.threadId) args.push("--thread-id", opts.threadId);
+  if (opts.requestId) args.push("--retry-request", opts.requestId);
   return runOrca<Record<string, unknown>>(args);
 }
 
@@ -2231,6 +2260,7 @@ export interface WorkerDetailView {
   dispatchId: string;
   runId: string | null;
   taskId: string | null;
+  launchMode?: NativeLaunchMode | null;
   /** Effective launch preferences only; requested values never fill an unknown. */
   launch: {
     agent: string | null;
@@ -2464,8 +2494,9 @@ export async function showWorkerDetail(
   });
   const detail: WorkerDetailView = {
     dispatchId,
-    runId: stringOrNull(fleet?.runId) ?? stringOrNull(dispatch.runId),
+    runId: stringOrNull(fleet?.runId) ?? stringOrNull(dispatch.runId) ?? stringOrNull(dispatch.run_id),
     taskId: stringOrNull(fleet?.taskId) ?? stringOrNull(dispatch.taskId) ?? stringOrNull(dispatch.task_id),
+    launchMode: parseNativeLaunchMode(result.mode ?? worker.mode),
     launch: startOptions
       ? {
           agent: stringOrNull(effectiveLaunch?.agent),
@@ -2829,6 +2860,11 @@ export interface WorkerOutputReceipt {
    * start instead of silently pretending the page was continuous.
    */
   sourceChanged: boolean;
+  fallbackReason?: string | null;
+  sourceExact?: boolean | null;
+  archived?: boolean | null;
+  provider?: string | null;
+  sourceIdentity?: string | null;
 }
 
 function openCodeOutputPrefixHash(lines: string[], end: number): string {
@@ -3010,6 +3046,11 @@ export async function readWorkerOutput(
     contentComplete?: boolean;
     warnings?: string[];
     clipping?: string[];
+    fallbackReason?: unknown;
+    sourceExact?: unknown;
+    archived?: unknown;
+    provider?: unknown;
+    sourceIdentity?: unknown;
   }): WorkerOutputReceipt => {
     let textClipped = false;
     const transcriptLines = (result.transcript?.messages ?? []).flatMap((rawMessage): string[] => {
@@ -3062,6 +3103,14 @@ export async function readWorkerOutput(
         (result.clipping ?? []).length > 0,
       warnings: (result.warnings ?? []).map(String),
       sourceChanged: false,
+      ...(result.fallbackReason === null || typeof result.fallbackReason === "string"
+        ? { fallbackReason: typeof result.fallbackReason === "string" ? result.fallbackReason.slice(0, 256) : null } : {}),
+      ...(result.sourceExact === null || typeof result.sourceExact === "boolean" ? { sourceExact: result.sourceExact } : {}),
+      ...(result.archived === null || typeof result.archived === "boolean" ? { archived: result.archived } : {}),
+      ...(result.provider === null || typeof result.provider === "string"
+        ? { provider: typeof result.provider === "string" ? result.provider.slice(0, 256) : null } : {}),
+      ...(result.sourceIdentity === null || typeof result.sourceIdentity === "string"
+        ? { sourceIdentity: typeof result.sourceIdentity === "string" ? result.sourceIdentity.slice(0, 1024) : null } : {}),
     };
   };
   try {
@@ -3302,7 +3351,7 @@ export async function showRequest(requestId: string): Promise<OrcaRequestReceipt
     requestId: String(result.requestId ?? requestId),
     state: String(result.state ?? "absent"),
     interpretation: typeof result.interpretation === "string" ? result.interpretation : null,
-    outcome: result.outcome ?? null,
+    outcome: result.receipt ?? result.outcome ?? null,
     raw: result,
   };
 }
@@ -3315,6 +3364,8 @@ export async function showRequest(requestId: string): Promise<OrcaRequestReceipt
  * results AND failure envelopes (field spellings vary between wire versions;
  * anything absent stays null instead of being invented).
  */
+export type NativeLaunchMode = { mode: string; preferred: string | null; reason: string | null; detail: string | null };
+
 export interface WorkerStartReceipt {
   /** Whether the start reached `ready`. */
   ok: boolean;
@@ -3338,6 +3389,9 @@ export interface WorkerStartReceipt {
   residualResources: unknown;
   /** Orca's own prescribed recovery commands, verbatim. */
   recoveryCommands: string[];
+  launchMode?: NativeLaunchMode | null;
+  /** CLI --keep-open is a second effect; missing confirmation is not retention. */
+  keepOpen?: string;
   /**
    * Launch preferences the runtime reports as EFFECTIVE for this worker
    * (Phase 5) — its receipt's echo of agent/model/effort/worktree/terminal.
@@ -3382,6 +3436,12 @@ function pickString(obj: Record<string, unknown>, ...keys: string[]): string | n
 /** Coerce unknown into a plain record (or an empty one) for tolerant digging. */
 function asRecord(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+}
+
+function parseNativeLaunchMode(value: unknown): NativeLaunchMode | null {
+  const mode = asRecord(value);
+  const actual = pickString(mode, "mode");
+  return actual ? { mode: actual, preferred: pickString(mode, "preferred"), reason: pickString(mode, "reason"), detail: pickString(mode, "detail") } : null;
 }
 
 /**
@@ -3435,6 +3495,9 @@ export function parseWorkerStartReceipt(payload: unknown, ok: boolean): WorkerSt
     effects: nested.effects ?? null,
     residualResources: nested.residualResources ?? nested.residual_resources ?? null,
     recoveryCommands: Array.isArray(recovery) ? recovery.map(String) : [],
+    launchMode: parseNativeLaunchMode(nested.mode),
+    ...(nested.keptOpen === true ? { keepOpen: "retained" } :
+      typeof nested.keepOpenFailure === "string" ? { keepOpen: nested.keepOpenFailure } : {}),
     effective: {
       agent: pickString(preferences, "agent", "agentId", "agent_id"),
       model: pickString(preferences, "model"),
@@ -3465,9 +3528,10 @@ export function parseWorkerStartReceipt(payload: unknown, ok: boolean): WorkerSt
 }
 
 /** Apply the same ready/unknown boundary to direct starts and recorded replays. */
-function requireReadyWorkerStartReceipt(payload: unknown, requestId: string): WorkerStartReceipt {
+function requireReadyWorkerStartReceipt(payload: unknown, requestId: string, keepOpen = false): WorkerStartReceipt {
   const receipt = parseWorkerStartReceipt(payload, true);
   receipt.requestId ??= requestId;
+  if (keepOpen && !receipt.keepOpen) receipt.keepOpen = "unknown";
   if (!receipt.ok) {
     const unknown = receipt.status === "outcome_unknown" || receipt.status === "start_unknown";
     throw new WorkerStartError(
@@ -3743,6 +3807,12 @@ export const CANONICAL_RUNTIME_CAPABILITIES: readonly RuntimeCapabilitySpec[] = 
     explanation: "worker-stop receipts carry an explicit per-worker verdict instead of an ambiguous exit.",
     aliases: [],
   },
+  { canonicalId: "orchestration.worker-auto-release.v1", label: "Worker auto release", scope: "runtime", explanation: "Advertises automatic release of eligible worker resources.", aliases: [] },
+  { canonicalId: "orchestration.worker-keep-open.v1", label: "Worker keep open", scope: "runtime", explanation: "Advertises explicit worker resource retention.", aliases: [] },
+  { canonicalId: "orchestration.worker-start-implicit-run.v1", label: "Implicit Run start", scope: "runtime", explanation: "Advertises implicit Run support; the viewer still requires explicit Run authority.", aliases: [] },
+  { canonicalId: "orchestration.retained-run-bindings.v1", label: "Retained Run bindings", scope: "runtime", explanation: "Advertises retained worker Run bindings.", aliases: [] },
+  { canonicalId: "orchestration.worker-turn-stop-reports.v1", label: "Worker turn stop reports", scope: "runtime", explanation: "Advertises worker turn stop reporting.", aliases: [] },
+  { canonicalId: "orchestration.ask-returns-at-once.v1", label: "Immediate ask receipt", scope: "runtime", explanation: "Advertises immediate question receipts.", aliases: [] },
 ] as const;
 
 function normalizeCapabilityName(name: string): string {
@@ -4613,6 +4683,7 @@ interface OpenCodeStartOptions {
   model?: string | null; effort?: string | null; retryRequestId: string; retryOf?: string;
   onHandle: (handle: string | null) => void;
   isCancelled?: () => boolean;
+  keepOpen?: boolean;
 }
 
 /** Compatibility entry point: the existing env opt-in keeps its POSIX scope. */
@@ -4749,6 +4820,7 @@ async function startOpenCodeSessionWorker(opts: OpenCodeStartOptions & { fronten
       taskId: opts.taskId, runId: opts.runId, from: opts.from, agent: "opencode",
       worktree: `path:${workspace}`, terminal: launch.terminal!,
       retryRequestId: opts.retryRequestId, retryOf: opts.retryOf,
+      keepOpen: opts.keepOpen,
     });
     if (!started.dispatchId) throw new Error("OpenCode start carried no Dispatch ID; do not retry");
     launch = { ...launch, dispatchId: started.dispatchId, state: "bound" };
@@ -4881,6 +4953,7 @@ export interface WorkerStartRequest {
   comment?: string;
   /** Setup-hook policy for the new worktree (`--setup run|skip|inherit`). */
   setup?: string;
+  keepOpen?: boolean;
 }
 
 /** Placement identity only; creation metadata is validated separately and kept on the original request. */
@@ -5074,6 +5147,7 @@ export function buildWorkerStartArgv(
     displayName?: string;
     comment?: string;
     setup?: string;
+    keepOpen?: boolean;
   },
   requestId: string,
 ): string[] {
@@ -5096,6 +5170,7 @@ export function buildWorkerStartArgv(
     requestId,
   ];
   if (opts.retryOf) args.push("--retry-of", opts.retryOf);
+  if (opts.keepOpen) args.push("--keep-open");
   if (opts.model) args.push("--model", opts.model);
   // Only ever alongside --model (enforced in assertValidWorkerStart): the CLI
   // rejects a bare --effort, and we don't paper over that with a silent drop.
@@ -5171,11 +5246,25 @@ export async function startSupervisedWorker(opts: {
   comment?: string;
   /** Setup-hook policy for the new worktree (creation modes only). */
   setup?: string;
+  keepOpen?: boolean;
 }): Promise<StartedWorker> {
   // Local creating starts get their derived name BEFORE the last gate, so the
   // gate's "creation requires a name" rule stays absolute and the derived
   // name is baked into the exact argv a replay must reuse.
-  const request = withDerivedCreationDefaults(opts);
+  const readiness = opts.keepOpen ? await checkReadiness() : null;
+  const supportsKeepOpen = Boolean(readiness?.cliVersion && readiness.version &&
+    readiness.runtimeState === "ready" && /^\d+\.\d+\.\d+$/.test(readiness.cliVersion) &&
+    /^\d+\.\d+\.\d+$/.test(readiness.version) &&
+    compareVersions(readiness.cliVersion, "1.4.246") >= 0 && compareVersions(readiness.version, "1.4.246") >= 0 &&
+    canonicalCapabilitySupported(await readLocalRuntimeCapabilities().catch(() => null), "orchestration.worker-keep-open.v1"));
+  // Only a positively identified pre-auto-release host can safely use the old
+  // path. On a newer or unknown host silently dropping retention would let a
+  // fast worker be released before the coordinator's settlement callback.
+  if (opts.keepOpen && !supportsKeepOpen && !(readiness?.runtimeState === "ready" && readiness.version &&
+      /^\d+\.\d+\.\d+$/.test(readiness.version) && compareVersions(readiness.version, "1.4.246") < 0)) {
+    throw new OrcaCliError("Cannot prove native keep-open support; no worker was started", "keep_open_unavailable");
+  }
+  const request = withDerivedCreationDefaults({ ...opts, keepOpen: supportsKeepOpen });
   // The last gate before the CLI: remote current/new-child, --on+--terminal,
   // unpaired effort, creation-flag misuse, and malformed metadata all refuse
   // WITHOUT a spawn.
@@ -5200,7 +5289,7 @@ export async function startSupervisedWorker(opts: {
     }
     // Ambiguous: did the start land? Ask Orca before doing anything else.
     if (e instanceof OrcaCliError && e.code === RESPONSE_LOST) {
-      return resolveAmbiguousStart(opts, requestId, buildArgs, e);
+      return resolveAmbiguousStart(request, requestId, buildArgs, e);
     }
     // cli_not_found / spawn failures: the command never ran — nothing landed,
     // nothing to resolve. Surface a receipt-less failed start.
@@ -5210,7 +5299,7 @@ export async function startSupervisedWorker(opts: {
       e.code ?? null,
     );
   }
-  const receipt = requireReadyWorkerStartReceipt(result, requestId);
+  const receipt = requireReadyWorkerStartReceipt(result, requestId, supportsKeepOpen);
   return {
     mode: "supervised",
     dispatchId: receipt.dispatchId ?? readDispatchId(result),
@@ -5232,7 +5321,7 @@ export async function startSupervisedWorker(opts: {
  * Dispatch for the task instead of minting a second one.
  */
 async function resolveAmbiguousStart(
-  opts: { taskId: string; runId: string },
+  opts: { taskId: string; runId: string; keepOpen?: boolean },
   requestId: string,
   buildArgs: () => string[],
   original: OrcaCliError,
@@ -5246,7 +5335,7 @@ async function resolveAmbiguousStart(
   if (probe && (probe.state === "completed" || probe.state === "pending")) {
     try {
       const result = await runOrca<Record<string, unknown>>(buildArgs());
-      const receipt = requireReadyWorkerStartReceipt(result, requestId);
+      const receipt = requireReadyWorkerStartReceipt(result, requestId, opts.keepOpen);
       return {
         mode: "supervised",
         dispatchId: receipt.dispatchId ?? readDispatchId(result),
@@ -5398,8 +5487,14 @@ async function startOpencodeWorker(opts: {
   from: string;
   worktree?: string;
   model?: string;
+  effort?: string;
+  /** Legacy terminals are caller-owned; native keep-open does not apply. */
+  keepOpen?: boolean;
   onHandle?: (handle: string) => void;
 }): Promise<StartedWorker> {
+  if (opts.effort && !opts.model) throw new OrcaCliError("OpenCode effort requires an explicit model", "invalid_model");
+  const selected = opts.model ? parseOpenCodeModel(opts.model, opts.effort) : null;
+  const selector = selected ? `${selected.providerID}/${selected.id}${selected.variant ? `#${selected.variant}` : ""}` : null;
   const created = await runOrca<{ terminal?: { handle?: string } }>([
     "terminal",
     "create",
@@ -5456,7 +5551,7 @@ async function startOpencodeWorker(opts: {
   // (validateModel) has already bounded it to provider/model plus an optional
   // #variant suffix, so no quote, space or shell operator can be inside.
   // `--auto` is the mandatory autonomous flag (see the docstring).
-  const modelArg = opts.model ? ` -m "${opts.model}"` : "";
+  const modelArg = selector ? ` -m "${selector}"` : "";
   // A provider-issued session ID does not exist until `opencode run` starts.
   // Its unique launch title lets the background API later correlate that ID
   // with this exact Dispatch, including after this viewer has restarted.
@@ -5490,6 +5585,9 @@ export async function startLegacyWorker(opts: {
   from: string;
   worktree?: string;
   model?: string;
+  effort?: string;
+  /** Legacy terminals are caller-owned and have no native auto-release. */
+  keepOpen?: boolean;
   /**
    * Called the moment the viewer-created terminal exists (Phase 4): a later
    * step failing must not orphan a pane we provably created — the coordinator

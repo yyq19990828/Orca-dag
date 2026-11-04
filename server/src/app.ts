@@ -51,7 +51,6 @@ import {
   retainWorker,
   runOrca,
   sendCoordinatorGroupMessage,
-  sendCoordinatorMessage,
   showRepo,
   showRun,
   listRemovedWork,
@@ -74,11 +73,13 @@ import {
 import type { PlacementSpec } from "./config";
 import { buildRunHealth, type RunHealthView } from "./runHealth";
 import { loadConfig, saveConfig } from "./config";
+import { validateMergeInputProtocol } from "./stageGit";
 import {
   answerInboxItem,
   coordinatorStatus as liveCoordinatorStatus,
   noteManualRelease,
   retryWorker,
+  sendTaskGuidance,
   startCoordinator,
   stopCoordinator,
 } from "./coordinator";
@@ -176,7 +177,7 @@ function fail(res: express.Response, err: unknown): void {
   const e = err as OrcaCliError;
   const code = e?.code ?? null;
   const status = code === "execution_disabled" ? 503 :
-    code === "unverified_harness" || code === "invalid_placement" || code === "unsupported_effort" ? 400 :
+    code === "unverified_harness" || code === "invalid_placement" || code === "unsupported_effort" || code === "invalid_stage_plan" ? 400 :
     code === "run_required" || code === "run_not_found"
       ? 409
       : code === "coordinator_conflict"
@@ -193,6 +194,10 @@ function fail(res: express.Response, err: unknown): void {
               code === "lane_not_settled" ||
               code === "lane_unverifiable" ||
               code === "active_dispatch_required" ||
+              code === "guidance_capacity" ||
+              code === "guidance_unknown" ||
+              code === "guidance_reconciled" ||
+              code === "reply_unknown" ||
               code === "dispatch_not_active" ||
               code === "inbox_item_not_found" ||
               code === "message_not_found" ||
@@ -269,7 +274,15 @@ async function resolveReplyIdentity(
   let source: Awaited<ReturnType<typeof listRunMessages>>[number] | null = null;
 
   if (!seed || !taskId || !dispatchId) {
-    source = (await listRunMessages(runId)).find((message) => message.id === messageId) ?? null;
+    try {
+      source = (await listRunMessages(runId)).find((message) => message.id === messageId) ?? null;
+    } catch (error) {
+      // A live same-Run pending item already proves the reply target. Global
+      // history is bounded and may be unavailable; that presentation lookup
+      // must not strand a durably queued question. Without a seed it remains
+      // the authority boundary and a failed read must still stop the reply.
+      if (!seed) throw error;
+    }
     if (!source && !seed) {
       throw new OrcaCliError(
         `Message ${messageId} does not belong to Run ${runId} or is no longer available.`,
@@ -288,8 +301,10 @@ async function resolveReplyIdentity(
   // fill the gap; absence stays null rather than being guessed from a task's
   // saved configuration.
   if (!taskId || !dispatchId) {
-    const rows = await listWorkers(runId, { includeRemote: true });
-    const row = rows.find(
+    // Run/message scope is already established above. An unavailable fleet
+    // leaves activity identity unknown; it cannot invalidate the native reply.
+    const rows = await listWorkers(runId, { includeRemote: true }).catch(() => null);
+    const row = rows?.find(
       (candidate) =>
         (dispatchId !== null && candidate.dispatchId === dispatchId) ||
         (taskId !== null && candidate.taskId === taskId) ||
@@ -449,9 +464,9 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
   // ALWAYS re-read live from Orca (`request-show`); this ledger never
   // becomes a second lifecycle authority.
   const requestLedger = new RequestLedger(workspaceDir);
-  // This store is only a binding of identities. Orca's worker-list remains the
-  // authority for Dispatch scope and lifecycle; provider observations cannot
-  // settle a Task or grant coordinator authority.
+  // Identity bindings and critical request journals are workspace-scoped.
+  // Orca still proves Dispatch scope/lifecycle; stored presentation evidence
+  // and provider observations cannot by themselves settle work or grant custody.
   const providerSessions = new ProviderSessionStore(workspaceDir);
   const launchHistory = new LaunchHistory(workspaceDir);
   // worker-list has no startOptions on Orca 1.4.207. Share the one-time
@@ -1188,6 +1203,10 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       assertLanePlacementDisjoint(placementByTask, laneByTask);
       assertEnvironmentPlacementCompatibility(environmentByTask, placementByTask);
       const tasks = await listTasks(runId);
+      for (const task of tasks) {
+        const issue = validateMergeInputProtocol(task);
+        if (issue) throw new OrcaCliError(`Invalid committed Stage plan: ${issue}`, "invalid_stage_plan");
+      }
       const nativeCandidates = tasks.filter(task =>
         !["completed", "failed", "dispatched"].includes(task.status) &&
         isNativeFreshPreset(harnessByTask[task.id] ?? defaultHarness));
@@ -2176,6 +2195,17 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         });
         return;
       }
+      // Reused native chats can omit launchMode from later worker-show reads.
+      // The immutable send receipt survives Stop/restart in the critical
+      // journal. Match its ACTUAL worker, never the requested parent: this is
+      // presentation evidence only, not a new source of mutation authority.
+      if (!detail.launchMode && detail.taskId) {
+        const sends = await providerSessions.listGuidanceSends(runId).catch(() => []);
+        const saved = sends.find((row) => row.creationProven &&
+          row.receipt?.runId === runId && row.receipt.taskId === detail.taskId &&
+          row.receipt.dispatchId === dispatchId && row.startEvidence?.launchMode);
+        detail.launchMode = saved?.startEvidence?.launchMode ?? null;
+      }
       res.json({ detail: { ...detail, stopOperation: await workerStopOperation(dispatchId) } });
     }),
   );
@@ -2498,58 +2528,25 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
           "not_running",
         );
       }
-      // Keep the explicit Run check even though the adapter passes `--run`:
-      // this boundary should fail closed if a mixed-version CLI ever returns
-      // an unscoped or foreign row in a supposedly scoped receipt.
-      const task = (await listTasks(runId)).find(
-        (candidate) => candidate.id === taskId && candidate.run_id === runId,
-      );
-      if (!task || task.status !== "dispatched" || !task.dispatch_id) {
-        throw new OrcaCliError(
-          "Coordinator guidance requires a Task with an active Dispatch.",
-          "active_dispatch_required",
-        );
-      }
-
-      // Task rows can briefly lag the fleet after settlement, and a remote
-      // host can disappear while the Dispatch id remains on the Task. Refuse
-      // unless Orca's remote-inclusive accounting currently proves both an
-      // active Dispatch and a live worker; never send guidance into an
-      // unverifiable or already-settled attempt.
-      const worker = (await listWorkers(runId, { includeRemote: true })).find(
-        (candidate) =>
-          candidate.runId === runId &&
-          candidate.taskId === taskId &&
-          candidate.dispatchId === task.dispatch_id &&
-          candidate.dispatchStatus === "dispatched" &&
-          normalizeLiveness(candidate.projection?.liveness?.verdict) === "live",
-      );
-      if (!worker) {
-        throw new OrcaCliError(
-          "Coordinator guidance requires Orca to verify that the Task Dispatch is still active and live.",
-          "active_dispatch_required",
-        );
-      }
-
-      await sendCoordinatorMessage({
-        runId,
-        taskId,
-        dispatchId: task.dispatch_id,
-        from: live.coordinatorHandle,
-        subject: "Coordinator guidance",
-        body,
-      });
+      const subject = validateText(req.body?.subject, "subject", 200) ?? "Coordinator guidance";
+      const threadId = validateId(req.body?.threadId, "threadId") ?? undefined;
+      const receipt = await sendTaskGuidance({ runId, taskId, subject, body, threadId });
       await recordActivity(
         createViewerActivity({
-          runId,
+          runId: receipt.runId,
           kind: "status",
-          title: "Coordinator sent guidance",
+          title: receipt.kind === "follow_up"
+            ? "Coordinator guidance created or steered follow-up work"
+            : "Coordinator sent guidance",
           summary: body,
-          taskId,
-          dispatchId: task.dispatch_id,
+          taskId: receipt.taskId,
+          dispatchId: receipt.dispatchId,
+          threadId,
+          requestId: receipt.requestId,
+          payload: receipt,
         }),
       );
-      res.json({ ok: true, dispatchId: task.dispatch_id });
+      res.json({ ok: true, ...receipt });
     }),
   );
 

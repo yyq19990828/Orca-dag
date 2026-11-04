@@ -18,6 +18,7 @@ import type {
   RunsPageView,
   RunStatus,
   StopResultEntry,
+  TaskMessageReceipt,
   ViewerConfig,
   WorkerControlReceiptView,
   WorkerDetailView,
@@ -393,9 +394,22 @@ export async function replyToMessage(id: string, body: string, runId: string): P
   await post(`/api/messages/${encodeURIComponent(id)}/reply`, { body, runId });
 }
 
-/** Send durable coordinator guidance to the Task's current active Dispatch. */
-export async function sendTaskMessage(taskId: string, body: string, runId: string): Promise<void> {
-  await post(`/api/tasks/${encodeURIComponent(taskId)}/messages`, { body, runId });
+/** The returned identity may be a follow-up if the target settled during send. */
+export async function sendTaskMessage(taskId: string, body: string, runId: string): Promise<TaskMessageReceipt> {
+  const value = await post<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/messages`, { body, runId });
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ApiError("task_message_response_invalid", "task_message_response_invalid", 502);
+  }
+  const receipt = value as Record<string, unknown>;
+  if (receipt.ok !== true || (receipt.kind !== "enqueued" && receipt.kind !== "follow_up") ||
+      receipt.runId !== runId || receipt.requestedTaskId !== taskId ||
+      ![receipt.runId, receipt.taskId, receipt.dispatchId, receipt.requestedTaskId, receipt.requestedDispatchId]
+        .every((field) => typeof field === "string" && field.length > 0) ||
+      !(receipt.followUpOf === null || typeof receipt.followUpOf === "string") ||
+      !(receipt.requestId === null || typeof receipt.requestId === "string")) {
+    throw new ApiError("task_message_response_invalid", "task_message_response_invalid", 502);
+  }
+  return value as TaskMessageReceipt;
 }
 
 // --- Phase 6: safe group messaging --------------------------------------------

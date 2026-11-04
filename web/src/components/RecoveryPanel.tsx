@@ -15,6 +15,7 @@ import {
 } from "../harness";
 import { useLang, useT } from "../i18n";
 import { useDecisionDialog } from "./DecisionDialog";
+import { NativeLaunchEvidence } from "./NativeLaunchEvidence";
 import type {
   ProviderSessionBindingView,
   ProviderSessionObservationView,
@@ -793,6 +794,7 @@ export const RecoveryPanel = memo(function RecoveryPanel({
           {a.startReceipt?.failedStage && (
             <div className="inbox__body">{t("recovery.startFailedAt", { stage: a.startReceipt.failedStage })}</div>
           )}
+          {(a.launchMode ?? a.startReceipt?.launchMode) && <NativeLaunchEvidence launchMode={(a.launchMode ?? a.startReceipt?.launchMode)!} />}
           {a.terminalDetail && <div className="inbox__body">{a.terminalDetail}</div>}
         </div>
       ))}
@@ -833,6 +835,7 @@ export const RecoveryPanel = memo(function RecoveryPanel({
             })}
           </div>
           {circuitBroken && <div className="inbox__body">{t("recovery.circuitBrokenBlocked")}</div>}
+          {(a.launchMode ?? a.startReceipt?.launchMode) && <NativeLaunchEvidence launchMode={(a.launchMode ?? a.startReceipt?.launchMode)!} />}
           {a.terminalDetail && <div className="inbox__body">{a.terminalDetail}</div>}
           {a.startReceipt && a.startReceipt.recoveryCommands.length > 0 && (
             <div className="inbox__body">

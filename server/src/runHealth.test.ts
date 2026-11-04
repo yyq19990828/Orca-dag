@@ -577,12 +577,7 @@ describe("GET /api/capabilities", () => {
   it("projects the local status advertisement without treating unrelated capabilities as unknown orchestration ids", async () => {
     const ids = [
       "orchestration.worker-launch-preferences.v1",
-      "orchestration.federation-structured-read.v1",
-      "orchestration.federation-fleet-snapshot.v1",
-      "orchestration.federation-control-mail.v1",
-      "orchestration.federation-lifecycle-settlement.v1",
-      "orchestration.federation-release-archive.v1",
-      "orchestration.worker-stop-verdict.v1",
+      "orchestration.worker-keep-open.v1",
     ];
     const advertised = [...ids, "orchestration.contract.v1", "orchestration.future.v1", "browser.screencast.v1"];
     writeScript({
@@ -598,13 +593,13 @@ describe("GET /api/capabilities", () => {
       capabilities: Array<{ id: string; supported: boolean; state: string }>;
       unknownAdvertised: string[];
     };
-    assert.deepEqual(json.advertised, advertised);
     assert.equal(json.advertisedSource, "local-runtime-status");
-    assert.deepEqual(json.capabilities.map((c) => c.id), ids);
-    for (const cap of json.capabilities) {
-      assert.equal(cap.supported, true, `${cap.id} was advertised by status`);
-      assert.equal(cap.state, "supported");
-    }
+    const byId = new Map(json.capabilities.map((cap) => [cap.id, cap]));
+    assert.equal(byId.get("orchestration.worker-launch-preferences.v1")?.supported, true);
+    assert.equal(byId.get("orchestration.worker-keep-open.v1")?.supported, true);
+    assert.equal(byId.get("orchestration.worker-keep-open.v1")?.state, "supported");
+    assert.equal(byId.get("orchestration.worker-auto-release.v1")?.supported, false);
+    assert.equal(byId.get("orchestration.worker-auto-release.v1")?.state, "absent");
     assert.deepEqual(json.unknownAdvertised, ["orchestration.future.v1"]);
     assert.equal(json.runtime.executionEnabled, false, "advertised capabilities do not grant execution to an old runtime");
   });

@@ -49,7 +49,7 @@ viewer 作为一个具有直接控制 Orca 运行时能力的管理面进程，�
 |---|---|---|---|
 | `GET` | `/api/session` | 无 | 获取当前进程的 mutation token 以及自定义命令启用状态（响应头包含 `Cache-Control: no-store`）。 |
 | `GET` | `/api/readiness` | 无 | 获取 CLI 及其构建版本、目标运行时版本/状态、工作区信息及执行权限；不可执行时附上恢复原因。 |
-| `GET` | `/api/capabilities` | 无 | 获取 Orca 运行时能力矩阵：包含版本信息及各项编排能力的状态（`supported / alias / absent`）；未知能力保持列出但关闭。 |
+| `GET` | `/api/capabilities` | 无 | 返回运行时就绪状态、原始能力声明及识别后的编排支持状态；包括 V3 自动释放、keep-open、隐式 Run 能力声明、保留绑定、turn-stop 报告和立即返回的 ask 回执。能力声明不会让 viewer 隐式创建 Run。 |
 | `GET` | `/api/run-health?run=<id>` | `run` (查询参数): Run ID | 返回归属状态（`viewer_coordinator / viewer_coordinator_other_run / external_coordinator / unbound / unverifiable`）、coordinator 句柄、按来源划分的计数、警告与可空的 `health.removedWork` 摘要。 |
 | `GET` | `/api/dag?run=<id>` | `run`: Run ID | 获取指定 Run 的完整 DAG 结构，包括 `{ runId, nodes, edges, hierarchy, gates, readyWave, readiness, generatedAt }`。 |
 | `GET` | `/api/runs` | 无 | 列出精确归属于当前工作区的 Run 列表（基于任务创建者的 worktree 身份过滤，排除其他工作区的不相关 Run）。 |
@@ -70,7 +70,8 @@ viewer 作为一个具有直接控制 Orca 运行时能力的管理面进程，�
 | `GET` | `/api/inbox?run=<id>` | `run`: Run ID | 兼容接口：获取指定 Run 的待处理提问、升级项及未处理的清理债务。 |
 | `GET` | `/api/activity?run=<id>&after=&limit=` | `run`: Run ID, `after`: 游标, `limit`: 分页条数 | 获取严格归属于指定 Run 的可读 Activity 列表、每阶段 fleet 运行态以及有界的 coordinator check receipt。 |
 | `GET` | `/api/activity/stream?run=<id>` | `run`: Run ID | 获取指定 Run 的实时 SSE (Server-Sent Events) 快照流；前端在连接异常时自动回退为有界轮询。 |
-| `POST` | `/api/messages/:id/reply` | `{ body: string, runId: string }`, `:id`: 消息 ID | 回复 worker 提出的升级提问；发送成功代表 Orca 已将消息持久化入队。 |
+| `POST` | `/api/messages/:id/reply` | `{ body: string, runId: string }`, `:id`: 消息 ID | 使用持久化请求 ID 回复 worker 提出的升级提问；合并输入提问（`[orca-dag:merge-inputs-v3]`）返回 StageGit 不可变提交 SHA。原生 reply 不会创建后续任务。 |
+| `POST` | `/api/tasks/:taskId/messages` | `{ runId, body, subject?, threadId? }` | 由当前 viewer 的活跃 coordinator 向经验证的活动 Task Dispatch 发送指导。返回带类型的 `TaskMessageReceipt`（`ok: true, kind: "enqueued" | "follow_up", runId, taskId, dispatchId, requestedTaskId, requestedDispatchId, followUpOf, requestId`）。 |
 | `GET` | `/api/audiences?run=<id>` | `run`: Run ID | 获取当前 Run 的群发受众预览（包含 `@all` 及已发现的有效 worktree），携带当前 coordinator 活跃状态与发现错误。 |
 | `POST` | `/api/messages/group` | `{ runId, audience, body, subject?, type?, priority? }` | 向白名单受众发起广播通知。禁止发送生命周期消息（报 `forbidden_group_type`），未发现受众报 `unknown_audience`，非活跃协调者报 409。 |
 | `POST` | `/api/gates/:id/resolve` | `{ resolution: "approved" \| "rejected" \| "integrated", runId: string }` | 解决指定的审批门或跨 lane 集成门决策。 |
@@ -102,6 +103,25 @@ viewer 作为一个具有直接控制 Orca 运行时能力的管理面进程，�
 | `PUT` | `/api/config` | 合并配置对象 | 合并并更新当前工作区的偏好配置。 |
 | `GET` | `/api/health` | 无 | 基础服务健康检查接口，返回工作区物理路径。 |
 
+### 指导消息投递、恢复与后续任务生命周期
+
+`POST /api/tasks/:taskId/messages` 严格校验当前 viewer 是否拥有该 `runId` 的活跃 coordinator、目标任务是否存在活跃 Dispatch，以及 fleet 并发配额（包含可见 helper 与未决不确定性）是否允许发送：
+- **带类型的回执与身份区分**：接口返回 `{ ok: true, ...receipt }`，显式区分请求的 ID（`requestedTaskId`, `requestedDispatchId`）与实际返回的 ID（`taskId`, `dispatchId`）。`kind: "enqueued"` 表示投递到原 Dispatch，无新任务；`kind: "follow_up"` 表示创建或路由了后续工作（`followUpOf` 记录父级谱系）。
+- **持久化落盘与不可变启动证据**：调用原生 Orca 前，coordinator 先将包含请求身份及请求目标身份的 `guidanceSends` checkpoint 写入 `.orca-dag/sessions.json`。接受原生回执后才记录 `creationProven` 与清洗后的不可变 `startEvidence`（`status`, `launchMode`）；缺失的证据不会被补造。
+- **调和 vs 新投递（`guidance_reconciled`）**：若同一目标的先前指导处于未确认状态（`prepared` 或 `unknown`），后续调用会先通过 `request-show` 进行只读恢复（`recoverTaskGuidance`），不发送新内容。若先前操作成功恢复，则抛出 `guidance_reconciled`（“Previous guidance request was reconciled; submit the new guidance again”），表明先前操作已解决，调用方须重新提交新内容，不能将旧回执误判为新投递。先前请求若仍未解决则抛出 `guidance_unknown`；未决指导占用 fleet 并发配额并阻止盲目重发。
+- **Stop 归属与配额债务**：coordinator 仅追踪证实由 viewer 创建的后续根任务（`creationProven: true`）或完全匹配的账本根任务。`POST /api/run-stop` 尝试清理全部归属已证实的根任务，包括后续任务，返回 `{ ok: true, clean, results }`。未决发送或未知清理结果使 `clean: false`；每项结果明确给出 `target`、`kind`、`result` 与 `detail`。
+
+### 输出与启动模式证据
+
+输出响应为 `{ output: ... }`。原生输出回执包含可选证据 `fallbackReason`、`sourceExact`、`archived`、`provider` 与 `sourceIdentity`。缺失或 null 表示未知，并非 false；显式 `false` 具有实际语义并完整保留。这些字段描述返回的来源，不证明完整历史、Task 落定或清理权限。`sourceChanged` 表示来源重置；分页仍有界。Orca 提供时，原生启动回执还可包含 `launchMode`（`mode`、`preferred`、`reason`、`detail`），作为界面证据如实透传，不脑补确定性。启动回执亦上报 `keepOpen` 保留状态（`retained`、`already_released`、`release_pending`、`no_owned_resource`、`unknown`）；启动被接受后即使后续保留异常也不会回退启动或意外释放。
+
+### 关键状态恢复与热降级防线
+
+`.orca-dag/sessions.json` 除了 provider session 绑定外，还持久化关键恢复账本：
+- `mailboxChecks`：消费式 check 与旧版 ACK 的持久 checkpoint，记录 `requestId`、`delivery`、`processedMessageIds`、`pendingQuestionIds` 以及每题的 `replyRequests`。进程重启后，未完成的提问与流转批次会在新 check 之前恢复。
+- `guidanceSends`：coordinator 指导消息的持久 checkpoint，跟踪 `requestId`、`state`（`prepared`、`unknown`、`enqueued`、`follow_up`、`refused`）、`receipt`、`creationProven` 及清洗后的 `startEvidence`。
+
+这些账本是**故障恢复依据**，而非普通滚动审计日志。不支持新字段的旧版读取器会直接报错（`session binding store contains unknown fields`），因此包含未结算关键账本的 `sessions.json` 无法安全热降级至旧版读取器。
 ### Run 健康度与已移除工作账本
 
 `GET /api/run-health` 返回聚合的健康与归属数据，`GET /api/runs/:runId/removed-work` 支持按需分页加载已移除条目：

@@ -1,4 +1,5 @@
 import type { OpenCodeUi, PlacementSpec } from "./config";
+import { parseOpenCodeModel } from "./openCode";
 
 export type OpenCodeRoute = "native-default" | "native-model" | "api-mini" | "api-tui" | "cli-run" | "unsupported";
 export const MIN_OPENCODE_API_TUI_VERSION = "1.4.222";
@@ -39,6 +40,15 @@ function compareVersions(a: string, b: string): number {
 /** One routing rule shared by read-only preview and the actual worker start. */
 export function resolveOpenCodeRoute(input: OpenCodeRouteInput): OpenCodeRouteDecision {
   const { ui, model, effort, environment, lane, placement, reuseTerminal, platform, runtimeVersion, capabilities } = input;
+  // Preview, initial start and retries share this gate. A separate effort is
+  // meaningful only with an exact model, and conflicts must fail before a
+  // terminal or Dispatch can be created.
+  try {
+    if (effort && !model) throw new Error("OpenCode effort requires an explicit model.");
+    if (model) parseOpenCodeModel(model, effort);
+  } catch (err) {
+    return { route: "unsupported", reason: String((err as Error).message ?? err), reasonCode: "invalidModel", limitations: ["noFallback"] };
+  }
   const versionKnown = typeof runtimeVersion === "string" && /^\d+\.\d+\.\d+$/.test(runtimeVersion);
   const versionAtLeast = (required: string) => versionKnown && compareVersions(runtimeVersion!, required) >= 0;
   const explicitUi = ui !== "auto";

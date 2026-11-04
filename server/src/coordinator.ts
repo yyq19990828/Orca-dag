@@ -37,6 +37,7 @@ import {
   runOrca,
   showWorkerDetail,
   showEnvironment,
+  showRequest,
   showRun,
   showWorktree,
   startLegacyWorker,
@@ -47,6 +48,7 @@ import {
   closeReleasedOpenCodeTui,
   retainOpenCodeTui,
   recoverOpenCodeTuiBindings,
+  verifyOpenCodeTuiTerminal,
   startSupervisedWorker,
   stopWorkerReceipt,
   workerStopOperation,
@@ -61,20 +63,26 @@ import {
   type StartedWorker,
   type WorkerOutputReceipt,
   type WorkerStartReceipt,
+  type TaskMessageReceipt,
+  type NativeLaunchMode,
   type WorkerDetailView,
   type WorkerTerminalReceipt,
   FLEET_CAPABILITY_GAP_REASONS,
 } from "./orca";
 import type { MutationRequestMeta } from "./requestLedger";
+import { RequestLedger } from "./requestLedger";
 import type { LaneSeedPlacement, PlacementSpec, WorktreeLaneSpec, OpenCodeUi } from "./config";
 import { assertOpenCodeUiPlacement, validateOpenCodeUi } from "./security";
 import { ProviderSessionStore, discoverProviderSession } from "./providerSessions";
+import type { MailboxCheckCheckpoint, GuidanceSendCheckpoint } from "./providerSessions";
 import type { ProviderSessionBinding, ProviderSessionObservation, ProviderSessionStatus } from "./providerSessions";
 import { LaunchHistory } from "./launchHistory";
-import { MERGE_PREP_MARKER, StageGit, validateStagePlan } from "./stageGit";
-import type { OpenCodeEvidence } from "./openCode";
-import { readWorkerOwnership, type WorkerCreatorEvidence } from "./workerOwnership";
+import { MERGE_PREP_MARKER, MERGE_INPUTS_V3_MARKER, StageGit, validateStagePlan, isMergeInputsQuestion, buildMergeInputs } from "./stageGit";
+import { performTaskGuidance, recoverTaskGuidance } from "./taskGuidance";
+import { verifyOpenCodeSession, type OpenCodeEvidence } from "./openCode";
+import { readWorkerOwnership, type WorkerCreatorEvidence, type WorkerOwnershipSnapshot } from "./workerOwnership";
 import { realpath } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { resolveOpenCodeRoute } from "./openCodeRoute";
 
 /**
@@ -365,6 +373,8 @@ interface Attempt {
   taskId: string;
   harness: string;
   mode: StartedWorker["mode"];
+  launchMode?: NativeLaunchMode | null;
+  guidanceStartEvidence?: GuidanceSendCheckpoint["startEvidence"];
   dispatchId: string | null;
   /** Worker terminal, ONLY when this viewer created it (legacy lane). */
   handle: string | null;
@@ -768,6 +778,12 @@ interface State {
   recoverySessions: RecoverySessionView[];
   /** Workspace-scoped durable mapping from Orca Dispatches to provider sessions. */
   providerSessionStore: ProviderSessionStore | null;
+  requestLedger: RequestLedger | null;
+  mailboxChecks: Map<string, MailboxCheckCheckpoint>;
+  guidanceSends: Map<string, GuidanceSendCheckpoint>;
+  ownedDispatchIds: Set<string>;
+  unknownStartRequests: Map<string, string>;
+  mailboxNeedsDrain: boolean;
   /** Short-lived cache keeps provider CLI probes off every loop tick. */
   providerSessionProbeCache: Map<string, { sessionId: string; checkedAt: number; observation: ProviderSessionObservation }>;
   /** Failed identity discovery is retried later; never infer from a miss. */
@@ -846,6 +862,12 @@ const state: State = {
   recovery: null,
   recoverySessions: [],
   providerSessionStore: null,
+  requestLedger: null,
+  mailboxChecks: new Map(),
+  guidanceSends: new Map(),
+  ownedDispatchIds: new Set(),
+  unknownStartRequests: new Map(),
+  mailboxNeedsDrain: false,
   providerSessionProbeCache: new Map(),
   providerSessionDiscoveryAt: new Map(),
   retryOfByTask: new Map(),
@@ -887,6 +909,12 @@ export function resetCoordinatorForTests(): void {
   state.recovery = null;
   state.recoverySessions = [];
   state.providerSessionStore = null;
+  state.requestLedger = null;
+  state.mailboxChecks = new Map();
+  state.guidanceSends = new Map();
+  state.ownedDispatchIds = new Set();
+  state.unknownStartRequests = new Map();
+  state.mailboxNeedsDrain = false;
   state.providerSessionProbeCache = new Map();
   state.providerSessionDiscoveryAt = new Map();
   state.retryOfByTask = new Map();
@@ -914,6 +942,8 @@ export function coordinatorStatus() {
       harness: a.harness,
       mode: a.mode,
       dispatchId: a.dispatchId,
+      launchMode: a.launchMode ?? a.startReceipts.at(-1)?.launchMode ?? null,
+      guidanceStartEvidence: a.guidanceStartEvidence ?? null,
       handle: a.handle,
       startedAt: a.startedAt,
       failureCount: a.failureCount,
@@ -959,13 +989,22 @@ export function coordinatorStatus() {
             cursor: a.output.cursor,
             warnings: a.output.warnings,
             sourceChanged: a.output.sourceChanged,
+            ...(a.output.fallbackReason !== undefined ? { fallbackReason: a.output.fallbackReason } : {}),
+            ...(a.output.sourceExact !== undefined ? { sourceExact: a.output.sourceExact } : {}),
+            ...(a.output.archived !== undefined ? { archived: a.output.archived } : {}),
+            ...(a.output.provider !== undefined ? { provider: a.output.provider } : {}),
+            ...(a.output.sourceIdentity !== undefined ? { sourceIdentity: a.output.sourceIdentity } : {}),
           }
         : null,
     })),
     busy:
       [...state.attempts.values()].filter((a) => !a.settled).length +
       [...state.retryCandidates.values()].filter((r) => !r.attempt.settled).length +
-      state.unownedDispatches.length,
+      state.unownedDispatches.length +
+      [...state.unknownStartRequests.values()].filter(taskId => !state.attempts.has(taskId)).length +
+      [...state.guidanceSends.values()].filter(row => (row.state === "prepared" || row.state === "unknown") &&
+        (!row.receipt || (![...state.attempts.values()].some(a => !a.settled && a.dispatchId === row.receipt!.dispatchId) &&
+          !state.unownedDispatches.some(value => value.endsWith(` (${row.receipt!.dispatchId})`))))).length,
     /**
      * The configured worker-slot budget (Phase 4 scheduler surface). null while
      * no coordinator is running: capacity is then UNKNOWN, never zero — the
@@ -1051,6 +1090,14 @@ export async function startCoordinator(opts: StartOpts): Promise<void> {
   state.recovery = null;
   state.recoverySessions = [];
   state.providerSessionStore = new ProviderSessionStore(getOrcaRuntime().workspace.dir);
+  state.requestLedger = new RequestLedger(getOrcaRuntime().workspace.dir);
+  state.mailboxChecks = new Map();
+  state.guidanceSends = new Map();
+  state.ownedDispatchIds = new Set();
+  state.unknownStartRequests = new Map();
+  // Restart may occur immediately after a batch was durably marked done but
+  // before a following batch was read. Begin with an unfiltered FIFO drain.
+  state.mailboxNeedsDrain = true;
   state.providerSessionProbeCache = new Map();
   state.providerSessionDiscoveryAt = new Map();
   state.retryOfByTask = new Map();
@@ -1195,11 +1242,15 @@ export async function startCoordinator(opts: StartOpts): Promise<void> {
     // behind, release what is positively settled, and surface what cannot be
     // verified. Only after recovery does the loop enter `running`.
     state.phase = "recovering";
+    await recoverGuidanceSends(opts.runId);
     await recoverState(opts);
     if (!stillMyTurn(myLoop) || state.coordinatorHandle !== handle || state.runId !== opts.runId) {
       // Stopped while recovering — stopCoordinator already reported.
       return;
     }
+    await restoreMailboxChecks(opts.runId);
+    await recoverPendingReplies();
+    if (!stillMyTurn(myLoop) || state.coordinatorHandle !== handle || state.runId !== opts.runId) return;
     state.phase = "running";
     // The loop now owns the handle (stop/close flows through the normal
     // coordinator teardown from here); the provisional guard retires.
@@ -1717,14 +1768,42 @@ async function recoverState(opts: StartOpts): Promise<void> {
   // --include-remote: a crashed viewer's remote Dispatches live on their
   // connected servers; a local-only listing would misread them as lost.
   const [tasks, rows] = await Promise.all([listTasks(runId), listWorkers(runId, { includeRemote: true })]);
+  const [launches, requests] = await Promise.all([
+    new LaunchHistory(getOrcaRuntime().workspace.dir).list(runId),
+    new RequestLedger(getOrcaRuntime().workspace.dir).list(),
+  ]);
+  for (const row of rows) {
+    const launch = launches.get(row.dispatchId);
+    const recordedStart = requests.some(request => request.operation === "worker-start" &&
+      request.runId === runId && request.taskId === row.taskId && request.dispatchId === row.dispatchId);
+    const guidance = [...state.guidanceSends.values()].some(request =>
+      request.creationProven && request.receipt?.taskId === row.taskId && request.receipt.dispatchId === row.dispatchId);
+    const explicit = opts.resumeBlocked?.dispatchId === row.dispatchId || opts.resumeStoppedDispatchIds?.includes(row.dispatchId);
+    if ((launch?.source === "viewer-launch" && launch.taskId === row.taskId) || recordedStart || guidance || explicit) {
+      state.ownedDispatchIds.add(row.dispatchId);
+    }
+  }
+  for (const request of requests) {
+    if (request.operation === "worker-start" && request.runId === runId && request.taskId &&
+        !request.dispatchId && request.settledLocally !== true) {
+      state.unknownStartRequests.set(request.requestId, request.taskId);
+    }
+  }
   const ownership = await readWorkerOwnership(runId, tasks, rows, state.workerCreators);
   if (!stillMyTurn(generation) || state.runId !== runId || state.coordinatorHandle !== coordinator) return;
+  registerHandedBackOwnership(ownership);
   state.delegatedTaskIds = ownership.heldTaskIds;
   state.delegatedDispatchIds = ownership.heldDispatchIds;
   await captureProviderSessions(runId, tasks, rows);
   const rowByDispatch = new Map(rows.map((r) => [r.dispatchId, r]));
   const bindings = await listProviderSessions(runId);
   const tuiLaunches = await state.providerSessionStore?.listOpenCodeLaunches(runId) ?? [];
+  for (const launch of tuiLaunches) {
+    if (launch.dispatchId && rows.some(row => row.runId === runId && row.taskId === launch.taskId &&
+        row.dispatchId === launch.dispatchId)) state.ownedDispatchIds.add(launch.dispatchId);
+  }
+  // OpenCode launch records are also exact ownership roots for helper lineage.
+  registerHandedBackOwnership(ownership);
   const tuiByDispatch = new Map(tuiLaunches.filter(row => row.dispatchId).map(row => [row.dispatchId, row]));
   const bindingByDispatch = new Map(
     bindings
@@ -1963,6 +2042,11 @@ async function recoverState(opts: StartOpts): Promise<void> {
     }
     const evidence = taskDispatchEvidence(task, rows, runId);
     const row = evidence.row;
+    // Run membership and supervision alone do not establish viewer custody.
+    if (row && !state.ownedDispatchIds.has(row.dispatchId)) {
+      summary.unverifiable.push(task.id);
+      continue;
+    }
     if (task.status === "dispatched" || evidence.active.length > 0) {
       if (!row || evidence.uncertain || workerSupervision(row) !== "supervised") {
         // Legacy Dispatches do not gain Orca process ownership on adoption.
@@ -2208,6 +2292,25 @@ export async function stopCoordinator(): Promise<StopReport> {
   const wasRunning = state.running;
   state.running = false;
   if (wasRunning) state.phase = "stopping";
+  // This stage owns only check preparation, transport and receipt caching; it
+  // never waits for the lifecycle mutex or processes a delivery.
+  await waitForMailboxChecksAtStop();
+  // An in-flight human reply must finish recording its exact outcome before
+  // its attested coordinator terminal can be closed.
+  await mailboxMutationChain;
+  await lifecycleMutationChain;
+  if (state.runId && state.providerSessionStore) await recoverGuidanceSends(state.runId);
+  // Empty, unacknowledged checks have no delivery or effects left to process.
+  // Persist their actual receipt before retiring them; all batches and ACK
+  // receipts remain replayable.
+  for (const row of [...state.mailboxChecks.values()]) {
+    const delivery = row.delivery;
+    if (row.state === "received" && !row.ack && delivery && !delivery.deliveryId &&
+        delivery.messages.length === 0 && delivery.count === 0 && !delivery.acknowledged &&
+        !delivery.cancelled && !delivery.connectionLost) {
+      await saveMailbox({ ...row, state: "completed" });
+    }
+  }
 
   const attempts = [
     ...state.attempts.values(),
@@ -2215,15 +2318,44 @@ export async function stopCoordinator(): Promise<StopReport> {
   ];
   const coordinator = state.coordinatorHandle;
   const results: StopResultEntry[] = [];
-  // Stop covers this viewer's workers, not helpers still owned by an active
-  // creator (or whose creator is unreadable). Report the retained work rather
-  // than silently claiming the entire Run stopped.
-  for (const dispatchId of state.delegatedDispatchIds) {
-    results.push({
-      target: dispatchId, kind: "supervised", result: "unknown",
-      detail: "Helper custody belongs to its creator or is unverified; no Stop was sent to this Dispatch.",
-    });
+  for (const [requestId, taskId] of state.unknownStartRequests) {
+    results.push({ target: requestId, kind: "supervised", result: "unknown",
+      detail: `Viewer start for ${taskId} has no resolved Dispatch; inspect its exact request before declaring Stop clean.` });
   }
+  for (const row of state.guidanceSends.values()) {
+    if (row.state === "prepared" || row.state === "unknown") {
+      results.push({ target: row.requestId, kind: "supervised", result: "unknown",
+        detail: "Guidance outcome remains unresolved; inspect the exact request before declaring Stop clean." });
+    }
+  }
+  const unresolvedMail = [...state.mailboxChecks.values()].filter(row =>
+    row.state === "prepared" || row.state === "unknown" || row.state === "received" ||
+    (row.state === "pending_input" && (row.delivery?.deliveryAcknowledged !== true ||
+      Object.values(row.replyRequests ?? {}).some(reply => reply.state !== "completed"))));
+  if (unresolvedMail.length && coordinator) {
+    results.push({ target: coordinator, kind: "coordinator_terminal", result: "unknown",
+      detail: `Mailbox recovery remains pending for request(s): ${unresolvedMail.map(row => row.requestId).join(", ")}` });
+  }
+  // Re-read creator custody before touching any Dispatch. The previous tick's
+  // snapshot is not authority for stopping a helper.
+  let stopOwnership: WorkerOwnershipSnapshot | null = null;
+  let stopCustodyError: string | null = null;
+  const readStopOwnership = async (): Promise<WorkerOwnershipSnapshot | null> => {
+    if (!state.runId) return null;
+    try {
+      const [tasks, workers] = await Promise.all([
+        listTasks(state.runId), listWorkers(state.runId, { includeRemote: true }),
+      ]);
+      const snapshot = await readWorkerOwnership(state.runId, tasks, workers, state.workerCreators);
+      registerHandedBackOwnership(snapshot);
+      return snapshot;
+    } catch (err) {
+      stopCustodyError = String((err as Error).message ?? err);
+      return null;
+    }
+  };
+  stopOwnership = await readStopOwnership();
+  const heldAtStop = stopOwnership?.heldDispatchIds ?? state.delegatedDispatchIds;
 
   // Phase 5: every worker-stop runs under a durable, ledger-recorded request
   // id — recorded BEFORE the call so an interrupted stop stays inspectable,
@@ -2268,8 +2400,35 @@ export async function stopCoordinator(): Promise<StopReport> {
       throw err;
     }
   };
+  const attemptedDispatches = new Set<string>();
+  const attemptDispatches = new Set(attempts.map(a => a.dispatchId).filter((id): id is string => !!id));
+  for (const row of state.guidanceSends.values()) {
+    const receipt = row.receipt;
+    if (!row.creationProven || !receipt || attemptDispatches.has(receipt.dispatchId) || heldAtStop.has(receipt.dispatchId)) continue;
+    if (!stopOwnership) {
+      results.push({ target: receipt.dispatchId, kind: "supervised", result: "unknown", detail: "Helper custody could not be refreshed." });
+      continue;
+    }
+    attemptedDispatches.add(receipt.dispatchId);
+    try {
+      const stopped = await stopWithAudit(receipt.taskId, receipt.dispatchId);
+      const confirmed = stopped.state === "stopped" || stopped.alreadySettled;
+      results.push({ target: receipt.dispatchId, kind: "supervised",
+        result: confirmed ? (stopped.alreadySettled ? "already_settled" : "stopped") : "unknown",
+        detail: confirmed ? "Journal-owned guidance follow-up" : `Guidance follow-up Stop returned ${stopped.state}` });
+    } catch (err) {
+      results.push({ target: receipt.dispatchId, kind: "supervised", result: "unknown",
+        detail: `Guidance follow-up Stop failed: ${String((err as Error).message ?? err)}` });
+    }
+  }
 
   for (const a of attempts) {
+    if (a.dispatchId && heldAtStop.has(a.dispatchId)) continue;
+    if (a.dispatchId && !stopOwnership) {
+      results.push({ target: a.dispatchId, kind: "supervised", result: "unknown", detail: "Helper custody could not be refreshed." });
+      continue;
+    }
+    if (a.dispatchId) attemptedDispatches.add(a.dispatchId);
     if (a.openCodeTui && !a.dispatchId &&
         (a.handle || !a.settled || a.startReceipts.at(-1)?.failedStage === "response_lost")) {
       results.push({ target: a.handle ?? a.taskId, kind: "supervised", result: "unknown",
@@ -2277,6 +2436,11 @@ export async function stopCoordinator(): Promise<StopReport> {
     }
     if (a.dispatchId && a.mode === "supervised") {
       try {
+        let paneProofError: string | null = null;
+        if (a.openCodeTui && state.opts?.retainByTask?.[a.taskId]) {
+          try { await verifyPreparedOpenCodePane(a); }
+          catch (err) { paneProofError = String((err as Error).message ?? err); }
+        }
         const receipt = await stopWithAudit(a.taskId, a.dispatchId);
         let cleanupDetail: string | null = null;
         // The OpenCode adapter returns provider exit only after separately
@@ -2284,7 +2448,12 @@ export async function stopCoordinator(): Promise<StopReport> {
         const stopConfirmed = receipt.state === "stopped" || receipt.alreadySettled ||
           (a.openCodeTui && receipt.providerExecutionExited === true);
         if (a.openCodeTui && stopConfirmed) {
-          if (state.opts?.retainByTask?.[a.taskId]) await retainOpenCodeTui(a.dispatchId);
+          if (state.opts?.retainByTask?.[a.taskId]) {
+            await retainOpenCodeTui(a.dispatchId);
+            cleanupDetail = paneProofError
+              ? `Caller-owned OpenCode pane left open; identity was not confirmed: ${paneProofError}`
+              : "Verified caller-owned OpenCode pane retained; native resource state is separate.";
+          }
           else {
             const released = await performRelease(a);
             if (released.state === "retained" && released.reason === "identity_unproven") {
@@ -2304,7 +2473,7 @@ export async function stopCoordinator(): Promise<StopReport> {
         results.push({
           target: a.dispatchId,
           kind: "supervised",
-          result: !stopConfirmed ? "unknown" : receipt.alreadySettled ? "already_settled" :
+          result: !stopConfirmed || paneProofError ? "unknown" : receipt.alreadySettled ? "already_settled" :
             a.openCodeTui && receipt.providerExecutionExited ? "provider_stopped_accounting_abandoned" : "stopped",
           detail: cleanupDetail ?? receipt.warning ?? receipt.state,
         });
@@ -2338,7 +2507,7 @@ export async function stopCoordinator(): Promise<StopReport> {
         });
       }
     }
-    if (a.handle && !a.openCodeTui && a.mode === "legacy" && !a.adopted) {
+    if (a.handle && !a.openCodeTui && a.mode === "legacy" && !a.adopted && !a.startRequestId) {
       try {
         await closeTerminalStrict(a.handle);
         results.push({ target: a.handle, kind: "legacy_terminal", result: "closed", detail: null });
@@ -2350,6 +2519,60 @@ export async function stopCoordinator(): Promise<StopReport> {
           detail: String((err as Error).message ?? err),
         });
       }
+    }
+  }
+  // Stopping a creator may hand its helpers back to this Run. Re-read after
+  // every wave so nested helpers are stopped only after their own exact
+  // creator's positive settlement, never from a stale pre-Stop snapshot.
+  if (runIdAtStop) {
+    for (;;) {
+      stopOwnership = await readStopOwnership();
+      if (!stopOwnership) break;
+      const handedBack = stopOwnership.handedBack.filter(row =>
+        state.ownedDispatchIds.has(row.dispatchId) && !attemptedDispatches.has(row.dispatchId));
+      if (!handedBack.length) break;
+      for (const row of handedBack) {
+        attemptedDispatches.add(row.dispatchId);
+        try {
+          const receipt = await stopWithAudit(row.taskId, row.dispatchId);
+          const confirmed = receipt.state === "stopped" || receipt.alreadySettled;
+          results.push({ target: row.dispatchId, kind: "supervised",
+            result: confirmed ? (receipt.alreadySettled ? "already_settled" : "stopped") : "unknown",
+            detail: confirmed ? "Creator settled; exact helper custody returned to this Run" : receipt.warning ?? receipt.state });
+        } catch (err) {
+          results.push({ target: row.dispatchId, kind: "supervised", result: "unknown",
+            detail: `Handed-back helper Stop failed: ${String((err as Error).message ?? err)}` });
+        }
+      }
+    }
+    const stillHeld = stopOwnership?.heldDispatchIds ?? heldAtStop;
+    for (const dispatchId of stillHeld) {
+      results.push({ target: dispatchId, kind: "supervised", result: "unknown",
+        detail: "Helper custody belongs to its active or unverified creator; no Stop was sent." });
+    }
+    for (const row of stopOwnership?.handedBack ?? []) {
+      if (!state.ownedDispatchIds.has(row.dispatchId)) {
+        results.push({ target: row.dispatchId, kind: "supervised", result: "unknown",
+          detail: "The exact creator lineage does not establish viewer custody; no Stop was sent." });
+      }
+    }
+    if (stopCustodyError) results.push({ target: coordinator ?? runIdAtStop, kind: "coordinator_terminal", result: "unknown",
+      detail: `Could not completely refresh helper custody during Stop: ${stopCustodyError}` });
+  }
+  if (runIdAtStop && state.providerSessionStore) {
+    try {
+      await recoverGuidanceSends(runIdAtStop);
+      for (let index = results.length - 1; index >= 0; index--) {
+        const result = results[index];
+        const row = state.guidanceSends.get(result.target);
+        if (!row || result.result !== "unknown" || row.state === "prepared" || row.state === "unknown") continue;
+        if (row.receipt?.kind === "follow_up" && row.creationProven &&
+            !results.some(entry => entry.target === row.receipt!.dispatchId && entry.result !== "unknown")) continue;
+        results.splice(index, 1);
+      }
+    } catch (err) {
+      results.push({ target: coordinator ?? runIdAtStop, kind: "coordinator_terminal", result: "unknown",
+        detail: `Guidance custody recovery failed after Stop: ${String((err as Error).message ?? err)}` });
     }
   }
 
@@ -2438,6 +2661,11 @@ export async function stopCoordinator(): Promise<StopReport> {
  * landed. Called by POST /api/messages/:id/reply while the loop is running.
  */
 export async function answerInboxItem(messageId: string, body: string): Promise<void> {
+  await withMailboxMutation(() => answerInboxItemLocked(messageId, body));
+  await acknowledgePendingDeliveryIfResolved();
+}
+
+async function answerInboxItemLocked(messageId: string, body: string): Promise<void> {
   const item = state.inbox.find((i) => i.messageId === messageId);
   if (!item) {
     throw new OrcaCliError(
@@ -2449,9 +2677,96 @@ export async function answerInboxItem(messageId: string, body: string): Promise<
   if (!from || !state.running) {
     throw new OrcaCliError("Coordinator is not running; cannot reply from its terminal.", "not_running");
   }
-  await replyToMessage(messageId, body, from);
+  const checkpoint = [...state.mailboxChecks.values()].find(row => row.pendingQuestionIds.includes(messageId));
+  if (!checkpoint) throw new OrcaCliError("The question has no durable mailbox checkpoint", "mailbox_recovery_unknown");
+  const bodyHash = createHash("sha256").update(body).digest("hex");
+  const previous = checkpoint.replyRequests?.[messageId];
+  if (previous && previous.bodyHash !== bodyHash) throw new OrcaCliError("The previous reply outcome is unknown; retry the same reply text", "reply_unknown");
+  const request = previous ?? { requestId: newRequestId(), from, bodyHash, state: "prepared" as const };
+  await saveMailbox({ ...checkpoint, replyRequests: { ...checkpoint.replyRequests, [messageId]: request } });
+  await noteRequest({ requestId: request.requestId, operation: "reply", runId: checkpoint.runId, taskId: item.taskId, dispatchId: item.dispatchId ?? null });
+  if (!state.running || state.coordinatorHandle !== from) {
+    throw new OrcaCliError("Coordinator stopped before the reply was sent.", "not_running");
+  }
+  try {
+    if (request.from !== from) {
+      const result = await showRequest(request.requestId);
+      const outcome = result?.outcome && typeof result.outcome === "object" ? result.outcome as Record<string, unknown> : null;
+      const message = outcome?.message && typeof outcome.message === "object" ? outcome.message as Record<string, unknown> : null;
+      if (result?.requestId !== request.requestId || result.state !== "completed" ||
+          result.raw.method !== "orchestration.reply" || message?.run_id !== checkpoint.runId) {
+        throw new OrcaCliError(`Reply request ${request.requestId} belongs to a prior terminal and remains unresolved`, "reply_unknown");
+      }
+    } else {
+      await replyToMessage(messageId, body, from, request.requestId);
+    }
+  } catch (err) {
+    const current = state.mailboxChecks.get(checkpoint.requestId)!;
+    await saveMailbox({ ...current, replyRequests: { ...current.replyRequests, [messageId]: { ...request, state: "unknown" } } });
+    throw err;
+  }
+  const current = state.mailboxChecks.get(checkpoint.requestId)!;
+  const pendingQuestionIds = current.pendingQuestionIds.filter(id => id !== messageId);
+  await saveMailbox({ ...current, pendingQuestionIds,
+    state: current.state !== "received" && current.delivery?.deliveryAcknowledged === true && pendingQuestionIds.length === 0 &&
+      current.processedMessageIds.length === current.delivery.messages.length ? "completed" : current.state,
+    replyRequests: { ...current.replyRequests, [messageId]: { ...request, state: "completed" } },
+  });
   state.inbox = state.inbox.filter((i) => i.messageId !== messageId);
-  await acknowledgePendingDeliveryIfResolved();
+}
+
+/** Recover a previously issued reply by its exact request, without resending
+ * text from a new terminal or clearing uncertainty on an absent receipt. */
+async function recoverPendingReplies(): Promise<void> {
+  for (const row of [...state.mailboxChecks.values()]) {
+    for (const id of row.pendingQuestionIds) {
+      const request = state.mailboxChecks.get(row.requestId)?.replyRequests?.[id];
+      if (!request || request.state === "completed") continue;
+      try {
+        const result = await showRequest(request.requestId);
+        const outcome = result?.outcome && typeof result.outcome === "object" ? result.outcome as Record<string, unknown> : null;
+        const message = outcome?.message && typeof outcome.message === "object" ? outcome.message as Record<string, unknown> : null;
+        if (result?.requestId !== request.requestId || result.state !== "completed" ||
+            result.raw.method !== "orchestration.reply" || message?.run_id !== row.runId) continue;
+        const current = state.mailboxChecks.get(row.requestId);
+        if (!current) continue;
+        const pendingQuestionIds = current.pendingQuestionIds.filter(value => value !== id);
+        await saveMailbox({ ...current, pendingQuestionIds,
+          state: current.state !== "received" && current.delivery?.deliveryAcknowledged === true && !pendingQuestionIds.length
+            ? "completed" : current.state,
+          replyRequests: { ...current.replyRequests, [id]: { ...request, state: "completed" } } });
+        state.inbox = state.inbox.filter(item => item.messageId !== id);
+      } catch {
+        // A read failure is not evidence of either success or refusal.
+      }
+    }
+  }
+}
+
+async function answerMergeQuestion(message: OrcaMessage): Promise<void> {
+  if (!state.stageGit || !state.runId || !isMergeInputsQuestion(message) || message.run_id !== state.runId) return;
+  const payload = parseWorkerDonePayload(message);
+  if (!payload?.taskId || !payload.dispatchId || message.from_handle !== `dispatch:${payload.dispatchId}`) return;
+  const attempt = state.attempts.get(payload.taskId);
+  if (!attempt || attempt.settled || attempt.dispatchId !== payload.dispatchId ||
+      !state.ownedDispatchIds.has(payload.dispatchId)) return;
+  const [tasks, gates, workers] = await Promise.all([
+    listTasks(state.runId), listGates(state.runId), listWorkers(state.runId, { includeRemote: true }),
+  ]);
+  const task = tasks.find(item => item.id === payload.taskId && item.run_id === state.runId);
+  if (!task || task.status !== "dispatched" || task.dispatch_id !== payload.dispatchId ||
+      !task.spec?.includes(MERGE_PREP_MARKER) || !task.spec.includes(MERGE_INPUTS_V3_MARKER) ||
+      !taskDeps(task).every(id => tasks.some(dep => dep.id === id && dep.run_id === state.runId && dep.status === "completed")) ||
+      gates.some(gate => !!gate.taskId && (gate.taskId === task.id || taskDeps(task).includes(gate.taskId)) &&
+        !(isIntegrationGate(gate) ? gateIntegrated(gate) : ordinaryGateApproved(gate))) ||
+      !workers.some(row => row.runId === state.runId && row.taskId === task.id && row.dispatchId === payload.dispatchId && activeDispatch(row))) return;
+  const body = await buildMergeInputs(state.stageGit, task, await stageWorkerPath(attempt));
+  // Recheck the in-memory fence after the fallible Git/authority reads. The
+  // native reply itself addresses this question, never a potentially settled
+  // Dispatch and never the follow-up-producing send primitive.
+  if (!state.running || state.runId !== message.run_id || state.attempts.get(task.id) !== attempt ||
+      attempt.settled || attempt.dispatchId !== payload.dispatchId) return;
+  await answerInboxItemLocked(message.id, body);
 }
 
 /**
@@ -2531,7 +2846,8 @@ async function emitCoordinatorCheck(receipt: CoordinatorCheckReceipt): Promise<v
  * reclassify an in-flight mutation.
  */
 async function noteRequest(meta: MutationRequestMeta): Promise<void> {
-  const sink = state.opts?.onRequestRecord;
+  const fallback = state.requestLedger;
+  const sink = state.opts?.onRequestRecord ?? (fallback ? (row: MutationRequestMeta) => fallback.record(row) : null);
   if (!sink) return;
   try {
     await sink(meta);
@@ -2601,6 +2917,269 @@ export function shouldPersistCoordinatorCheck(
  * the lane restart-adoption test (2026-09-22).
  */
 let coordinatorLoopGeneration = 0;
+let mailboxMutationChain: Promise<void> = Promise.resolve();
+let lifecycleMutationChain: Promise<void> = Promise.resolve();
+const inFlightMailboxChecks = new Set<Promise<unknown>>();
+// A normal check waits up to three seconds. Do not let a stuck native
+// transport (whose own deadline may be much longer) hold Stop indefinitely.
+const STOP_MAILBOX_WAIT_MS = 5000;
+function trackMailboxCheck<T>(work: () => Promise<T>): Promise<T> {
+  const result = work();
+  inFlightMailboxChecks.add(result);
+  void result.then(() => inFlightMailboxChecks.delete(result), () => inFlightMailboxChecks.delete(result));
+  return result;
+}
+async function waitForMailboxChecksAtStop(): Promise<void> {
+  const pending = [...inFlightMailboxChecks];
+  if (!pending.length) return;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      Promise.allSettled(pending),
+      new Promise<void>(resolve => { timer = setTimeout(resolve, STOP_MAILBOX_WAIT_MS); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function withLifecycleMutation<T>(work: () => Promise<T>): Promise<T> {
+  const result = lifecycleMutationChain.then(work, work);
+  lifecycleMutationChain = result.then(() => undefined, () => undefined);
+  return result;
+}
+function withMailboxMutation<T>(work: () => Promise<T>): Promise<T> {
+  const result = mailboxMutationChain.then(work, work);
+  mailboxMutationChain = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+/** Reconcile only the exact journaled send; never synthesize a replacement
+ * mutation when request-show is unavailable or its outcome is uncertain. */
+async function recoverGuidanceSends(runId: string): Promise<void> {
+  const store = state.providerSessionStore;
+  if (!store) return;
+  let rows = await store.listGuidanceSends(runId);
+  for (const row of rows) {
+    if (row.state !== "prepared" && row.state !== "unknown") continue;
+    try { await recoverTaskGuidance(row, { store }); } catch { /* unresolved remains a capacity/Stop debt */ }
+  }
+  rows = await store.listGuidanceSends(runId);
+  state.guidanceSends = new Map(rows.map(row => [row.requestId, row]));
+  for (const row of rows) if (row.creationProven && row.receipt) state.ownedDispatchIds.add(row.receipt.dispatchId);
+  for (const row of rows) {
+    const receipt = row.receipt;
+    if (!row.creationProven || !receipt) continue;
+    try {
+      const detail = await showWorkerDetail(receipt.dispatchId);
+      if (!detail?.dispatch || detail.dispatch.id !== receipt.dispatchId ||
+          detail.dispatch.runId !== runId || detail.dispatch.taskId !== receipt.taskId) continue;
+      const status = detail.dispatch.status;
+      const settled = status === "succeeded" || status === "completed" || status === "failed" ||
+        status === "stopped" || status === "abandoned";
+      // Settlement resolves custody, not the historical start readiness.
+      if (row.state === "unknown" && settled) {
+        const resolved: GuidanceSendCheckpoint = { ...row, state: "follow_up", updatedAt: new Date().toISOString(),
+          error: "start readiness remained unknown; exact Dispatch later settled" };
+        await store.recordGuidanceSend(resolved);
+        state.guidanceSends.set(row.requestId, resolved);
+      }
+      if (!state.running || state.runId !== runId || !state.opts || state.attempts.has(receipt.taskId)) continue;
+      const source = state.attempts.get(row.requestedTaskId);
+      const attempt = reserveAttempt({ id: receipt.taskId }, source?.harness ?? state.opts.defaultHarness);
+      attempt.adopted = true;
+      attempt.dispatchId = receipt.dispatchId;
+      attempt.guidanceStartEvidence = row.startEvidence;
+      if (row.startEvidence?.launchMode !== undefined) attempt.launchMode = row.startEvidence.launchMode;
+      applyAttemptDispatchDetail(attempt, runId, detail);
+      if (settled) settleAttempt(attempt, status === "succeeded" || status === "completed" ? "succeeded" : "failed", "task_status");
+      state.attempts.set(receipt.taskId, attempt);
+    } catch { /* exact identity remains in the journal for later recovery/Stop */ }
+  }
+}
+
+export async function sendTaskGuidance(input: {
+  runId: string; taskId: string; subject: string; body: string; threadId?: string;
+}): Promise<TaskMessageReceipt> {
+  return withLifecycleMutation(async () => {
+    const { runId, taskId } = input;
+    const from = state.coordinatorHandle;
+    const store = state.providerSessionStore;
+    const opts = state.opts;
+    if (!state.running || state.runId !== runId || !from || !store || !opts) {
+      throw new OrcaCliError("The requested Run is not controlled by this coordinator", "not_running");
+    }
+    const wasUnknown = [...state.guidanceSends.values()].some(row =>
+      row.requestedTaskId === taskId && row.requestedDispatchId === state.attempts.get(taskId)?.dispatchId &&
+      (row.state === "prepared" || row.state === "unknown"));
+    await recoverGuidanceSends(runId);
+    if (wasUnknown) {
+      const unresolved = [...state.guidanceSends.values()].some(row =>
+        row.requestedTaskId === taskId && (row.state === "prepared" || row.state === "unknown"));
+      if (unresolved) {
+        throw new OrcaCliError("A prior guidance request remains unresolved; inspect its request before sending again", "guidance_unknown");
+      }
+      throw new OrcaCliError("The prior guidance request was reconciled; submit the new guidance again", "guidance_reconciled");
+    }
+    const attempt = state.attempts.get(taskId);
+    if (!attempt || attempt.settled || !attempt.dispatchId || !state.ownedDispatchIds.has(attempt.dispatchId) ||
+        isUnverifiedHarness(attempt.harness) || state.delegatedDispatchIds.has(attempt.dispatchId)) {
+      throw new OrcaCliError("Guidance requires an active viewer-owned attempt", "active_dispatch_required");
+    }
+    const dispatchId = attempt.dispatchId;
+    const [tasks, workers, detail] = await Promise.all([
+      listTasks(runId), listWorkers(runId, { includeRemote: true }), showWorkerDetail(dispatchId),
+    ]);
+    const task = tasks.find(row => row.id === taskId && row.run_id === runId);
+    const worker = workers.find(row => row.runId === runId && row.taskId === taskId && row.dispatchId === dispatchId);
+    if (!state.running || state.runId !== runId || state.coordinatorHandle !== from ||
+        state.attempts.get(taskId) !== attempt || attempt.settled || attempt.dispatchId !== dispatchId ||
+        !task || task.status !== "dispatched" || task.dispatch_id !== dispatchId ||
+        !worker || !activeDispatch(worker) || !detail?.dispatch ||
+        detail.dispatch.id !== dispatchId || detail.dispatch.runId !== runId || detail.dispatch.taskId !== taskId ||
+        detail.dispatch.status !== "dispatched") {
+      throw new OrcaCliError("The exact owned attempt is no longer active", "active_dispatch_required");
+    }
+    const fleetVerdict = normalizeLiveness(worker.projection?.liveness?.verdict ?? null);
+    const fleetReason = worker.projection?.liveness?.reason ?? null;
+    const qualifiedGap = fleetVerdict === "unverifiable" && !!fleetReason &&
+      FLEET_CAPABILITY_GAP_REASONS.has(fleetReason) &&
+      detail.observation?.status === "live" && detail.observation.exactWorker === true;
+    if (fleetVerdict !== "live" && !qualifiedGap) {
+      throw new OrcaCliError("The exact active Dispatch is not positively live", "active_dispatch_required");
+    }
+    const occupied = new Set(workers.filter(row => row.runId === runId && activeDispatch(row) && row.dispatchId !== dispatchId)
+      .map(row => row.dispatchId));
+    const unbound = [...state.attempts.values()].filter(row => !row.settled && !row.dispatchId).length +
+      [...state.retryCandidates.values()].filter(row => !row.attempt.settled && !row.attempt.dispatchId).length;
+    const unknown = [...state.guidanceSends.values()].filter(row => (row.state === "prepared" || row.state === "unknown") &&
+      (!row.receipt || !occupied.has(row.receipt.dispatchId))).length;
+    const unknownStarts = [...state.unknownStartRequests.values()].filter(id => !state.attempts.has(id)).length;
+    if (occupied.size + unbound + unknown + unknownStarts >= opts.maxConcurrency) {
+      throw new OrcaCliError("No fleet capacity remains for a possible guidance follow-up", "guidance_capacity");
+    }
+    try {
+      const result = await performTaskGuidance({ ...input, dispatchId, from }, {
+        store,
+        audit: row => noteRequest({ requestId: row.requestId, operation: "send", runId: row.runId,
+          taskId: row.requestedTaskId, dispatchId: row.requestedDispatchId,
+          settledLocally: row.state === "enqueued" || row.state === "follow_up" }),
+      });
+      await recoverGuidanceSends(runId);
+      const followUp = state.attempts.get(result.receipt.taskId);
+      if (result.creationProven && result.startReceipt && followUp?.dispatchId === result.receipt.dispatchId) {
+        followUp.startReceipts.push(result.startReceipt);
+        if (result.startReceipt.launchMode !== undefined) followUp.launchMode = result.startReceipt.launchMode;
+      }
+      return result.receipt;
+    } finally {
+      // Even a thrown response may have created a root. Reload the critical
+      // checkpoint before another start, cleanup, or Stop can proceed.
+      await recoverGuidanceSends(runId);
+    }
+  });
+}
+
+async function saveMailbox(row: MailboxCheckCheckpoint, generation = coordinatorLoopGeneration,
+  store = state.providerSessionStore): Promise<MailboxCheckCheckpoint> {
+  if (!store) throw new Error("Mailbox checkpoint store is unavailable");
+  const updated = { ...row, updatedAt: new Date().toISOString() };
+  await store.recordMailboxCheck(updated);
+  if (generation === coordinatorLoopGeneration && state.runId === row.runId) {
+    if (updated.state === "completed") state.mailboxChecks.delete(updated.requestId);
+    else state.mailboxChecks.set(updated.requestId, updated);
+  }
+  return updated;
+}
+
+function mailboxQuestion(message: OrcaMessage): void {
+  if (message.type !== "question" && message.type !== "escalation") throw new Error("Invalid pending mailbox question");
+  const payload = parseWorkerDonePayload(message);
+  const payloadTaskId = payload?.taskId ?? null;
+  const payloadDispatchId = payload?.dispatchId ?? null;
+  const relatedAttempt = [...state.attempts.values()].find(attempt =>
+    (!payloadTaskId || attempt.taskId === payloadTaskId) &&
+    (!payloadDispatchId || attempt.dispatchId === payloadDispatchId) &&
+    !!message.from_handle &&
+    (message.from_handle === attempt.handle || message.from_handle === attempt.agentTerminalHandle ||
+      (!!attempt.dispatchId && message.from_handle === `dispatch:${attempt.dispatchId}`)));
+  state.inbox = [...state.inbox.filter(item => item.messageId !== message.id), {
+    messageId: message.id, kind: message.type, from: message.from_handle,
+    subject: message.subject, body: message.body, createdAt: message.created_at,
+    taskId: relatedAttempt?.taskId ?? null,
+    dispatchId: relatedAttempt?.dispatchId ?? null,
+  }];
+}
+
+async function restoreMailboxChecks(runId: string): Promise<void> {
+  const rows = await state.providerSessionStore!.listMailboxChecks(runId);
+  for (const row of rows) {
+    if (row.state === "completed") continue;
+    state.mailboxChecks.set(row.requestId, row);
+    if (row.delivery?.deliveryAcknowledged === true) state.mailboxNeedsDrain = true;
+    for (const id of row.processedMessageIds) state.processedMessages.add(id);
+    for (const message of row.delivery?.messages ?? []) {
+      if (row.pendingQuestionIds.includes(message.id)) mailboxQuestion(message);
+    }
+    if (row.delivery?.deliveryId && row.delivery.deliveryAcknowledged !== true) {
+      state.pendingDeliveryId = row.delivery.deliveryId;
+    }
+  }
+}
+
+/** Save the exact native identity before the potentially consuming call. */
+async function prepareMailboxCheck(ack: string | null, drain = false): Promise<MailboxCheckCheckpoint> {
+  const generation = coordinatorLoopGeneration;
+  const store = state.providerSessionStore;
+  const timestamp = new Date().toISOString();
+  const row: MailboxCheckCheckpoint = {
+    requestId: newRequestId(), runId: state.runId!, from: state.coordinatorHandle!, ack, drain,
+    state: "prepared", delivery: null, processedMessageIds: [], pendingQuestionIds: [],
+    createdAt: timestamp, updatedAt: timestamp, error: null,
+  };
+  await saveMailbox(row, generation, store);
+  try {
+    await noteRequest({ requestId: row.requestId, operation: "check", runId: row.runId, taskId: null, dispatchId: null });
+  } catch (err) {
+    // The native call cannot have started if its ledger preparation failed.
+    await saveMailbox({ ...row, state: "completed" }, generation, store);
+    throw err;
+  }
+  return row;
+}
+
+/** A lost response is retried with its original identity, never a new check. */
+async function receiveMailboxCheck(row: MailboxCheckCheckpoint, waitMs: number): Promise<MailboxCheckCheckpoint> {
+  const generation = coordinatorLoopGeneration;
+  const store = state.providerSessionStore;
+  const coordinator = state.coordinatorHandle;
+  let delivery: OrcaDelivery;
+  try {
+    if (row.from !== coordinator) {
+      // A new terminal cannot replay an old terminal's attested operation.
+      // Only a recorded exact request receipt can recover its consumed batch.
+      const receipt = await showRequest(row.requestId);
+      const outcome = receipt?.requestId === row.requestId && receipt.state === "completed" &&
+        receipt.raw.method === "orchestration.check" ? receipt.outcome : null;
+      const candidate = outcome && typeof outcome === "object" && !Array.isArray(outcome)
+        ? outcome as Record<string, unknown> : null;
+      const value = candidate?.result && typeof candidate.result === "object" ? candidate.result : candidate;
+      if (!value || typeof value !== "object" || (value as { runId?: unknown }).runId !== row.runId ||
+          !Array.isArray((value as { messages?: unknown }).messages)) {
+        throw new Error(`Mailbox request ${row.requestId} cannot be recovered from its original terminal; inspect request-show`);
+      }
+      delivery = value as OrcaDelivery;
+    } else {
+      delivery = await checkInbox({ from: row.from, ...(row.ack ? { ack: row.ack } : row.drain ? {} : { types: WAKE_TYPES, waitMs }), requestId: row.requestId });
+    }
+    if (delivery.runId !== row.runId) throw new Error(`Mailbox request ${row.requestId} returned a foreign Run`);
+    const received: MailboxCheckCheckpoint = { ...row, state: "received", delivery, error: null };
+    return await saveMailbox(received, generation, store);
+  } catch (err) {
+    const detail = String((err as Error).message ?? err);
+    await saveMailbox({ ...row, state: "unknown", error: detail }, generation, store);
+    throw err;
+  }
+}
 
 async function loop(myLoop: number): Promise<void> {
   const waitMs = state.opts?.tickWaitMs ?? CHECK_WAIT_MS;
@@ -2608,41 +3187,74 @@ async function loop(myLoop: number): Promise<void> {
     const iterStart = Date.now();
     let delivery: OrcaDelivery | null = null;
     let passError: string | null = null;
+    let processingFailed = false;
     try {
-      // Rolling inbox wait: block (bounded) for worker_done/escalation/question
-      // mail instead of sleeping through it. Nothing pending → timedOut batch.
-      delivery = state.queuedDelivery;
-      state.queuedDelivery = null;
-      if (!delivery) delivery = await checkInbox({
-        from: state.coordinatorHandle!,
-        types: WAKE_TYPES,
-        waitMs,
+      await withMailboxMutation(async () => {
+        await recoverPendingReplies();
+        for (const row of [...state.mailboxChecks.values()]) {
+          for (const message of row.delivery?.messages ?? []) {
+            if (row.pendingQuestionIds.includes(message.id) && isMergeInputsQuestion(message)) {
+              await withLifecycleMutation(() => stillMyTurn(myLoop) ? answerMergeQuestion(message) : Promise.resolve());
+            }
+          }
+        }
       });
+      // Resume a persisted receipt first. A prepared/unknown request is the
+      // only native request allowed until its precise outcome is recovered.
       if (!stillMyTurn(myLoop)) break;
-      await processDelivery(delivery);
+      const checkpoint = await trackMailboxCheck(async () => {
+        const store = state.providerSessionStore;
+        let row = [...state.mailboxChecks.values()].find(item => item.state === "prepared" || item.state === "unknown") ??
+          [...state.mailboxChecks.values()].find(item => item.state === "received");
+        const fresh = !row && !state.pendingDeliveryId;
+        if (fresh) row = await prepareMailboxCheck(null, state.mailboxNeedsDrain);
+        if (!stillMyTurn(myLoop)) {
+          if (fresh && row) await saveMailbox({ ...row, state: "completed" }, myLoop, store);
+          return row;
+        }
+        if (row && (row.state === "prepared" || row.state === "unknown")) {
+          row = await receiveMailboxCheck(row, waitMs);
+        }
+        return row;
+      });
+      delivery = checkpoint?.delivery ?? null;
+      if (!stillMyTurn(myLoop)) break;
+      if (checkpoint && delivery) {
+        const batch = delivery;
+        // ACK-only returns are independent of whether legacy hosts also give
+        // us the next batch; retiring the previous row never discards this one.
+        if (checkpoint.ack) await finishAcknowledgedCheckpoint(checkpoint);
+        await withMailboxMutation(() => processDelivery(batch, { checkpoint: checkpoint! }));
+        if (!checkpoint.ack) {
+          if (delivery.deliveryAcknowledged === true && delivery.deliveryId) state.mailboxNeedsDrain = true;
+          else state.mailboxNeedsDrain = false;
+        }
+      }
     } catch (e) {
+      processingFailed = true;
       passError = String((e as Error).message ?? e);
-      state.error = passError;
+      if (stillMyTurn(myLoop)) state.error = passError;
     }
     if (!stillMyTurn(myLoop)) break;
     try {
-      await reconcile();
+      await withLifecycleMutation(() => stillMyTurn(myLoop) ? reconcile() : Promise.resolve());
     } catch (e) {
       const detail = String((e as Error).message ?? e);
       passError = passError ? `${passError}; reconcile: ${detail}` : detail;
-      state.error = detail;
+      if (stillMyTurn(myLoop)) state.error = detail;
     }
-    if (myLoop !== coordinatorLoopGeneration) break;
+    if (!stillMyTurn(myLoop)) break;
     // Ownership decisions run during reconciliation. Retry the delivery ACK
     // afterward so a settled worker's release/retain is complete before Orca
     // retires the batch.
     try {
-      await acknowledgePendingDeliveryIfResolved();
+      if (!processingFailed) await acknowledgePendingDeliveryIfResolved();
     } catch (e) {
       const detail = String((e as Error).message ?? e);
       passError = passError ? `${passError}; acknowledge: ${detail}` : detail;
-      state.error = detail;
+      if (stillMyTurn(myLoop)) state.error = detail;
     }
+    if (!stillMyTurn(myLoop)) break;
     // Capture AFTER reconciliation so each receipt carries the freshest
     // worker-list projection the same check pass observed. A failed or empty
     // check is still recorded: both are meaningful coordinator health facts.
@@ -2653,8 +3265,7 @@ async function loop(myLoop: number): Promise<void> {
     // work now, after the normal reconciliation above, rather than delaying
     // each notification by another tick. Errors and held/replayed batches
     // still use the floor below, so they cannot turn into a hot polling loop.
-    if (!passError && state.queuedDelivery?.deliveryId &&
-        state.queuedDelivery.deliveryId !== delivery?.deliveryId) continue;
+    if (!passError && ((state.mailboxNeedsDrain && !state.pendingDeliveryId) || [...state.mailboxChecks.values()].some(row => row.state === "received"))) continue;
     // In production `check --wait` consumed the interval already; this floor
     // only matters when the check returned instantly (empty inbox fast path,
     // or a failed call) — without it an erroring loop would hot-spin the CLI.
@@ -2737,11 +3348,12 @@ async function processDelivery(
     messages: OrcaMessage[];
     replayed: boolean;
   },
-  opts: { acknowledge?: boolean } = {},
+  opts: { acknowledge?: boolean; checkpoint?: MailboxCheckCheckpoint } = {},
 ): Promise<void> {
   const generation = coordinatorLoopGeneration;
   const runId = state.runId;
-  if (delivery.deliveryId) {
+  const v3 = opts.checkpoint?.delivery?.deliveryAcknowledged === true;
+  if (delivery.deliveryId && !v3) {
     // Hold the Delivery before any authority read: if one fails, completion
     // must not close the coordinator while Orca is still replaying this batch.
     state.pendingDeliveryId = delivery.deliveryId;
@@ -2761,10 +3373,12 @@ async function processDelivery(
   // A real Delivery is the FIFO unit Orca keeps replaying until acked. Record
   // it only after the worker_done validation read succeeds, so failed reads
   // leave the entire batch untouched and replayable.
-  if (delivery.deliveryId) state.pendingDeliveryId = delivery.deliveryId;
+  if (delivery.deliveryId && !v3) state.pendingDeliveryId = delivery.deliveryId;
   for (const message of delivery.messages) {
-    if (markProcessed(message.id)) continue;
-    switch (message.type) {
+    if (state.processedMessages.has(message.id)) continue;
+    if (message.run_id !== runId) {
+      noteRecent(message, "mail row belongs to another Run — ignored");
+    } else switch (message.type) {
       case "worker_done": {
         const settledTaskId = await handleWorkerDone(message, tasks);
         if (settledTaskId && delivery.deliveryId) {
@@ -2778,28 +3392,7 @@ async function processDelivery(
       }
       case "question":
       case "escalation": {
-        const payload = parseWorkerDonePayload(message);
-        const payloadTaskId = payload?.taskId ?? null;
-        const payloadDispatchId = payload?.dispatchId ?? null;
-        const relatedAttempt = [...state.attempts.values()].find(
-          (attempt) =>
-            (payloadDispatchId !== null && attempt.dispatchId === payloadDispatchId) ||
-            (payloadDispatchId === null && payloadTaskId !== null && attempt.taskId === payloadTaskId) ||
-            (payloadDispatchId === null && payloadTaskId === null && attempt.handle === message.from_handle),
-        );
-        state.inbox = [
-          ...state.inbox.filter((i) => i.messageId !== message.id),
-          {
-            messageId: message.id,
-            kind: message.type,
-            from: message.from_handle,
-            subject: message.subject,
-            body: message.body,
-            createdAt: message.created_at,
-            taskId: payloadTaskId ?? relatedAttempt?.taskId ?? null,
-            dispatchId: payloadDispatchId ?? relatedAttempt?.dispatchId ?? null,
-          },
-        ];
+        mailboxQuestion(message);
         break;
       }
       case "heartbeat":
@@ -2818,28 +3411,60 @@ async function processDelivery(
         ].slice(0, RECENT_MESSAGES_MAX);
         break;
     }
+    // The handler above can perform fallible reads/writes. A replay must retry
+    // that specific row if it throws instead of marking it done prematurely.
+    if (opts.checkpoint) {
+      const current = state.mailboxChecks.get(opts.checkpoint.requestId)!;
+      await saveMailbox({ ...current,
+        processedMessageIds: [...current.processedMessageIds, message.id],
+        pendingQuestionIds: message.run_id === runId && (message.type === "question" || message.type === "escalation")
+          ? [...new Set([...current.pendingQuestionIds, message.id])] : current.pendingQuestionIds,
+      });
+    }
+    markProcessed(message.id);
   }
-  if (opts.acknowledge !== false) await acknowledgePendingDeliveryIfResolved();
+  if (opts.checkpoint) {
+    const current = state.mailboxChecks.get(opts.checkpoint.requestId);
+    for (const message of delivery.messages) {
+      if (current?.pendingQuestionIds.includes(message.id) && isMergeInputsQuestion(message)) {
+        await withLifecycleMutation(() => stillMyTurn(generation) ? answerMergeQuestion(message) : Promise.resolve());
+      }
+    }
+  }
+  if (opts.checkpoint) {
+    const current = state.mailboxChecks.get(opts.checkpoint.requestId)!;
+    await saveMailbox({ ...current, state: current.pendingQuestionIds.length || (delivery.deliveryId && !v3)
+      ? "pending_input" : "completed" });
+  } else if (opts.acknowledge !== false) await acknowledgePendingDeliveryIfResolved();
 }
 
-/**
- * Acknowledge the pending Delivery exactly once, after every row in it is
- * processed AND (plan §Phase 3 item 6) every terminal-ownership decision the
- * batch owes has executed, AND no question/escalation in it is still open.
- * A stale ack (the runtime already retired the batch because a reply marked
- * its last message read) is success, not an error.
- *
- * Concurrent invocations (the loop's replay pass vs. a reply arriving through
- * the API) serialize on a promise chain that re-checks the guards, so two
- * acks for one Delivery can never race out.
- */
+/** Legacy ACKs are journaled separately and serialized. V3 receipts skip ACK;
+ * unanswered questions remain durable without preventing later V3 reads. */
 let ackChain: Promise<void> = Promise.resolve();
+async function finishAcknowledgedCheckpoint(checkpoint: MailboxCheckCheckpoint): Promise<void> {
+  if (!checkpoint.ack || !checkpoint.delivery) return;
+  if (checkpoint.delivery.acknowledged !== checkpoint.ack) {
+    throw new Error(`Mailbox ACK request ${checkpoint.requestId} did not confirm delivery ${checkpoint.ack}`);
+  }
+  for (const row of state.mailboxChecks.values()) {
+    if (row.requestId !== checkpoint.requestId && row.delivery?.deliveryId === checkpoint.ack && row.state !== "completed") {
+      await saveMailbox({ ...row, state: "completed", pendingQuestionIds: [] });
+    }
+  }
+  if (state.pendingDeliveryId === checkpoint.ack) state.pendingDeliveryId = null;
+  state.lastAckedDeliveryId = checkpoint.ack;
+  state.mailboxNeedsDrain = !checkpoint.delivery.deliveryId;
+  state.pendingOwnership.clear();
+}
+
 async function runAck(): Promise<void> {
+  if (!state.running) return;
   const deliveryId = state.pendingDeliveryId;
-  if (!deliveryId || state.inbox.length > 0) return;
-  // A stale ACK already retired this batch. Keep the id as a completion guard
-  // until a fresh check observes the next head, but do not ACK it again during
-  // the post-reconciliation retry.
+  if (!deliveryId) return;
+  const original = [...state.mailboxChecks.values()].find(row => row.delivery?.deliveryId === deliveryId && row.state !== "completed");
+  if (!original || original.pendingQuestionIds.length > 0) return;
+  if ([...state.mailboxChecks.values()].some(row => row.ack !== deliveryId && (row.state === "prepared" || row.state === "unknown"))) return;
+  // The previous ACK receipt already named this exact Delivery.
   if (deliveryId === state.lastAckedDeliveryId) return;
   // Ownership gate: an attempt still sitting at `pending` means its release/
   // retain/close decision has not executed yet — keep the batch open so it
@@ -2854,41 +3479,25 @@ async function runAck(): Promise<void> {
     }
   }
   const generation = coordinatorLoopGeneration;
-  const coordinator = state.coordinatorHandle!;
-  let next: OrcaDelivery | null = null;
-  try {
-    next = await checkInbox({ from: coordinator, ack: deliveryId });
-  } catch (err) {
-    if (!stillMyTurn(generation) || state.coordinatorHandle !== coordinator) return;
-    const e = err as OrcaCliError;
-    if (e?.code !== "stale_delivery") {
-      state.error = `Failed to acknowledge delivery ${deliveryId}: ${String(e.message ?? err)}`;
-      return; // retry on a later pass — the batch simply replays
+  const coordinator = state.coordinatorHandle;
+  const store = state.providerSessionStore;
+  const checkpoint = await trackMailboxCheck(async () => {
+    let row = [...state.mailboxChecks.values()].find(item => item.ack === deliveryId && item.state !== "completed");
+    const fresh = !row;
+    if (!row) row = await prepareMailboxCheck(deliveryId);
+    if (!stillMyTurn(generation) || state.coordinatorHandle !== coordinator) {
+      // This invocation knows it never issued the newly prepared ACK. Do not
+      // retire an older uncertain ACK or the original unacknowledged batch.
+      if (fresh) await saveMailbox({ ...row, state: "completed" }, generation, store);
+      return row;
     }
-    // A reply can retire the Delivery before this ack arrives. Keep the exact
-    // id as a completion guard until the next ordinary check proves what is
-    // next (or that the mailbox is empty); never overwrite a newer pending id.
-    if (state.pendingDeliveryId === deliveryId) {
-      state.lastAckedDeliveryId = deliveryId;
-      state.pendingOwnership.clear();
-    }
-    return;
-  }
-  // The native ACK belongs to the captured coordinator. A Stop/restart during
-  // the await must not enqueue its returned Delivery into a newer Run.
+    if (row.state === "prepared" || row.state === "unknown") row = await receiveMailboxCheck(row, 0);
+    return row;
+  });
   if (!stillMyTurn(generation) || state.coordinatorHandle !== coordinator) return;
-  if (state.pendingDeliveryId === deliveryId) {
-    state.pendingDeliveryId = null;
-    state.lastAckedDeliveryId = deliveryId;
-    state.pendingOwnership.clear();
-  }
-  // Orca acknowledges and consumes in one call. Preserve the returned FIFO
-  // batch for the loop's immediate next iteration; processing it here would
-  // bypass the loop's normal receipt/reconcile boundary.
-  if (next?.deliveryId && !state.pendingDeliveryId) {
-    state.queuedDelivery = next;
-  }
-
+  await finishAcknowledgedCheckpoint(checkpoint);
+  // Its received batch remains journaled and is processed by the normal loop;
+  // an ACK-only result is also processed there and completes that checkpoint.
 }
 function acknowledgePendingDeliveryIfResolved(): Promise<void> {
   const run = ackChain.then(runAck, runAck);
@@ -2931,6 +3540,35 @@ async function handleWorkerDone(message: OrcaMessage, tasks: OrcaTask[]): Promis
 
   if (!attempt) {
     noteRecent(message, "worker_done for an unknown Dispatch — not settling anything");
+    return null;
+  }
+  if ((payloadTask && payloadTask !== attempt.taskId) ||
+      (payloadDispatch && payloadDispatch !== attempt.dispatchId)) {
+    noteRecent(message, "worker_done payload identities disagree with the owned attempt — ignored");
+    return null;
+  }
+  if (message.subject?.startsWith("Rejected worker_done") || payload?._orcaLifecycleRejection) {
+    noteRecent(message, "worker_done was rejected by Orca — ignored");
+    return null;
+  }
+  if (outcome !== "succeeded" && outcome !== "failed") {
+    noteRecent(message, "worker_done without a verifiable outcome — not treated as completion");
+    return null;
+  }
+  const dispatchSender = attempt.dispatchId && message.from_handle === `dispatch:${attempt.dispatchId}`;
+  let terminalSender = !!message.from_handle &&
+    (message.from_handle === attempt.handle || message.from_handle === attempt.agentTerminalHandle);
+  if (!dispatchSender && !terminalSender && attempt.dispatchId && state.runId) {
+    const detail = await showWorkerDetail(attempt.dispatchId);
+    if (!detail?.dispatch || detail.dispatch.id !== attempt.dispatchId ||
+        detail.dispatch.runId !== state.runId || detail.dispatch.taskId !== attempt.taskId) {
+      noteRecent(message, "worker_done sender has no exact Dispatch evidence — ignored");
+      return null;
+    }
+    terminalSender = !!detail.terminal?.handle && detail.terminal.handle === message.from_handle;
+  }
+  if (!dispatchSender && !terminalSender) {
+    noteRecent(message, "worker_done sender does not match the exact owned Dispatch — ignored");
     return null;
   }
   // Only provisional start failures use this early correction path. A normal
@@ -3081,6 +3719,7 @@ function applyAttemptDispatchDetail(
   if (typeof dispatch.status === "string" && dispatch.status.trim()) {
     attempt.dispatchStatus = dispatch.status;
   }
+  if (detail.launchMode !== undefined) attempt.launchMode = detail.launchMode;
   return true;
 }
 
@@ -3168,6 +3807,29 @@ function reserveAttempt(task: Pick<OrcaTask, "id">, harness: string): Attempt {
   };
 }
 
+/** Disposed history establishes identity, not occupancy. Live helpers transfer
+ * custody only after their exact creator settles; Task.parent is never proof. */
+function registerHandedBackOwnership(snapshot: WorkerOwnershipSnapshot): void {
+  let changed: boolean;
+  do {
+    changed = false;
+    for (const [dispatchId, evidence] of state.workerCreators) {
+      if (evidence.historical && evidence.creatorId && state.ownedDispatchIds.has(evidence.creatorId) &&
+          !state.ownedDispatchIds.has(dispatchId)) {
+        state.ownedDispatchIds.add(dispatchId);
+        changed = true;
+      }
+    }
+    for (const row of snapshot.handedBack) {
+      const creator = state.workerCreators.get(row.dispatchId)?.creatorId;
+      if (creator && state.ownedDispatchIds.has(creator) && !state.ownedDispatchIds.has(row.dispatchId)) {
+        state.ownedDispatchIds.add(row.dispatchId);
+        changed = true;
+      }
+    }
+  } while (changed);
+}
+
 /**
  * A helper returns to Run custody only after its exact creator settles. This
  * also handles helpers created after viewer startup: normal fleet visibility
@@ -3180,9 +3842,11 @@ async function refreshHelperOwnership(runId: string, tasks: OrcaTask[], rows: Or
     state.coordinatorHandle === coordinator;
   const ownership = await readWorkerOwnership(runId, tasks, rows, state.workerCreators);
   if (!isCurrent()) return false;
+  registerHandedBackOwnership(ownership);
   state.delegatedTaskIds = ownership.heldTaskIds;
   state.delegatedDispatchIds = ownership.heldDispatchIds;
   for (const row of ownership.handedBack) {
+    if (!state.ownedDispatchIds.has(row.dispatchId)) continue;
     const task = tasks.find(candidate => candidate.id === row.taskId);
     if (!task || state.attempts.has(task.id) || workerSupervision(row) !== "supervised") continue;
     const evidence = taskDispatchEvidence(task, rows, runId);
@@ -3216,10 +3880,17 @@ async function refreshHelperOwnership(runId: string, tasks: OrcaTask[], rows: Or
  * settled attempts get their ownership decision executed here.
  */
 async function reconcile(): Promise<void> {
+  if (state.runId && state.providerSessionStore) await recoverGuidanceSends(state.runId);
   const opts = state.opts!;
   const runId = state.runId!;
   const generation = coordinatorLoopGeneration;
   state.lastTick = Date.now();
+  // Unprocessed or ambiguous consuming requests may contain lifecycle mail.
+  // Do not release, reuse, schedule, or complete past that uncertainty.
+  if ([...state.mailboxChecks.values()].some(row => ["prepared", "received", "unknown"].includes(row.state))) {
+    state.phase = "recovering";
+    return;
+  }
 
   // Task DAG state and fleet accounting are independent read-only authorities.
   let [tasks, workerRows] = await Promise.all([
@@ -3490,7 +4161,12 @@ async function reconcile(): Promise<void> {
   const activeAttempts =
     [...state.attempts.values()].filter((a) => !a.settled).length +
     [...state.retryCandidates.values()].filter((r) => !r.attempt.settled).length;
-  const budget = Math.max(0, opts.maxConcurrency - activeAttempts - unownedCount);
+  const occupiedDispatches = new Set(workerRows.filter(row => row.runId === runId && activeDispatch(row)).map(row => row.dispatchId));
+  for (const attempt of state.attempts.values()) if (!attempt.settled && attempt.dispatchId) occupiedDispatches.add(attempt.dispatchId);
+  const guidanceUnknown = [...state.guidanceSends.values()].filter(row => (row.state === "prepared" || row.state === "unknown") &&
+    (!row.receipt || !occupiedDispatches.has(row.receipt.dispatchId))).length;
+  const unknownStarts = [...state.unknownStartRequests.values()].filter(id => !state.attempts.has(id)).length;
+  const budget = Math.max(0, opts.maxConcurrency - activeAttempts - unownedCount - guidanceUnknown - unknownStarts);
   // One unsettled Dispatch per lane (worktree-lanes epic): a lane with an
   // in-flight attempt — ours, or a dispatched task we never started (pending
   // adoption) — cannot take a second worker, so a lane's chain advances one
@@ -3507,6 +4183,7 @@ async function reconcile(): Promise<void> {
     }
   }
   const batch = ready
+    .filter((t) => ![...state.unknownStartRequests.values()].includes(t.id))
     .filter((t) => !state.attempts.has(t.id))
     .filter((t) => !occupiedTaskIds.has(t.id))
     .filter((t) => !state.delegatedTaskIds.has(t.id))
@@ -3538,6 +4215,19 @@ async function reconcile(): Promise<void> {
   );
 }
 
+/** The native resource and an API-prepared caller-owned pane are distinct.
+ * A retained caller pane needs exact journal, terminal-title and session proof. */
+async function verifyPreparedOpenCodePane(attempt: Attempt): Promise<void> {
+  if (!attempt.dispatchId || !state.runId) throw new Error("OpenCode retention has no exact Dispatch or Run");
+  const launch = await findOpenCodeTuiLaunch(attempt.dispatchId);
+  if (!launch || launch.state === "closed" || !launch.terminal || launch.runId !== state.runId ||
+      launch.taskId !== attempt.taskId || launch.dispatchId !== attempt.dispatchId) {
+    throw new Error("OpenCode retention lacks an exact caller-owned pane/session journal");
+  }
+  await verifyOpenCodeTuiTerminal(launch);
+  await verifyOpenCodeSession(launch);
+}
+
 /**
  * Execute the post-settlement ownership decision for one settled worker:
  * archive output → retain (explicit) or release (default) for supervised
@@ -3555,8 +4245,24 @@ async function decideTerminalOwnership(attempt: Attempt, opts: StartOpts, readyT
     // through the generic reuse filter to an unpinned follow-up Task.
     if (opts.retainByTask?.[attempt.taskId]) {
       const receipt = await retainWorker(attempt.dispatchId);
-      applyReleaseReceipt(attempt, receipt);
-      if (receipt.state === "retained") await retainOpenCodeTui(attempt.dispatchId);
+      try {
+        await verifyPreparedOpenCodePane(attempt);
+        await retainOpenCodeTui(attempt.dispatchId);
+      } catch (err) {
+        attempt.terminalDecision = "release_unknown";
+        attempt.terminalDetail = `Caller-owned OpenCode pane retained without closing; identity is unconfirmed: ${String((err as Error).message ?? err)}`;
+        recordDebt(attempt, "release_unknown", attempt.terminalDetail);
+        return;
+      }
+      if (receipt.state === "retained" || receipt.state === "released" || receipt.state === "already_released") {
+        attempt.terminalDecision = "retained";
+        attempt.terminalDetail = `Caller-owned OpenCode pane retained; native resource: ${receipt.state}${receipt.reason ? ` (${receipt.reason})` : ""}`;
+        clearAttemptDebt(attempt);
+      } else {
+        attempt.terminalDecision = "release_unknown";
+        attempt.terminalDetail = `Caller-owned OpenCode pane retained; native retain returned ${receipt.state}: ${receipt.reason ?? "resource state unresolved"}`;
+        recordDebt(attempt, "release_unknown", attempt.terminalDetail);
+      }
       return;
     }
     if (!await findOpenCodeTuiLaunch(attempt.dispatchId)) {
@@ -3687,6 +4393,21 @@ async function decideTerminalOwnership(attempt: Attempt, opts: StartOpts, readyT
           (receipt.reason ? `: ${receipt.reason}` : "");
       }
     }
+    if (opts.retainByTask?.[attempt.taskId] && attempt.handle) {
+      // The legacy terminal was created by this viewer, not an Orca-owned
+      // worker resource. Keep the actual handle; do not infer retention from
+      // the tracking Dispatch's no-owned-resource receipt.
+      try {
+        const terminal = (await listTerminals()).find(row => row.handle === attempt.handle && row.connected);
+        attempt.terminalDecision = terminal ? "retained" : "not_needed";
+        attempt.terminalDetail = terminal ? "Viewer-created legacy terminal kept open by request" : "Legacy terminal is no longer connected; no retained pane is confirmed";
+      } catch (err) {
+        attempt.terminalDecision = "release_unknown";
+        attempt.terminalDetail = `Cannot verify the legacy terminal: ${String((err as Error).message ?? err)}`;
+        recordDebt(attempt, "release_unknown", attempt.terminalDetail);
+      }
+      return;
+    }
     try {
       await closeTerminalStrict(attempt.handle!);
       attempt.terminalDecision = "closed";
@@ -3704,13 +4425,22 @@ async function decideTerminalOwnership(attempt: Attempt, opts: StartOpts, readyT
   // reuse, then the default release.
   if (opts.retainByTask?.[attempt.taskId]) {
     const receipt = await retainWorker(attempt.dispatchId!);
-    if (receipt.state === "release_unknown") {
-      attempt.terminalDecision = "release_unknown";
-      attempt.terminalDetail = receipt.reason;
-      recordDebt(attempt, "release_unknown", receipt.reason);
-    } else {
+    if (receipt.state === "retained" && receipt.reason === "no_owned_resource") {
+      attempt.terminalDecision = "not_needed";
+      attempt.terminalDetail = "Orca reports no owned resource; no retained pane is confirmed";
+    } else if (receipt.state === "retained") {
       attempt.terminalDecision = "retained";
       attempt.terminalDetail = receipt.warning ?? receipt.reason;
+    } else if (receipt.state === "already_released" || receipt.state === "released") {
+      attempt.terminalDecision = "released";
+      attempt.terminalDetail = "The resource was already released; retain could not keep it open";
+    } else {
+      // A committed/pending release cannot be turned into retention. Do not
+      // enter the regular release_pending retry path, which would issue a
+      // release despite the user's explicit retain intent.
+      attempt.terminalDecision = "release_unknown";
+      attempt.terminalDetail = `Retain returned ${receipt.state}: ${receipt.reason ?? "resource state unresolved"}`;
+      recordDebt(attempt, "release_unknown", attempt.terminalDetail);
     }
     return;
   }
@@ -3886,9 +4616,9 @@ function applyReleaseReceipt(
       clearAttemptDebt(attempt); // a settled release resolves any earlier debt
       break;
     case "retained":
-      // Includes unsupervised tracking dispatches (no owned resource).
-      attempt.terminalDecision = "retained";
-      attempt.terminalDetail = receipt.reason;
+      attempt.terminalDecision = receipt.reason === "no_owned_resource" ? "not_needed" : "retained";
+      attempt.terminalDetail = receipt.reason === "no_owned_resource"
+        ? "Orca reports no owned resource; no retained pane is confirmed" : receipt.reason;
       clearAttemptDebt(attempt);
       break;
     case "release_pending":
@@ -3971,7 +4701,15 @@ async function evaluateCompletionBoundary(tasks: OrcaTask[], gates: Gate[]): Pro
   );
 
   // A question/escalation still open → human input owed, not completion.
-  if (state.inbox.length > 0 || state.pendingDeliveryId) {
+  if ([...state.guidanceSends.values()].some(row => row.state === "prepared" || row.state === "unknown")) {
+    state.phase = "awaiting_input";
+    return;
+  }
+  if (state.unknownStartRequests.size) {
+    state.phase = "awaiting_input";
+    return;
+  }
+  if (state.inbox.length > 0 || state.pendingDeliveryId || state.mailboxNeedsDrain || [...state.mailboxChecks.values()].some(row => row.state !== "completed")) {
     state.phase = "awaiting_input";
     return;
   }
@@ -4502,6 +5240,7 @@ async function startOne(
         from,
         worktree: opts.worktree,
         model,
+        keepOpen: opts.retainByTask?.[task.id] === true,
         onHandle: (handle) => {
           attempt.handle = handle;
         },
@@ -4513,6 +5252,7 @@ async function startOne(
       started = await start({
         taskId: task.id, runId, from, worktree: wt.worktree ?? opts.worktree,
         model: model!, effort: attempt.requested.effort,
+        keepOpen: opts.retainByTask?.[task.id] === true,
         retryRequestId: startRequestId, retryOf: retryOf ?? undefined,
         onHandle: handle => { attempt.handle = handle; },
         isCancelled: () => !isCurrent(),
@@ -4538,6 +5278,8 @@ async function startOne(
         from,
         worktree: opts.worktree,
         model,
+        effort: attempt.requested.effort ?? undefined,
+        keepOpen: opts.retainByTask?.[task.id] === true,
         // Record the terminal the moment it exists so a later failed step can
         // still close the pane we provably created (no orphaned resources).
         onHandle: (handle) => {
@@ -4610,6 +5352,7 @@ async function startOne(
       }
       started = await startSupervisedWorker({
         taskId: task.id,
+        keepOpen: opts.retainByTask?.[task.id] === true,
         agent: nativeOpenCode ? "opencode2" : attempt.harness,
         runId,
         from,
@@ -4642,32 +5385,7 @@ async function startOne(
     }
     if (started.dispatchId) {
       bindAttemptDispatch(attempt, started.dispatchId);
-    }
-    if (isCurrent() && state.stageGit && task.spec?.includes(MERGE_PREP_MARKER) && started.dispatchId) {
-      const inputs = state.stageGit.mergeInputs(task);
-      const lines = inputs.map((dep) =>
-        `${dep.taskId}: ${dep.path} (branch ${dep.branch || "detached"}, commit ${dep.sha})`,
-      );
-      try {
-        await runOrca([
-          "orchestration", "send", "--run", runId, "--from", from,
-          "--to", `dispatch:${started.dispatchId}`, "--type", "status",
-          "--subject", `Committed merge inputs for ${task.id}`,
-          "--body", [
-            `This is a merge-preparation Task. Read these immutable dependency commits before changing code:`,
-            ...lines,
-            `Merge each commit into this worktree with history-preserving Git merges; resolve conflicts and commit the result.`,
-            `Do not begin the dependent development Task. The coordinator checks ancestry and a clean worktree after worker_done.`,
-          ].join("\n"),
-        ]);
-      } catch (err) {
-        // Enqueue failure is not proof the worker never saw its Task. Keep the
-        // Dispatch and the missing-guidance evidence; the Task spec remains
-        // authoritative and Git verification still blocks downstream work.
-        if (isCurrent()) {
-          state.stageGitErrors.set(task.id, `Merge input delivery failed: ${String((err as Error).message ?? err)}`);
-        }
-      }
+      state.ownedDispatchIds.add(started.dispatchId);
     }
     // A prewarmed Codex terminal was created by this viewer before Orca took
     // ownership. The supervised start returns no handle, but the terminal is
@@ -4678,7 +5396,14 @@ async function startOne(
       ? { ...started.receipt, requestId: started.receipt.requestId ?? startRequestId }
       : null;
     if (successReceipt) {
+      if (successReceipt.launchMode !== undefined) attempt.launchMode = successReceipt.launchMode;
       attempt.startReceipts.push(successReceipt);
+      if (successReceipt.keepOpen && successReceipt.keepOpen !== "retained") {
+        // The accepted Dispatch remains authoritative even when the CLI's
+        // post-start keep-open step failed or could not be confirmed. Never
+        // launch a replacement over it.
+        attempt.terminalDetail = `Worker started; early keep-open: ${successReceipt.keepOpen}`;
+      }
       if (attempt.startReceipts.length > START_RECEIPTS_MAX) {
         attempt.startReceipts = attempt.startReceipts.slice(-START_RECEIPTS_MAX);
       }
@@ -4699,6 +5424,7 @@ async function startOne(
       // A resolved CLI promise is not proof a worker exists. Keep the durable
       // request pointer and the unsettled slot until Orca can resolve identity.
       attempt.startRequestId = startRequestId;
+      state.unknownStartRequests.set(startRequestId, task.id);
       await noteRequest({
         requestId: startRequestId,
         operation: "worker-start",
@@ -4884,6 +5610,8 @@ async function startOne(
       startErr.code === RESPONSE_LOST ||
       startErr.code === "start_unknown";
     const dispatchId = attempt.dispatchId ?? receipt?.dispatchId ?? null;
+    if (dispatchId) state.ownedDispatchIds.add(dispatchId);
+    else if (responseLost) state.unknownStartRequests.set(startRequestId, task.id);
     if (dispatchId && attempt.dispatchId !== dispatchId) bindAttemptDispatch(attempt, dispatchId);
     const kind: "rejected" | "failed" | "unknown" = responseLost ? "unknown" : dispatchId ? "failed" : "rejected";
     attempt.startRequestId = responseLost ? startRequestId : null;
@@ -5011,6 +5739,14 @@ function recordLateRetryOutcome(reservation: RetryReservation, result: StartOneR
 }
 
 export async function retryWorker(idOrTask: string): Promise<{
+  taskId: string;
+  dispatchId: string;
+  retriedFrom: string | null;
+}> {
+  return withLifecycleMutation(() => retryWorkerLocked(idOrTask));
+}
+
+async function retryWorkerLocked(idOrTask: string): Promise<{
   taskId: string;
   dispatchId: string;
   retriedFrom: string | null;
@@ -5176,7 +5912,7 @@ export async function retryWorker(idOrTask: string): Promise<{
     if (result.kind === "failed" || result.kind === "unknown") throw result.error;
     return { taskId: attempt.taskId, dispatchId: result.dispatchId, retriedFrom: retryOf };
   } finally {
-    if (state.retryCandidates.get(attempt.taskId) === reservation) {
+    if (state.retryCandidates.get(attempt.taskId) === reservation && (state.running || state.phase !== "stopping")) {
       state.retryCandidates.delete(attempt.taskId);
     }
   }

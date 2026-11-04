@@ -12,7 +12,7 @@
 | Task | 带有说明、状态、可选 `parent` 和 `deps` 的工作项。viewer 称其为 **Stage**。 | `deps` 决定何时就绪；`parent` 只表示层级，不规定执行顺序。 |
 | Dispatch | Task 的一次权威执行尝试，ID 形如 `ctx_*`。 | 重试同一 Task 会创建新的 Dispatch；操作前要核对准确的那一次。 |
 | Gate | 绑定到 Task 的决策门。 | 即使依赖已完成，Task 仍须等待门被解决。 |
-| Delivery | coordinator 收件箱中的一批消息。 | coordinator 处理后必须确认；未确认的批次会反复出现，挡住后续消息。 |
+| Delivery | coordinator 收件箱中的一批消息。 | 旧版 check 会重放最旧未确认批次；V3 消费式 check 在读取时确认。消费式 check 的 UUID、批次投递与待处理提问缓存于 `sessions.json`。 |
 
 Orca 提供这些记录和 worker 生命周期操作，但不决定下一个就绪 Task、工作区放置位置或并行度。viewer 的 coordinator 循环负责这些选择，再调用启动时确定的 Orca CLI。它将自己的终端绑定到 Run，取得修改权限；其他终端仍可读取 Run，竞争性的修改会被权限隔离。viewer 接管绑定前会要求确认。
 
@@ -65,11 +65,11 @@ A  CSV 格式约定
 | --- | --- | --- |
 | `worker-start` | `--task <task_id>`、`--agent <agent>`、放置参数 `--worktree`，可选 `--model` 和 `--effort`。 | 启动一次受监督 Dispatch；改用 `--spec` 会新建 Task。启动失败的回执会列出失败阶段和残留资源。 |
 | `send` 加 `--type worker_done` | 精确的 `--task-id`、`--dispatch-id`、`--outcome succeeded\|failed`；有真实值时可加 `--files-modified`、`--report-path`。 | 只有当前已派遣的 worker 能让自己的 Task 落定。它发送一次后，应停止使用这组 ID 工作。 |
-| `check` | 在调用方 Orca 终端之外使用 `--terminal <handle>`；另有 `--wait`、`--types`、`--timeout-ms`、`--ack <delivery_id>`。 | `--types` 只改变等待的唤醒条件，不筛掉返回的消息。先处理最旧批次的全部消息，再确认它。`check` **不用** `--from`。 |
-| `reply` / `send` | 回复时使用 `--id <message_id>` 和 `--body`；定向指导发到 `dispatch:<id>`。 | 发送成功只证明持久化入队，不证明 worker 已读。worker 提问用 `ask`/`reply`，不建决策门。 |
+| `check` | 在调用方 Orca 终端之外使用 `--terminal <handle>`；等待、ACK 和请求恢复参数以运行时指南为准。 | 旧版 FIFO 须处理完整批次并 ACK；V3 消费式 check 在读取时确认，单独 ACK 不会获取下一批。读取时的传输确认与本地处理完成严格区分：`sessions.json` 中的持久 checkpoint（`mailboxChecks`）支持跨重启恢复。丢失的响应通过 `request-show` 依据同一请求身份恢复。失败的启动绝不会自动重试。`--peek` 是观察而非消费；不要为了监控而消费其他 agent 的收件箱。`check` **不用** `--from`。 |
+| `reply` / `send` | 回复时使用 `--id <message_id>` 和 `--body`；定向指导发到 `dispatch:<id>`。 | 指导发送返回带类型的回执，显式区分请求的 ID 与实际返回的 ID，以及同 Dispatch 入队与后续任务类型。未决指导占用并发配额并阻止盲目重发；调和先前的未确认发送将返回 `guidance_reconciled`。提问使用 `ask`/`reply`；1.4.247 的 `ask` 没有 `--subject`/`--payload` 参数，合并提问须在任何 Git 修改前将完整提问文本严格写为 `[orca-dag:merge-inputs-v3]`。 |
 | `worker-list`、`worker-show`、`worker-read` | 用 `--run` 限定 worker 列表；远端加 `--include-remote`；用 `--dispatch` 检查单次尝试。 | worker 存活状态与终端存活状态是两回事。`unverifiable` 代表证据不足，不代表已退出。 |
 
-coordinator 先启动可独立执行的就绪波次，处理提问和完成消息，为每个已落定 worker 决定复用、保留或释放，确认 Delivery，然后检查新就绪的 Task。等待超时只是一个检查点。若从 CLI 直接协调，须完整遵循运行时指南的完成对账和恢复规则；viewer 会自动执行这套循环。
+coordinator 启动就绪波次、处理提问和完成消息，为已落定 worker 决定复用、保留或释放，再检查新就绪的 Task。等待超时只是检查点。V3 读取时确认不代表本地处理完成：须在 `sessions.json` 中保留待处理工作，并用完全相同的请求身份恢复丢失的消费响应。旧版则在处理整批后 ACK，并处理 ACK 返回的后续批次。失败的启动绝不自动重试。对账与恢复应遵循运行时指南。
 
 ## 在 viewer 中配置并执行
 
@@ -81,6 +81,6 @@ coordinator 先启动可独立执行的就绪波次，处理提问和完成消�
 
 ## 观察结果与修改计划
 
-用 Scheduler 卡片查看就绪原因，用 Chat 处理提问和持久化消息，用 Activity 查看 coordinator 行为，用 Workers 查看每个 Dispatch 的存活状态和终端归属。“已发送”只证明入队，不证明对方已读；超时或远端断连也不能证明 worker 已退出。恢复步骤见[viewer 操作教程](viewer-operations_zh.md#处理受阻或状态不明的-stage)。
+用 Scheduler 卡片查看就绪原因，用 Chat 处理提问和持久化消息，用 Activity 查看 coordinator 行为，用 Workers 查看每个 Dispatch 的存活状态和终端归属。检查发送回执中的实际 Task 和 Dispatch（包括后续工作）；投递不证明对方已读。超时或远端断连也不能证明 worker 已退出。恢复步骤见[viewer 操作教程](viewer-operations_zh.md#处理受阻或状态不明的-stage)。
 
 结束前检查每个 Task 的结果、变更文件、集成证据和未清理的 worker 归属。要修改 Task 或依赖边，应让 agent **新建 Run**，保留旧 Run 作为历史。规划、执行、集成分支和批准门槛是不同步骤，各有归属。
