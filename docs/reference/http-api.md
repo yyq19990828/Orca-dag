@@ -56,7 +56,7 @@ All `POST` and `PUT` endpoints require the `X-Orca-Dag-Token` header. `GET` endp
 |---|---|---|
 | `GET` | `/api/session` | Returns `{ token, allowCustomCommands }`. Provides the per-process mutation token to same-origin clients (`Cache-Control: no-store`). |
 | `GET` | `/api/readiness` | Reports the resolved CLI/build version, selected runtime version/state, workspace selector, and execution permission with an actionable disabled reason. |
-| `GET` | `/api/capabilities` | Returns runtime readiness, raw advertisements and recognized orchestration support, including V3 auto-release, keep-open, implicit-Run advertisement, retained bindings, turn-stop reports and immediate ask receipts. Advertising implicit Run support does not enable implicit creation in the viewer. |
+| `GET` | `/api/capabilities` | Returns runtime readiness, raw advertisements and recognized orchestration support (public contract 1 via `orchestration.contract.v1`, runtime protocol 3, federation lifecycle settlement protocol 3, control mail protocol 2, and `orchestration.federation-lifecycle-settlement.v1`), including auto-release, keep-open, implicit-Run advertisement, retained bindings, turn-stop reports and immediate ask receipts. Advertising implicit Run support does not enable implicit creation in the viewer. |
 | `GET` | `/api/health` | Basic health check returning the current workspace directory. |
 
 ---
@@ -65,13 +65,29 @@ All `POST` and `PUT` endpoints require the `X-Orca-Dag-Token` header. `GET` endp
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/runs` | Lists Runs whose Task creator identity matches this workspace, plus the current/persisted empty Run. |
-| `GET` | `/api/runs/page?cursor=` | Cursor-paginated raw `run-list` page. The opaque `nextCursor` token passes through byte-for-byte (`null` on the last page). |
-| `GET` | `/api/runs/:runId` | Fetches single Run details (`run-show`) and workspace ownership evidence as `{ run, workspace }`. Foreign Runs remain visible with `workspace.owned: false`. Returns 404 only on definite Orca absence. |
+| `GET` | `/api/runs` | Lists Runs whose Task creator identity matches this workspace (`::${workspaceDir}@@` marker), plus the current/persisted empty Run. |
+| `GET` | `/api/runs/page?cursor=&limit=` | Cursor-paginated, bounded workspace-scoped `run-list` page. Accepts `limit` integer 1..100 (default 100) and opaque `cursor`. Evaluates workspace ownership evidence; candidate pages are filtered to owned runs (may be empty with non-null `nextCursor`). Historical traversal cursor is preserved across refreshes. |
+| `GET` | `/api/runs/:runId` | Fetches single Run details (`run-show`) and workspace ownership evidence as `{ run, workspace: { owned, evidence } }`. Foreign Runs remain visible with `workspace.owned: false`. Returns 404 only on definite Orca absence. |
 | `POST` | `/api/runs` | `{ objective? }`: Creates a new empty Run in the current workspace using a temporary coordinator terminal. Requires `executionEnabled`. |
 | `GET` | `/api/run-health?run=<id>` | Evaluates Run ownership (`viewer_coordinator`, `viewer_coordinator_other_run`, `external_coordinator`, `unbound`, or `unverifiable`), per-source counts, warnings, and nullable `health.removedWork` summary. |
 | `GET` | `/api/runs/:runId/removed-work?cursor=` | On-demand cursor-paginated removed-work ledger page (`{ page: { entries, page: { hasMore, nextCursor } } }`). Bounded at 200 entries/page. Opaque cursor (1–2048 chars); validates advance (502 on stuck cursor, 400 on invalid cursor). Reports historical `activeAtRemoval` and safe `unreadable: true` for unknown kinds. Read-only, no reset endpoint. |
 | `GET` | `/api/dag?run=<id>` | Returns DAG structure: `{ runId, nodes, edges, hierarchy, gates, readyWave, readiness, generatedAt }`. |
+
+#### One-Off Mutation Authority and Coordinator Control
+
+One-off coordinator mutations against an inactive, unbound, or externally coordinated Run require explicit confirmation matching fresh Run binding evidence:
+
+```json
+{
+  "coordinatorControl": {
+    "confirmed": true,
+    "coordinatorHandle": "term_coord_1",
+    "consumerGeneration": 1
+  }
+}
+```
+
+Omitting `coordinatorControl` or submitting mismatched evidence fails with HTTP 409 `coordinator_control_required`. The server never implicitly fences or takes over an external coordinator without explicit operator consent.
 
 #### Run Health and Removed-Work Ledger
 
@@ -146,9 +162,9 @@ All `POST` and `PUT` endpoints require the `X-Orca-Dag-Token` header. `GET` endp
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/worktrees` | Lists Orca-discovered local workspaces (`worktree list`) for exact-existing placement selection. |
+| `GET` | `/api/worktrees` | Lists Orca-discovered local workspaces (`worktree list`). Together with scoped `GET /api/workers?run=<id>`, provides on-demand candidate review inventory for safe cleanup. |
 | `GET` | `/api/worktrees/:worktreeId` | Fetches durable identity for one worktree via `worktree show`. |
-| `POST` | `/api/worktrees/remove` | `{ selector }`: Removes an Orca worktree via `orca worktree rm`. Requires confirmed settled ownership; returns `removal_evidence_required` if workers or locks remain. |
+| `POST` | `/api/worktrees/remove` | `{ worktree, deleteBranch?: boolean, runHooks?: boolean, force?: boolean, allowFailedArchiveHook?: boolean, evidenceRequestId?: string, runId?: string }`: Removes an Orca worktree via `orca worktree rm --worktree <worktree>`. When `deleteBranch: true` is passed, safely removes merged branches only; unmerged branches are preserved. Returns `{ ok: true, requestId, receipt: { worktree, archiveHookOverride, preservedBranch, raw } }`. Requires confirmed settled ownership and queries the global complete fleet (`listWorkers(undefined, { includeRemote: true })`) to guard unlisted other-Run chats; returns `removal_evidence_required` if active workers or locks remain. |
 | `GET` | `/api/repos` | Lists Orca-registered local repositories (`repo list`) for new-top-level placement. |
 | `GET` | `/api/worktree-lanes?run=<id>` | Returns planned workspace lanes and their Orca runtime status (`planned`, `creating`, `active`, `integration_required`, `settled`, `unverifiable`, `removal_blocked`, `removed`). |
 | `POST` | `/api/worktree-lanes/:laneId/open-changed` | Opens changed files/diffs for a lane workspace in the Orca editor. |
@@ -161,13 +177,15 @@ All `POST` and `PUT` endpoints require the `X-Orca-Dag-Token` header. `GET` endp
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/activity?run=<id>&after=&limit=` | Fetches readable Activity event timeline, stage presence, and coordinator check receipts. |
-| `GET` | `/api/activity/stream?run=<id>` | Real-time Server-Sent Events (SSE) feed of activity snapshots for the specified Run. |
-| `GET` | `/api/inbox?run=<id>` | Returns pending questions, escalations, and cleanup debt for the Run. |
-| `POST` | `/api/tasks/:taskId/messages` | `{ runId, body, subject?, threadId? }`: Sends guidance to a verified active Task Dispatch under this viewer's live coordinator. Returns typed `TaskMessageReceipt` (`ok: true, kind: "enqueued" | "follow_up", runId, taskId, dispatchId, requestedTaskId, requestedDispatchId, followUpOf, requestId`). |
-| `POST` | `/api/messages/:id/reply` | `{ body, runId }`: Sends a reply to a pending worker question or escalation using a durable request ID. Merge input questions (`[orca-dag:merge-inputs-v3]`) are answered with immutable commit SHAs from StageGit. Native reply does not create follow-up tasks. |
+| `GET` | `/api/activity/stream?run=<id>` | Real-time Server-Sent Events (SSE) feed of activity snapshots for the specified Run. Pauses/closes when the document is hidden (`document.visibilityState === 'hidden'`); refreshes and reconnects on return, preserving rail-closed unread counts. |
+| `GET` | `/api/inbox?run=<id>` | Returns pending questions, escalations, stop events, and cleanup debt for the Run. Items distinguish `kind: "question"` (replyable) from `kind: "stop_event"` (stopReason escalations like `finished`, `errored`, `needs-input`, `exited`, which are events resolved by exact Dispatch steering, operator decisions, or authoritative later settlement, not synthesized replies). |
+| `POST` | `/api/tasks/:taskId/messages` | `{ runId, body, subject?, threadId? }`: Sends guidance to a verified active Task Dispatch under this viewer's live coordinator. Returns typed `TaskMessageReceipt` (`ok: true, kind: "enqueued" | "follow_up" | "recipient_run_bound_redirect", runId, taskId, dispatchId, requestedTaskId, requestedDispatchId, followUpOf, requestId, destinationRunId`). Positively evidenced nested coordinator redirects distinguish originating Task/Dispatch Run from actual destination mailbox/Run without child authority adoption or false worker creation. |
+| `POST` | `/api/messages/:id/reply` | `{ body, runId, coordinatorControl? }`: Sends a reply to a pending worker question or escalation using durable operator helper (`operatorMessages.ts`) and `sessions.json` checkpoint. Merge input questions (`[orca-dag:merge-inputs-v3]`, a local contract marker) are answered with immutable commit SHAs from StageGit. Native reply does not create follow-up tasks. Requires `coordinatorControl` if not currently coordinated by this viewer instance. |
+| `POST` | `/api/messages/:id/acknowledge-stop-event` | `{ runId, dispatchId }`: Records operator acknowledgement of a stop event for an exact live-viewer Run/Dispatch without synthesizing Task success. |
 | `GET` | `/api/audiences?run=<id>` | Previews allowable group-messaging targets (`@all` and discovered worktrees) with discovery health. |
-| `POST` | `/api/messages/group` | `{ runId, audience, body, subject?, type?, priority? }`: Broadcasts a coordinator message. Rejects lifecycle signal types (`forbidden_group_type`). |
-| `POST` | `/api/gates/:id/resolve` | `{ resolution, runId }`: Resolves an approval gate or cross-lane integration gate (`integrated`). |
+| `POST` | `/api/messages/group` | `{ runId, audience, body, subject?, type?, priority?, coordinatorControl? }`: Broadcasts a coordinator message via durable operator helper (`operatorMessages.ts`). Rejects lifecycle signal types (`forbidden_group_type`). Handles `recipient_run_bound_redirect` warnings. |
+| `POST` | `/api/gates` | `{ runId, taskId, question, coordinatorControl? }`: Canonical approve/reject gate creation for same-Run NOT-yet-dispatched Tasks (`--options '["approved","rejected"]'`). Guarded by coordinator lifecycle lock (`withLifecycleMutation`) and request auditing in `requests.jsonl`. Rejects if task is dispatched, gated, absent, or host observations are incomplete (`gate_not_eligible`). Requires `coordinatorControl` if not currently coordinated by this viewer instance. |
+| `POST` | `/api/gates/:id/resolve` | `{ resolution, runId, coordinatorControl? }`: Resolves an approval gate or cross-lane integration gate (`integrated`). Requires `coordinatorControl` if not currently coordinated by this viewer instance. |
 
 #### Guidance Delivery, Recovery, and Follow-Up Lifecycle
 
@@ -182,16 +200,16 @@ All `POST` and `PUT` endpoints require the `X-Orca-Dag-Token` header. `GET` endp
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/workers?run=<id>` | Fetches cursor-paged, remote-inclusive worker attempt history, liveness, and launch locks for a Run. |
+| `GET` | `/api/workers?run=<id>` | Fetches typed `WorkerInventory` (`{ workers: OrcaWorkerRow[], partialHostErrors: unknown[] }`) for the Run. Preserves and aggregates `partialHostErrors` across all pages. Missing remote hosts make absence unsuitable for lifecycle decisions; host errors never clear debt or infer exit. |
 | `GET` | `/api/workers/:dispatchId?run=<id>` | Returns detailed durable row and `worker-show` evidence (PTY facts, observation, agent wait status) for a Dispatch. |
-| `GET` | `/api/workers/:dispatchId/output` | Reads bounded worker output pages (`?source=auto\|terminal\|transcript&cursor=&limit=`, limit clamped 1–200). |
+| `GET` | `/api/workers/:dispatchId/output?run=<id>` | Reads bounded worker output pages (`?run=<id>&source=auto\|terminal\|transcript&cursor=&limit=`, limit clamped 1–200). Requires explicit `run` scope. |
 | `POST` | `/api/workers/:dispatchId/stop` | Halts one positively identified active Dispatch with a durable request ID. Returns `502 response_lost` if response verification drops. |
 | `POST` | `/api/workers/:dispatchId/abandon` | Fences orchestration state via `worker-abandon` for positively exited or outcome-unknown attempts. Refused if Orca proves worker is live. |
 | `POST` | `/api/workers/:dispatchId/focus` | Focuses the local worker terminal (`terminal switch`) when positive `agentWait` evidence exists. |
-| `POST` | `/api/workers/:id/release` | Explicitly releases a settled worker's terminal. |
-| `POST` | `/api/workers/:id/retain` | Explicitly retains a settled worker's terminal for debugging. |
+| `POST` | `/api/workers/:id/release` | `{ runId }`: Explicitly releases a settled worker's terminal. Requires body `runId`. |
+| `POST` | `/api/workers/:id/retain` | `{ runId }`: Explicitly retains a settled worker's terminal for debugging. Requires body `runId`. |
 | `POST` | `/api/workers/:id/retry` | Re-places a positively failed attempt using the identical harness, model, effort, and placement. |
-| `POST` | `/api/workers/:dispatchId/resolve-blocked` | `{ runId, result, acknowledgeUnknownProvider: true }`: Manually records an operator-reviewed result on a blocked Task. |
+| `POST` | `/api/workers/:dispatchId/resolve-blocked` | `{ runId, result, acknowledgeUnknownProvider: true, coordinatorControl? }`: Manually records an operator-reviewed result on a blocked Task. Requires `coordinatorControl` if not currently coordinated by this viewer instance. |
 
 The output response is `{ output: ... }`. Native output receipts can include optional `fallbackReason`, `sourceExact`, `archived`, `provider`, and `sourceIdentity` evidence. Missing or null means unknown, not false; an explicit `false` is meaningful and strictly preserved. These fields describe the returned source, not full history, Task settlement, or authority to clean up. `sourceChanged` indicates a source reset; paging remains bounded. Native start receipts may also include `launchMode` (`mode`, `preferred`, `reason`, `detail`) when Orca provides it. This is surface evidence, distinct from supervised/legacy adapter mode; do not infer a surface from a terminal handle. Start receipts also report `keepOpen` dispositions (`retained`, `already_released`, `release_pending`, `no_owned_resource`, or `unknown`); an accepted start remains accepted even if subsequent retention encounters issues, without fallback launches or unintended release.
 ---
@@ -211,6 +229,7 @@ The output response is `{ output: ... }`. Native output receipts can include opt
 `.orca-dag/sessions.json` stores critical recovery journals in addition to provider session bindings:
 - `mailboxChecks`: Durable checkpoints of consuming checks and legacy ACKs, caching `requestId`, `delivery`, `processedMessageIds`, `pendingQuestionIds`, and per-question `replyRequests`. On restart, pending questions and draining batches are recovered before new checks.
 - `guidanceSends`: Durable checkpoints of coordinator guidance sends, tracking `requestId`, `state` (`prepared`, `unknown`, `enqueued`, `follow_up`, `refused`), `receipt`, `creationProven`, and sanitized `startEvidence`.
+- `operatorMessages`: Durable checkpoints of inactive operator reply and group send requests, persisting `requestId`, `target`, `from`, `bodyHash`, `state` (`prepared`, `unknown`, `completed`, `refused`), and outcome before Orca calls. Read-only recovery via `request-show` resolves pending requests without blind resends.
 
 These records are **recovery authority**, not rotating audit history. Unsupported older readers will throw `session binding store contains unknown fields` when reading these new inventories; therefore, active `sessions.json` state cannot safely be hot-downgraded across unsupported readers without settling or archiving it first.
 ---
@@ -264,7 +283,7 @@ These records are **recovery authority**, not rotating audit history. Unsupporte
 
 - **Scope:** Scoped strictly to `local-workspace` (the current local viewer workspace where `opencode models` executes). It does not probe remote execution environments or alternate worktrees.
 - **Status & Diagnostic:**
-  - `status: "available"`: `models` contains catalog strings matching `^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(?:#[A-Za-z0-9._-]{1,64})?$`. A successful query with no models returns `{ status: "available", models: [], diagnostic: null }`. Non-OpenCode harnesses return `available` with empty `models`.
+  - `status: "available"`: `models` contains catalog strings matching `^[A-Za-z0-9._-]{1,128}/[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}(?:#[A-Za-z0-9._-]{1,128})?$`. A successful query with no models returns `{ status: "available", models: [], diagnostic: null }`. Non-OpenCode harnesses return `available` with empty `models`.
   - `status: "unavailable"`: Discovery failed (e.g., CLI not found → `"OpenCode CLI was not found"`, 20s timeout → `"OpenCode model discovery timed out after 20 seconds"`, process exit code → `"OpenCode model command failed (exit code <N>)"`, generic failure → `"OpenCode model discovery failed"`). `models` is empty. Stderr and internal process stack traces are never leaked.
 - **Advisory Semantics:** Model discovery is purely advisory for local workspace selection. A failed discovery or empty catalog does not prevent manual model entry, nor does a successful catalog entry guarantee execution-host availability.
 

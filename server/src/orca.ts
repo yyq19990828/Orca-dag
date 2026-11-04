@@ -16,7 +16,7 @@ import {
 // The audience allowlist is a security-boundary concept, so the adapter
 // consumes it from security.ts (which never imports this module — no cycle).
 import { assertNativePresetConstraints, isNativeFreshPreset, KNOWN_HARNESSES, WORKTREE_AUDIENCE_PREFIX,
-  type NativePresetConstraints } from "./security";
+  OPENCODE_MODEL_PATTERN, type NativePresetConstraints } from "./security";
 // The creation-metadata grammar lives in config.ts next to the stored
 // placement shape; the adapter re-checks it as the LAST gate before Orca.
 import {
@@ -917,7 +917,8 @@ export async function listTasks(
   ];
   if (opts.brief) args.push("--brief");
   const result = await runOrca<{ tasks: OrcaTask[] }>(args);
-  return result.tasks ?? [];
+  if (!Array.isArray(result.tasks)) throw new OrcaCliError("task-list returned incomplete inventory", "inventory_incomplete");
+  return result.tasks;
 }
 
 /** Fetch a Run's decision gates, normalized for the UI. */
@@ -928,7 +929,8 @@ export async function listGates(runId: string): Promise<Gate[]> {
     "--run",
     runId,
   ]);
-  const raw = (result.gates ?? []) as Record<string, unknown>[];
+  if (!Array.isArray(result.gates)) throw new OrcaCliError("gate-list returned incomplete inventory", "inventory_incomplete");
+  const raw = result.gates as Record<string, unknown>[];
   return raw.map((g) => normalizeGate(g));
 }
 
@@ -1056,7 +1058,8 @@ export interface OrcaTerminal {
 
 export async function listTerminals(): Promise<OrcaTerminal[]> {
   const result = await runOrca<{ terminals?: Record<string, unknown>[] }>(["terminal", "list"]);
-  return (result.terminals ?? []).map((t) => ({
+  if (!Array.isArray(result.terminals)) throw new OrcaCliError("terminal-list returned incomplete inventory", "inventory_incomplete");
+  return result.terminals.map((t) => ({
     handle: String(t.handle ?? ""),
     worktreePath: String(t.worktreePath ?? ""),
     worktreeId: String(t.worktreeId ?? ""),
@@ -1500,6 +1503,25 @@ export async function checkReadiness(force = false): Promise<OrcaReadiness> {
   return readinessCache;
 }
 
+/** Local certified native Codex new-worktree route; unknown evidence keeps compatibility. */
+export async function canUseNativeCodexFreshWorktree(readiness?: OrcaReadiness): Promise<boolean> {
+  const probe = readiness ?? await checkReadiness(true);
+  if (!probe.executionEnabled || probe.runtimeState !== "ready" ||
+      !probe.version || !/^\d+\.\d+\.\d+$/.test(probe.version) ||
+      !probe.cliVersion || !/^\d+\.\d+\.\d+$/.test(probe.cliVersion) ||
+      compareVersions(probe.version, "1.4.247") < 0 ||
+      compareVersions(probe.cliVersion, "1.4.247") < 0) return false;
+  try {
+    const { stdout } = await pExecFile("codex", ["--version"], {
+      cwd: currentWorkspace().dir, shell: false, timeout: 15_000, maxBuffer: 1024 * 1024,
+    });
+    const match = /^codex-cli (\d+\.\d+\.\d+)\s*$/.exec(stdout);
+    return Boolean(match && compareVersions(match[1], "0.166.0") >= 0);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * One guard for preview, coordinator admission, retry and the final adapter.
  * These presets have no viewer-owned prestart/surface/provider adapter: only
@@ -1770,7 +1792,7 @@ export async function replyToMessage(messageId: string, body: string, from: stri
 }
 
 export interface TaskMessageReceipt {
-  kind: "enqueued" | "follow_up";
+  kind: "enqueued" | "follow_up" | "recipient_run_bound_redirect";
   runId: string;
   taskId: string;
   dispatchId: string;
@@ -1778,6 +1800,7 @@ export interface TaskMessageReceipt {
   requestedDispatchId: string;
   followUpOf: string | null;
   requestId: string | null;
+  destinationRunId: string | null;
 }
 
 /**
@@ -1847,6 +1870,7 @@ export async function sendCoordinatorGroupMessage(opts: {
   type: string;
   priority?: string | null;
   from: string;
+  requestId?: string;
 }): Promise<Record<string, unknown>> {
   const args = [
     "orchestration",
@@ -1865,6 +1889,7 @@ export async function sendCoordinatorGroupMessage(opts: {
     opts.type,
   ];
   if (opts.priority) args.push("--priority", opts.priority);
+  if (opts.requestId) args.push("--retry-request", opts.requestId);
   return runOrca<Record<string, unknown>>(args);
 }
 
@@ -2025,6 +2050,7 @@ export interface WorkerTerminalResource {
   releaseError: string | null;
   recoveryAttemptCount: number | null;
   lastRecoveryAt: string | null;
+  autoReleaseAt?: string | null;
 }
 
 /**
@@ -2098,6 +2124,7 @@ export interface OrcaWorkerRow {
     stage: { worker: string; dispatch: string; detail: string | null; activity: string } | null;
     nextAction: { kind: string; argv: string[] } | null;
     attention: { categories: string[]; requiresAction: boolean } | null;
+    autoReleaseAt?: string | null;
     /**
      * Execution host that owns this worker's process/filesystem/transcript
      * facts (Phase 6). `local` rows say `{ kind: "local", id: "local" }`; a
@@ -2276,6 +2303,7 @@ export interface WorkerDetailView {
   } | null;
   /** Full custody receipt when available; projection fallback retains unknowns. */
   terminalResource: WorkerTerminalResource | null;
+  autoReleaseAt?: string | null;
   /** Durable accounting row — the same shape `worker-list` emits for this Dispatch. */
   fleet: OrcaWorkerRow | null;
   /** Dispatch record facts (attempt bookkeeping). */
@@ -2368,6 +2396,7 @@ function parseTerminalResource(value: unknown): WorkerTerminalResource | null {
     releaseError: stringOrNull(resource.releaseError),
     recoveryAttemptCount: numberOrNull(resource.recoveryAttemptCount),
     lastRecoveryAt: stringOrNull(resource.lastRecoveryAt),
+    autoReleaseAt: stringOrNull(resource.autoReleaseAt),
   };
 }
 
@@ -2513,6 +2542,7 @@ export async function showWorkerDetail(
         }
       : null,
     terminalResource,
+    autoReleaseAt: stringOrNull(result.autoReleaseAt) ?? terminalResource?.autoReleaseAt ?? null,
     fleet: normalizedFleet,
     dispatch: {
       id: stringOrNull(dispatch.id),
@@ -2585,11 +2615,17 @@ export async function showWorkerDetail(
   return detail;
 }
 
+export interface WorkerInventory {
+  workers: OrcaWorkerRow[];
+  partialHostErrors: unknown[];
+}
+
 export async function listWorkers(
-  runId: string,
+  runId: string | undefined,
   opts: { terminalState?: string; includeRemote?: boolean } = {},
-): Promise<OrcaWorkerRow[]> {
+): Promise<WorkerInventory> {
   const workers: OrcaWorkerRow[] = [];
+  const partialHostErrors: unknown[] = [];
   const seenCursors = new Set<string>();
   let cursor: string | null = null;
 
@@ -2601,11 +2637,14 @@ export async function listWorkers(
   // worker-list is capped at 100 rows per receipt. That cap matters for more
   // than fleet dashboards: a row is the durable proof that a Task has ever
   // dispatched, so returning only the newest page could make an older Task's
-  // launch controls editable after a viewer restart. Preserve the historical
-  // array contract for every caller while following Orca's opaque cursor
-  // byte-for-byte until the snapshot is exhausted.
+  // launch controls editable after a viewer restart. Return the complete
+  // inventory while following Orca's opaque cursor byte-for-byte until the
+  // snapshot is exhausted.
   for (let pageNumber = 0; pageNumber < 10_000; pageNumber += 1) {
-    const args = ["orchestration", "worker-list", "--run", runId];
+    const args = ["orchestration", "worker-list"];
+    // Undefined is reserved for workspace-wide custody checks. HTTP worker
+    // reads and all dispatch mutations still supply their explicit Run.
+    if (runId !== undefined) args.push("--run", runId);
     if (opts.terminalState) args.push("--terminal-state", opts.terminalState);
     // Phase 6: local fleet state is all worker-list reads by default; remote
     // workers (started with --on) are only visible with --include-remote, and
@@ -2650,6 +2689,11 @@ export async function listWorkers(
       invalidReceipt("page.hasMore=false with a nextCursor is inconsistent; refusing to return an ambiguous page.");
     }
 
+    if (receipt.partialHostErrors !== undefined) {
+      if (!Array.isArray(receipt.partialHostErrors)) invalidReceipt("partialHostErrors must be an array");
+      partialHostErrors.push(...receipt.partialHostErrors as unknown[]);
+    }
+
     const workerRows = receipt.workers as unknown[];
     for (const [index, rawWorker] of workerRows.entries()) {
       if (!rawWorker || typeof rawWorker !== "object" || Array.isArray(rawWorker)) {
@@ -2666,7 +2710,7 @@ export async function listWorkers(
       // accidentally leaks a row from another Run. Rejecting (rather than
       // silently dropping) the row is important: otherwise the caller could
       // mistake partial history for complete accounting and unlock a Task.
-      if (worker.runId !== runId) {
+      if (runId !== undefined && worker.runId !== runId) {
         invalidReceipt(`workers[${index}].runId ${JSON.stringify(worker.runId)} does not match ${JSON.stringify(runId)}`);
       }
       const row = worker as unknown as OrcaWorkerRow;
@@ -2678,7 +2722,7 @@ export async function listWorkers(
     }
 
     if (!hasMore) {
-      return workers;
+      return { workers, partialHostErrors };
     }
     if (nextCursor === null) {
       // This is also checked above so the receipt is rejected before any
@@ -4357,6 +4401,7 @@ export interface WorktreeRemovalReceipt {
    * present only when removal proceeded past an explicitly waived hook failure.
    */
   archiveHookOverride: unknown;
+  preservedBranch?: unknown;
   /** The runtime's verbatim result. */
   raw: Record<string, unknown>;
 }
@@ -4374,6 +4419,7 @@ export async function removeWorktree(
     runHooks?: boolean;
     allowFailedArchiveHook?: boolean;
     force?: boolean;
+    deleteBranch?: boolean;
     environmentId?: string;
   } = {},
 ): Promise<WorktreeRemovalReceipt> {
@@ -4395,6 +4441,7 @@ export async function removeWorktree(
     "--worktree",
     selector,
     ...(opts.force ? ["--force"] : []),
+    ...(opts.deleteBranch ? ["--delete-branch"] : []),
     ...(opts.runHooks ? ["--run-hooks"] : []),
     ...(opts.allowFailedArchiveHook ? ["--allow-failed-archive-hook"] : []),
     ...environmentArgs(opts.environmentId),
@@ -4402,6 +4449,7 @@ export async function removeWorktree(
   return {
     worktree: pickString(result, "worktree", "worktreeId", "worktree_id") ?? selector,
     archiveHookOverride: result.archiveHookOverride ?? null,
+    preservedBranch: result.preservedBranch ?? null,
     raw: result,
   };
 }
@@ -4633,8 +4681,9 @@ export async function verifyOpenCodeTuiTerminal(launch: OpenCodeLaunch): Promise
         detail.terminal.worktreePath !== launch.workspace) {
       throw new OrcaCliError("OpenCode Dispatch no longer owns the exact prepared terminal", "session_binding_mismatch");
     }
-    const rows = await listWorkers(launch.runId, { includeRemote: true });
-    if (rows.some(row => row.dispatchId !== launch.dispatchId && row.agentTerminalHandle === launch.terminal && row.dispatchStatus === "dispatched")) {
+    const inventory = await listWorkers(launch.runId, { includeRemote: true });
+    if (inventory.partialHostErrors.length) throw new OrcaCliError("Worker inventory is incomplete", "inventory_incomplete");
+    if (inventory.workers.some(row => row.dispatchId !== launch.dispatchId && row.agentTerminalHandle === launch.terminal && row.dispatchStatus === "dispatched")) {
       throw new OrcaCliError("OpenCode terminal was transferred to another Dispatch", "session_binding_mismatch");
     }
   }
@@ -5363,7 +5412,7 @@ async function resolveAmbiguousStart(
   // --include-remote: a start addressed to a connected server may have landed
   // THERE — a local-only listing would misread it as unlanded and re-place it.
   try {
-    const rows = await listWorkers(opts.runId, { includeRemote: true });
+    const { workers: rows } = await listWorkers(opts.runId, { includeRemote: true });
     const candidate = rows.find(
       (r) => r.taskId === opts.taskId && r.dispatchStatus === "dispatched",
     );
@@ -5430,7 +5479,7 @@ export async function listModels(harness: string): Promise<ModelDiscoveryResult>
     const models = stdout
       .split("\n")
       .map((line) => line.trim())
-      .filter((line) => /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(?:#[A-Za-z0-9._-]{1,64})?$/.test(line));
+      .filter((line) => OPENCODE_MODEL_PATTERN.test(line));
     return { status: "available", models, diagnostic: null, scope: "local-workspace" };
   } catch (error) {
     const failure = error as NodeJS.ErrnoException & { killed?: boolean; signal?: string };

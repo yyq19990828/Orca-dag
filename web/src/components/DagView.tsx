@@ -1,9 +1,8 @@
-import { memo, useCallback, useEffect, useMemo, useRef, type CSSProperties } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   Background,
   BackgroundVariant,
   Controls,
-  getBezierPath,
   getSmoothStepPath,
   Handle,
   Position,
@@ -12,15 +11,14 @@ import {
   useEdgesState,
   useNodesState,
   useReactFlow,
-  useUpdateNodeInternals,
   type Edge,
   type EdgeProps,
   type Node,
   type NodeProps,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import "../stage-card.css";
-import { applyLayout } from "../layout";
+import "../graph-motion.css";
+import { applyLayout, NODE_H, NODE_W } from "../layout";
 import { effectiveHarness, useConfig } from "../harness";
 import { useLang, useT, type TranslationKey, type Translator } from "../i18n";
 import { laneSummaryLabel } from "../placement";
@@ -34,136 +32,10 @@ import {
   type WorkerRowView,
 } from "../types";
 
-/** Deterministic PRNG so each node's scribble stays stable across polls. */
-function mulberry32(seed: number) {
-  return () => {
-    seed |= 0;
-    seed = (seed + 0x6d2b79f5) | 0;
-    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-function hashId(id: string): number {
-  let h = 2166136261;
-  for (let i = 0; i < id.length; i++) {
-    h ^= id.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
-}
-
-/**
- * Clip the infinite line through (px,py) along (dx,dy) to the box, returning
- * the [t0,t1] parameter span inside it (null when the line misses entirely).
- */
-function clipSpan(
-  px: number,
-  py: number,
-  dx: number,
-  dy: number,
-  box: { x: number; y: number; w: number; h: number },
-): [number, number] | null {
-  let lo = -Infinity;
-  let hi = Infinity;
-  const slabs: [number, number, number, number][] = [
-    [px, dx, box.x, box.x + box.w],
-    [py, dy, box.y, box.y + box.h],
-  ];
-  for (const [p, d, min, max] of slabs) {
-    if (Math.abs(d) < 1e-6) {
-      if (p < min || p > max) return null;
-      continue;
-    }
-    const a = (min - p) / d;
-    const b = (max - p) / d;
-    lo = Math.max(lo, Math.min(a, b));
-    hi = Math.min(hi, Math.max(a, b));
-  }
-  return hi - lo > 1 ? [lo, hi] : null;
-}
-
-type ScribbleLeg = { d: string; width: number; opacity: number };
-
-/**
- * One continuous colouring pass across the box, chopped into legs: diagonal
- * strokes chained end-to-end, alternating direction, each bowed a little and
- * overshooting the edges like a crayon that never lifts. Seeded by the node
- * id, so every task gets its own "handwriting". Opacities stay translucent
- * and widths vary per leg, so overlapping passes build up wax.
- */
-function scribbleLegs(seedId: string, w = 210, h = 72): ScribbleLeg[] {
-  const rand = mulberry32(hashId(seedId));
-  const box = { x: 0, y: 0, w, h };
-  // seeded per node, so every task colours in at its own slant, density and
-  // pressure — same hand, never the same page twice
-  const angle = 45 + (rand() - 0.5) * 16;
-  const spacing = 10.5 * (0.88 + rand() * 0.24);
-  const baseWidth = 10.5 * (0.9 + rand() * 0.2);
-  const bleed = 6;
-  const th = (angle * Math.PI) / 180;
-  const dx = Math.cos(th);
-  const dy = -Math.sin(th);
-  const ax = -dy;
-  const ay = dx;
-  const cx = box.x + box.w / 2;
-  const cy = box.y + box.h / 2;
-  const half = (Math.abs(box.w * ax) + Math.abs(box.h * ay)) / 2;
-  const over = () => bleed * (0.15 + rand() * rand() * 1.9) + (rand() < 0.12 ? bleed * (1.5 + rand()) : 0);
-  const legs: ScribbleLeg[] = [];
-  let prev: { x: number; y: number } | null = null;
-  let t = -half - spacing * 0.5;
-  let i = 0;
-  while (t < half + spacing * 0.5) {
-    const px = cx + t * ax;
-    const py = cy + t * ay;
-    const span = clipSpan(px, py, dx, dy, box);
-    t += spacing * (0.86 + rand() * 0.3);
-    if (!span) continue;
-    const uA = span[0] - over();
-    const uB = span[1] + over();
-    const at = (u: number) => ({ x: px + dx * u, y: py + dy * u });
-    const forward = i % 2 === 0;
-    let s = at(forward ? uA : uB);
-    let e = at(forward ? uB : uA);
-    const piv = (rand() - 0.5) * 0.075;
-    const px0 = (s.x + e.x) / 2;
-    const py0 = (s.y + e.y) / 2;
-    const spin = (p: { x: number; y: number }) => {
-      const vx = p.x - px0;
-      const vy = p.y - py0;
-      return { x: px0 + vx * Math.cos(piv) - vy * Math.sin(piv), y: py0 + vx * Math.sin(piv) + vy * Math.cos(piv) };
-    };
-    s = spin(s);
-    e = spin(e);
-    const bow = (rand() - 0.5) * 4.5;
-    const mx = px0 + ax * bow + (rand() - 0.5) * 3;
-    const my = py0 + ay * bow + (rand() - 0.5) * 3;
-    const n1f = (v: number) => v.toFixed(1);
-    let d = `M${n1f(s.x)},${n1f(s.y)}`;
-    if (prev) {
-      const out = (forward ? -1 : 1) * (1.5 + rand() * 4.5);
-      const kx = (prev.x + s.x) / 2 + dx * out;
-      const ky = (prev.y + s.y) / 2 + dy * out;
-      d = `M${n1f(prev.x)},${n1f(prev.y)} Q${n1f(kx)},${n1f(ky)} ${n1f(s.x)},${n1f(s.y)}`;
-    }
-    d += ` Q${n1f(mx)},${n1f(my)} ${n1f(e.x)},${n1f(e.y)}`;
-    legs.push({ d, width: baseWidth * (0.82 + rand() * 0.36), opacity: 0.68 * (0.75 + rand() * 0.5) });
-    prev = e;
-    i++;
-  }
-  return legs;
-}
-
-// No scribble timing lives here (and none in styles.css either): the pass is
-// rendered once, fully drawn, for dispatched/completed/failed alike. Seeded by
-// the node id it is identical on every poll — a static crayon texture, never a
-// loop — which is exactly what keeps `document.getAnimations()` empty inside
-// the canvas once the entrance settles.
 
 type TaskNodeData = {  label: string;
   status: TaskStatus;
+  runId: string;
   /** One stable, single-line clue about what this stage needs or produced. */
   summary: string;
   /** Full evidence text, available on hover when the visible summary is clipped. */
@@ -176,16 +48,14 @@ type TaskNodeData = {  label: string;
   harnessActual: boolean;
   /** A Task with no Dispatch can show its configured future harness. */
   harnessPlanned: boolean;
-  /** Visible launch choices for a Stage that has not dispatched yet. */
-  plannedSettings: string | null;
-  plannedSettingsTitle: string;
+  /** Dispatch-evidenced model or future planned settings. */
+  settings: string | null;
+  settingsTitle: string;
+  settingsActual: boolean;
   dir: "LR" | "TB";
-  /** paint order on first draw — staggers the entrance so the DAG "grows" */
-  index: number;
-  /** deterministic sticker tilt in degrees — pasted, not aligned */
-  tilt: number;
-  /** the status changed on this poll — play the one-shot celebration */
-  pop: boolean;
+  /** Motion is enabled only while the graph is the active view. */
+  executing: boolean;
+  active: boolean;
 };
 
 type StageSummary = { text: string; title: string };
@@ -374,30 +244,32 @@ function summarizeStage(
   return { text: t("dag.contextUnavailable"), title: t("dag.contextUnavailable") };
 }
 
-function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
-  // Status copy is translated (canvas nodes are the most-read surface in the
-  // app), so subscribe here; STATUS_META keeps owning only the palette.
+function TaskNode({ data }: NodeProps<Node<TaskNodeData>>) {
   const t = useT();
   const meta = STATUS_META[data.status];
   const statusLabel = t(`status.${data.status}`);
   const isTB = data.dir === "TB";
-  const alive = data.status === "ready" || data.status === "dispatched";
-  const updateNodeInternals = useUpdateNodeInternals();
-  // one unbroken colouring pass, chopped into back-and-forth zigzag legs.
-  // Deterministic in the node id, so it renders once and never redraws: there
-  // is deliberately NO cycle timer and no `key`-driven remount here — a
-  // dispatched task used to re-scrawl itself forever, which meant a timer
-  // incrementing a dispatched node and a permanent animation in the canvas.
-  const legs = useMemo(() => scribbleLegs(id), [id]);
-  const dispatched = data.status === "dispatched";
+  const marker = useRef<HTMLSpanElement>(null);
+  const previousStatus = useRef({ runId: data.runId, status: data.status });
+  useEffect(() => {
+    const changed = previousStatus.current.runId === data.runId &&
+      previousStatus.current.status !== data.status;
+    previousStatus.current = { runId: data.runId, status: data.status };
+    if (!changed || !data.active || document.hidden ||
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const animation = marker.current?.animate(
+      [{ opacity: 0.35 }, { opacity: 1 }],
+      { duration: 260, easing: "ease-out" },
+    );
+    return () => animation?.cancel();
+  }, [data.runId, data.status, data.active]);
   return (
     <div
       role="group"
       className={[
         "task-node",
         data.selected ? "task-node--selected" : "",
-      data.lead ? "task-node--lead" : "",
-        data.pop ? "task-node--pop" : "",
+        data.lead ? "task-node--lead" : "",
       ]
         .filter(Boolean)
         .join(" ")}
@@ -410,72 +282,36 @@ function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
         data.harnessActual
           ? t("dag.node.ariaHarnessActual", { harness: data.harness })
           : t("dag.node.ariaHarnessPlanned", { harness: data.harness }),
-        data.plannedSettings
-          ? t("dag.node.ariaPlannedSettings", { settings: data.plannedSettingsTitle })
+        data.settings
+          ? data.settingsActual
+            ? t("dag.node.ariaActualSettings", { settings: data.settingsTitle })
+            : t("dag.node.ariaPlannedSettings", { settings: data.settingsTitle })
           : null,
         data.lead ? t("dag.node.ariaLead") : null,
       ]
         .filter(Boolean)
         .join(" ")}
-      onAnimationEnd={(event) => {
-        if (event.target === event.currentTarget && event.animationName === "node-in") {
-          // React Flow may take its first handle measurement while the card is
-          // still scaled down by `node-in`. Transforms do not trigger its
-          // ResizeObserver when they settle, so explicitly replace those
-          // temporary, inset handle coordinates with the final geometry.
-          updateNodeInternals(id);
-        }
-      }}
       style={
         {
-          "--crayon": meta.color,
-          "--crayon-ink": meta.ink,
-          "--wash": meta.bg,
-          "--i": data.index,
-          "--tilt": `${data.tilt}deg`,
+          width: NODE_W,
+          height: NODE_H,
+          "--node-status": meta.color,
+          "--node-status-ink": meta.ink,
         } as CSSProperties
       }
     >
       {data.lead && (
-        <>
-          <span className="task-node__lead-ring" aria-hidden="true" />
-          <span
-            className="task-node__lead-badge"
-            title={t("dag.node.leadBadgeTitle")}
-          >
-            <span aria-hidden="true">★</span> {t("dag.node.lead")}
-          </span>
-        </>
+        <span className="task-node__lead-badge" title={t("dag.node.leadBadgeTitle")}>
+          {t("dag.node.lead")}
+        </span>
       )}
-      {/* a real hand scrawl, coloured in and frozen: dispatched nodes show the
-          pass mid-run, completed/failed keep it at its final frame — fully
-          drawn, no animation, still their own hand */}
-      {(dispatched || data.status === "completed" || data.status === "failed") && (
-        <svg
-          className="task-node__scribble"
-          viewBox="0 0 210 72"
-          preserveAspectRatio="none"
-          aria-hidden="true"
-        >
-          {legs.map((leg, i) => (
-            <path
-              key={i}
-              pathLength={100}
-              d={leg.d}
-              strokeWidth={leg.width.toFixed(1)}
-              strokeOpacity={leg.opacity.toFixed(3)}
-            />
-          ))}
-        </svg>
-      )}
-      {/* static dashed ring (ready) / static solid ring (dispatched) — status
-          stays legible from the border alone, with nothing pulsing */}
-      {alive && <div className="task-node__aura" aria-hidden="true" />}
       <Handle type="target" position={isTB ? Position.Top : Position.Left} />
       <div className="task-node__title" title={data.label}>{data.label}</div>
       <div className="task-node__row">
         <div className="task-node__status">
-          <span className="dot" style={{ background: meta.color }} />
+          <span ref={marker} className="task-node__marker" aria-hidden="true">
+            <span className={data.executing && data.active ? "task-node__marker-dot task-node__marker-dot--executing" : "task-node__marker-dot"} />
+          </span>
           {statusLabel}
         </div>
         <span
@@ -494,49 +330,10 @@ function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
       <div className="task-node__summary" title={data.summaryTitle}>
         {data.summary}
       </div>
-      {data.plannedSettings && (
-        <div className="task-node__planned" title={data.plannedSettingsTitle}>
-          {data.plannedSettings}
+      {data.settings && (
+        <div className="task-node__planned" title={data.settingsTitle}>
+          {data.settings}
         </div>
-      )}
-      {/* hand-drawn sign-off: a tick that draws itself, or a scribbled-out cross */}
-      {data.status === "completed" && (
-        <svg className="task-node__stamp task-node__stamp--ok" viewBox="0 0 46 36" aria-hidden="true">
-          <path d="M5 20 C10 22.5 13 26 17 32 C23 20 32 9 42 4" />
-        </svg>
-      )}
-      {data.status === "failed" && (
-        <svg className="task-node__stamp task-node__stamp--bad" viewBox="0 0 46 36" aria-hidden="true">
-          <path d="M8 6 C17 13 28 22 38 30" />
-          <path d="M38 6 C29 14 18 23 8 30" />
-        </svg>
-      )}
-      {/* selection = circled with a red marker, the way you'd flag it on paper.
-          pathLength=100 lets CSS draw it in without knowing the true length. */}
-      {data.selected && (
-        <svg
-          className="task-node__lasso"
-          viewBox="0 0 232 94"
-          preserveAspectRatio="none"
-          aria-hidden="true"
-        >
-          <path
-            pathLength={100}
-            d="M10 48 C7 16 44 5 116 6 C193 7 227 20 225 46 C223 79 182 90 112 88 C46 86 13 79 10 48 Z"
-          />
-        </svg>
-      )}
-      {/* one-shot ring that flicks outward the moment the status flips */}
-      {data.pop && <span className="task-node__ripple" aria-hidden="true" />}
-      {/* a burst of crayon sparks the moment work lands done */}
-      {data.pop && data.status === "completed" && (
-        <svg className="task-node__sparks" viewBox="0 0 64 64" aria-hidden="true">
-          <path d="M32 14 L32 3" />
-          <path d="M48 20 L56 11" />
-          <path d="M54 34 L64 32" />
-          <path d="M16 20 L8 11" />
-          <path d="M10 34 L0 32" />
-        </svg>
       )}
       <Handle type="source" position={isTB ? Position.Bottom : Position.Right} />
     </div>
@@ -545,53 +342,9 @@ function TaskNode({ id, data }: NodeProps<Node<TaskNodeData>>) {
 
 const nodeTypes = { task: TaskNode };
 
-/**
- * Edge leaving a running node: a faint dashed pencil sketch with a solid
- * pencil stroke inked over it, source → target — the "hand went over the
- * dashes" look, held still. Two stacked paths share one geometry; the wobble
- * lives in the #pencil-edge filter (userSpaceOnUse, with a 24000² region so
- * nothing clips).
- *
- * The trace used to be driven by the Web Animations API (element.animate) with
- * the measured per-edge length baked into keyframes, looping draw → hold →
- * fade forever. Continuous canvas motion is now out of contract, so there is
- * NO animation, NO measurement and NO ref here: the solid stroke simply renders
- * at full length. The dashed sketch underneath still distinguishes "being
- * worked on" from the idle/done dependency strokes, so the edge keeps its
- * scheduling meaning without anything moving.
- */
-function PencilEdge(props: EdgeProps) {
-  const [path] = getBezierPath({
-    sourceX: props.sourceX,
-    sourceY: props.sourceY,
-    sourcePosition: props.sourcePosition,
-    targetX: props.targetX,
-    targetY: props.targetY,
-    targetPosition: props.targetPosition,
-  });
-  return (
-    <g className="pencil-edge">
-      <path className="pencil-edge__sketch" d={path} fill="none" />
-      <path className="pencil-edge__draw" d={path} fill="none" />
-    </g>
-  );
-}
+const edgeTypes = { hierarchy: HierarchyEdge };
 
-const edgeTypes = { pencil: PencilEdge, hierarchy: HierarchyEdge };
-
-/**
- * Parent → child OWNERSHIP edge (Phase 4) — a deliberately different visual
- * grammar from the dependency pencils above:
- *
- *   dependency  = hand-wobbling bezier, pencil sketch under solid ink (still)
- *   ownership   = calm rounded bracket (smooth step), fine dotted graphite,
- *                 a small open ring resting on the child, no animation
- *
- * The stillness is the point: nothing about a parent relation moves work
- * forward, so nothing on it may look like flow. These edges are never fed to
- * the layout algorithms (see the layout effect below) and can be hidden from
- * the toolbar toggle when they hurt readability.
- */
+/** Hierarchy is a distinct, static relationship, never a scheduling edge. */
 function HierarchyEdge(props: EdgeProps) {
   // Its own aria-label is viewer copy, so this edge subscribes to the
   // language store like TaskNode does.
@@ -615,10 +368,7 @@ function HierarchyEdge(props: EdgeProps) {
   );
 }
 
-// The all-tasks-done confetti rain used to live here. It was decorative
-// continuous motion (a 48-bit CSS fall, replaying whenever the DAG re-rendered
-// while everything stayed completed), so it is gone: a finished Run reads from
-// the green stamps, the inked edges and the progress strip instead.
+const NO_PENDING_DISPATCHES: readonly string[] = [];
 
 function Flow({
   dag,
@@ -631,6 +381,9 @@ function Flow({
   showHierarchy,
   workerRows,
   attempts,
+  active = true,
+  fleetFresh = false,
+  pendingDispatchIds = NO_PENDING_DISPATCHES,
 }: {
   dag: DagResponse;
   leadTaskId: string | null;
@@ -644,6 +397,9 @@ function Flow({
   workerRows: WorkerRowView[];
   /** Live attempts fill the gap before the new Dispatch reaches worker-list. */
   attempts: RunAttempt[];
+  active?: boolean;
+  fleetFresh?: boolean;
+  pendingDispatchIds?: readonly string[];
 }) {
   const rf = useReactFlow();
   const config = useConfig();
@@ -659,16 +415,16 @@ function Flow({
   const dragged = useRef<Map<string, { x: number; y: number }>>(new Map());
   // id of the node under an active drag gesture (keep its live position)
   const draggingId = useRef<string | null>(null);
-  // status seen on the previous poll, and the ids whose status just flipped —
-  // recomputed only when the DAG object itself changes (Stage 2 below), so a
-  // reconciliation re-run for a selection/config change never cuts a
-  // celebration short.
-  const prevStatus = useRef<Map<string, TaskStatus>>(new Map());
-  const popped = useRef<Set<string>>(new Set());
-  const seenDag = useRef<DagResponse | null>(null);
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<TaskNodeData>>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const handledFitNonce = useRef(fitNonce);
+  const handledLayout = useRef({ layout, reorgNonce });
+  const [documentVisible, setDocumentVisible] = useState(() => !document.hidden);
+  useEffect(() => {
+    const onVisibilityChange = () => setDocumentVisible(!document.hidden);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, []);
 
   // --- Stage 1 · topology → positioned geometry ----------------------------
   //
@@ -711,22 +467,6 @@ function Flow({
     dragged.current.clear();
   }, [layout, reorgNonce]);
 
-  // --- Stage 2 · status-pop detection ---------------------------------------
-  //
-  // Keyed to the DAG object identity alone (guarded by `seenDag`): it must not
-  // re-arm when a reconciliation runs for selection/config/worker-row churn,
-  // and the flags must survive those re-merges until the next poll —
-  // recomputing here for a selection change would drop the flags mid-flight
-  // and cut a celebration short.
-  useEffect(() => {
-    if (seenDag.current === dag) return;
-    const prev = prevStatus.current;
-    popped.current = new Set(
-      dag.nodes.filter((n) => prev.has(n.id) && prev.get(n.id) !== n.status).map((n) => n.id),
-    );
-    prevStatus.current = new Map(dag.nodes.map((n) => [n.id, n.status]));
-    seenDag.current = dag;
-  }, [dag]);
 
   // --- Stage 3 · actual-launch evidence --------------------------------------
   //
@@ -737,15 +477,20 @@ function Flow({
   // Dispatches without either kind of evidence show "unknown" honestly.
   const harnessEvidence = useMemo(() => {
     const actual = new Map<string, string>();
+    const actualModel = new Map<string, string>();
     const launched = new Set<string>();
     const latestRow = new Map<string, WorkerRowView>();
+    const currentDispatch = new Map(dag.nodes.map((node) => [node.id, node.dispatchId]));
     for (const row of workerRows) {
+      if (currentDispatch.get(row.taskId) && currentDispatch.get(row.taskId) !== row.dispatchId) continue;
       if (!row.taskId || latestRow.has(row.taskId)) continue;
       latestRow.set(row.taskId, row);
       launched.add(row.taskId);
       const agent = row.launchEvidence?.agent ??
         row.projection?.launch?.agent ?? row.projection?.provider?.id ?? null;
       if (agent) actual.set(row.taskId, agent);
+      const model = row.projection?.launch?.model ?? row.projection?.provider?.model;
+      if (model) actualModel.set(row.taskId, model);
     }
     const latestAttemptByTask = new Map<string, RunAttempt>();
     for (const attempt of attempts) {
@@ -758,13 +503,15 @@ function Flow({
       if (attempt.adopted || !attempt.dispatchId) continue;
       const row = latestRow.get(taskId);
       // Never paste an older attempt's harness onto a newer Dispatch.
+      if (currentDispatch.get(taskId) && currentDispatch.get(taskId) !== attempt.dispatchId) continue;
       if (row && row.dispatchId !== attempt.dispatchId) continue;
       launched.add(taskId);
       const agent = attempt.effective?.agent ?? attempt.harness;
       if (agent && !actual.has(taskId)) actual.set(taskId, agent);
+      if (attempt.effective?.model && !actualModel.has(taskId)) actualModel.set(taskId, attempt.effective.model);
     }
-    return { actual, launched };
-  }, [workerRows, attempts]);
+    return { actual, actualModel, launched };
+  }, [workerRows, attempts, dag.nodes]);
 
   // One compact, evidence-backed clue per card. Prefer the exact current
   // Dispatch when Orca supplied its id; only fall back to newest-per-Task
@@ -825,11 +572,19 @@ function Flow({
     const dir: "LR" | "TB" = layout === "layered-tb" ? "TB" : "LR";
     const statusById = new Map(dag.nodes.map((n) => [n.id, n.status]));
     const nodeById = new Map(dag.nodes.map((n) => [n.id, n]));
+    const pendingDispatches = new Set(pendingDispatchIds);
+    const liveDispatches = new Set(
+      fleetFresh ? workerRows.filter((row) =>
+        row.runId === dag.runId &&
+        row.dispatchStatus === "dispatched" &&
+        !pendingDispatches.has(row.dispatchId) &&
+        row.projection?.attention?.requiresAction !== true &&
+        row.projection?.liveness?.verdict === "live" &&
+        !/stale|unknown|missing|pending|unverifiable/i.test(row.projection.liveness.reason ?? ""),
+      ).map((row) => `${row.taskId}\0${row.dispatchId}`) : [],
+    );
 
-    // `laid.nodes` is the same id sequence as `dag.nodes` (Stage 1 is keyed to
-    // exactly that topology), so index i is the paint order — the same `--i`
-    // entrance stagger and deterministic tilt as before.
-    const decoratedNodes: Node<TaskNodeData>[] = laid.nodes.map((n, i) => {
+    const decoratedNodes: Node<TaskNodeData>[] = laid.nodes.map((n) => {
       const dagNode = nodeById.get(n.id);
       const status = dagNode?.status ?? "pending";
       const harnessPlanned = !harnessEvidence.launched.has(n.id) &&
@@ -846,10 +601,12 @@ function Flow({
               : plannedPlacementLabel(placement, t),
           ].filter((part): part is string => Boolean(part))
         : [];
+      const model = harnessEvidence.actualModel.get(n.id);
       return {
         ...n,
         type: "task",
         data: {
+          runId: dag.runId,
           label: dagNode?.label ?? n.id,
           status,
           summary: stageSummaries.get(n.id)?.text ?? t("dag.contextUnavailable"),
@@ -863,28 +620,27 @@ function Flow({
             (harnessPlanned ? effectiveHarness(n.id) : t("dag.harnessUnknown")),
           harnessActual: harnessEvidence.actual.has(n.id),
           harnessPlanned,
-          plannedSettings: plannedParts.length ? plannedParts.join(" · ") : null,
-          plannedSettingsTitle: plannedParts.length
-            ? t("dag.plannedTitle", {
-                summary:
-                  plannedParts.join(" · ") +
-                  (placement?.kind === "existing"
-                    ? t("dag.plannedSelectorSuffix", { selector: placement.selector })
-                    : ""),
-              })
-            : "",
+          settings: model ? t("dag.actualModel", { model }) : plannedParts.length ? plannedParts.join(" · ") : null,
+          settingsActual: !!model,
+          settingsTitle: model
+            ? t("dag.actualTitle", { summary: t("dag.actualModel", { model }) })
+            : plannedParts.length
+              ? t("dag.plannedTitle", {
+                  summary:
+                    plannedParts.join(" · ") +
+                    (placement?.kind === "existing"
+                      ? t("dag.plannedSelectorSuffix", { selector: placement.selector })
+                      : ""),
+                })
+              : "",
           dir,
-          index: i,
-          // deterministic pseudo-random tilt from the paint order: stickers
-          // slapped on paper, stable across polls (no RNG, no jumping)
-          tilt: (((i * 37) % 5) - 2) * 0.8,
-          pop: popped.current.has(n.id),
+          executing: status === "dispatched" && !!dagNode?.dispatchId &&
+            liveDispatches.has(`${n.id}\0${dagNode.dispatchId}`),
+          active: active && documentVisible,
         },
       };
     });
-    // an edge carries the state of the dependency it represents: satisfied
-    // (inked green), being worked on (pencil-traced), or not yet reached —
-    // decorated here, onto the layout's own edge list, never inside it.
+    // Dependency edges remain static, with their source status distinguished.
     const decoratedEdges: Edge[] = laid.edges.map((e) => {
       const from = statusById.get(e.source);
       const running = from === "dispatched";
@@ -893,8 +649,6 @@ function Flow({
         id: e.id,
         source: e.source,
         target: e.target,
-        // pencil-sketch the link out of a node that is currently running
-        type: running ? "pencil" : undefined,
         className: running ? "edge--run" : done ? "edge--done" : "edge--idle",
       };
     });
@@ -945,35 +699,31 @@ function Flow({
       });
     });
     setEdges([...hierarchyEdges, ...decoratedEdges]);
-  }, [laid, dag, leadTaskId, selectedId, layout, reorgNonce, showHierarchy, harnessEvidence, stageSummaries, config, lang, setNodes, setEdges]);
+  }, [laid, dag, leadTaskId, selectedId, layout, reorgNonce, showHierarchy, harnessEvidence, stageSummaries, config, lang, setNodes, setEdges, fleetFresh, workerRows, active, documentVisible, pendingDispatchIds]);
 
-  // Auto-fit when the node count changes, so live status polls don't yank the
-  // viewport while the user is inspecting (or dragging).
+  // Defer requested fits while the graph or document is hidden. Record only
+  // after the timer fires, so a cancelled timer is retried when visible.
   useEffect(() => {
-    if (nodes.length !== prevCount.current) {
-      prevCount.current = nodes.length;
-      const t = window.setTimeout(() => rf.fitView({ padding: 0.22, duration: 300 }), 60);
-      return () => window.clearTimeout(t);
+    if (!active || !documentVisible) return;
+    if (nodes.length === 0) {
+      prevCount.current = 0;
+      return;
     }
-  }, [nodes.length, rf]);
-
-  // Re-fit after a layout switch or re-org (node count is unchanged, so the
-  // effect above won't fire).
-  useEffect(() => {
-    const t = window.setTimeout(() => rf.fitView({ padding: 0.22, duration: 400 }), 90);
-    return () => window.clearTimeout(t);
-  }, [layout, reorgNonce, rf]);
-
-  // Opening, closing or resizing the communication rail changes the canvas
-  // viewport but not the DAG layout. Reframe the existing positions after the
-  // flex layout settles; do not reuse reorgNonce because that intentionally
-  // clears the user's manually dragged positions.
-  useEffect(() => {
-    if (fitNonce === handledFitNonce.current) return;
-    handledFitNonce.current = fitNonce;
-    const t = window.setTimeout(() => rf.fitView({ padding: 0.22, duration: 320 }), 90);
-    return () => window.clearTimeout(t);
-  }, [fitNonce, rf]);
+    const countChanged = nodes.length !== prevCount.current;
+    const layoutChanged = layout !== handledLayout.current.layout ||
+      reorgNonce !== handledLayout.current.reorgNonce;
+    const fitRequested = fitNonce !== handledFitNonce.current;
+    if (!countChanged && !layoutChanged && !fitRequested) return;
+    const timer = window.setTimeout(() => {
+      if (document.hidden) return;
+      prevCount.current = nodes.length;
+      handledLayout.current = { layout, reorgNonce };
+      handledFitNonce.current = fitNonce;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      void rf.fitView({ padding: 0.22, duration: reducedMotion ? 0 : 300 });
+    }, 90);
+    return () => window.clearTimeout(timer);
+  }, [active, documentVisible, nodes.length, layout, reorgNonce, fitNonce, rf]);
 
   const onNodeDragStart = useCallback((_e: unknown, node: Node) => {
     draggingId.current = node.id;
@@ -1009,7 +759,6 @@ function Flow({
   if (dag.nodes.length === 0) {
     return (
       <div className="dag-empty">
-        <div className="dag-empty__doodle">🖍️</div>
         <div className="dag-empty__title">{t("dag.empty.title")}</div>
         <div className="dag-empty__hint">
           {t("dag.empty.body")}{" "}
@@ -1043,7 +792,6 @@ function Flow({
         }}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
-        fitView
         nodesDraggable
         nodesConnectable={false}
         /* The canvas is a projection, not a task/dependency editor. Native
@@ -1086,6 +834,12 @@ export const DagView = memo(function DagView(props: {
    *  legacy/tracking starts (opencode, custom commands), whose fleet rows
    *  carry no launch facts at all. Scoped to the selected Run by the caller. */
   attempts: RunAttempt[];
+  /** False when this view is hidden; does not reset graph position. */
+  active?: boolean;
+  /** Current-Run fleet inventory has successfully loaded and is not stale. */
+  fleetFresh?: boolean;
+  /** Current-Run Dispatches with unresolved human input or actionable events. */
+  pendingDispatchIds?: readonly string[];
 }) {
   return (
     <ReactFlowProvider>

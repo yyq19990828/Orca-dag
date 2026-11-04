@@ -45,6 +45,11 @@ if (verb === "request-show") {
     ? { requestId: id, state: rec.state, interpretation: rec.interpretation ?? null, outcome: rec.outcome ?? null }
     : { requestId: id, state: "absent", interpretation: "no recorded request", outcome: null });
 }
+if (verb === "worker-show") {
+  const id = flag("--dispatch");
+  okEnvelope({ dispatch: { id, runId: "run_a", task_id: "task_r1", status: "completed" },
+    worker: { dispatchId: id, state: "succeeded", stage: "settled" } });
+}
 if (verb === "worker-release" || verb === "worker-retain") {
   const id = flag("--dispatch");
   const requestId = flag("--retry-request");
@@ -150,7 +155,7 @@ describe("mutation-request audit surface", () => {
   });
 
   it("records a manual release endpoint mutation and inspects it live via request-show", async () => {
-    const release = await call("POST", "/api/workers/ctx_r1/release");
+    const release = await call("POST", "/api/workers/ctx_r1/release", { runId: "run_a" });
     assert.equal(release.status, 200);
     const receipt = release.json.receipt as { state: string; requestId: string | null };
     assert.equal(receipt.state, "released");
@@ -159,12 +164,11 @@ describe("mutation-request audit surface", () => {
     const list = await call("GET", "/api/requests?run=run_a");
     assert.equal(list.status, 200);
     const requests = list.json.requests as Array<Record<string, unknown>>;
-    // The coordinator is NOT running, so scope is positively unknown → the
-    // row is stored unscoped and stays inspectable under every Run.
+    // Exact worker-show evidence, not a live coordinator, establishes scope.
     const row = requests.find((r) => r.requestId === receipt.requestId);
     assert.ok(row, "the minted request id is durably listed");
     assert.equal(row!.operation, "worker-release");
-    assert.equal(row!.runId, null, "no coordinator → run scope unknown, never guessed");
+    assert.equal(row!.runId, "run_a");
     assert.equal(row!.dispatchId, "ctx_r1");
     assert.equal(row!.settledLocally, true);
 
@@ -265,9 +269,13 @@ describe("mutation-request audit surface", () => {
   });
 
   it("never replays a mutation from a read surface: audit GETs only ever run request-show", async () => {
+    const requestId = "bbbbbbbb-0000-4000-8000-000000000001";
+    await new RequestLedger(workspace).record({
+      requestId, operation: "worker-release", runId: "run_b",
+      taskId: null, dispatchId: "ctx_read_only",
+    });
     const before = logLines();
-    // A full pass over the read surface, including the row minted by the
-    // release POST in the first test.
+    const stateBefore = fakeState();
     await call("GET", "/api/requests?run=run_a");
     const list = await call("GET", "/api/requests?run=run_b");
     for (const row of (list.json.requests as Array<Record<string, unknown>>).slice(0, 3)) {
@@ -279,11 +287,9 @@ describe("mutation-request audit surface", () => {
     for (const argv of added) {
       assert.equal(argv[1], "request-show", `read surface ran ${argv[1]} — replay is forbidden`);
     }
-    // The deliberate release above is still the ONLY mutating verb on record.
-    const mutators = after.filter((argv) =>
+    assert.equal(added.filter((argv) =>
       ["worker-start", "worker-release", "worker-retain", "worker-stop"].includes(argv[1]),
-    );
-    assert.equal(mutators.length, 1, "no read endpoint ever minted a second mutation");
-    assert.equal(fakeState().version, "1.4.205", "fake state untouched by reads");
+    ).length, 0, "audit reads cannot replay a mutation");
+    assert.deepEqual(fakeState(), stateBefore);
   });
 });

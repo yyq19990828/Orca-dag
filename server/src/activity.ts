@@ -23,6 +23,7 @@ export type ActivityKind =
   | "reply"
   | "worker_done"
   | "escalation"
+  | "stop_event"
   | "gate"
   | "recovery"
   | "release"
@@ -75,7 +76,7 @@ export interface ActivityEvent {
    */
   read: boolean | null;
   actionable: null | {
-    kind: "reply" | "release" | "retain" | "retry";
+    kind: "reply" | "release" | "retain" | "retry" | "acknowledge_stop";
     targetId: string;
   };
   technical: {
@@ -161,6 +162,7 @@ type Payload = {
   taskId?: string;
   dispatchId?: string;
   outcome?: string;
+  stopReason?: string;
   phase?: string;
   filesModified?: string[];
   reportPath?: string;
@@ -213,6 +215,7 @@ function normalizeMessage(
   workers: OrcaWorkerRow[],
   leadTaskId: string | null,
   pendingIds: Set<string>,
+  pendingStopIds: Set<string>,
 ): ActivityEvent {
   // Treat the CLI receipt as untrusted JSON despite the compile-time type.
   // Mixed-version peers may omit or reshape presentational fields; Activity
@@ -399,16 +402,21 @@ function normalizeMessage(
         detail: null,
         actionable: pendingIds.has(eventId) ? { kind: "reply", targetId: eventId } : null,
       };
-    case "escalation":
+    case "escalation": {
+      const stopEvent = typeof payload.dispatchId === "string" &&
+        ["finished", "errored", "needs-input", "exited"].includes(String(payload.stopReason));
       return {
         ...base,
-        kind: "escalation",
+        kind: stopEvent ? "stop_event" : "escalation",
         severity: "error",
-        title: `${label} needs attention`,
+        title: stopEvent ? `${label} reported a stop event` : `${label} needs attention`,
         summary: firstSentence(body || subject),
         detail: body || null,
-        actionable: pendingIds.has(eventId) ? { kind: "reply", targetId: eventId } : null,
+        actionable: stopEvent
+          ? pendingStopIds.has(eventId) && dispatchId ? { kind: "acknowledge_stop", targetId: eventId } : null
+          : pendingIds.has(eventId) ? { kind: "reply", targetId: eventId } : null,
       };
+    }
     case "worker_done": {
       const succeeded = payload.outcome === "succeeded";
       const failed = payload.outcome === "failed";
@@ -746,13 +754,14 @@ export function buildActivitySnapshot(input: {
   const taskMap = new Map(input.tasks.filter((task) => task.run_id === runId).map((task) => [task.id, task]));
   const workers = input.workers.filter((worker) => worker.runId === runId);
   const scopedStatus = input.status?.runId === runId ? input.status : null;
-  const pendingIds = new Set(scopedStatus?.inbox.pending.map((item) => item.messageId) ?? []);
+  const pendingIds = new Set(scopedStatus?.inbox.pending.filter((item) => item.kind !== "stop_event").map((item) => item.messageId) ?? []);
+  const pendingStopIds = new Set(scopedStatus?.inbox.pending.filter((item) => item.kind === "stop_event").map((item) => item.messageId) ?? []);
   const scopedMessages = input.messages.filter((message) => message.run_id === runId);
   const truncated = scopedMessages.length > MAX_HISTORY_MESSAGES;
   const normalized = scopedMessages
     .sort((a, b) => a.created_at.localeCompare(b.created_at))
     .slice(-MAX_HISTORY_MESSAGES)
-    .map((message) => normalizeMessage(message, taskMap, workers, input.leadTaskId ?? null, pendingIds));
+    .map((message) => normalizeMessage(message, taskMap, workers, input.leadTaskId ?? null, pendingIds, pendingStopIds));
   const debts = (scopedStatus?.cleanupDebt ?? []).map((debt) =>
     debtEvent(runId, debt, new Date(scopedStatus?.lastReconciledAt || now).toISOString()),
   );

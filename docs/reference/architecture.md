@@ -71,15 +71,16 @@ Orca 1.4.226 counts failed `worker-start` invocations along the exact `--retry-o
 
 ## Coordinator Safety and Read Efficiency
 
-- **Mailbox protocol:** Legacy FIFO checks replay the oldest unacknowledged Delivery; process every message and drain any next batch returned by ACK. V3 consuming checks acknowledge on read, and ACK alone does not fetch another batch. Transport acknowledgement on read is distinct from local processing completion: durable consuming-check UUIDs, batch deliveries, processed message IDs, and pending questions are checkpointed in `.orca-dag/sessions.json` (`mailboxChecks`) and survive restarts. A lost consuming response is recovered via read-only `request-show` using the original request identity, never a fresh mutation. Acknowledged batches continue draining while human questions remain pending. `--peek` is observation only; never consume a worker's mailbox for monitoring.
-- **Guidance and Follow-Up Lifecycle:** Guidance persists its request and requested worker identity in `guidanceSends` before native effects. Accepted receipts distinguish requested from actual Task/Dispatch IDs and `enqueued` from `follow_up`; the journal records `creationProven` and sanitized immutable start evidence (`status`, `launchMode`). Unknown guidance holds fleet capacity and blocks blind resends. Read-only reconciliation of a prior operation returns `guidance_reconciled`, never acknowledgment of the new body. Run Stop covers every viewer-owned follow-up root and reports unresolved sends or teardown outcomes as explicit debt.
+- **Mailbox protocol and version terminology:** Upstream official public orchestration contract is `contract 1` (`orchestration.contract.v1`), runtime protocol is 3, federation lifecycle settlement protocol is 3 (`ORCHESTRATION_FEDERATION_LIFECYCLE_SETTLEMENT_PROTOCOL_VERSION`), and control mail protocol is 2; `orchestration.federation-lifecycle-settlement.v1` is the settlement capability. Local V3 migration and the `[orca-dag:merge-inputs-v3]` handshake marker are local viewer contracts/markers, NOT a global upstream version; never rename persisted markers. Legacy FIFO checks replay the oldest unacknowledged Delivery; process every message and drain any next batch returned by ACK. Consuming checks acknowledge on read, and ACK alone does not fetch another batch. Transport acknowledgement on read is distinct from local processing completion: durable consuming-check UUIDs, batch deliveries, processed message IDs, pending questions, and operator message checkpoints are preserved in `.orca-dag/sessions.json` (`mailboxChecks`, `guidanceSends`, `operatorMessages`) and survive restarts. A lost consuming response is recovered via read-only `request-show` using the original request identity, never a fresh mutation. Acknowledged batches continue draining while human questions remain pending. `--peek` is observation only; never consume a worker's mailbox for monitoring.
+- **Guidance, Follow-Up Lifecycle, and Nested Routing:** Guidance persists its request and requested worker identity in `guidanceSends` before native effects. Accepted receipts distinguish requested from actual Task/Dispatch IDs, and `enqueued` from `follow_up`; guidance also supports positively evidenced `recipient_run_bound_redirect`, distinguishing originating Task/Dispatch Run from actual destination mailbox/Run (`destinationRunId`) without child authority adoption or false worker creation. The journal records `creationProven` and sanitized immutable start evidence (`status`, `launchMode`). Unknown guidance holds fleet capacity and blocks blind resends. Read-only reconciliation of a prior operation returns `guidance_reconciled`, never acknowledgment of the new body. Run Stop covers every viewer-owned follow-up root and reports unresolved sends or teardown outcomes as explicit debt.
+- **Stop Events vs Actual Questions:** Native `stopReason` escalations (`finished`, `errored`, `needs-input`, `exited`) are events in `PendingInboxItem.kind === 'stop_event'`, distinct from replyable questions (`kind === 'question'`). Resolution must follow exact Dispatch steering, operator decisions, or authoritative later settlement; the viewer does not fabricate replies or synthesize task success.
 - **Historical launch-mode reads:** Worker detail can restore an immutable follow-up start-mode tuple from the critical journal after Stop or restart. It must match the actual Run, Task and Dispatch, never the requested parent. Missing/unreadable evidence stays unknown; display recovery does not grant mutation authority.
 - **Committed Stage Merge Handshake:** Cross-workspace merges requiring committed Git handoff declare both `[orca-dag:merge-prep]` and `[orca-dag:merge-inputs-v3]`. Native 1.4.247 `ask` has no `--subject` or `--payload` flags (the native subject is fixed to `'Question'`, and `payload.question` contains the entire question text). The worker asks before any Git edit with the entire question text exactly `[orca-dag:merge-inputs-v3]`. The coordinator verifies current merge Task/Dispatch ownership, sender handle, and clean dependencies before replying with immutable commit SHAs from StageGit. Legacy runnable merge specs are refused at plan validation and must replan in a fresh Run.
-- **Critical Recovery & No Hot Downgrade:** `.orca-dag/sessions.json` stores critical recovery journals (`mailboxChecks` and `guidanceSends`) that serve as recovery authority, not rotating audit logs. Unsupported older readers throw `session binding store contains unknown fields` on these inventories; active `sessions.json` state cannot safely be hot-downgraded across unsupported readers.
-- **Cleanup Debt Reconciliation:** Reclaimable cleanup debt is rechecked against fresh fleet state on every cycle; external releases clear debt automatically. Unknown cleanup states remain blocking.
+- **Critical Recovery & No Hot Downgrade:** `.orca-dag/sessions.json` stores critical recovery journals (`mailboxChecks`, `guidanceSends`, and `operatorMessages`) that serve as recovery authority, not rotating audit logs. Inactive operator reply and group send helpers (`operatorMessages.ts`) checkpoint UUID, body hash, and scope in `operatorMessages` before Orca CLI calls, recovering unknown states via read-only `request-show` (`operator_message_reconciled` on prior completion with different body, `operator_message_unknown` on unresolved). Unsupported older readers throw `session binding store contains unknown fields` on these inventories; active `sessions.json` state cannot safely be hot-downgraded across unsupported readers.
+- **Cleanup Debt & Incomplete Remote Observations:** Reclaimable cleanup debt is rechecked against fresh fleet state on every cycle; external releases clear debt automatically. `listWorkers` returns typed `WorkerInventory` (`{ workers: OrcaWorkerRow[], partialHostErrors: unknown[] }`), preserving and aggregating `partialHostErrors` across all pages. Missing remote hosts make absence unsuitable for lifecycle decisions; host errors never clear debt or infer worker exit. Worktree removal safety queries the global complete fleet (`listWorkers(undefined, { includeRemote: true })`) rather than only the selected Run, ensuring other-Run Native Chat workers absent from terminal-list still protect shared workspaces from accidental teardown.
 - **Helper Custody:** Workers created as helpers within the same Run remain under the custody of their active creator. The viewer verifies exact Dispatch lineage rather than inferring ownership from `parent_id`. Helpers are adopted only after positive creator settlement. Visible active workers consume concurrency admission budget, but external helpers mean **Max parallel is an admission throttle, not a hard runtime-wide cap**.
 - **Terminal Reuse Preconditions:** Automatic terminal reuse requires fresh, exact, connected PTY evidence for the identical agent and workspace. Chat handles do not establish PTY proof. OpenCode, OMP and Antigravity workers are excluded from generic reuse to preserve frontend, fresh-session and model identity.
-- **In-Flight Read Deduplication:** Concurrent GET requests for DAG, Workers, Activity, and Health share identical in-flight CLI reads, scoped by Run and options. No stale-result caching is introduced; mutation preconditions always execute fresh reads.
+- **Scoped Operations & In-Flight Presentation Sharing:** Worker output, terminal release, and retention are strictly scoped to the selected Run (query `run` for GET, body `runId` for mutations). Unscoped request audit inspection stays available. Concurrent GET requests share identical in-flight CLI reads, scoped by Run and options; in-flight presentation cache never serves as final mutation custody proof. Activity EventSource closes/pauses when hidden (`document.visibilityState === 'hidden'`), retaining unread counts and refreshing on return.
 
 ---
 
@@ -94,7 +95,7 @@ Mutations (dispatch, gates)   ---> Requires active Run binding (--from <coordina
 
 Because the viewer runs as an external OS process without an ambient Orca session, it creates and manages a dedicated coordinator terminal:
 - **Terminal Title:** `orca-dag coordinator · <workspace-hash> · <instance-id>`.
-- **Binding and Fencing:** Binding with `run-use --from <handle>` fences any prior coordinator (such as an agent chat terminal). The viewer prompts for explicit operator confirmation before taking over.
+- **Binding and Fencing:** Binding with `run-use --from <handle>` fences any prior coordinator (such as an agent chat terminal). The viewer prompts for explicit operator confirmation before taking over. One-off mutations (`asCoordinator`) on inactive, unbound, or externally coordinated Runs require explicit confirmation matching current Run binding evidence (`coordinatorControl: { confirmed: true, coordinatorHandle: string | null, consumerGeneration: number | null }`), throwing `409 coordinator_control_required` otherwise. The server never silently takes over or binds a temporary terminal without consent.
 - **Handoff and Workers (1.4.242+):** Dispatched workers cannot bind their own or ancestor Run and cannot use `--takeover-legacy`. They communicate using the live preamble. Coordinators can yield or hand off to separate Runs cleanly.
 - **Workspace Scoping:** The `<workspace-hash>` scopes the coordinator to a single real workspace path. Two viewers in different workspaces operate independently. A second viewer started in the **same** workspace refuses startup with `coordinator_conflict` (HTTP 409) rather than clobbering the existing coordinator.
 - **Teardown:** On Stop or clean shutdown, the viewer closes its coordinator terminal and releases the Run binding.
@@ -140,6 +141,7 @@ server/src/
   activity.ts              Run-scoped event parser and bounded Activity journal.
   requestLedger.ts         Bounded mutation-request audit ledger (.orca-dag/requests.jsonl).
   providerSessions.ts      Durable sessions.json store with bindings, mailboxChecks, and guidanceSends.
+  operatorMessages.ts      Durable operator reply and group send helpers with sessions.json checkpoints.
   taskGuidance.ts          Proactive worker guidance, typed receipts, and read-only recovery.
   stageGit.ts              Git Stage evidence, immutable base commit capture, and merge handshake.
   security.ts              Security enforcement: loopback binding, mutation tokens, input validation.
@@ -154,24 +156,28 @@ server/src/
   uninstall.ts             Uninstallation logic: unlinks skills, closes stale coordinator terminals.
   webAssets.ts             Build-time asset loader for embedded frontend and skill assets.
 web/src/
-  App.tsx                  Main UI shell, 2-second polling loop, SVG crayon filter definitions.
+  App.tsx                  Main workbench shell, section navigation, URL hash routing, 2s polling loop, execution state guards.
   components/
-    DagView.tsx            React Flow DAG canvas, custom node rendering, crayon animations.
-    ExecControls.tsx       Toolbar: default harness, max parallel, Run/Stop controls, status indicators.
-    NodePanel.tsx          Inspector: spec preview, lead-stage toggle, locked preferences, placement.
+    DagView.tsx            Lazy-loaded React Flow DAG canvas, 280x120 node rendering, scoped status dot animation, static edges.
+    TaskList.tsx           Accessible vertical task list view with readiness/blocked reasons and status badges.
+    ExecControls.tsx       Portaled execution action group (header) and execution settings panel (Settings section).
+    NodePanel.tsx          Central detail inspector: spec preview, lead-stage toggle, locked preferences, placement, gate creation.
     PlacementEditor.tsx    Placement editor: 4 local modes, 2 remote modes, creation metadata.
     LanesPanel.tsx         Workspace lanes management: runtime state, diffs, and worktree removal.
-    ActivityPanel.tsx      Real-time event timeline, filters, technical evidence inspection.
-    ChatPanel.tsx          Stage-scoped conversation bubbles and live coordinator-check receipts.
+    ActivityPanel.tsx      Real-time event timeline (single shared SSE), filters, technical evidence inspection.
+    ChatPanel.tsx          Persistent communication dock: thread list, message bubbles, live check receipts, audience preview.
+    useScopedChatState.ts  Scoped chat state hook isolating drafts, receipts, and busy status per Run/thread.
     GatePanel.tsx          Approval gate buttons and cross-lane integration gates.
     RunPicker.tsx          Workspace-scoped Run selector, pagination cursor, and exact Run lookup.
-    DoodleSelect.tsx       Accessible hand-drawn portal select component.
     WorkerPanel.tsx        Fleet view: liveness, output reader, search, download, stop/abandon/focus.
     RequestAuditPanel.tsx  Mutation request audit table with live request-show receipts.
   harness.ts               Reactive state store for preferences, hydrating from /api/config.
   placement.ts             Client-side placement grammar and lane preflight validation.
-  layout.ts                Layout engines: Dagre layered (LR/TB) and Fruchterman–Reingold force-directed.
+  layout.ts                Layout engines: Dagre layered (LR/TB, 280x120 nodes) and Fruchterman–Reingold force-directed.
   types.ts / api.ts        Frontend data contracts and API client.
+  workbench.css            Sectional workbench layout, 200px nav rail, header, central detail, and responsive breakpoints.
+  chat-dock.css            Persistent right chat dock, message bubbles, thread navigation, and composer layout.
+  graph-motion.css         Task node styling (280x120), static edges, and scoped executing dot motion guards.
 
 scripts/
   build-binary.mjs         Bundles Vite web assets + server into a standalone Bun binary.

@@ -24,8 +24,8 @@
   align-items: stretch;
   gap: 6px;
   padding: 10px 12px;
-  border: 1.5px dashed var(--line-strong);
-  border-radius: 12px 10px 13px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
   background: var(--paper);
   color: var(--ink);
   font: inherit;

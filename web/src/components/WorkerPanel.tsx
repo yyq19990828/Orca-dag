@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import {
   abandonWorker,
   fetchEnvironments,
@@ -88,6 +88,23 @@ export const WorkerPanel = memo(function WorkerPanel({
 }) {
   const t = useT();
   const [openDispatch, setOpenDispatch] = useState<string | null>(null);
+  const generation = useRef(0);
+  const outputGeneration = useRef(0);
+  const selectedRun = useRef(runId);
+  if (selectedRun.current !== runId) {
+    selectedRun.current = runId;
+    generation.current++;
+    outputGeneration.current++;
+  }
+  useEffect(() => {
+    setOpenDispatch(null);
+    setDetail(null);
+    setDetailErr(null);
+    setOutput(null);
+    setOutputErr(null);
+    setErr(null);
+    return () => { generation.current++; outputGeneration.current++; };
+  }, [runId]);
   const [detail, setDetail] = useState<WorkerDetailView | null>(null);
   const [detailErr, setDetailErr] = useState<string | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -142,13 +159,17 @@ export const WorkerPanel = memo(function WorkerPanel({
 
   const loadOutput = useCallback(
     async (dispatchId: string, cursor?: string, src?: string) => {
+      const selection = generation.current;
+      const request = ++outputGeneration.current;
       setOutputErr(null);
+      if (!cursor) setOutput(null);
       try {
-        const page = await fetchWorkerOutput(dispatchId, {
+        const page = await fetchWorkerOutput(runId, dispatchId, {
           cursor,
           limit: 40,
           source: src && src !== "auto" ? src : undefined,
         });
+        if (selection !== generation.current || request !== outputGeneration.current) return;
         setOutput((prev) => {
           // A cursor page CONTINUES the previous read; a fresh read replaces it.
           if (cursor && prev && prev.dispatchId === page.dispatchId && !page.sourceChanged) {
@@ -157,14 +178,16 @@ export const WorkerPanel = memo(function WorkerPanel({
           return page;
         });
       } catch (e) {
-        setOutputErr(String((e as Error).message ?? e));
+        if (selection === generation.current && request === outputGeneration.current) setOutputErr(String((e as Error).message ?? e));
       }
     },
-    [],
+    [runId],
   );
 
   const loadDetail = useCallback(
     async (dispatchId: string) => {
+      const request = ++generation.current;
+      outputGeneration.current++;
       setDetailLoading(true);
       setDetailErr(null);
       setDetail(null);
@@ -175,11 +198,12 @@ export const WorkerPanel = memo(function WorkerPanel({
       setControl(null);
       setSource("auto");
       try {
-        setDetail(await fetchWorkerDetail(runId, dispatchId));
+        const result = await fetchWorkerDetail(runId, dispatchId);
+        if (request === generation.current) setDetail(result);
       } catch (e) {
-        setDetailErr(String((e as Error).message ?? e));
+        if (request === generation.current) setDetailErr(String((e as Error).message ?? e));
       } finally {
-        setDetailLoading(false);
+        if (request === generation.current) setDetailLoading(false);
       }
     },
     [runId],
@@ -187,6 +211,8 @@ export const WorkerPanel = memo(function WorkerPanel({
 
   function toggle(row: WorkerRowView) {
     const open = openDispatch === row.dispatchId;
+    generation.current++;
+    outputGeneration.current++;
     setOpenDispatch(open ? null : row.dispatchId);
     setDetail(null);
     setDetailErr(null);
@@ -216,10 +242,16 @@ export const WorkerPanel = memo(function WorkerPanel({
   }
 
   async function decide(dispatchId: string, kind: "release" | "retain") {
+    const confirmed = await dialog.confirm({
+      title: t(kind === "release" ? "worker.releaseConfirmTitle" : "worker.retainConfirmTitle"),
+      message: t(kind === "release" ? "worker.releaseConfirmMessage" : "worker.retainConfirmMessage", { id: dispatchId }),
+      confirmLabel: t(kind === "release" ? "worker.release" : "worker.retain"),
+    });
+    if (!confirmed) return;
     setBusyId(dispatchId);
     setErr(null);
     try {
-      const receipt = await (kind === "release" ? releaseWorker(dispatchId) : retainWorker(dispatchId));
+      const receipt = await (kind === "release" ? releaseWorker(runId, dispatchId) : retainWorker(runId, dispatchId));
       setDecision({ dispatchId, kind, receipt });
     } catch (e) {
       setErr(String((e as Error).message ?? e));
@@ -254,7 +286,7 @@ export const WorkerPanel = memo(function WorkerPanel({
     const fleetLive = liveness?.verdict === "live" || (liveness?.qualifiedWorking ?? false);
     const fleetExited = liveness?.verdict === "exited";
     const prescribed = scoped?.fleet?.projection?.nextAction;
-    const hasPrescribed = Boolean(prescribed && prescribed.argv.length > 0);
+    const hasPrescribed = Boolean(prescribed?.kind === "abandon" && prescribed.argv.length > 0);
     const local = scoped?.fleet?.projection?.host?.kind === "local";
     const snapshot = scoped?.terminalResource;
     const resource = row.resource ?? snapshot;
@@ -484,6 +516,8 @@ export const WorkerPanel = memo(function WorkerPanel({
           const decisionOwed =
             row.terminalState === "release_pending" ||
             (attempt?.settled === true && !DECIDED.has(attempt.terminalDecision));
+          const canRelease = decisionOwed || row.terminalState === "retained" || row.terminalState === "reclaimable";
+          const canRetain = decisionOwed || (row.terminalState === "active" && row.supervision === "supervised" && Boolean(row.dispatchId));
           const scopedDetail = detail?.dispatchId === row.dispatchId && detail.runId === runId ? detail : null;
           const providerSession = scopedDetail?.providerSession;
           const oneShot = attempt?.openCodeUiLaunched === "oneshot";
@@ -499,6 +533,7 @@ export const WorkerPanel = memo(function WorkerPanel({
               <button className="workers__toggle" onClick={() => toggle(row)} aria-expanded={open}>
                 <span className="workers__summary">
                   <strong>{labelsById[row.taskId] || row.taskId}</strong>
+                  <span className="workers__dispatch">{t("record.dispatch")}: <code>{row.dispatchId || t("worker.noDispatch")}</code></span>
                   <span className="workers__context">{hostLabel}{providerLabel ? ` · ${providerLabel}` : ""}</span>
                   <span className="workers__context">{terminalStateLabel(row.terminalState)}</span>
                   {projection?.attention?.requiresAction && <span className="workers__attention">{t("attention.workerNeedsAttention")}</span>}
@@ -516,6 +551,7 @@ export const WorkerPanel = memo(function WorkerPanel({
                     <dt>{t("record.dispatch")}</dt><dd><code>{row.dispatchId || t("worker.noDispatch")}</code></dd>
                     <dt>{t("record.workerState")}</dt><dd>{row.workerState}</dd>
                     <dt>{t("worker.supervision")}</dt><dd>{t(`worker.supervision.${row.supervision}`)}</dd>
+                    <dt>{t("worker.autoReleaseAt")}</dt><dd>{scopedDetail?.autoReleaseAt ?? scopedDetail?.terminalResource?.autoReleaseAt ?? row.resource?.autoReleaseAt ?? row.projection?.autoReleaseAt ?? t("worker.unknown")}</dd>
                     {projection?.outcome && <><dt>{t("record.outcome")}</dt><dd>{projection.outcome}</dd></>}
                   </dl>
                   {/* --- Liveness: both evidence layers, never merged away --- */}
@@ -933,6 +969,7 @@ export const WorkerPanel = memo(function WorkerPanel({
                     {output?.dispatchId === row.dispatchId && (
                       <select
                         className="workers__source"
+                        aria-label={t("worker.outputSourceLabel")}
                         value={source}
                         onChange={(e) => {
                           setSource(e.target.value);
@@ -945,8 +982,9 @@ export const WorkerPanel = memo(function WorkerPanel({
                         )}
                       </select>
                     )}
-                    {decisionOwed && row.dispatchId && (
+                    {(canRelease || canRetain) && row.dispatchId && (
                       <>
+                        {canRelease && (
                         <button
                           className="btn btn--gate btn--ok"
                           disabled={disabled || busyId === row.dispatchId}
@@ -955,6 +993,8 @@ export const WorkerPanel = memo(function WorkerPanel({
                         >
                           {t("worker.release")}
                         </button>
+                        )}
+                        {canRetain && (
                         <button
                           className="btn btn--gate"
                           disabled={disabled || busyId === row.dispatchId}
@@ -963,6 +1003,7 @@ export const WorkerPanel = memo(function WorkerPanel({
                         >
                           {t("worker.retain")}
                         </button>
+                        )}
                       </>
                     )}
                     {/* Phase 7: one-worker intervention. Each button is

@@ -458,7 +458,12 @@ if (ns === "orchestration" && verb === "run-list") {
   // no existing test sets it.
   if (state.runUseFail) fail("run_use_refused", "scripted: binding refused");
   state.runId = runId;
-  ok({ run: state.runs?.[runId] ?? { id: runId, objective: "", legacy: 0 } });
+  state.runs ??= {};
+  const run = state.runs[runId] ?? { id: runId, objective: "", legacy: 0, consumer_generation: 0 };
+  run.coordinator_handle = flag("--from");
+  run.consumer_generation = (run.consumer_generation ?? 0) + 1;
+  state.runs[runId] = run;
+  ok({ run });
 } else if (ns === "orchestration" && verb === "run-show") {
   // Read-only: the Run record names its bound coordinator handle — the key a
   // restarting viewer uses to identify its own dead incarnation's terminal.
@@ -539,6 +544,25 @@ if (ns === "orchestration" && verb === "run-list") {
   const requestId = flag("--retry-request");
   const previous = requestId && state.requests?.[requestId];
   if (previous?.state === "completed") ok(previous.outcome);
+  if (target.startsWith("@")) {
+    state.seq ??= {};
+    const messages = Object.values(state.dispatches ?? {})
+      .filter(row => row.run_id === flag("--run") && row.status === "dispatched")
+      .map(row => ({
+        id: `msg_sent_${state.seq.message = (state.seq.message ?? 0) + 1}`,
+        run_id: row.run_id, dispatch_id: row.id, task_id: row.task_id,
+        to_handle: `dispatch:${row.id}`, from_handle: flag("--from"),
+        subject: flag("--subject"), body: flag("--body"), type: flag("--type"),
+      }));
+    state.sentMessages ??= [];
+    state.sentMessages.push(...messages);
+    const outcome = { messages, recipients: messages.length, warnings: [] };
+    if (requestId) {
+      state.requests ??= {};
+      state.requests[requestId] = { state: "completed", method: "orchestration.send", outcome };
+    }
+    ok(outcome);
+  }
   if (!dispatch || dispatch.status !== "dispatched") {
     fail("dispatch_not_active", `no active dispatch ${dispatchId ?? target}`);
   }
@@ -592,7 +616,8 @@ if (ns === "orchestration" && verb === "run-list") {
       d.messages = d.messages.filter((m) => m.id !== id);
     }
   }
-  const outcome = { message: { run_id: original?.run_id ?? state.runId, reply_to: id } };
+  state.seq ??= {};
+  const outcome = { message: { id: `msg_reply_${state.seq.message = (state.seq.message ?? 0) + 1}`, run_id: original?.run_id ?? state.runId, reply_to: id } };
   state.replies ??= [];
   state.replies.push({ id, body: flag("--body"), requestId });
   if (requestId) {

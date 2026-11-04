@@ -3,6 +3,7 @@ import {
   OrcaCliError,
   assertNativePresetSupport,
   bindRun,
+  canUseNativeCodexFreshWorktree,
   checkReadiness,
   checkInbox,
   closeTerminal,
@@ -69,6 +70,15 @@ import {
   type WorkerTerminalReceipt,
   FLEET_CAPABILITY_GAP_REASONS,
 } from "./orca";
+
+/** Missing remote hosts make absence unsuitable for lifecycle decisions. */
+async function listCompleteWorkers(...args: Parameters<typeof listWorkers>): Promise<OrcaWorkerRow[]> {
+  const inventory = await listWorkers(...args);
+  if (inventory.partialHostErrors.length) {
+    throw new OrcaCliError("Worker inventory is incomplete because one or more hosts could not be observed", "worker_inventory_incomplete");
+  }
+  return inventory.workers;
+}
 import type { MutationRequestMeta } from "./requestLedger";
 import { RequestLedger } from "./requestLedger";
 import type { LaneSeedPlacement, PlacementSpec, WorktreeLaneSpec, OpenCodeUi } from "./config";
@@ -79,6 +89,7 @@ import type { ProviderSessionBinding, ProviderSessionObservation, ProviderSessio
 import { LaunchHistory } from "./launchHistory";
 import { MERGE_PREP_MARKER, MERGE_INPUTS_V3_MARKER, StageGit, validateStagePlan, isMergeInputsQuestion, buildMergeInputs } from "./stageGit";
 import { performTaskGuidance, recoverTaskGuidance } from "./taskGuidance";
+import { replyReceiptMatches } from "./operatorMessages";
 import { verifyOpenCodeSession, type OpenCodeEvidence } from "./openCode";
 import { readWorkerOwnership, type WorkerCreatorEvidence, type WorkerOwnershipSnapshot } from "./workerOwnership";
 import { realpath } from "node:fs/promises";
@@ -529,7 +540,7 @@ export interface RecoverySummary {
 /** A question/escalation waiting on a human, surfaced in the InboxPanel. */
 export interface PendingInboxItem {
   messageId: string;
-  kind: "question" | "escalation";
+  kind: "question" | "escalation" | "stop_event";
   from: string;
   subject: string;
   body: string;
@@ -537,6 +548,7 @@ export interface PendingInboxItem {
   taskId: string | null;
   /** Dispatch identity from the worker payload, when the sender supplied it. */
   dispatchId?: string | null;
+  stopReason?: string | null;
 }
 
 /** Work this coordinator could not finish deciding — blocks completion. */
@@ -1051,7 +1063,11 @@ export type CoordinatorStatus = Omit<ReturnType<typeof coordinatorStatus>, "reco
  * was coordinating this Run, so the user's agent terminal will start getting
  * `consumer_fenced` on its own mutations until it runs `run-use` again.
  */
-export async function startCoordinator(opts: StartOpts): Promise<void> {
+export function startCoordinator(opts: StartOpts): Promise<void> {
+  return withLifecycleMutation(() => startCoordinatorLocked(opts));
+}
+
+async function startCoordinatorLocked(opts: StartOpts): Promise<void> {
   const unverified = [opts.defaultHarness, ...Object.values(opts.harnessByTask ?? {})].find(isUnverifiedHarness);
   if (unverified) {
     throw new OrcaCliError(
@@ -1134,7 +1150,7 @@ export async function startCoordinator(opts: StartOpts): Promise<void> {
     const nativeCandidates = planTasks.filter(task =>
       !["completed", "failed", "dispatched"].includes(task.status) &&
       isNativeFreshPreset(opts.harnessByTask[task.id] ?? opts.defaultHarness));
-    const nativeFleet = nativeCandidates.length ? await listWorkers(opts.runId, { includeRemote: true }) : [];
+    const nativeFleet = nativeCandidates.length ? await listCompleteWorkers(opts.runId, { includeRemote: true }) : [];
     const nativeLaunchTasks = nativeCandidates.filter(task => !nativeFleet.some(row =>
       row.runId === opts.runId && row.taskId === task.id && activeDispatch(row)));
     const nativeReadiness = nativeLaunchTasks.length ? await checkReadiness(true) : undefined;
@@ -1767,7 +1783,7 @@ async function recoverState(opts: StartOpts): Promise<void> {
   const coordinator = state.coordinatorHandle;
   // --include-remote: a crashed viewer's remote Dispatches live on their
   // connected servers; a local-only listing would misread them as lost.
-  const [tasks, rows] = await Promise.all([listTasks(runId), listWorkers(runId, { includeRemote: true })]);
+  const [tasks, rows] = await Promise.all([listTasks(runId), listCompleteWorkers(runId, { includeRemote: true })]);
   const [launches, requests] = await Promise.all([
     new LaunchHistory(getOrcaRuntime().workspace.dir).list(runId),
     new RequestLedger(getOrcaRuntime().workspace.dir).list(),
@@ -2344,7 +2360,7 @@ export async function stopCoordinator(): Promise<StopReport> {
     if (!state.runId) return null;
     try {
       const [tasks, workers] = await Promise.all([
-        listTasks(state.runId), listWorkers(state.runId, { includeRemote: true }),
+        listTasks(state.runId), listCompleteWorkers(state.runId, { includeRemote: true }),
       ]);
       const snapshot = await readWorkerOwnership(state.runId, tasks, workers, state.workerCreators);
       registerHandedBackOwnership(snapshot);
@@ -2605,7 +2621,7 @@ export async function stopCoordinator(): Promise<StopReport> {
     try {
       const [tasks, rows] = await Promise.all([
         listTasks(runIdAtStop),
-        listWorkers(runIdAtStop, { includeRemote: true }),
+        listCompleteWorkers(runIdAtStop, { includeRemote: true }),
       ]);
       await refreshRecoverySessions(runIdAtStop, tasks, rows, true);
     } catch {
@@ -2673,29 +2689,30 @@ async function answerInboxItemLocked(messageId: string, body: string): Promise<v
       "inbox_item_not_found",
     );
   }
+  if (item.kind === "stop_event") throw new OrcaCliError("A worker stop event is not a question; steer or settle its exact Dispatch", "stop_event_not_question");
   const from = state.coordinatorHandle;
   if (!from || !state.running) {
     throw new OrcaCliError("Coordinator is not running; cannot reply from its terminal.", "not_running");
   }
   const checkpoint = [...state.mailboxChecks.values()].find(row => row.pendingQuestionIds.includes(messageId));
   if (!checkpoint) throw new OrcaCliError("The question has no durable mailbox checkpoint", "mailbox_recovery_unknown");
+  const generation = coordinatorLoopGeneration;
+  await verifyMailboxAuthority(checkpoint.runId, from, generation);
   const bodyHash = createHash("sha256").update(body).digest("hex");
   const previous = checkpoint.replyRequests?.[messageId];
   if (previous && previous.bodyHash !== bodyHash) throw new OrcaCliError("The previous reply outcome is unknown; retry the same reply text", "reply_unknown");
   const request = previous ?? { requestId: newRequestId(), from, bodyHash, state: "prepared" as const };
   await saveMailbox({ ...checkpoint, replyRequests: { ...checkpoint.replyRequests, [messageId]: request } });
   await noteRequest({ requestId: request.requestId, operation: "reply", runId: checkpoint.runId, taskId: item.taskId, dispatchId: item.dispatchId ?? null });
-  if (!state.running || state.coordinatorHandle !== from) {
-    throw new OrcaCliError("Coordinator stopped before the reply was sent.", "not_running");
-  }
+  await verifyMailboxAuthority(checkpoint.runId, from, generation);
   try {
-    if (request.from !== from) {
+    if (previous) {
       const result = await showRequest(request.requestId);
-      const outcome = result?.outcome && typeof result.outcome === "object" ? result.outcome as Record<string, unknown> : null;
-      const message = outcome?.message && typeof outcome.message === "object" ? outcome.message as Record<string, unknown> : null;
+      const original = checkpoint.delivery?.messages.find(message => message.id === messageId);
       if (result?.requestId !== request.requestId || result.state !== "completed" ||
-          result.raw.method !== "orchestration.reply" || message?.run_id !== checkpoint.runId) {
-        throw new OrcaCliError(`Reply request ${request.requestId} belongs to a prior terminal and remains unresolved`, "reply_unknown");
+          result.raw.method !== "orchestration.reply" ||
+          !replyReceiptMatches(result.outcome, checkpoint.runId, messageId, original ? original.thread_id ?? original.id : null)) {
+        throw new OrcaCliError(`Reply request ${request.requestId} remains unresolved`, "reply_unknown");
       }
     } else {
       await replyToMessage(messageId, body, from, request.requestId);
@@ -2724,10 +2741,10 @@ async function recoverPendingReplies(): Promise<void> {
       if (!request || request.state === "completed") continue;
       try {
         const result = await showRequest(request.requestId);
-        const outcome = result?.outcome && typeof result.outcome === "object" ? result.outcome as Record<string, unknown> : null;
-        const message = outcome?.message && typeof outcome.message === "object" ? outcome.message as Record<string, unknown> : null;
+        const original = row.delivery?.messages.find(message => message.id === id);
         if (result?.requestId !== request.requestId || result.state !== "completed" ||
-            result.raw.method !== "orchestration.reply" || message?.run_id !== row.runId) continue;
+            result.raw.method !== "orchestration.reply" ||
+            !replyReceiptMatches(result.outcome, row.runId, id, original ? original.thread_id ?? original.id : null)) continue;
         const current = state.mailboxChecks.get(row.requestId);
         if (!current) continue;
         const pendingQuestionIds = current.pendingQuestionIds.filter(value => value !== id);
@@ -2751,7 +2768,7 @@ async function answerMergeQuestion(message: OrcaMessage): Promise<void> {
   if (!attempt || attempt.settled || attempt.dispatchId !== payload.dispatchId ||
       !state.ownedDispatchIds.has(payload.dispatchId)) return;
   const [tasks, gates, workers] = await Promise.all([
-    listTasks(state.runId), listGates(state.runId), listWorkers(state.runId, { includeRemote: true }),
+    listTasks(state.runId), listGates(state.runId), listCompleteWorkers(state.runId, { includeRemote: true }),
   ]);
   const task = tasks.find(item => item.id === payload.taskId && item.run_id === state.runId);
   if (!task || task.status !== "dispatched" || task.dispatch_id !== payload.dispatchId ||
@@ -2942,7 +2959,7 @@ async function waitForMailboxChecksAtStop(): Promise<void> {
     clearTimeout(timer);
   }
 }
-function withLifecycleMutation<T>(work: () => Promise<T>): Promise<T> {
+export function withLifecycleMutation<T>(work: () => Promise<T>): Promise<T> {
   const result = lifecycleMutationChain.then(work, work);
   lifecycleMutationChain = result.then(() => undefined, () => undefined);
   return result;
@@ -2965,6 +2982,11 @@ async function recoverGuidanceSends(runId: string): Promise<void> {
   }
   rows = await store.listGuidanceSends(runId);
   state.guidanceSends = new Map(rows.map(row => [row.requestId, row]));
+  for (const row of rows) {
+    if ((row.state === "enqueued" || row.state === "follow_up") && row.receipt) {
+      await resolveStopEvents(row.requestedDispatchId, `guidance:${row.requestId}`, row.createdAt);
+    }
+  }
   for (const row of rows) if (row.creationProven && row.receipt) state.ownedDispatchIds.add(row.receipt.dispatchId);
   for (const row of rows) {
     const receipt = row.receipt;
@@ -3008,6 +3030,11 @@ export async function sendTaskGuidance(input: {
     if (!state.running || state.runId !== runId || !from || !store || !opts) {
       throw new OrcaCliError("The requested Run is not controlled by this coordinator", "not_running");
     }
+    const binding = await showRun(runId).catch(() => null);
+    if (!binding || binding.run.id !== runId || binding.run.coordinator_handle !== from ||
+        !state.running || state.runId !== runId || state.coordinatorHandle !== from) {
+      throw new OrcaCliError("The coordinator's current Run binding cannot be verified; inspect the Run before sending", "coordinator_control_required");
+    }
     const wasUnknown = [...state.guidanceSends.values()].some(row =>
       row.requestedTaskId === taskId && row.requestedDispatchId === state.attempts.get(taskId)?.dispatchId &&
       (row.state === "prepared" || row.state === "unknown"));
@@ -3027,7 +3054,7 @@ export async function sendTaskGuidance(input: {
     }
     const dispatchId = attempt.dispatchId;
     const [tasks, workers, detail] = await Promise.all([
-      listTasks(runId), listWorkers(runId, { includeRemote: true }), showWorkerDetail(dispatchId),
+      listTasks(runId), listCompleteWorkers(runId, { includeRemote: true }), showWorkerDetail(dispatchId),
     ]);
     const task = tasks.find(row => row.id === taskId && row.run_id === runId);
     const worker = workers.find(row => row.runId === runId && row.taskId === taskId && row.dispatchId === dispatchId);
@@ -3056,6 +3083,11 @@ export async function sendTaskGuidance(input: {
     const unknownStarts = [...state.unknownStartRequests.values()].filter(id => !state.attempts.has(id)).length;
     if (occupied.size + unbound + unknown + unknownStarts >= opts.maxConcurrency) {
       throw new OrcaCliError("No fleet capacity remains for a possible guidance follow-up", "guidance_capacity");
+    }
+    const freshBinding = await showRun(runId).catch(() => null);
+    if (!freshBinding || freshBinding.run.id !== runId || freshBinding.run.coordinator_handle !== from ||
+        !state.running || state.runId !== runId || state.coordinatorHandle !== from) {
+      throw new OrcaCliError("The coordinator's current Run binding changed; inspect the Run before sending", "coordinator_control_required");
     }
     try {
       const result = await performTaskGuidance({ ...input, dispatchId, from }, {
@@ -3091,6 +3123,61 @@ async function saveMailbox(row: MailboxCheckCheckpoint, generation = coordinator
   return updated;
 }
 
+function stopEventReason(message: OrcaMessage): string | null {
+  if (message.type !== "escalation" || !message.payload) return null;
+  try {
+    const payload = JSON.parse(message.payload) as { stopReason?: unknown; dispatchId?: unknown };
+    return typeof payload.dispatchId === "string" && ["finished", "errored", "needs-input", "exited"].includes(String(payload.stopReason))
+      ? String(payload.stopReason) : null;
+  } catch { return null; }
+}
+
+async function resolveStopEvents(dispatchId: string, evidence: string, after?: string, onlyMessageId?: string): Promise<void> {
+  for (const row of [...state.mailboxChecks.values()]) {
+    const matches = (row.delivery?.messages ?? []).filter(message =>
+      row.pendingQuestionIds.includes(message.id) && (!onlyMessageId || message.id === onlyMessageId) && stopEventReason(message) &&
+      parseWorkerDonePayload(message)?.dispatchId === dispatchId &&
+      (!after || (Number.isFinite(Date.parse(message.created_at)) && Date.parse(message.created_at) <= Date.parse(after))));
+    if (!matches.length) continue;
+    const ids = new Set(matches.map(message => message.id));
+    const pendingQuestionIds = row.pendingQuestionIds.filter(id => !ids.has(id));
+    const resolvedStopEvents = { ...row.resolvedStopEvents };
+    for (const message of matches) resolvedStopEvents[message.id] = { dispatchId, evidence };
+    await saveMailbox({ ...row, pendingQuestionIds, resolvedStopEvents,
+      state: row.state !== "received" && row.delivery?.deliveryAcknowledged === true && !pendingQuestionIds.length &&
+        row.processedMessageIds.length === row.delivery.messages.length ? "completed" : row.state });
+    state.inbox = state.inbox.filter(item => !ids.has(item.messageId));
+  }
+}
+
+async function verifyMailboxAuthority(runId: string, from: string, generation: number): Promise<void> {
+  const binding = await showRun(runId).catch(() => null);
+  if (!binding || binding.run.id !== runId || binding.run.coordinator_handle !== from ||
+      !state.running || state.runId !== runId || state.coordinatorHandle !== from ||
+      generation !== coordinatorLoopGeneration) {
+    throw new OrcaCliError("The coordinator's Run binding cannot be verified; inspect the Run before acting", "coordinator_control_required");
+  }
+}
+
+/** Record an explicit operator acknowledgement, without settling the Task. */
+export async function acknowledgeStopEvent(runId: string, messageId: string, dispatchId: string): Promise<void> {
+  await withMailboxMutation(async () => {
+    if (!state.running || state.runId !== runId) throw new OrcaCliError("The requested Run is not controlled by this coordinator", "not_running");
+    const from = state.coordinatorHandle;
+    if (!from) throw new OrcaCliError("The requested Run has no coordinator handle", "not_running");
+    const generation = coordinatorLoopGeneration;
+    await verifyMailboxAuthority(runId, from, generation);
+    const event = [...state.mailboxChecks.values()].flatMap(row => row.delivery?.messages ?? [])
+      .find(message => message.id === messageId && message.run_id === runId && stopEventReason(message) &&
+        parseWorkerDonePayload(message)?.dispatchId === dispatchId);
+    if (!event || !state.inbox.some(item => item.messageId === messageId && item.kind === "stop_event")) {
+      throw new OrcaCliError("The exact stop event is no longer pending", "stop_event_not_found");
+    }
+    await resolveStopEvents(dispatchId, "operator_acknowledged", undefined, messageId);
+  });
+  await acknowledgePendingDeliveryIfResolved();
+}
+
 function mailboxQuestion(message: OrcaMessage): void {
   if (message.type !== "question" && message.type !== "escalation") throw new Error("Invalid pending mailbox question");
   const payload = parseWorkerDonePayload(message);
@@ -3102,11 +3189,15 @@ function mailboxQuestion(message: OrcaMessage): void {
     !!message.from_handle &&
     (message.from_handle === attempt.handle || message.from_handle === attempt.agentTerminalHandle ||
       (!!attempt.dispatchId && message.from_handle === `dispatch:${attempt.dispatchId}`)));
+  const stopReason = stopEventReason(message);
+  const stopAttempt = stopReason && payloadDispatchId
+    ? [...state.attempts.values()].find(attempt => attempt.dispatchId === payloadDispatchId) : undefined;
   state.inbox = [...state.inbox.filter(item => item.messageId !== message.id), {
-    messageId: message.id, kind: message.type, from: message.from_handle,
+    messageId: message.id, kind: stopReason ? "stop_event" : message.type, from: message.from_handle,
     subject: message.subject, body: message.body, createdAt: message.created_at,
-    taskId: relatedAttempt?.taskId ?? null,
-    dispatchId: relatedAttempt?.dispatchId ?? null,
+    taskId: relatedAttempt?.taskId ?? stopAttempt?.taskId ?? null,
+    dispatchId: relatedAttempt?.dispatchId ?? stopAttempt?.dispatchId ?? payloadDispatchId,
+    ...(stopReason ? { stopReason } : {}),
   }];
 }
 
@@ -3381,6 +3472,8 @@ async function processDelivery(
     } else switch (message.type) {
       case "worker_done": {
         const settledTaskId = await handleWorkerDone(message, tasks);
+        const settledDispatch = parseWorkerDonePayload(message)?.dispatchId;
+        if (settledTaskId && settledDispatch) await resolveStopEvents(settledDispatch, `worker_done:${message.id}`);
         if (settledTaskId && delivery.deliveryId) {
           // The batch may not be acknowledged until the ownership decision for
           // this worker has actually executed (plan §Phase 3 item 6) — an ack
@@ -3895,9 +3988,22 @@ async function reconcile(): Promise<void> {
   // Task DAG state and fleet accounting are independent read-only authorities.
   let [tasks, workerRows] = await Promise.all([
     listTasks(runId),
-    listWorkers(runId, { includeRemote: true }),
+    listCompleteWorkers(runId, { includeRemote: true }),
   ]);
   if (!stillMyTurn(generation) || state.runId !== runId) return;
+  // A later authoritative terminal Dispatch settles a stop event even when
+  // its worker_done was consumed elsewhere; it never invents a Task outcome.
+  const stoppedDispatches = new Set([...state.mailboxChecks.values()].flatMap(row =>
+    (row.delivery?.messages ?? []).filter(message => row.pendingQuestionIds.includes(message.id) && stopEventReason(message))
+      .map(message => parseWorkerDonePayload(message)?.dispatchId).filter((id): id is string => !!id)));
+  for (const dispatchId of stoppedDispatches) {
+    const detail = await showWorkerDetail(dispatchId).catch(() => null);
+    const dispatch = detail?.dispatch;
+    if (dispatch?.id === dispatchId && dispatch.runId === runId && dispatch.status !== null &&
+        ["succeeded", "completed", "failed", "stopped", "abandoned"].includes(dispatch.status)) {
+      await resolveStopEvents(dispatchId, `dispatch_settled:${dispatch.status}`);
+    }
+  }
   const byId = new Map(tasks.map((t) => [t.id, t]));
   // gate-resolve can promote a Task to ready before its dependencies settle.
   // Recheck the actual same-Run prerequisites for every scheduling path.
@@ -4725,7 +4831,7 @@ async function evaluateCompletionBoundary(tasks: OrcaTask[], gates: Gate[]): Pro
   let reclaimableRows: OrcaWorkerRow[] | null = null;
   if (state.cleanupDebt.some((debt) => debt.kind === "reclaimable")) {
     try {
-      reclaimableRows = await listWorkers(runId, { terminalState: "reclaimable", includeRemote: true });
+      reclaimableRows = await listCompleteWorkers(runId, { terminalState: "reclaimable", includeRemote: true });
       const reclaimableIds = new Set(reclaimableRows.map((row) => row.dispatchId));
       state.cleanupDebt = state.cleanupDebt.filter(
         (debt) => debt.kind !== "reclaimable" || (debt.dispatchId !== null && reclaimableIds.has(debt.dispatchId)),
@@ -4798,7 +4904,7 @@ async function evaluateCompletionBoundary(tasks: OrcaTask[], gates: Gate[]): Pro
   try {
     // --include-remote: a remote worker whose execution host still owes a
     // release blocks completion exactly like a local one would.
-    const reclaimable = reclaimableRows ?? await listWorkers(runId, { terminalState: "reclaimable", includeRemote: true });
+    const reclaimable = reclaimableRows ?? await listCompleteWorkers(runId, { terminalState: "reclaimable", includeRemote: true });
     const reclaimableIds = new Set(reclaimable.map((r) => r.dispatchId));
     state.cleanupDebt = state.cleanupDebt.filter(
       (d) => d.kind !== "reclaimable" || (d.dispatchId !== null && reclaimableIds.has(d.dispatchId)),
@@ -5287,18 +5393,20 @@ async function startOne(
         },
       });
     } else {
-      // A local newly created worktree must exist BEFORE Codex launches.
-      // worker-start's combined create + launch + injection can report
-      // input_accepted while Codex's final splash repaint discards the
-      // preamble. Create the workspace and identify its startup shell first;
-      // then the same ready-composer prewarm used by current/existing
-      // workspaces can bind that exact pane to the Dispatch.
+      // Orca 1.4.247 + Codex 0.166.0 delivered the first prompt with exact
+      // model/effort in real Linux child and top-level worktrees. Recheck that
+      // narrowly certified route immediately before launch. Older/unknown
+      // versions and other platforms retain create → verify base → prewarm:
+      // earlier combined launches could lose input during the final repaint.
+      // A refused/unknown native start never enters that compatibility path.
       let codexStartupTerminal: string | null = null;
       const creatingLocalCodex =
         attempt.harness === "codex" && !environment && !reuseTerminal &&
         process.platform !== "win32" &&
         (wt.worktree === "new-child" || wt.worktree === "new-top-level");
-      if (creatingLocalCodex) {
+      const nativeFreshCodex = creatingLocalCodex && process.platform === "linux" &&
+        await canUseNativeCodexFreshWorktree();
+      if (creatingLocalCodex && !nativeFreshCodex) {
         const created = await createLocalCodexWorktree({
           kind: wt.worktree as "new-child" | "new-top-level",
           name: wt.name ?? deriveWorktreeName(runId, laneId ?? task.id),
@@ -5327,10 +5435,9 @@ async function startOne(
       // server, so existing workspaces no longer need viewer-owned TUI
       // parsing. Inspect the RUNNING runtime: a newer CLI can still talk to
       // an older app. Missing/unrecognizable versions keep compatibility.
-      // New worktrees retain create → base-SHA verification → prewarm until
-      // that separate placement path has been accepted end to end. Choose
-      // before launching; never retry a failed native start by prewarming.
-      let nativeCodex = false;
+      // Fresh worktrees have their own newer, independently checked floor.
+      // Choose before effects; never retry a failed native start by prewarming.
+      let nativeCodex = nativeFreshCodex;
       if (canPrepareCodex && !creatingLocalCodex) {
         const status = await runOrca<{ runtime?: { appVersion?: string } }>(["status"]);
         const version = status.runtime?.appVersion;
@@ -5845,7 +5952,7 @@ async function retryWorkerLocked(idOrTask: string): Promise<{
 
     // Orca-side verification: worker-list is authoritative. A live Dispatch
     // for this task (local or connected) must never be double-placed over.
-    const rows = await listWorkers(runId, { includeRemote: true });
+    const rows = await listCompleteWorkers(runId, { includeRemote: true });
     if (!retryReservationIsCurrent(reservation)) {
       throw new OrcaCliError("Coordinator stopped or changed while retry was being verified.", "not_running");
     }

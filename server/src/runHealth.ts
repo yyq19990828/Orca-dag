@@ -306,7 +306,7 @@ export function buildRunHealth(opts: {
       evidence.tasks !== null &&
       evidence.gates !== null &&
       evidence.messages !== null &&
-      evidence.workers !== null,
+      evidence.workers !== null && !evidence.workerError,
     removedWork: opts.removedWork ?? null,
     warnings,
   };

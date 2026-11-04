@@ -171,6 +171,7 @@ describe("validateModel", () => {
   it("enforces the provider/model grammar for opencode (same as enumeration)", () => {
     assert.equal(validateModel("zai-coding-plan/glm-5.3-flash", "opencode"), "zai-coding-plan/glm-5.3-flash");
     assert.equal(validateModel("openai/gpt-4o.mini_2", "opencode"), "openai/gpt-4o.mini_2");
+    assert.equal(validateModel("openrouter/vendor/model#xhigh", "opencode"), "openrouter/vendor/model#xhigh");
     assertThrowsWith(() => validateModel("glm-5.3-flash", "opencode"), "invalid_model");
     assertThrowsWith(() => validateModel("zai/glm v2", "opencode"), "invalid_model");
     assertThrowsWith(() => validateModel("zai/glm;rm -rf /", "opencode"), "invalid_model");
@@ -203,8 +204,8 @@ describe("validateModel", () => {
     assertThrowsWith(() => validateModel("zai-coding-plan/glm-5.3-flash#high/x", "opencode"), "invalid_model");
     assertThrowsWith(() => validateModel("zai-coding-plan/glm-5.3-flash#", "opencode"), "invalid_model");
     assertThrowsWith(() => validateModel("zai#high", "opencode"), "invalid_model");
-    // bounded length: a 65-char variant is rejected
-    assertThrowsWith(() => validateModel(`zai-coding-plan/glm-5.3-flash#${"x".repeat(65)}`, "opencode"), "invalid_model");
+    // Variant bounds match the OpenCode Model.Ref parser.
+    assertThrowsWith(() => validateModel(`zai-coding-plan/glm-5.3-flash#${"x".repeat(129)}`, "opencode"), "invalid_model");
   });
 
   it("keeps plain Claude/Codex model grammar unchanged", () => {

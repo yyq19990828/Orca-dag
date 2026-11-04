@@ -2,8 +2,8 @@ import dagre from "@dagrejs/dagre";
 import { Position, type Edge, type Node } from "@xyflow/react";
 import type { LayoutKind } from "./types";
 
-export const NODE_W = 210;
-export const NODE_H = 72;
+export const NODE_W = 280;
+export const NODE_H = 120;
 
 /**
  * Assign deterministic left-to-right (or top-to-bottom) positions using dagre —

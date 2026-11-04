@@ -49,14 +49,30 @@ viewer 作为一个具有直接控制 Orca 运行时能力的管理面进程，�
 |---|---|---|---|
 | `GET` | `/api/session` | 无 | 获取当前进程的 mutation token 以及自定义命令启用状态（响应头包含 `Cache-Control: no-store`）。 |
 | `GET` | `/api/readiness` | 无 | 获取 CLI 及其构建版本、目标运行时版本/状态、工作区信息及执行权限；不可执行时附上恢复原因。 |
-| `GET` | `/api/capabilities` | 无 | 返回运行时就绪状态、原始能力声明及识别后的编排支持状态；包括 V3 自动释放、keep-open、隐式 Run 能力声明、保留绑定、turn-stop 报告和立即返回的 ask 回执。能力声明不会让 viewer 隐式创建 Run。 |
+| `GET` | `/api/capabilities` | 无 | 返回运行时就绪状态、原始能力声明及识别后的编排支持状态（公共契约 1 即 `orchestration.contract.v1`、运行时协议 3、联盟生命周期结算协议 3、控制邮件协议 2，以及 `orchestration.federation-lifecycle-settlement.v1`）；包括自动释放、keep-open、隐式 Run 能力声明、保留绑定、turn-stop 报告和立即返回的 ask 回执。能力声明不会让 viewer 隐式创建 Run。 |
 | `GET` | `/api/run-health?run=<id>` | `run` (查询参数): Run ID | 返回归属状态（`viewer_coordinator / viewer_coordinator_other_run / external_coordinator / unbound / unverifiable`）、coordinator 句柄、按来源划分的计数、警告与可空的 `health.removedWork` 摘要。 |
 | `GET` | `/api/dag?run=<id>` | `run`: Run ID | 获取指定 Run 的完整 DAG 结构，包括 `{ runId, nodes, edges, hierarchy, gates, readyWave, readiness, generatedAt }`。 |
-| `GET` | `/api/runs` | 无 | 列出精确归属于当前工作区的 Run 列表（基于任务创建者的 worktree 身份过滤，排除其他工作区的不相关 Run）。 |
-| `GET` | `/api/runs/page?cursor=` | `cursor` (可选): 不透明游标 | 分页读取原始 `run-list` 注册表；透传游标，每行携带轻量级本地归属证据。 |
-| `GET` | `/api/runs/:runId` | `:runId` (路径参数): Run ID | 通过 `run-show` 精确查找单个 Run，返回 `{ run, workspace }`；外来 Run 仍可见，但 `workspace.owned: false`。仅在 Orca 确认不存在时返回 `run_not_found`。 |
+| `GET` | `/api/runs` | 无 | 列出任务创建者身份严格匹配当前工作区（携带 `::${workspaceDir}@@` 标记）的 Run 列表，外加当前/已配置的空 Run。 |
+| `GET` | `/api/runs/page?cursor=&limit=` | `cursor` (可选), `limit` (可选 1..100，默认 100) | 分页读取并根据工作区归属证据过滤后的 Run 注册表；透传不透明游标，首屏刷新保留遍历游标，候选页过滤后可能为空但游标非空。 |
+| `GET` | `/api/runs/:runId` | `:runId` (路径参数): Run ID | 通过 `run-show` 精确查找单个 Run，返回 `{ run, workspace: { owned, evidence } }`；外来 Run 仍可见，但如实标记 `workspace.owned: false`。仅在 Orca 确认不存在时返回 `run_not_found`。 |
 | `GET` | `/api/runs/:runId/removed-work?cursor=` | `:runId`: Run ID, `cursor`: 不透明游标 | 按需分页拉取 Run 的已移除工作历史账本（`{ page: { entries, page: { hasMore, nextCursor } } }`）。单页上限为官方 200 行；不透明游标（1–2048 字符），校验游标推进（游标停滞返回 502，非法游标返回 400）；条目携带历史移除时活跃标记 `activeAtRemoval`，未知 kind 标记 `unreadable: true`；只读不可变，无重置接口。 |
 | `POST` | `/api/runs` | `{ objective?: string }` | 在当前工作区创建一个新的空 Run（通过一次性临时 coordinator 终端完成创建，避免占用主循环）。 |
+
+### 一次性变更权限与 Coordinator 显式控制
+
+对未处于当前 viewer 活跃调度下的 Run 发起一次性变更（回复提问、解决门、创建审批门、落定受阻 worker）时，必须提供与当前 Run 绑定匹配的显式确认信息：
+
+```json
+{
+  "coordinatorControl": {
+    "confirmed": true,
+    "coordinatorHandle": "term_coord_1",
+    "consumerGeneration": 1
+  }
+}
+```
+
+缺少该字段或绑定凭据不匹配时，服务以 HTTP 409 `coordinator_control_required` 拒绝，绝不擅自抢占或静默绑定临时终端。
 | `GET` | `/api/terminals` | 无 | 列出当前 Orca 运行时的所有终端实例。 |
 | `POST` | `/api/run` | `{ runId, harnessByTask?, modelByTask?, effortByTask?, retainByTask?, environmentByTask?, placementByTask?, worktreeLanes?, laneByTask?, defaultHarness?, maxConcurrency? }` | 启动自驱动 coordinator 循环开始调度指定的 Run。若当前环境只读则返回 503，若已在协调则返回 409。 |
 | `POST` | `/api/run-stop` | 无 | 停止当前正在运行的 coordinator 调度循环，并安全回收/结算所有已派发的活跃 worker。 |
@@ -64,37 +80,39 @@ viewer 作为一个具有直接控制 Orca 运行时能力的管理面进程，�
 | `GET` | `/api/worktree-lanes?run=<id>` | `run`: Run ID | 获取指定 Run 的 workspace lane 规划以及每条 lane 由 Orca 推导的运行时身份（包含状态、精确选择器、worktree ID、路径、分支、HEAD 和来源）。 |
 | `POST` | `/api/worktree-lanes/:laneId/open-changed` | `:laneId`: Lane 标识符 | 在 Orca 编辑器中打开指定 lane 本地工作区的改动文件和 diff（工作区身份不可验证时禁用）。 |
 | `POST` | `/api/worktree-lanes/:laneId/remove` | `:laneId`: Lane 标识符 | 调用 `orca worktree rm` 显式移除已验证且已落定的 lane 工作区；需要归属落定与显式确认，归档钩子失败原样暴露，绝不自动豁免。 |
-| `GET` | `/api/worktrees` | 无 | 获取 Orca 发现的本地工作区列表（`worktree list`）；作为精确已有放置（existing placement）的选择器来源，绝不通过文件系统猜测。 |
+| `GET` | `/api/worktrees` | 无 | 获取 Orca 发现的本地工作区列表（`worktree list`）；与限定 Run 的 `GET /api/workers?run=<id>` 共同构成按需清理候选清单审查数据源。 |
 | `GET` | `/api/worktrees/:worktreeId` | `:worktreeId`: Worktree 标识符 | 通过 `worktree show` 读取单个工作区的持久身份；仅在 Orca 明确不存在时返回 404，传输错误如实向上传播。 |
 | `GET` | `/api/repos` | 无 | 获取 Orca 发现的本地注册仓库列表（`repo list`）；作为新建顶层工作树（new top-level）的选择器来源。 |
-| `GET` | `/api/inbox?run=<id>` | `run`: Run ID | 兼容接口：获取指定 Run 的待处理提问、升级项及未处理的清理债务。 |
+| `GET` | `/api/inbox?run=<id>` | `run`: Run ID | 获取指定 Run 的待处理提问、升级项、stop 事件及未处理的清理债务。条目明确区分 `kind: "question"`（可回复）与 `kind: "stop_event"`（包含 `stopReason` 如 `finished`, `errored`, `needs-input`, `exited`，属于事件，由精确 Dispatch 引导、操作员决断或权威结算解决，不能通过伪造回复或合成成功结算）。 |
 | `GET` | `/api/activity?run=<id>&after=&limit=` | `run`: Run ID, `after`: 游标, `limit`: 分页条数 | 获取严格归属于指定 Run 的可读 Activity 列表、每阶段 fleet 运行态以及有界的 coordinator check receipt。 |
-| `GET` | `/api/activity/stream?run=<id>` | `run`: Run ID | 获取指定 Run 的实时 SSE (Server-Sent Events) 快照流；前端在连接异常时自动回退为有界轮询。 |
-| `POST` | `/api/messages/:id/reply` | `{ body: string, runId: string }`, `:id`: 消息 ID | 使用持久化请求 ID 回复 worker 提出的升级提问；合并输入提问（`[orca-dag:merge-inputs-v3]`）返回 StageGit 不可变提交 SHA。原生 reply 不会创建后续任务。 |
-| `POST` | `/api/tasks/:taskId/messages` | `{ runId, body, subject?, threadId? }` | 由当前 viewer 的活跃 coordinator 向经验证的活动 Task Dispatch 发送指导。返回带类型的 `TaskMessageReceipt`（`ok: true, kind: "enqueued" | "follow_up", runId, taskId, dispatchId, requestedTaskId, requestedDispatchId, followUpOf, requestId`）。 |
+| `GET` | `/api/activity/stream?run=<id>` | `run`: Run ID | 获取指定 Run 的实时 SSE (Server-Sent Events) 快照流；页面隐藏时（`document.visibilityState === 'hidden'`）自动暂停连接，重新可见时刷新重连，保留轨道收起期间的未读计数。 |
+| `POST` | `/api/messages/:id/reply` | `{ body: string, runId: string, coordinatorControl? }`, `:id`: 消息 ID | 使用持久化操作员消息助手（`operatorMessages.ts`）在 `sessions.json` 记录 checkpoint 后回复；合并输入提问（`[orca-dag:merge-inputs-v3]`，本地契约标记）返回 StageGit 不可变提交 SHA。未在当前活跃调度下时需要 `coordinatorControl`。 |
+| `POST` | `/api/messages/:id/acknowledge-stop-event` | `{ runId, dispatchId }` | 记录操作员对指定 live Run/Dispatch 停止事件的确认，不合成 Task 成功。 |
+| `POST` | `/api/tasks/:taskId/messages` | `{ runId, body, subject?, threadId? }` | 由当前 viewer 的活跃 coordinator 向经验证的活动 Task Dispatch 发送指导。返回带类型的 `TaskMessageReceipt`（`ok: true, kind: "enqueued" | "follow_up" | "recipient_run_bound_redirect", runId, taskId, dispatchId, requestedTaskId, requestedDispatchId, followUpOf, requestId, destinationRunId`）。正面证实的嵌套 coordinator 重定向明确区分源 Task/Dispatch 与实际目标 Run，不篡夺子所有权，不凭空生成 worker。 |
 | `GET` | `/api/audiences?run=<id>` | `run`: Run ID | 获取当前 Run 的群发受众预览（包含 `@all` 及已发现的有效 worktree），携带当前 coordinator 活跃状态与发现错误。 |
-| `POST` | `/api/messages/group` | `{ runId, audience, body, subject?, type?, priority? }` | 向白名单受众发起广播通知。禁止发送生命周期消息（报 `forbidden_group_type`），未发现受众报 `unknown_audience`，非活跃协调者报 409。 |
-| `POST` | `/api/gates/:id/resolve` | `{ resolution: "approved" \| "rejected" \| "integrated", runId: string }` | 解决指定的审批门或跨 lane 集成门决策。 |
-| `GET` | `/api/workers?run=<id>` | `run`: Run ID | 获取指定 Run 完整、包含远程记录的 worker 历史列表（存活状态、终端信息、投影数据），作为启动偏好锁定的持久化证据。 |
+| `POST` | `/api/messages/group` | `{ runId, audience, body, subject?, type?, priority?, coordinatorControl? }` | 向白名单受众发起广播通知。禁止发送生命周期消息（报 `forbidden_group_type`），处理 `recipient_run_bound_redirect` 告警；未在当前活跃调度下时需要 `coordinatorControl`。 |
+| `POST` | `/api/gates` | `{ runId, taskId, question, coordinatorControl? }` | 为同 Run 尚未派发的任务创建规范审批门（`--options '["approved","rejected"]'`）。受 coordinator 生命周期锁（`withLifecycleMutation`）与请求审计保护。任务已派发、已有门或主机观测不完整时以 `gate_not_eligible` 拒绝。未在当前活跃调度下时需要 `coordinatorControl`。 |
+| `POST` | `/api/gates/:id/resolve` | `{ resolution: "approved" \| "rejected" \| "integrated", runId: string, coordinatorControl? }` | 解决指定的审批门或跨 lane 集成门决策。未在当前活跃调度下时需要 `coordinatorControl`。 |
+| `GET` | `/api/workers?run=<id>` | `run`: Run ID | 获取指定 Run 的有类型 `WorkerInventory`（`{ workers: OrcaWorkerRow[], partialHostErrors: unknown[] }`）。跨页汇总保留 `partialHostErrors`；远端主机缺失代表证据不全，绝不误判为已退出或借此清除债务。 |
 | `GET` | `/api/workers/:dispatchId?run=<id>` | `:dispatchId`: Dispatch ID, `run`: Run ID | 获取单个 worker 的持久化记录与 `worker-show` 证据（Dispatch/Worker 详情、PTY 事实、等待人工输入的 agentWait 证据）。 |
 | `GET` | `/api/session-bindings?run=<id>` | `run`: Run ID | 列出当前工作区下指定 Run 已绑定的精确 provider session 映射列表（不向 provider 发起探测）。 |
 | `PUT` | `/api/session-bindings/:dispatchId` | `{ runId, taskId, harness, sessionId }` | 重新校验 worker 与执行位置后，绑定已知的 provider session ID 并写入 `.orca-dag/sessions.json`。 |
 | `POST` | `/api/session-bindings/:dispatchId/probe` | `{ runId: string }` | 按需向 provider 探测该 Dispatch 已绑定的 session 状态；结果仅为观测数据，绝不作为 Task 结算依据。 |
-| `POST` | `/api/workers/:dispatchId/resolve-blocked` | `{ runId, result, acknowledgeUnknownProvider: true }` | 将人工核对结果写入已退出 worker 对应的受阻任务，使任务落定；原 Dispatch 保持失败状态。 |
-| `GET` | `/api/workers/:dispatchId/output` | `source`: auto/terminal/transcript, `cursor`, `limit` (1–200) | 分页获取指定 worker 的有界输出日志，标记日志来源（终端归档或精确 transcript）。 |
+| `POST` | `/api/workers/:dispatchId/resolve-blocked` | `{ runId, result, acknowledgeUnknownProvider: true, coordinatorControl? }` | 将人工核对结果写入已退出 worker 对应的受阻任务，使任务落定；原 Dispatch 保持失败状态。未在当前活跃调度下时需要 `coordinatorControl`。 |
+| `GET` | `/api/workers/:dispatchId/output?run=<id>` | `?run=<id>&source=auto/terminal/transcript&cursor=&limit=` | 分页获取指定 worker 的有界输出日志（限制 1–200），必须显式提供 `run` 作用域。 |
 | `POST` | `/api/workers/:dispatchId/stop` | `:dispatchId`: Dispatch ID | 停止一个经正面证实存活的 Dispatch。操作前重新读取 `worker-show` 并记录请求 ID；若通信丢失返回 `502 response_lost` 与请求 ID。 |
 | `POST` | `/api/workers/:dispatchId/abandon` | `:dispatchId`: Dispatch ID | 针对已退出或结果未知的尝试调用 `worker-abandon` 隔离编排权限；若 Orca 能证明 worker 仍存活则以 `abandon_refused` 拒绝。 |
 | `POST` | `/api/workers/:dispatchId/focus` | `:dispatchId`: Dispatch ID | 聚焦到本地 worker 所在的终端（`terminal switch`）；必须具备新鲜的 `agentWait` 证据，否则禁用。 |
 | `GET` | `/api/requests?run=<id>` | `run`: Run ID | 获取当前工作区已记录的变更请求审计列表，按 Run 划分作用域。 |
 | `GET` | `/api/requests/:requestId?run=<id>` | `:requestId`: 请求 ID | 查询单条请求的账本记录，并向 Orca 发起实时的只读 `request-show` 探测：返回 `{ state, interpretation, outcome }`。 |
-| `POST` | `/api/workers/:id/release` | `:id`: Worker/Dispatch ID | 对已落定的 worker 显式执行终端释放。 |
-| `POST` | `/api/workers/:id/retain` | `:id`: Worker/Dispatch ID | 显式将已落定的 worker 终端置为保留状态，供人工排错。 |
+| `POST` | `/api/workers/:id/release` | `{ runId }`, `:id`: Worker/Dispatch ID | 对已落定的 worker 显式执行终端释放。请求体必须提供 `runId`。 |
+| `POST` | `/api/workers/:id/retain` | `{ runId }`, `:id`: Worker/Dispatch ID | 显式将已落定的 worker 终端置为保留状态，供人工排错。请求体必须提供 `runId`。 |
 | `POST` | `/api/workers/:id/retry` | `:id`: Worker/Dispatch ID | 针对明确失败的尝试重新发起调度（继承原 harness、模型、effort 和放置参数）。 |
 | `POST` | `/api/files/open` | `{ path, worktree? }` | 在 Orca 编辑器中打开指定工作区下的文件进行审阅（仅限本地）。 |
 | `POST` | `/api/files/diff` | `{ path, worktree? }` | 在 Orca 编辑器中查看指定文件的 diff 差异对比。 |
 | `POST` | `/api/files/open-changed` | `{ worktree }` | 在 Orca 编辑器中打开指定工作区的所有已变动文件。 |
-| `POST` | `/api/worktrees/remove` | `{ worktreeSelector, confirmed: true }` | 使用精确选择器调用 `orca worktree rm` 移除工作树；必须提供已落定证据，否则以 `removal_evidence_required` 拒绝。 |
-| `GET` | `/api/models/:harness` | `:harness`: Harness 名称 | 本地工作区范围（`scope: "local-workspace"`）的模型建议性发现接口。返回 `{ harness, status, models, diagnostic, scope }`。区分成功空目录与发现失败（返回可控英文诊断，不泄露 stderr）。 |
+| `POST` | `/api/worktrees/remove` | `{ worktree, deleteBranch?: boolean, runHooks?: boolean, force?: boolean, allowFailedArchiveHook?: boolean, evidenceRequestId?: string, runId?: string }` | 调用 `orca worktree rm --worktree <worktree>` 移除工作树。传入 `deleteBranch: true` 时原生安全删除已合并分支，未合并分支如实保留；返回 `{ ok: true, requestId, receipt: { worktree, archiveHookOverride, preservedBranch, raw } }`。必须提供已落定证据，核查全局完整 fleet 列表（`listWorkers(undefined, { includeRemote: true })`）以保护未在终端列表中的其他 Run Chat，且受主工作区与活跃工作区保护。 |
+| `GET` | `/api/models/:harness` | `:harness`: Harness 名称 | 本地工作区范围（`scope: "local-workspace"`）的模型建议性发现接口。返回 `{ harness, status, models, diagnostic, scope }`。OpenCode 校验正则支持首斜杠后带命名空间的格式：`^[A-Za-z0-9._-]{1,128}/[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}(?:#[A-Za-z0-9._-]{1,128})?$`。 |
 | `GET` | `/api/environments` | 无 | 获取已保存的远程连接环境列表（`environment list`），包含对端通告的能力集。 |
 | `GET` | `/api/environments/:envId/worktrees?repo=` | `:envId`: 环境标识符, `repo`: 仓库路径 | 获取远程环境上的精确工作区选择器（格式为 `id:<repoId>::<path>`）。 |
 | `GET` | `/api/environments/:envId/repos` | `:envId`: 环境标识符 | 获取远程环境上已注册的仓库列表（用于新建顶层工作树）。 |
@@ -120,7 +138,7 @@ viewer 作为一个具有直接控制 Orca 运行时能力的管理面进程，�
 `.orca-dag/sessions.json` 除了 provider session 绑定外，还持久化关键恢复账本：
 - `mailboxChecks`：消费式 check 与旧版 ACK 的持久 checkpoint，记录 `requestId`、`delivery`、`processedMessageIds`、`pendingQuestionIds` 以及每题的 `replyRequests`。进程重启后，未完成的提问与流转批次会在新 check 之前恢复。
 - `guidanceSends`：coordinator 指导消息的持久 checkpoint，跟踪 `requestId`、`state`（`prepared`、`unknown`、`enqueued`、`follow_up`、`refused`）、`receipt`、`creationProven` 及清洗后的 `startEvidence`。
-
+- `operatorMessages`：非活跃 coordinator 提问回复与群发消息的持久 checkpoint 清单，在调用 Orca CLI 前落盘，通过只读 `request-show` 调和未知结果，防止盲目重复重发。
 这些账本是**故障恢复依据**，而非普通滚动审计日志。不支持新字段的旧版读取器会直接报错（`session binding store contains unknown fields`），因此包含未结算关键账本的 `sessions.json` 无法安全热降级至旧版读取器。
 ### Run 健康度与已移除工作账本
 

@@ -41,7 +41,9 @@ Orca DAG 将智能体中的规划与查看器中的执行监督分开：智能�
 - **任务定义不可原地修改。** 标题、spec 和依赖的修改需要在新 Run 中重新规划；不提供清空所有任务的 reset 入口，不把全局清理伪装为当前 Run 的操作。
 - **不确定不等于结束。** 失联、过期、unknown 或不可读证据，不代表 worker 已退出、操作未发生或结果已成功。不能据此自动重试、替换 worker、释放容量或关闭终端；启动失败也不自动重试。
 - **人工决策必须可追溯。** 审批与跨工作区集成保留人工确认；集成 gate 不能代替实际代码集成验证。请求意图、实际回执、worker 活性和清理决定不能合并成一个笼统的“成功”。
-- **证据按需展开。** 现有界面提供 Activity、任务级 Chat、Operations、worker 与工作区信息、任务结果、请求审计和能力诊断。保持任务名称与完整标识符之间的可追溯关系，未知值和原始证据不可被友好标签吞掉。
+- **证据按需展开。** 现有界面通过分节式工作台（Overview、Tasks、Decisions、Executions、Activity、Resources、Settings）与常驻通信侧栏呈现系统状态；顶栏提供带省略号与完整 Tooltip 的紧凑 Run 选择器（支持历史分页与精确 ID 查找，本页不提供新建 Run 按钮；新建 Run 由智能体规划或 CLI 完成，服务端 `POST /api/runs` 接口保持开放不变）。NodePanel 在中央阅读区直接以标准文档流（`h1.node-panel__title`，`position: static; width: 100%`）展示任务详情，并完整保留列表/图的滚动上下文与筛选状态。所有运维面板（`.gates`、`LanesPanel`、`CleanupPanel`、`WorkerPanel`、`SchedulerPanel`）均处于常规文档布局流中，彻底消除了绝对定位带来的内容交叉与遮挡缺陷。概览提供紧凑的待办操作摘要（`OperationsAttention` `summary` 变体）与流内跳转入口，决策分节提供完整操作列表（`full` 变体）。保持任务名称与完整标识符之间的可追溯关系，未知值和原始证据不可被友好标签吞掉。
+- **通信作用域与防篡改。** 右侧通信侧栏中用户草稿、繁忙状态、消息回执及不确定性标记通过 `useScopedChatState` 实施精准隔离：不确定性标记按 Run 隔离；输入草稿按 `[runId, conversationId, targetId/dispatchId]`（Run、会话及目标问题/派发标识）隔离；繁忙状态、错误与回执按会话 `[runId, conversationId]` 隔离；群播草稿按 `runId` 隔离。切换 Run 或接收者时草稿独立保留，绝不隐式向新 Run 或其他接收者派发消息。
+- **内存与性能边界客观表达。** V8 JavaScript 堆（JS Heap）不代表浏览器渲染进程或 GPU 合成器内存；严禁将 JS 堆指标直接等同于 GPU/渲染器内存改善，也不得将未完成验证的优化计划描述为实测性能提升。移除持续的 SVG 滤镜运算与常驻跑马灯动效减轻了计算负载，但未建立量化节省基准或通过相关认证；历史 Run 533 基线测得 JS 堆（旧值 5708840 / 新值 5769648）并无总内存或 GPU 资源缩减。
 - **本地控制面。** 服务不开放 CORS；写操作需要令牌，自定义执行命令需显式启用。后续界面工作不能削弱这些边界来简化交互。
 
 ## Brand Commitments
@@ -49,19 +51,20 @@ Orca DAG 将智能体中的规划与查看器中的执行监督分开：智能�
 - 产品及页面名称沿用 Orca DAG / Orca DAG Viewer。
 - npm 发布包名是 `orca-orchestration-launcher`；命令、技能名及运行痕迹保留 `orca-dag`。不能把上游的 npm 包名当作本项目的安装入口。
 - 文案必须清楚区分已知事实、用户请求、实际观测与待确认状态。不夸大执行支持或未完成的验证。
-- 本次初始化不指定新视觉风格，也不授权替换现有界面身份。视觉系统不在本产品记录中定义。
+- 界面已由用户确认采用低噪、资源高效的现代化分节式编排工作台（Sectional Workbench）与常驻通信侧栏，完全替代旧有纸张、蜡笔与 SVG 湍流滤镜风格。视觉规范见 [`DESIGN.md`](DESIGN.md)。
 
 ## Evidence on Hand
 
 以下路径相对于 `web/`：
 
 - [`../README.md`](../README.md) 与 [`../README_zh.md`](../README_zh.md)：产品边界、安装、典型流程和重要风险。
-- [`../docs/ui-layout.md`](../docs/ui-layout.md) 与 [`../docs/ui-layout_zh.md`](../docs/ui-layout_zh.md)：现有信息层级、Operations 分组、结果与证据呈现规则。
+- [`DESIGN.md`](DESIGN.md) 与 [`.impeccable/design.json`](.impeccable/design.json)：已落地的设计系统规范与组件扩展元数据。
+- [`.impeccable/surfaces/src-app-tsx.md`](.impeccable/surfaces/src-app-tsx.md)：工作台改造规范与界面协议。
+- [`../docs/ui-layout.md`](../docs/ui-layout.md) 与 [`../docs/ui-layout_zh.md`](../docs/ui-layout_zh.md)：分节式工作台信息层级、展示规则及浏览器端冒烟核验清单。
 - [`../docs/reference/viewer-features.md`](../docs/reference/viewer-features.md)：已记录的查看、执行、配置、审计和语言能力；位置等易变化描述应以当前实现核对。
 - [`../docs/reference/compatibility.md`](../docs/reference/compatibility.md)：智能体、版本、执行位置与已验证路径的支持边界；未运行的验证不能算作通过。
 - [`src/App.tsx`](src/App.tsx)、[`src/i18n/`](src/i18n/) 与 [`vite.config.ts`](vite.config.ts)：当前界面结构、双语资源和开发入口。
-- [`../docs/screenshot.png`](../docs/screenshot.png)：历史界面截图，包含已过时控件；不能作为当前功能、布局或操作安全性的唯一依据。
-
+- 界面视觉核验以真实浏览器运行截图与报告为依据。在本次深层布局重构后，既有检查套件（`npm run check`，841 项通过）及 CSS/import 构建全部通过；基于真实 Run 44 数据的 168 组样本测试（7 路由 × 12 视口 × 2 语言：375、390、900、901、959、960、1000、1024、1199、1200、1280、1440）已证实实现零文档溢出、零面板标题重叠及零主槽位几何不一致。无通知稳定状态下的双语顶栏实测高度为：宽屏（≥1200px）为 69px（单行合并主操作按钮），中等视口（901–1199px）为 117px，窄屏（≤900px）为 216px；导航按钮固定为 56px（行高 20px），设置面板同行控件统一为 40px × 360px。最终核验报告与截图保存于 `web/.impeccable/review/deep-layout-verification.json` 与 `deep-after-{section}-{lang}.png`；历史截图与基线数据不能作为当前功能或布局的依据。
 本次未建立用户研究、量化效率指标或无障碍合规证据；不得据此编造提升数据或宣称已通过 WCAG 认证。
 
 ## Product Principles

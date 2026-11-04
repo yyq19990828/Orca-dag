@@ -5,8 +5,7 @@ import { useEffect, useState } from "react";
  *
  * Orca's embedded browser disables background-tab timer throttling
  * (IntensiveWakeUpThrottling is off in its launch flags), so a hidden tab
- * keeps firing its 2s polls at full speed and re-rasterizing feTurbulence
- * regions nobody is watching — one of the heaviest costs this page has.
+ * otherwise keeps firing 2s polls and updating invisible projections.
  * Every periodic viewer-API caller in the app reads this flag and gates its
  * interval on it:
  *

@@ -49,14 +49,17 @@ CLI 自动选择顺序为：`ORCA_CLI_COMMAND` → 设置了 `ORCA_DEV_REPO_ROOT
 
 ## 点击 Run 之前先看懂界面
 
-| 区域 | 展示的信息 | 可执行的操作 |
+| 分节 / 区域 | 展示的信息 | 可执行的操作 |
 | --- | --- | --- |
-| Run 选择器与健康徽标 | 当前工作区的 Run 历史；coordinator 状态为 `viewer-owned`、`external`、`unbound` 或 `inconsistent`，并提供可空的 `removedWork` 摘要与按需分页加载（不提供重置数据库控件）。 | 选择或新建 Run、分页加载旧 Run、查看已移除工作历史，或按精确 Run ID 查找。 |
-| DAG、Stage 卡片与任务列表 | Task 说明、依赖箭头、单独的父子连线、状态、结果和 worker 实际工作区；移动端（≤760px）默认提供可读垂直任务列表。 | 选中 Stage（点击或键盘 Enter/Space），在设置锁定前选择其启动参数；移动端可自由切换任务列表与图画布。 |
-| Scheduler | 就绪波次、可用容量及每个等待中的 Stage 的原因。 | 区分依赖未满足、决策门、无空闲槽位或状态未知。 |
-| Chat / Activity | 派工、回复、持久化发送、coordinator 检查和事件时间线。 | 回答问题，或向 Orca 已确认活跃的 Dispatch 发送指导。 |
-| Operational details | Workers、决策门、工作区 lane、Recovery、能力和 Request audit。 | 重试、停止、放弃、集成或移除之前先查看证据。 |
-
+| 顶栏与 Run 选择器 | 当前工作区的 Run 历史；coordinator 状态（`viewer-owned`、`external`、`unbound`、`inconsistent`）、传送动作组（Run/Stop）、连接状态与中英切换。 | 选择既有 Run（规划/CLI 创建 Run，查看器仅读取既有 Run）、分页加载旧 Run、查看已移除工作历史，或按精确 Run ID 查找。 |
+| 概览与 Scheduler（Overview） | 阶段总计数、运维待办摘要（`OperationsAttention`）以及调度器就绪波次与阻断原因。 | 快速掌握 Run 进展、识别阻塞瓶颈并直接定位至关联任务或决策项。 |
+| 任务（Tasks：列表与图） | 无障碍垂直任务列表（`TaskList`）与懒加载 DAG 画布（`DagView`）；中央 `NodePanel` 详情区替换中央主内容，保留离开时的滚动位置与焦点。 | 切换列表与图视图、过滤任务、在锁定前配置节点启动参数，或查看报告与产物。 |
+| 决策（Decisions） | 待处理审批门（`GatePanel`）、跨 lane 集成门与中断启动恢复卡片（`RecoveryPanel`）。 | 审批或拒绝决策、核对并放行跨工作区代码集成，或安全重试/人工标记完成已阻塞任务。 |
+| 执行（Executions） | Worker 状态卡片（`WorkerPanel`）、存活与终端状态、归档输出日志、主机/模型详情与 coordinator 权限控制。 | 检查执行证据、搜索/下载日志、释放已落定终端或显式保留终端供调试排查。 |
+| 动态（Activity） | 单条共享 SSE 连接驱动的实时事件流（`ActivityPanel`）与变更请求账本（`RequestAuditPanel`）。 | 监控实时进展（后台页面自动暂停、前台刷新重连）、核对 coordinator check 回执与审计 API 记录。 |
+| 资源（Resources） | 工作区 Lane 管理（`LanesPanel`）与安全清理面板（`CleanupPanel`）。 | 管理串行隔离工作树链条、查看 lane 分支 diff，以及安全清理已合并分支。 |
+| 设置（Settings） | 全局执行默认偏好、最大并行容量与运行时预检能力诊断（`CapabilityPanel`）。 | 调整 Run 级别执行参数、启动前检查或审查各 agent 版本的就绪状态。 |
+| 常驻通信侧栏 | 右侧常驻通信面板（`.workbench-chat`），具备按 Run 隔离的作用域草稿、实时回执与紧凑受众选择器。 | 向活跃 worker 或 coordinator 发送指导，切换分节或 Run 时草稿独立保留。 |
 DAG 每两秒刷新一次。拖动节点只改变画布位置；布局可选横向/纵向分层或力导向。可选的 **Lead Stage** 只在图中标记语义上的主 agent 阶段，不授予 Orca coordinator 权限。界面支持英文和简体中文，语言选择按浏览器保存。
 
 界面区分正在读取、首读失败、确认为空与陈旧快照。尚未取得任务数据时，首次失败会显示
@@ -115,7 +118,7 @@ Orca Task 没有 harness、模型、放置位置或画布布局字段。viewer �
 
 viewer 创建与工作区对应的 Orca 终端，并绑定为 Run 的 coordinator。原 coordinator 会被权限隔离；带 Run 作用域的普通读取仍可进行。每一轮，viewer 找出就绪 Task，遵守依赖、门、lane 和 Max parallel，然后让 Orca 启动受监督 worker。`worker_done` 让 Task 落定；viewer 处理并确认收件箱 Delivery，再复用、明确保留或释放每个已落定终端。跨 lane 的汇合要等人确认 `integrated`；viewer 不会合并 Git 分支。
 
-新建 Run、解决 Gate 等单次界面修改会使用单独的临时 coordinator 终端，不借用正在运行的循环终端，否则会把它隔离。第二个指向**同一工作区**的 viewer 会报告 `coordinator_conflict`，而不会接管或关闭第一个 viewer 的终端；不同工作区的 coordinator 身份互不相同。
+通过 API/CLI 新建 Run、在界面解决 Gate 等单次修改会使用单独的临时 coordinator 终端，不借用正在运行的循环终端，否则会把它隔离。第二个指向**同一工作区**的 viewer 会报告 `coordinator_conflict`，而不会接管或关闭第一个 viewer 的终端；不同工作区的 coordinator 身份互不相同。
 
 ### 消息、会话与审计证据
 
@@ -295,11 +298,19 @@ helper 仍归活动创建者管理，以精确 `worker-show` Dispatch lineage �
 [Orca 1.4.229](https://github.com/stablyai/orca/releases/tag/v1.4.229) 扩大了原生聊天 worker 的范围，但不能据此认定 viewer 单独使用的 `opencode2` 路径已支持原生模型选择。现有 OpenCode 模型适配器，以及 Codex 创建工作区后验证基准再启动的顺序保持不变。
 
 - **原生拒绝不代表可以降级。** 不支持的 model/effort、无效参数或已知 agent 的 launcher 被禁用时，保留原尝试及回执并停车，绝不启动第二个 legacy worker。显式启用的自定义命令会在任何原生启动之前选择本地 legacy 路径。
-- **旧版 FIFO 批次须按归属约束确认**，包括只有被拒绝或重复报告的批次；ACK 返回的下一批也须处理。V3 消费式 check 则在读取时确认，仍须保留待处理工作并使用同一请求恢复。传输确认并不允许丢弃未回答的问题或未落定的归属。
-- **未决 gate 会阻止完成**，包括没有关联阻塞 Task 的 Run 级 gate。普通审批 gate 仅接受精确的已解决选项 `approve` 或 `approved`；Task 必须满足所有 gate 和同一 Run 内的依赖后才可运行。`integrated` 仍是独立且精确的集成决定。Orca 可能在仅通过一个审批后就报告 `ready`；其余未决 gate，或未完成、失败、阻塞、缺失的依赖，仍会将 Task 排除在就绪波外，并显示在等待原因中。
+- **旧版 FIFO 批次须按归属约束确认**，包括只有被拒绝或重复报告的批次；ACK 返回的下一批也须处理。消费式 check 则在读取时确认，仍须保留待处理工作、使用同一请求恢复并在 `sessions.json` 持久化关键账本（`mailboxChecks`、`guidanceSends`、`operatorMessages`）。传输确认并不允许丢弃未回答的问题或未落定的归属。官方公共编排契约为 contract 1（`orchestration.contract.v1`），运行时协议为 3，联盟生命周期结算协议为 3，控制邮件协议为 2；`[orca-dag:merge-inputs-v3]` 是本地 viewer 契约标记。
+- **未决 gate 会阻止完成与规范审批门创建**：未决 gate 会阻止完成，包括没有关联阻塞 Task 的 Run 级 gate。普通审批 gate 仅接受精确的已解决选项 `approve` 或 `approved`；Task 必须满足所有 gate 和同一 Run 内的依赖后才可运行。`integrated` 仍是独立且精确的集成决定。对于同 Run 尚未派发的任务，支持通过 `POST /api/gates` 预先创建规范审批门，受 coordinator 生命周期锁保护。
 - **Orca 可以纠正暂定启动失败。** Orca 接受精确同一 Run/Task/Dispatch 的迟到成功后，viewer 更新尝试结果，同时保留原启动回执和已执行的 release/retain 决策。旧报告、被拒绝报告或其他 Dispatch 都不能清除失败。
 
-本机 Orca 1.4.229 的只读 smoke 确认了 runtime readiness 与能力发现；所选环境不可达时保持只读，新建 Run 返回 `503 execution_disabled`。构建后页面的浏览器 smoke 还确认：该状态下执行和 **New Run** 均被禁用，而精确 ID 输入仍可编辑。原生拒绝、FIFO 消息、gate 推进和迟到纠正则使用隔离 CLI fixture 运行真实 coordinator 验证，没有启动真实付费 agent；这不代表全部 agent 都通过了 1.4.229 端到端验收。
+- **Coordinator 权限与防隐式夺权**：对未处于当前 viewer 活跃调度下的 Run 发起一次性变更时，服务严格拒绝隐式接管，强制要求提供与当前 Run 绑定匹配的显式控制确认（`coordinatorControl: { confirmed: true, coordinatorHandle: string | null, consumerGeneration: number | null }`），否则返回 409 `coordinator_control_required`。
+- **Stop 事件与真实提问分离**：原生 `stopReason` 升级属于事件（`kind: "stop_event"`），非可回复提问。必须通过精确 Dispatch 引导、操作员决断（`POST /api/messages/:id/acknowledge-stop-event`）或权威结算解决，绝不伪造回复或合成成功。
+- **不完整远程观测**：`listWorkers` 返回有类型的 `WorkerInventory`（`{ workers, partialHostErrors }`），跨页汇总保留 `partialHostErrors`。远端主机缺失代表证据不全，绝不误判为已退出或借此清除债务。
+- **有界工作区分页与安全清理**：`GET /api/runs/page?limit=1..100&cursor=` 严格根据工作区归属证据过滤 Run 候选页，刷新保留遍历游标。工作树清理使用 `worktree` 字段（`POST /api/worktrees/remove`），受主工作区与活跃工作区保护，支持原生安全 `deleteBranch: boolean`，仅删除已安全合并到上游的分支并返回 `preservedBranch` 证据。
+
+  移除前会重新检查包含其他 Run 的完整全局 fleet，以及当前终端清单。原生工作树在 worker 释放后仍可能保留初始 shell；`worktree_in_use` 会列出阻塞终端的 handle。重试前须在 Orca 中显式关闭这些终端，viewer 不会擅自关闭非 worker 终端。
+- **后台 Activity 流行为**：Activity EventSource（`/api/activity/stream`）在页面隐藏时（`document.visibilityState === 'hidden'`）自动暂停连接，重新可见时刷新重连，保留轨道收起期间的未读计数。
+
+本机 Orca 1.4.229 的只读 smoke 确认了 runtime readiness 与能力发现；所选环境不可达时保持只读，外部创建 Run 返回 `503 execution_disabled`。构建后页面的浏览器 smoke 还确认：该状态下执行已被禁用（查看器页面不提供 New Run 按钮，Run 创建由规划/CLI 执行），而精确 ID 输入仍可编辑。原生拒绝、FIFO 消息、gate 推进和迟到纠正则使用隔离 CLI fixture 运行真实 coordinator 验证，没有启动真实付费 agent；这不代表全部 agent 都通过了 1.4.229 端到端验收。
 
 **真实 agent 认证（2026-10-17）。** Run `run_e78451d88bc7` 在 Orca 1.4.229 上，通过默认的显式模型 one-shot 适配器，使用 OpenCode 2.0.28 和 `deepseek/deepseek-flash` 完成两个依赖任务。两个 OpenCode 会话导出均记录 provider `deepseek`、model `deepseek-flash`，并以 `idle / succeeded` 事件结束；模型使用情况不只是根据请求 argv 推断。
 
@@ -326,7 +337,7 @@ coordinator 回归套件覆盖 1.4.220 和 1.4.222：原生完成与释放、原
 
 Orca 1.4.217 修复了 Codex 就绪检测，并默认隔离每个新终端的后台服务。在 Codex 0.159.2 上的本机只读测试已确认：原生 `worker-start --agent codex` 能观察到回合开始、`live / agent_status`、精确 transcript 和已接受的 `worker_done`。因此，当 `status.runtime.appVersion` 至少为 1.4.217 时，viewer 对当前或已有 POSIX 工作区使用原生启动，直接传入模型与 effort。路径选择依据运行中的应用版本，不能只看较新的 CLI 版本。已有终端需要重新打开，才能获得 Orca 的隔离改动。参见 [1.4.217 发布说明](https://github.com/stablyai/orca/releases/tag/v1.4.217)。
 
-旧版或版本未知的运行时继续使用显式 `--enable hooks` 的预启动后绑定兼容路径。本地新建 POSIX 工作树也保留此路径，使创建及已提交 Stage 模式下的基准 SHA 校验在 worker 启动前完成；原生组合创建尚未在这里完成验收。兼容路径要求连续两帧稳定的空输入框，并拒绝 `model: loading`，但不再要求 `model:` 页脚：Codex 0.159.2 显示的是 `GPT-…`。远程和 Windows Codex 保留原生启动。原生启动失败会记录下来，不自动再启动一个兼容 worker。
+旧版或版本未知的运行时继续使用显式 `--enable hooks` 的预启动后绑定兼容路径。本地 Linux 新建 Git 工作树（`new-child` 与 `new-top-level`）在运行中的 Orca ≥ 1.4.247、CLI ≥ 1.4.247 且 Codex CLI ≥ 0.166.0 时已在 coordinator 启用原生 fresh-worktree 切换（`canUseNativeCodexFreshWorktree`），直接使用 `worker-start --agent codex --model --effort`。真实的 Viewer coordinator 端到端验证已在 Run `run_44b240b8e6ee` 通过（记录于 `.orca-dag/20261104T031219975Z-abcd/viewer-codex-verification.json`，基准提交为 1bb21a3，含 SIGKILL 重启恢复、提问回复、主动 Keep-open、作用域 Stop 杀死子进程与 blocked 记账；Native Chat 保持未测状态）。旧版或版本未知的运行时以及非 Linux 环境保留预启动绑定兼容路径。兼容路径要求连续两帧稳定的空输入框，并拒绝 `model: loading`，但不再要求 `model:` 页脚：Codex 0.159.2 显示的是 `GPT-…`。远程和 Windows Codex 保留原生启动。原生启动失败会记录下来，不自动再启动一个兼容 worker。
 
 在旧版运行时手动启动会话时，应在 Orca 管理的终端中新启动 `codex --enable hooks`；恢复会话可用 `codex --enable hooks resume`。在 Dispatch 运行期间，用 `worker-list` 检查 `liveness.source: agent_status`。仅凭 `missing_status` 不能判断进程已退出，也不能据此重试。`worker-release` 可能保留被归为 `user_takeover` 的终端；终端归属判定与进度、完成监督是否成功是不同的结果。
 

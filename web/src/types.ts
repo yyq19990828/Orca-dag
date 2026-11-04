@@ -113,26 +113,22 @@ export interface OrcaRun {
 }
 
 export interface StatusMeta {
-  /** Crayon stroke color — node border, legend dot. */
+  /** Status marker color. */
   color: string;
-  /** Soft crayon wash — node fill. */
+  /** Subtle status surface. */
   bg: string;
-  /** Darker crayon ink — status label text, for contrast on the wash. */
+  /** Status text color. */
   ink: string;
 }
 
-// A box of fresh crayons on paper. Each status gets a stroke, a soft wash fill,
-// and a darker ink for legible labels. Display names are NOT part of this
-// table: the wording is owned by i18n (`t("status.<status>")`), so the canvas,
-// the legend and the panels can never disagree — in either language — and a
-// language switch re-renders every one of them through its own subscription.
+// Status wording belongs to i18n; this palette is shared by the canvas and panels.
 export const STATUS_META: Record<TaskStatus, StatusMeta> = {
-  pending: { color: "#C6C1B4", bg: "#F3F1EA", ink: "#8A857A" },
-  ready: { color: "#7BB7E0", bg: "#EAF4FB", ink: "#3E7BA6" },
-  dispatched: { color: "#F0B94E", bg: "#FDF4E1", ink: "#B37F16" },
-  completed: { color: "#7FC98C", bg: "#EBF7EE", ink: "#3E9A55" },
-  failed: { color: "#EA6B5E", bg: "#FCECE9", ink: "#C23B2E" },
-  blocked: { color: "#B79FE0", bg: "#F2EDFB", ink: "#7B5CB8" },
+  pending: { color: "#64748b", bg: "#f1f5f9", ink: "#475569" },
+  ready: { color: "#2563a8", bg: "#eaf2fb", ink: "#1d4f83" },
+  dispatched: { color: "#a9650a", bg: "#fff5e5", ink: "#865008" },
+  completed: { color: "#23805a", bg: "#e9f6ef", ink: "#176444" },
+  failed: { color: "#be3e3e", bg: "#fceeee", ink: "#a32f2f" },
+  blocked: { color: "#a15c1b", bg: "#fff3e7", ink: "#804817" },
 };
 
 /**
@@ -219,6 +215,7 @@ export interface WorkerTerminalResourceView {
   releaseError: string | null;
   recoveryAttemptCount: number | null;
   lastRecoveryAt: string | null;
+  autoReleaseAt?: string | null;
 }
 
 /**
@@ -261,6 +258,7 @@ export interface WorkerRowView {
     stage: { worker: string; dispatch: string; detail: string | null; activity: string } | null;
     nextAction: { kind: string; argv: string[] } | null;
     attention: { categories: string[]; requiresAction: boolean } | null;
+    autoReleaseAt?: string | null;
     host?: { kind: string; id: string } | null;
     launch?: {
       agent?: string | null;
@@ -330,6 +328,7 @@ export interface WorkerDetailView {
   dispatchId: string;
   runId: string | null;
   taskId: string | null;
+  autoReleaseAt?: string | null;
   launchMode?: NativeLaunchMode | null;
   launch: {
     agent: string | null;
@@ -522,8 +521,9 @@ export interface WorkerStartReceiptView {
 
 /** Exact lineage returned by a task message, including any follow-up. */
 export interface TaskMessageReceipt {
-  kind: "enqueued" | "follow_up";
+  kind: "enqueued" | "follow_up" | "recipient_run_bound_redirect";
   runId: string;
+  destinationRunId: string | null;
   taskId: string;
   dispatchId: string;
   requestedTaskId: string;
@@ -649,12 +649,14 @@ export interface RequestDetailResponse {
 /** A worker question/escalation waiting on a human reply. */
 export interface PendingInboxItem {
   messageId: string;
-  kind: "question" | "escalation";
+  kind: "question" | "escalation" | "stop_event";
   from: string;
   subject: string;
   body: string;
   createdAt: string;
   taskId: string | null;
+  stopReason?: string | null;
+  dispatchId?: string | null;
 }
 
 /** Cleanup work the coordinator refuses to guess its way through. */
@@ -693,6 +695,7 @@ export interface ActivityEvent {
     | "reply"
     | "worker_done"
     | "escalation"
+    | "stop_event"
     | "gate"
     | "recovery"
     | "release"
@@ -722,7 +725,7 @@ export interface ActivityEvent {
   audience: string | null;
   read: boolean | null;
   actionable: null | {
-    kind: "reply" | "release" | "retain" | "retry";
+    kind: "reply" | "release" | "retain" | "retry" | "acknowledge_stop";
     targetId: string;
   };
   technical: {

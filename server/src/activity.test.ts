@@ -188,6 +188,28 @@ describe("human-readable activity projection", () => {
     assert.equal(snapshot.checks[0].agents[0].detail, "editing tests");
   });
 
+  it("keeps stop events distinct from replyable questions across pending and historical reads", () => {
+    const current = status();
+    current.inbox.pending.push({
+      messageId: "msg_stop", kind: "stop_event", from: "dispatch:ctx_stage",
+      subject: "Stopped", body: "Needs input", createdAt: "2026-09-21T00:00:04Z",
+      taskId: "task_stage", dispatchId: "ctx_stage", stopReason: "needs-input",
+    });
+    const messages = [
+      message({ id: "msg_question", type: "question", body: "Please answer" }),
+      message({ id: "msg_stop", type: "escalation", payload: JSON.stringify({ taskId: "task_stage", dispatchId: "ctx_stage", stopReason: "needs-input" }) }),
+    ];
+    const snapshot = buildActivitySnapshot({ runId: "run_a", tasks: [task()], workers: [worker()], messages, status: current });
+    assert.equal(snapshot.pendingCount, 1);
+    assert.deepEqual(snapshot.events.find((event) => event.id === "msg_question")?.actionable, { kind: "reply", targetId: "msg_question" });
+    assert.deepEqual(snapshot.events.find((event) => event.id === "msg_stop")?.actionable, { kind: "acknowledge_stop", targetId: "msg_stop" });
+    assert.equal(snapshot.events.find((event) => event.id === "msg_stop")?.kind, "stop_event");
+    const history = buildActivitySnapshot({ runId: "run_a", tasks: [task()], workers: [worker()], messages });
+    assert.equal(history.events.find((event) => event.id === "msg_stop")?.kind, "stop_event");
+    assert.equal(history.events.find((event) => event.id === "msg_stop")?.actionable, null);
+    assert.equal(history.events.find((event) => event.id === "msg_question")?.actionable, null);
+  });
+
   it("projects compact fleet presence and prefers runtime provider facts when launch echo is absent", () => {
     const observed = worker();
     observed.projection = {

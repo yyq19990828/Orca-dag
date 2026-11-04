@@ -18,6 +18,8 @@ export interface OperationsAttentionProps {
   /** Pass null while the durable, Run-scoped worker list is unavailable. */
   workers: readonly WorkerRowView[] | null;
   onFocus: (target: OperationFocus) => void;
+  variant?: "summary" | "full";
+  onOpenDecisions?: () => void;
 }
 
 export interface ActionableOperationSnapshots {
@@ -63,11 +65,9 @@ function attemptForWorker(
   row: WorkerRowView,
   attempts: readonly RunAttempt[],
 ): RunAttempt | undefined {
-  return (
-    (row.dispatchId
-      ? attempts.find((attempt) => attempt.dispatchId === row.dispatchId)
-      : undefined) ?? attempts.find((attempt) => attempt.taskId === row.taskId)
-  );
+  return row.dispatchId
+    ? attempts.find((attempt) => attempt.dispatchId === row.dispatchId && attempt.taskId === row.taskId)
+    : attempts.find((attempt) => attempt.taskId === row.taskId);
 }
 
 function workerNeedsDecision(row: WorkerRowView, attempt: RunAttempt | undefined): boolean {
@@ -88,6 +88,7 @@ type AttentionItem = {
   title: string;
   detail: string;
   action: string;
+  identity?: string;
 };
 
 function makeItems({ runId, dag, status, workers }: ActionableOperationSnapshots): AttentionItem[] {
@@ -113,16 +114,17 @@ function makeItems({ runId, dag, status, workers }: ActionableOperationSnapshots
   }
 
   for (const attempt of verifiedFailedStarts(scopedStatus?.attempts ?? [])) {
-    // RecoveryPanel treats taskId as the stable operation key for Retry.
-    // Deduplicate stale repeated attempt receipts for the same task in this compact list.
-    if (items.some((item) => item.kind === "recovery" && item.id === attempt.taskId)) continue;
+    // Retry remains task-scoped, but distinct Dispatch receipts remain visible.
+    const recoveryKey = `recovery:${attempt.taskId}:${attempt.dispatchId || ""}`;
+    if (items.some((item) => item.key === recoveryKey)) continue;
     items.push({
-      key: `recovery:${attempt.taskId}`,
+      key: recoveryKey,
       kind: "recovery",
       id: attempt.taskId,
       tone: "recovery",
       eyebrow: t("attention.startFailed"),
       title: labels.get(attempt.taskId) || attempt.taskId,
+      identity: attempt.dispatchId || undefined,
       detail: attempt.terminalDetail || t("attention.startFailedDetail"),
       action: t("attention.reviewRetry"),
     });
@@ -144,6 +146,7 @@ function makeItems({ runId, dag, status, workers }: ActionableOperationSnapshots
       tone: "worker",
       eyebrow: decisionOwed ? t("attention.decisionOwed") : t("attention.workerNeedsAttention"),
       title: labels.get(row.taskId) || row.taskId,
+      identity: row.dispatchId || undefined,
       detail: decisionOwed
         ? row.terminalState === "release_pending"
           ? t("attention.decisionPending")
@@ -194,6 +197,8 @@ export const OperationsAttention = memo(function OperationsAttention({
   status,
   workers,
   onFocus,
+  variant = "full",
+  onOpenDecisions,
 }: OperationsAttentionProps) {
   const t = useT();
   // makeItems() builds translated labels with the non-reactive `t` (t's
@@ -240,6 +245,15 @@ export const OperationsAttention = memo(function OperationsAttention({
         </span>
       </header>
 
+      {variant === "summary" ? (
+        onOpenDecisions && (
+          <button className="ops-attention__action" type="button" onClick={onOpenDecisions}>
+            {t("attention.openDecisions")}
+          </button>
+        )
+      ) : (
+        <>
+
       {items.length > 0 ? (
         <ul className="ops-attention__list">
           {visibleItems.map((item) => (
@@ -247,6 +261,7 @@ export const OperationsAttention = memo(function OperationsAttention({
               <div className="ops-attention__copy">
                 <span className="ops-attention__item-label">{item.eyebrow}</span>
                 <strong title={item.title}>{item.title}</strong>
+                {item.identity && <span className="ops-attention__detail">{t("record.dispatch")}: <code>{item.identity}</code></span>}
                 <span className="ops-attention__detail" title={item.detail}>
                   {item.detail}
                 </span>
@@ -255,7 +270,7 @@ export const OperationsAttention = memo(function OperationsAttention({
                 className="ops-attention__action"
                 type="button"
                 onClick={() => onFocus({ kind: item.kind, id: item.id })}
-                aria-label={`${item.action}: ${item.title}`}
+                aria-label={`${item.action}: ${item.title}${item.identity ? ` · ${item.identity}` : ""}`}
               >
                 {item.action}
                 <span aria-hidden="true"> →</span>
@@ -283,6 +298,8 @@ export const OperationsAttention = memo(function OperationsAttention({
         <div className="ops-attention__empty">
           <span aria-hidden="true">✓</span> {t("attention.emptyClean")}
         </div>
+      )}
+        </>
       )}
     </section>
   );

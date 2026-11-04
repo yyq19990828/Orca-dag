@@ -111,4 +111,20 @@ describe("durable task guidance", () => {
     assert.equal(rows[0].receipt?.dispatchId, "dispatch_2");
     assert.equal(rows[0].state, "unknown");
   });
+  it("recovers a positively evidenced nested coordinator redirect without adopting its Run", async () => {
+    const { store, rows } = memoryStore();
+    const outcome = { message: { run_id: "run_child", to_handle: "run:run_child" },
+      warnings: [{ code: "recipient_run_bound_redirect", recipient: "dispatch:dispatch_1" }] };
+    await assert.rejects(performTaskGuidance(input, { store, newRequestId: () => "req_redirect", send: async () => { throw new Error("lost"); } }));
+    const result = await recoverTaskGuidance(rows[0], { store, showRequest: async id => ({
+      requestId: id, state: "completed", interpretation: null, raw: { method: "orchestration.send" }, outcome,
+    }), showWorker: async () => { throw new Error("must not adopt or inspect child"); } });
+    assert.equal(result.receipt.kind, "recipient_run_bound_redirect");
+    assert.equal(result.receipt.runId, "run_1");
+    assert.equal(result.receipt.destinationRunId, "run_child");
+    assert.equal(result.receipt.dispatchId, "dispatch_1");
+    assert.equal(result.creationProven, false);
+    await assert.rejects(normalizeTaskMessageReceipt({ ...outcome, warnings: [{ code: "recipient_run_bound_redirect", recipient: "dispatch:other" }] }, input, "req_redirect"));
+    await assert.rejects(normalizeTaskMessageReceipt({ message: outcome.message }, input, "req_redirect"));
+  });
 });

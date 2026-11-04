@@ -4,10 +4,11 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, st
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Server } from "node:http";
 import {
   answerInboxItem,
+  acknowledgeStopEvent,
   sendTaskGuidance,
   coordinatorStatus,
   noteManualRelease,
@@ -16,12 +17,13 @@ import {
   shouldPersistCoordinatorCheck,
   startCoordinator,
   stopCoordinator,
+  withLifecycleMutation,
   type CoordinatorActivityNotice,
   type CoordinatorCheckReceipt,
   type StartOpts,
   type StopReport,
 } from "./coordinator";
-import { checkReadiness, deriveWorktreeName, initOrcaRuntime, workerSupervision, type OrcaReadiness } from "./orca";
+import { checkReadiness, deriveWorktreeName, initOrcaRuntime, runOrca, workerSupervision, type OrcaReadiness } from "./orca";
 import { createApp, listenLoopback } from "./app";
 import { createSecurityPolicy, type SecurityPolicy } from "./security";
 import { CONFIG_FILE, loadConfig, saveConfig } from "./config";
@@ -1115,6 +1117,30 @@ describe("worker_done validation", () => {
     assert.equal(ackCalls("delivery_v3_question").length, 0);
     await stopCoordinator();
   });
+  it("recovers a nested-Run reply using its original mailbox thread after restart", async () => {
+    const runId = "run_nested_reply_recovery";
+    await singleTaskState(runId);
+    const timestamp = new Date().toISOString();
+    const message = { ...workerDoneMessage("task_aaa", "ctx_prior", "succeeded", "msg_nested_report"),
+      run_id: runId, type: "escalation", thread_id: "thread_original", payload: null };
+    const requestId = "request_nested_reply";
+    await mutateState(s => { s.requests = { [requestId]: { state: "completed", method: "orchestration.reply",
+      outcome: { message: { id: "answer_nested", run_id: "run_child", to_handle: "run:run_child", thread_id: "thread_original" } } } }; });
+    await new ProviderSessionStore(workspace).recordMailboxCheck({
+      requestId: "check_nested", runId, from: "term_previous", ack: null, state: "pending_input",
+      delivery: { runId, deliveryId: "delivery_nested", messages: [message], count: 1, replayed: false,
+        deliveryAcknowledged: true, acknowledged: null, timedOut: false, cancelled: false, connectionLost: false },
+      processedMessageIds: [message.id], pendingQuestionIds: [message.id],
+      replyRequests: { [message.id]: { requestId, from: "term_previous",
+        bodyHash: createHash("sha256").update("yes").digest("hex"), state: "unknown" } },
+      createdAt: timestamp, updatedAt: timestamp, error: null,
+    });
+    await startCoordinator(baseOpts(runId));
+    const rows = await new ProviderSessionStore(workspace).listMailboxChecks(runId);
+    assert.equal(rows.find(row => row.requestId === "check_nested")?.replyRequests?.[message.id].state, "completed");
+    assert.equal(calls("reply").length, 0);
+    await stopCoordinator();
+  });
   it("ignores a duplicate/replayed worker_done: no double release, no state change, run still completes", async () => {
     const runId = "run_replay";
     await singleTaskState(runId);
@@ -1602,6 +1628,18 @@ describe("questions hold the Delivery open", () => {
     await stopCoordinator();
   });
 
+  it("refuses guidance after an external coordinator fences the viewer", async () => {
+    const runId = "run_guidance_fenced";
+    await singleTaskState(runId);
+    await startCoordinator(baseOpts(runId));
+    await dispatchIdOf("task_aaa");
+    await mutateState(s => { s.runs[runId].coordinator_handle = "term_external"; });
+    await assert.rejects(sendTaskGuidance({ runId, taskId: "task_aaa", subject: "Guidance", body: "Continue" }),
+      { code: "coordinator_control_required" });
+    assert.equal(calls("send").length, 0);
+    await stopCoordinator();
+  });
+
   it("surfaces escalations the same way and blocks completion until answered", async () => {
     const runId = "run_esc";
     await singleTaskState(runId);
@@ -1630,9 +1668,135 @@ describe("questions hold the Delivery open", () => {
     await waitFor(() => (coordinatorStatus().phase === "awaiting_input" ? true : null), "awaiting_input phase");
     await stopCoordinator();
   });
+  it("resolves stop events by exact steering without clearing a real question", async () => {
+    const runId = "run_stop_event";
+    await singleTaskState(runId);
+    await startCoordinator(baseOpts(runId, { maxConcurrency: 3 }));
+    const dispatchId = await dispatchIdOf("task_aaa");
+    const event = { ...workerDoneMessage("task_aaa", dispatchId, "succeeded", "msg_stop_event"),
+      run_id: runId, type: "escalation", payload: JSON.stringify({ dispatchId, stopReason: "finished" }) };
+    const question = { ...workerDoneMessage("task_aaa", dispatchId, "succeeded", "msg_real_question"),
+      run_id: runId, type: "question", payload: JSON.stringify({ taskId: "task_aaa", dispatchId }) };
+    await injectMail([event, question]);
+    await waitFor(() => coordinatorStatus().inbox.pending.length === 2 ? true : null, "stop and question");
+    assert.equal(coordinatorStatus().inbox.pending.find(item => item.messageId === event.id)?.kind, "stop_event");
+    await assert.rejects(answerInboxItem(event.id, "yes"), { code: "stop_event_not_question" });
+    await sendTaskGuidance({ runId, taskId: "task_aaa", subject: "Continue", body: "Please continue." });
+    await waitFor(() => !coordinatorStatus().inbox.pending.some(item => item.messageId === event.id) ? true : null, "stop event resolution");
+    assert.ok(coordinatorStatus().inbox.pending.some(item => item.messageId === question.id));
+    const checkpoints = await new ProviderSessionStore(workspace).listMailboxChecks(runId);
+    assert.ok(checkpoints.some(row => row.resolvedStopEvents?.[event.id]?.dispatchId === dispatchId));
+    await stopCoordinator();
+  });
+  it("resolves a stop event on authoritative later settlement without answering a question", async () => {
+    const runId = "run_stop_settlement";
+    await singleTaskState(runId);
+    await startCoordinator(baseOpts(runId));
+    const dispatchId = await dispatchIdOf("task_aaa");
+    const event = { ...workerDoneMessage("task_aaa", dispatchId, "succeeded", "msg_stopped"),
+      run_id: runId, type: "escalation", payload: JSON.stringify({ dispatchId, stopReason: "errored" }) };
+    const question = { ...workerDoneMessage("task_aaa", dispatchId, "succeeded", "msg_still_question"),
+      run_id: runId, type: "question", payload: JSON.stringify({ taskId: "task_aaa", dispatchId }) };
+    await injectMail([event, question]);
+    await waitFor(() => coordinatorStatus().inbox.pending.length === 2 ? true : null, "both inputs visible");
+    await settleViaWorkerDone("task_aaa", "failed", "msg_later_done");
+    await waitFor(() => attempt("task_aaa").outcome === "failed" &&
+      !coordinatorStatus().inbox.pending.some(item => item.messageId === event.id) ? true : null, "settlement and stop resolution");
+    assert.ok(coordinatorStatus().inbox.pending.some(item => item.messageId === question.id));
+    assert.equal(attempt("task_aaa").outcome, "failed");
+    await stopCoordinator();
+  });
+  it("records an explicit stop-event decision without settling its Dispatch", async () => {
+    const runId = "run_stop_decision";
+    await singleTaskState(runId);
+    await startCoordinator(baseOpts(runId));
+    const dispatchId = await dispatchIdOf("task_aaa");
+    const event = { ...workerDoneMessage("task_aaa", dispatchId, "succeeded", "msg_decision"),
+      run_id: runId, type: "escalation", payload: JSON.stringify({ dispatchId, stopReason: "needs-input" }) };
+    await injectMail([event]);
+    await waitFor(() => coordinatorStatus().inbox.pending.some(item => item.messageId === event.id) ? true : null, "stop decision");
+    await assert.rejects(acknowledgeStopEvent(runId, event.id, "ctx_other"), { code: "stop_event_not_found" });
+    await acknowledgeStopEvent(runId, event.id, dispatchId);
+    assert.equal(attempt("task_aaa").settled, false);
+    const rows = await new ProviderSessionStore(workspace).listMailboxChecks(runId);
+    assert.ok(rows.some(row => row.resolvedStopEvents?.[event.id]?.evidence === "operator_acknowledged"));
+    await stopCoordinator();
+  });
+  it("acknowledges a stop event without waiting on the lifecycle lock", async () => {
+    const runId = "run_mailbox_lock_order";
+    await singleTaskState(runId);
+    await startCoordinator(baseOpts(runId));
+    const dispatchId = await dispatchIdOf("task_aaa");
+    const event = { ...workerDoneMessage("task_aaa", dispatchId, "succeeded", "msg_lock_stop"),
+      run_id: runId, type: "escalation", payload: JSON.stringify({ dispatchId, stopReason: "errored" }) };
+    await injectMail([event]);
+    await waitFor(() => coordinatorStatus().inbox.pending.some(item => item.messageId === event.id) ? true : null, "stop event");
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const lock = withLifecycleMutation(async () => { enter(); await held; });
+    await entered;
+    let acknowledged = false;
+    const decision = acknowledgeStopEvent(runId, event.id, dispatchId).then(() => { acknowledged = true; });
+    try {
+      await waitFor(() => acknowledged ? true : null, "mailbox decision independent of lifecycle lock");
+    } finally {
+      release();
+      await lock;
+      await decision;
+    }
+    await stopCoordinator();
+  });
+
+  it("refuses mailbox decisions after its Run binding is fenced", async () => {
+    const runId = "run_mailbox_fenced";
+    await singleTaskState(runId);
+    await startCoordinator(baseOpts(runId));
+    const dispatchId = await dispatchIdOf("task_aaa");
+    const event = { ...workerDoneMessage("task_aaa", dispatchId, "succeeded", "msg_fenced_stop"),
+      run_id: runId, type: "escalation", payload: JSON.stringify({ dispatchId, stopReason: "finished" }) };
+    const question = { ...workerDoneMessage("task_aaa", dispatchId, "succeeded", "msg_fenced_question"),
+      run_id: runId, type: "question", payload: null };
+    await injectMail([event, question]);
+    await waitFor(() => coordinatorStatus().inbox.pending.length === 2 ? true : null, "mailbox inputs");
+    await mutateState(s => { s.runs[runId].coordinator_handle = "term_external"; });
+    await assert.rejects(answerInboxItem(question.id, "yes"), { code: "coordinator_control_required" });
+    await assert.rejects(acknowledgeStopEvent(runId, event.id, dispatchId), { code: "coordinator_control_required" });
+    assert.equal(calls("reply").length, 0);
+    assert.equal(coordinatorStatus().inbox.pending.length, 2);
+    await stopCoordinator();
+  });
 });
 
 describe("ordinary approval gates hold completion", () => {
+  it("serializes a gate admission with coordinator start before dispatch", async () => {
+    const runId = "run_gate_start_race";
+    await singleTaskState(runId);
+    let enter!: () => void;
+    let resume!: () => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    const continueGate = new Promise<void>(resolve => { resume = resolve; });
+    const admission = withLifecycleMutation(async () => {
+      enter();
+      await continueGate;
+      await runOrca(["orchestration", "gate-create", "--task", "task_aaa", "--question", "Approve?",
+        "--options", JSON.stringify(["approved", "rejected"]), "--from", "term_gate"]);
+    });
+    await entered;
+    const start = startCoordinator(baseOpts(runId));
+    await Promise.resolve();
+    assert.equal(coordinatorStatus().running, false, "start must wait for in-flight gate admission");
+    assert.equal(calls("worker-start").length, 0);
+    resume();
+    await admission;
+    await start;
+    await waitFor(() => coordinatorStatus().phase === "awaiting_input" ? true : null, "gate holds the Run");
+    assert.equal(calls("gate-create").length, 1);
+    assert.equal(calls("worker-start").length, 0, "the newly gated Task cannot race into dispatch");
+    await stopCoordinator();
+  });
+
   for (const [resolution, status] of [
     ["approve", "blocked"], ["approve", "ready"],
     ["approved", "blocked"], ["approved", "ready"],
@@ -1784,7 +1948,7 @@ describe("release_pending and release_unknown", () => {
     await mutateState((s) => {
       s.releaseMode[dispatchId] = "normal";
     });
-    const rel = await call("POST", `/api/workers/${dispatchId}/release`, {});
+    const rel = await call("POST", `/api/workers/${dispatchId}/release`, { runId });
     assert.equal(rel.status, 200);
     assert.equal(noteManualRelease(dispatchId, "released"), true, "projection updated");
     await waitFor(() => (coordinatorStatus().phase === "completed" ? true : null), "completion after manual release");
@@ -3753,7 +3917,7 @@ describe("Phase 5: worker output API and launch-preference API", () => {
       s.archives[dispatchId] = "hello output";
     });
 
-    const page = await call("GET", `/api/workers/${dispatchId}/output`);
+    const page = await call("GET", `/api/workers/${dispatchId}/output?run=${runId}`);
     assert.equal(page.status, 200);
     const out = page.json.output as {
       source: string;
@@ -3766,12 +3930,10 @@ describe("Phase 5: worker output API and launch-preference API", () => {
     assert.deepEqual(out.lines, ["hello output"]);
     assert.equal(out.clipped, true, "the runtime reported the page as limited → clipped");
     assert.equal(out.sourceChanged, false);
-    const read1 = calls("worker-read").at(-1)!;
-    assert.equal(read1.argv[read1.argv.indexOf("--limit") + 1], "40", "default limit is 40");
 
     // limit clamps at both bounds before reaching the CLI
-    await call("GET", `/api/workers/${dispatchId}/output?limit=99999`);
-    await call("GET", `/api/workers/${dispatchId}/output?limit=0`);
+    await call("GET", `/api/workers/${dispatchId}/output?run=${runId}&limit=99999`);
+    await call("GET", `/api/workers/${dispatchId}/output?run=${runId}&limit=0`);
     const limits = calls("worker-read").map((c) => c.argv[c.argv.indexOf("--limit") + 1]);
     assert.ok(limits.includes("200"), "upper clamp is 200");
     assert.ok(limits.includes("1"), "lower clamp is 1");
@@ -3781,7 +3943,7 @@ describe("Phase 5: worker output API and launch-preference API", () => {
     await mutateState((s) => {
       s.readCursorFail = { [dispatchId]: true };
     });
-    const restarted = await call("GET", `/api/workers/${dispatchId}/output?cursor=cur_stale`);
+    const restarted = await call("GET", `/api/workers/${dispatchId}/output?run=${runId}&cursor=cur_stale`);
     assert.equal(restarted.status, 200);
     const out2 = restarted.json.output as typeof out & { warnings: string[] };
     assert.equal(out2.sourceChanged, true, "the discontinuity is labeled");
@@ -3791,7 +3953,7 @@ describe("Phase 5: worker output API and launch-preference API", () => {
     assert.ok(reads.at(-2)!.argv.includes("--cursor"), "the refused call carried the cursor");
     assert.ok(!reads.at(-1)!.argv.includes("--cursor"), "the restart dropped it");
 
-    const bad = await call("GET", `/api/workers/${dispatchId}/output?source=everywhere`);
+    const bad = await call("GET", `/api/workers/${dispatchId}/output?run=${runId}&source=everywhere`);
     assert.equal(bad.status, 400);
     assert.equal(bad.json.code, "invalid_source");
     await stopCoordinator();

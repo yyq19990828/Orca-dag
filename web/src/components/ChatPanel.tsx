@@ -1,9 +1,12 @@
-import { Fragment, memo, useEffect, useMemo, useState } from "react";
-import { ApiError, fetchAudiencePreview, replyToMessage, sendGroupMessage, sendTaskMessage } from "../api";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { acknowledgeStopEvent, ApiError, fetchAudiencePreview, replyToMessage, sendGroupMessage, sendTaskMessage } from "../api";
 import { formatClock, formatDateTime, isUrgent, priorityLabel } from "../format";
 import { t, useLang, useT } from "../i18n";
 import { useDecisionDialog } from "./DecisionDialog";
+import { useCoordinatorControl } from "./useCoordinatorControl";
 import { DoodleSelect, type DoodleOption } from "./DoodleSelect";
+import { useScopedChatState } from "./useScopedChatState";
+import "../chat-dock.css";
 import type {
   ActivityEvent,
   ActivitySnapshot,
@@ -99,6 +102,7 @@ function eventHeading(event: ActivityEvent): string {
         : event.severity === "error" ? t("chat.heading.reportedFailure") : t("chat.heading.reportedOutcome");
     case "question": return t("chat.heading.question");
     case "escalation": return t("chat.heading.needsAttention");
+    case "stop_event": return t("chat.heading.stopEvent");
     case "reply": return t("chat.heading.reply");
     case "heartbeat": return t("chat.heading.working");
     default: return event.title;
@@ -147,29 +151,6 @@ function summaryStateKey(task: DagNode, presence: StagePresence | null, waiting:
   return task.status; // pending | ready | completed | failed | blocked
 }
 
-/** Connector words skipped when picking avatar initials ("Capability and Run
-    Health" is CR, not CA). */
-const AVATAR_STOP_WORDS = new Set([
-  "a", "an", "and", "for", "in", "of", "on", "or", "the", "to", "with",
-]);
-
-/**
- * Stage initials for the thread avatar. The old constant "S" made every stage
- * look identical in the list; two letters picked from the label's first two
- * meaningful words keep each row recognizable at a glance ("Integration and
- * Acceptance" → IA, "DAG Hierarchy and Ready Waves" → DH). Falls back to the
- * first letter (or "S" for an empty label).
- */
-function initialsOf(label: string): string {
-  const words = label
-    .split(/\s+/)
-    .map((word) => word.trim())
-    .filter((word) => word && !AVATAR_STOP_WORDS.has(word.toLowerCase()));
-  const picks = (words.length >= 2 ? words.slice(0, 2) : words.slice(0, 1)).map(
-    (word) => [...word][0]?.toUpperCase() ?? "",
-  );
-  return picks.join("") || "S";
-}
 
 function briefSummary(spec: string): string {
   const normalized = spec.replace(/\s+/g, " ").trim();
@@ -352,8 +333,10 @@ export const ChatPanel = memo(function ChatPanel({
   tasks,
   leadTaskId,
   onSelectTask,
+  onSelectWorker,
   onResolved,
   coordinatorActive,
+  active = true,
   disabled = false,
   disabledReason,
 }: {
@@ -362,8 +345,10 @@ export const ChatPanel = memo(function ChatPanel({
   tasks: DagNode[];
   leadTaskId: string | null;
   onSelectTask: (taskId: string) => void;
+  onSelectWorker: (dispatchId: string) => void;
   onResolved: () => void;
   coordinatorActive: boolean;
+  active?: boolean;
   disabled?: boolean;
   disabledReason?: string | null;
 }) {
@@ -431,16 +416,28 @@ export const ChatPanel = memo(function ChatPanel({
       });
   }, [lang, leadTaskId, snapshot.events, snapshot.presence, tasks]);
 
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  // Quiet Runs can accumulate hundreds of checks in one digest. Keep their
-  // evidence out of the DOM until the user opens Details, then reveal it in
-  // bounded pages so tab changes never style thousands of hidden elements.
-  const [expandedChecks, setExpandedChecks] = useState<Record<string, number>>({});
-  const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [messageReceipt, setMessageReceipt] = useState<TaskMessageReceipt | null>(null);
-  const [uncertainMessages, setUncertainMessages] = useState<Record<string, boolean>>({});
+  const [selectedId, setSelectedId] = useScopedChatState<string | null>(runId, null);
+  const selected = conversations.find((conversation) => conversation.id === selectedId) ?? null;
+  const conversationScope = JSON.stringify([runId, selectedId]);
+  // A new question or Dispatch is a new recipient. Retain the earlier draft
+  // separately instead of silently forwarding it to the replacement worker.
+  const draftScope = JSON.stringify([runId, selectedId,
+    selected?.pending.at(-1)?.actionable?.targetId ?? selected?.task?.dispatchId ?? null]);
+  const [expandedChecks, setExpandedChecks] = useScopedChatState<Record<string, number>>(conversationScope, {});
+  const [draft, setDraft] = useScopedChatState(draftScope, "");
+  const [busy, setBusy] = useScopedChatState(conversationScope, false);
+  const [error, setError] = useScopedChatState<string | null>(conversationScope, null);
+  const [messageReceipt, setMessageReceipt] = useScopedChatState<TaskMessageReceipt | null>(conversationScope, null);
+  const [operatorReceipt, setOperatorReceipt] = useScopedChatState<{ runId: string; value: string } | null>(conversationScope, null);
+  const [uncertainMessages, setUncertainMessages] = useScopedChatState<Record<string, boolean>>(runId, {});
+  const [timelineLimit, setTimelineLimit] = useScopedChatState(conversationScope, 100);
+  const messagesRef = useRef<HTMLDivElement>(null);
+  const scrollByConversation = useRef(new Map<string, number>());
+  useLayoutEffect(() => {
+    const element = messagesRef.current;
+    if (!active || !element) return;
+    element.scrollTop = scrollByConversation.current.get(conversationScope) ?? element.scrollHeight;
+  }, [active, conversationScope]);
 
   // --- Phase 6: Run-control group composer -----------------------------------
   //
@@ -449,33 +446,25 @@ export const ChatPanel = memo(function ChatPanel({
   // exact discovered @worktree:<id>). The composer never lets a recipient
   // string be typed — choosing is the only way to address a group.
   const dialog = useDecisionDialog();
-  const [preview, setPreview] = useState<AudiencePreviewResponse | null>(null);
-  const [audience, setAudience] = useState("");
-  const [groupSubject, setGroupSubject] = useState("");
-  const [groupType, setGroupType] = useState<"status" | "question">("status");
-  const [groupPriority, setGroupPriority] = useState<GroupPriority>("normal");
-  const [groupDraft, setGroupDraft] = useState("");
-  const [groupBusy, setGroupBusy] = useState(false);
-  const [groupError, setGroupError] = useState<string | null>(null);
-  const [previewNonce, setPreviewNonce] = useState(0);
-  const [previewFailed, setPreviewFailed] = useState(false);
+  const withControl = useCoordinatorControl();
+  const [preview, setPreview] = useScopedChatState<AudiencePreviewResponse | null>(runId, null);
+  const [audience, setAudience] = useScopedChatState(runId, "");
+  const [groupSubject, setGroupSubject] = useScopedChatState(runId, "");
+  const [groupType, setGroupType] = useScopedChatState<"status" | "question">(runId, "status");
+  const [groupPriority, setGroupPriority] = useScopedChatState<GroupPriority>(runId, "normal");
+  const [groupDraft, setGroupDraft] = useScopedChatState(runId, "");
+  const [groupBusy, setGroupBusy] = useScopedChatState(runId, false);
+  const [groupError, setGroupError] = useScopedChatState<string | null>(runId, null);
+  const [previewNonce, setPreviewNonce] = useScopedChatState(runId, 0);
+  const [previewFailed, setPreviewFailed] = useScopedChatState(runId, false);
 
-  useEffect(() => {
-    setSelectedId(null);
-    setExpandedChecks({});
-    setDraft("");
-    setError(null);
-    setMessageReceipt(null);
-    setUncertainMessages({});
-  }, [runId]);
 
   useEffect(() => {
     if (selectedId && conversations.some((conversation) => conversation.id === selectedId)) return;
     const next = conversations.find((conversation) => conversation.pending.length > 0) ?? conversations[0];
     setSelectedId(next?.id ?? null);
-  }, [conversations, selectedId]);
+  }, [conversations, selectedId, setSelectedId]);
 
-  const selected = conversations.find((conversation) => conversation.id === selectedId) ?? null;
 
   // Refresh the audience preview when Run control opens, when coordination
   // flips, and after every send (worker facts may have changed). Estimates
@@ -522,17 +511,18 @@ export const ChatPanel = memo(function ChatPanel({
     [lang, preview],
   );
 
-  // Keep the selection inside the offered set; default to the broadest group.
+  // A disappearing audience is not permission to redirect a composed message
+  // to @all. Keep the explicit selection; sending stays disabled until the
+  // operator chooses an audience present in the fresh preview.
   useEffect(() => {
-    if (audience && audienceOptions.some((option) => option.value === audience)) return;
-    setAudience(audienceOptions[0]?.value ?? "");
-  }, [audience, audienceOptions]);
+    if (!audience) setAudience(audienceOptions[0]?.value ?? "");
+  }, [audience, audienceOptions, setAudience]);
 
   const selectedAudience = preview?.audiences.find((option) => option.address === audience) ?? null;
 
   async function sendGroup() {
     const body = groupDraft.trim();
-    if (!body || !runId || disabled || groupBusy || !audience) return;
+    if (!body || !runId || disabled || groupBusy || !selectedAudience) return;
     const estimated = selectedAudience?.estimatedRecipients.length ?? 0;
     // In-app confirmation for every multi-recipient send. Group addresses are
     // multi-recipient by construction; the copy states the enqueue-only
@@ -549,7 +539,7 @@ export const ChatPanel = memo(function ChatPanel({
     setGroupBusy(true);
     setGroupError(null);
     try {
-      await sendGroupMessage({
+      const receipt = await sendGroupMessage({
         runId,
         audience,
         subject: groupSubject.trim() || undefined,
@@ -557,6 +547,7 @@ export const ChatPanel = memo(function ChatPanel({
         type: groupType,
         priority: groupPriority === "normal" ? null : groupPriority,
       });
+      setOperatorReceipt({ runId, value: JSON.stringify(receipt) });
       setGroupDraft("");
       setGroupSubject("");
       setPreviewNonce((nonce) => nonce + 1);
@@ -593,6 +584,12 @@ export const ChatPanel = memo(function ChatPanel({
       )
     : [];
   const timeline = buildTimeline(visibleEvents, selectedChecks, selected?.taskId ?? null);
+  // Keep unresolved actions visible even when their message predates the
+  // reading window. Older history remains available explicitly, not mounted
+  // forever in every hidden conversation.
+  const timelineStart = Math.max(0, timeline.length - timelineLimit);
+  const visibleTimeline = timeline.filter((item, index) =>
+    index >= timelineStart || (item.kind === "event" && Boolean(item.event.actionable)));
   const lastCheck = selectedChecks.at(-1) ?? null;
   const presenceSummary = selected?.task
     ? replyTarget?.summary ??
@@ -795,6 +792,24 @@ export const ChatPanel = memo(function ChatPanel({
     );
   }
 
+  async function acknowledge(event: ActivityEvent) {
+    if (!event.dispatchId || disabled || busy) return;
+    const confirmed = await dialog.confirm({
+      title: t("inbox.ackStopTitle"),
+      message: t("inbox.ackStopMessage", { dispatch: event.dispatchId, reason: String((event.technical.payload as { stopReason?: unknown } | undefined)?.stopReason ?? t("worker.unknown")) }),
+      confirmLabel: t("inbox.ackStop"),
+    });
+    if (!confirmed) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await acknowledgeStopEvent(runId, event.id, event.dispatchId);
+      onResolved();
+    } catch (error) {
+      setError(String((error as Error).message ?? error));
+    } finally { setBusy(false); }
+  }
+
   async function sendMessage() {
     const body = draft.trim();
     const targetId = replyTarget?.actionable?.targetId;
@@ -804,7 +819,10 @@ export const ChatPanel = memo(function ChatPanel({
     setError(null);
     setMessageReceipt(null);
     try {
-      if (targetId) await replyToMessage(targetId, body, runId);
+      if (targetId) {
+        const receipt = await withControl(runId, (control) => replyToMessage(targetId, body, runId, control));
+        setOperatorReceipt({ runId, value: JSON.stringify(receipt) });
+      }
       else setMessageReceipt(await sendTaskMessage(taskId!, body, runId));
       setDraft("");
       onResolved();
@@ -812,7 +830,10 @@ export const ChatPanel = memo(function ChatPanel({
       const reconciled = err instanceof ApiError && err.code === "guidance_reconciled";
       const diagnostic = String((err as Error).message ?? err);
       setError(reconciled ? `${t("chat.message.reconciled")}\n${diagnostic}` : diagnostic);
-      if (!targetId && taskId && !reconciled) {
+      // This local guard runs before the native send and checkpoint; a stale
+      // active-stage view is a definite refusal, not an ambiguous delivery.
+      const refusedBeforeSend = err instanceof ApiError && err.code === "active_dispatch_required";
+      if (!targetId && taskId && !reconciled && !refusedBeforeSend) {
         setUncertainMessages((current) => ({ ...current, [`${runId}:${taskId}`]: true }));
       }
     } finally {
@@ -840,85 +861,23 @@ export const ChatPanel = memo(function ChatPanel({
 
   return (
     <section className="chat" aria-label={t("chat.aria.section")}>
-      <nav className="chat__threads" aria-label={t("chat.aria.threadList")}>
-        <div className="chat__threads-title">
-          <span>{t("chat.threads.title")}</span>
-          <span>{conversations.length}</span>
-        </div>
-        <div className="chat__thread-list">
-          {conversations.map((conversation, index) => {
-            const latest = conversation.events.at(-1);
-            const isSystem = conversation.id === COORDINATOR_THREAD;
-            // Same state bucket the runtime-summary pulse uses, so the list,
-            // the conversation body, and the DAG canvas all tell one story.
-            // Only the Run-control thread carries run-level state; a taskless
-            // agent thread (dangling Task) simply shows no state.
-            const threadState = isSystem
-              ? coordinatorActive ? "run-active" : "run-stopped"
-              : conversation.task
-                ? summaryStateKey(conversation.task, conversation.presence, conversation.pending.length > 0)
-                : null;
-            const initials = conversation.taskId && !conversation.isLead ? initialsOf(conversation.label) : null;
-            return (
-              <Fragment key={conversation.id}>
-                {index > 0 && conversations[index - 1]?.id === COORDINATOR_THREAD && (
-                  <div className="chat-thread__section">{t("chat.threads.agentsSection")}</div>
-                )}
-                <button
-                  type="button"
-                  className={`chat-thread${isSystem ? " chat-thread--system" : ""}${selected?.id === conversation.id ? " chat-thread--active" : ""}`}
-                  data-state={threadState}
-                  aria-current={selected?.id === conversation.id ? "true" : undefined}
-                  onClick={() => {
-                    setSelectedId(conversation.id);
-                    setDraft("");
-                    setError(null);
-                  }}
-                >
-                  <span
-                    className={`chat-thread__avatar${conversation.isLead ? " chat-thread__avatar--lead" : ""}${isSystem ? " chat-thread__avatar--system" : ""}${initials && initials.length > 1 ? " chat-thread__avatar--pair" : ""}`}
-                    aria-hidden="true"
-                  >
-                    {conversation.taskId ? (conversation.isLead ? "★" : initials!) : "R"}
-                  </span>
-                  <span className="chat-thread__copy">
-                    <span className="chat-thread__topline">
-                      <strong title={conversation.label}>{conversation.label}</strong>
-                      {isSystem && <span className="chat-thread__system-label">{t("chat.thread.system")}</span>}
-                      {conversation.unread && (
-                        <span
-                          className="chat-thread__unread"
-                          role="img"
-                          aria-label={t("chat.thread.unreadAria")}
-                          title={t("chat.thread.unreadAria")}
-                        />
-                      )}
-                      <time dateTime={conversation.latestAt}>{formatClock(conversation.latestAt)}</time>
-                    </span>
-                    <span className="chat-thread__preview">
-                      {latest
-                        ? messageBody(latest)
-                        : compactSignal(conversation.presence?.detail) ??
-                          compactSignal(conversation.presence?.activity) ??
-                          (conversation.task ? t("chat.thread.previewAssigned") : t("chat.thread.noMessages"))}
-                    </span>
-                  </span>
-                  {conversation.urgent && (
-                    <span className="chat-thread__urgent" aria-label={t("chat.thread.urgentAria")} title={t("chat.thread.urgentAria")}>
-                      !
-                    </span>
-                  )}
-                  {conversation.pending.length > 0 && (
-                    <span className="chat-thread__badge" aria-label={t("chat.thread.repliesNeeded", { n: conversation.pending.length })}>
-                      {conversation.pending.length}
-                    </span>
-                  )}
-                </button>
-              </Fragment>
-            );
-          })}
-        </div>
-      </nav>
+      <div className="chat__recipient">
+        <label>
+          <span>{t("workbench.chat.recipient")}</span>
+          <select value={selectedId ?? ""} onChange={(event) => setSelectedId(event.target.value)}>
+            {conversations.map((conversation) => (
+              <option key={conversation.id} value={conversation.id}>
+                {conversation.label}
+                {conversation.taskId && conversation.taskId !== conversation.label ? ` · ${conversation.taskId}` : ""}
+                {conversation.urgent ? ` · ${t("chat.thread.urgentAria")}` : ""}
+                {conversation.unread ? ` · ${t("chat.thread.unreadAria")}` : ""}
+                {conversation.pending.length ? ` · ${t("chat.thread.repliesNeeded", { n: conversation.pending.length })}` : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+        <p>{t("workbench.chat.stableTarget")}</p>
+      </div>
 
       <div className="chat__conversation">
         {selected && (
@@ -930,7 +889,14 @@ export const ChatPanel = memo(function ChatPanel({
                   {selected.isLead && <span>{t("chat.leadStage")}</span>}
                   {!selected.taskId && <span className="chat__conversation-system">{t("chat.thread.system")}</span>}
                 </div>
-                <p>{selected.subtitle || (selected.taskId ? selected.taskId : t("chat.systemSubtitle"))}</p>
+                {selected.subtitle && selected.subtitle !== selected.label && selected.subtitle !== selected.taskId
+                  ? <p>{selected.subtitle}</p>
+                  : !selected.taskId && !selected.subtitle ? <p>{t("chat.systemSubtitle")}</p> : null}
+                {selected.taskId && <div className="chat__recipient-identity">
+                  {selected.taskId !== selected.label && <span>{t("record.task")}: <code>{selected.taskId}</code></span>}
+                  {selected.task?.dispatchId && <span>{t("record.dispatch")}: <code>{selected.task.dispatchId}</code></span>}
+                  {replyTarget?.dispatchId && replyTarget.dispatchId !== selected.task?.dispatchId && <span>{t("record.dispatch")}: <code>{replyTarget.dispatchId}</code></span>}
+                </div>}
               </div>
               {selected.taskId && (
                 <button type="button" onClick={() => onSelectTask(selected.taskId!)}>
@@ -939,7 +905,15 @@ export const ChatPanel = memo(function ChatPanel({
               )}
             </header>
 
-            <div className="chat__messages" aria-live="polite">
+            <div className="chat__messages" aria-live="polite" ref={messagesRef} onScroll={(event) => {
+              if (active) scrollByConversation.current.set(conversationScope, event.currentTarget.scrollTop);
+            }}>
+              {visibleTimeline.length < timeline.length && (
+                <div className="chat__history-window">
+                  <span>{t("workbench.chat.window", { shown: visibleTimeline.length, total: timeline.length })}</span>
+                  <button type="button" onClick={() => setTimelineLimit((count) => count + 100)}>{t("workbench.chat.more")}</button>
+                </div>
+              )}
               {historyWarning && (
                 <div className="chat-history-warning" role="status">
                   <strong aria-hidden="true">⚠</strong>
@@ -965,7 +939,7 @@ export const ChatPanel = memo(function ChatPanel({
                   )}
                 </article>
               )}
-              {timeline.map((item) => {
+              {visibleTimeline.map((item) => {
                 if (item.kind === "check") return renderTimelineCheck(item);
                 const event = item.event;
                 const system = event.direction === "system" || event.actor.role === "system";
@@ -1042,6 +1016,14 @@ export const ChatPanel = memo(function ChatPanel({
                     )}
                     {event.groupedCount > 1 && <small>{t("chat.message.grouped", { n: event.groupedCount })}</small>}
                     {event.actionable?.kind === "reply" && <span className="chat-message__waiting">{t("chat.state.waitingReply")}</span>}
+                    {event.kind === "stop_event" && (
+                      <div className="inbox__meta">
+                        {t("inbox.stopEvent", { reason: String((event.technical.payload as { stopReason?: unknown } | undefined)?.stopReason ?? t("worker.unknown")) })}
+                        {event.actionable?.kind === "acknowledge_stop" && event.dispatchId && (
+                          <button type="button" className="btn btn--gate" disabled={disabled || busy} onClick={() => void acknowledge(event)}>{t("inbox.ackStop")}</button>
+                        )}
+                      </div>
+                    )}
                     {event.detail?.trim() && event.detail.trim() !== event.summary.trim() && (
                       <details className="chat-message__details">
                         <summary>{event.kind === "dispatch_started" ? t("chat.brief.full") : t("chat.report.full")}</summary>
@@ -1076,18 +1058,26 @@ export const ChatPanel = memo(function ChatPanel({
             <footer className="chat__composer">
               {error && <div className="chat__error" role="status">⚠ {error}</div>}
               {messageUncertain && <div className="inbox__meta" role="status">{t("chat.message.sendUncertain")}</div>}
+              {operatorReceipt?.runId === runId && <div role="status" className="inbox__body"><strong>{t("chat.message.operatorReceipt")}</strong><pre>{operatorReceipt.value}</pre></div>}
               {messageReceipt && messageReceipt.runId === runId && messageReceipt.requestedTaskId === selected.taskId && (
                 <div className="inbox__body" role="status" data-testid="task-message-receipt">
-                  <strong>{t(messageReceipt.kind === "follow_up" ? "chat.message.followUp" : "chat.message.taskEnqueued")}</strong>
+                  <strong>{t(messageReceipt.kind === "follow_up" ? "chat.message.followUp" : messageReceipt.kind === "recipient_run_bound_redirect" ? "chat.message.redirect" : "chat.message.taskEnqueued")}</strong>
                   <dl className="record-facts">
                     <dt>{t("record.task")}</dt><dd><code>{messageReceipt.taskId}</code></dd>
                     <dt>{t("record.dispatch")}</dt><dd><code>{messageReceipt.dispatchId}</code></dd>
                     <dt>{t("chat.message.requestedTask")}</dt><dd><code>{messageReceipt.requestedTaskId}</code></dd>
                     <dt>{t("chat.message.requestedDispatch")}</dt><dd><code>{messageReceipt.requestedDispatchId}</code></dd>
                     {messageReceipt.followUpOf && <><dt>{t("chat.message.followUpOf")}</dt><dd><code>{messageReceipt.followUpOf}</code></dd></>}
+                    {messageReceipt.destinationRunId && <><dt>{t("chat.message.destinationRun")}</dt><dd><code>{messageReceipt.destinationRunId}</code></dd></>}
                     {messageReceipt.requestId && <><dt>{t("record.request")}</dt><dd><code>{messageReceipt.requestId}</code></dd></>}
                   </dl>
                   <span className="inbox__meta">{t("chat.message.taskReceiptNote")}</span>
+                  {messageReceipt.kind === "follow_up" && (
+                    <div className="gate__actions">
+                      <button type="button" onClick={() => onSelectTask(messageReceipt.taskId)}>{t("chat.message.openActualTask")}</button>
+                      <button type="button" onClick={() => onSelectWorker(messageReceipt.dispatchId)}>{t("chat.message.openActualDispatch")}</button>
+                    </div>
+                  )}
                 </div>
               )}
               {groupError && <div className="chat__error" role="status">⚠ {groupError}</div>}
@@ -1178,7 +1168,7 @@ export const ChatPanel = memo(function ChatPanel({
                     <button
                       type="button"
                       className="btn btn--ok"
-                      disabled={groupBusy || !groupDraft.trim() || !audience}
+                      disabled={groupBusy || !groupDraft.trim() || !selectedAudience}
                       title={t("chat.group.sendTitle", { audience: audience || t("chat.group.anAudience") })}
                       onClick={() => void sendGroup()}
                     >

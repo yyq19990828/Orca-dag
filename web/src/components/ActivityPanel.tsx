@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
+  acknowledgeStopEvent,
   fetchActivity,
   releaseWorker,
   replyToMessage,
@@ -10,6 +11,8 @@ import {
 import type { ActivityEvent, ActivitySnapshot } from "../types";
 import { formatTimestamp, isUrgent, priorityLabel } from "../format";
 import { t, useT, type TranslationKey } from "../i18n";
+import { useCoordinatorControl } from "./useCoordinatorControl";
+import { useDecisionDialog } from "./DecisionDialog";
 
 type ActivityFilter = "all" | "coordinator" | "agents" | "needs_reply";
 type ActivityTransport = "connecting" | "live" | "polling";
@@ -93,6 +96,7 @@ export const ActivityPanel = memo(function ActivityPanel({
   onSnapshot,
   disabled = false,
   disabledReason,
+  actionableOnly = false,
 }: {
   runId: string;
   onSelectTask: (taskId: string) => void;
@@ -100,16 +104,20 @@ export const ActivityPanel = memo(function ActivityPanel({
   onPendingCount: (count: number) => void;
   onSnapshot?: (snapshot: ActivitySnapshot) => void;
   disabled?: boolean;
+  actionableOnly?: boolean;
   disabledReason?: string | null;
 }) {
   // Timestamps and priority chips come from format.ts, whose language access
   // is intentionally non-reactive — this subscription is what re-renders the
   // memo()'d panel when the UI language changes.
   const t = useT();
+  const withControl = useCoordinatorControl();
+  const dialog = useDecisionDialog();
   const [snapshot, setSnapshot] = useState<ActivitySnapshot>(EMPTY);
   const [filter, setFilter] = useState<ActivityFilter>("all");
   const [transport, setTransport] = useState<ActivityTransport>("connecting");
   const [error, setError] = useState<string | null>(null);
+  const [operatorReceipt, setOperatorReceipt] = useState<{ runId: string; value: string } | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
   const requestSeq = useRef(0);
@@ -162,65 +170,84 @@ export const ActivityPanel = memo(function ActivityPanel({
 
     let alive = true;
     let pollTimer: number | null = null;
-    // While the tab is hidden, SSE pushes and polls are dropped (a hidden
-    // tab cannot show them, and Orca's embedded browser never throttles the
-    // timers behind them). The first visible transition re-syncs.
-    let dirtyWhileHidden = false;
-    const onHide = () => {
-      if (document.visibilityState !== "visible" || !dirtyWhileHidden) return;
-      dirtyWhileHidden = false;
-      void refresh();
+    let source: EventSource | null = null;
+    const stop = () => {
+      source?.close();
+      source = null;
+      if (pollTimer !== null) window.clearInterval(pollTimer);
+      pollTimer = null;
+      requestSeq.current++;
     };
-    const markDirtyIfHidden = () => {
-      if (document.visibilityState === "visible") return false;
-      dirtyWhileHidden = true;
-      return true;
+    const start = () => {
+      if (!alive || document.visibilityState !== "visible") return;
+      setTransport("connecting");
+      void refresh();
+      const current = new EventSource(`/api/activity/stream?run=${encodeURIComponent(runId)}`);
+      source = current;
+      current.onopen = () => {
+        if (alive && source === current) setTransport("live");
+      };
+      current.onmessage = (message) => {
+        if (!alive || source !== current) return;
+        try {
+          applySnapshot(JSON.parse(message.data) as ActivitySnapshot);
+          setTransport("live");
+        } catch {
+          setError(t("activity.streamError"));
+        }
+      };
+      current.onerror = () => {
+        if (!alive || source !== current) return;
+        current.close();
+        source = null;
+        setTransport("polling");
+        void refresh();
+        pollTimer = window.setInterval(() => void refresh(), 2_000);
+      };
+    };
+    const onHide = () => {
+      stop();
+      start();
     };
     document.addEventListener("visibilitychange", onHide);
-
-    let source: EventSource | null = new EventSource(`/api/activity/stream?run=${encodeURIComponent(runId)}`);
-    void refresh();
-    source.onopen = () => {
-      if (alive) setTransport("live");
-    };
-    source.onmessage = (message) => {
-      if (!alive || markDirtyIfHidden()) return;
-      try {
-        applySnapshot(JSON.parse(message.data) as ActivitySnapshot);
-        setTransport("live");
-      } catch {
-        setError(t("activity.streamError"));
-      }
-    };
-    source.onerror = () => {
-      if (!alive || pollTimer !== null) return;
-      // EventSource reconnects forever by default. Falling back explicitly
-      // gives the user a stable 2s path through proxies that buffer SSE.
-      source.close();
-      setTransport("polling");
-      if (!markDirtyIfHidden()) void refresh();
-      pollTimer = window.setInterval(() => {
-        if (!markDirtyIfHidden()) void refresh();
-      }, 2_000);
-    };
+    start();
     return () => {
       alive = false;
       document.removeEventListener("visibilitychange", onHide);
-      source?.close();
-      if (pollTimer !== null) window.clearInterval(pollTimer);
+      stop();
     };
   }, [applySnapshot, onPendingCount, onSnapshot, refresh, runId]);
 
   const visible = useMemo(
     () =>
       snapshot.events.filter((event) => {
+        if (actionableOnly) return event.actionable !== null && event.actionable !== undefined;
         if (filter === "coordinator") return event.direction !== "agent_to_coordinator";
         if (filter === "agents") return event.direction === "agent_to_coordinator";
         if (filter === "needs_reply") return event.actionable?.kind === "reply";
         return true;
       }),
-    [filter, snapshot.events],
+    [actionableOnly, filter, snapshot.events],
   );
+
+  async function acknowledge(event: ActivityEvent) {
+    if (!event.dispatchId || disabled || busyId) return;
+    const confirmed = await dialog.confirm({
+      title: t("inbox.ackStopTitle"),
+      message: t("inbox.ackStopMessage", { dispatch: event.dispatchId, reason: String((event.technical.payload as { stopReason?: unknown } | undefined)?.stopReason ?? t("worker.unknown")) }),
+      confirmLabel: t("inbox.ackStop"),
+    });
+    if (!confirmed) return;
+    setBusyId(event.id);
+    setError(null);
+    try {
+      await acknowledgeStopEvent(runId, event.id, event.dispatchId);
+      await refresh();
+      onResolved();
+    } catch (error) {
+      setError(String((error as Error).message ?? error));
+    } finally { setBusyId(null); }
+  }
 
   async function runAction(event: ActivityEvent, action: "reply" | "release" | "retain" | "retry") {
     if (!event.actionable || disabled || busyId) return;
@@ -231,12 +258,13 @@ export const ActivityPanel = memo(function ActivityPanel({
       if (action === "reply") {
         const body = (drafts[event.id] ?? "").trim();
         if (!body) return;
-        await replyToMessage(targetId, body, runId);
+        const receipt = await withControl(runId, (control) => replyToMessage(targetId, body, runId, control));
+        setOperatorReceipt({ runId, value: JSON.stringify(receipt) });
         setDrafts(({ [event.id]: _drop, ...rest }) => rest);
       } else if (action === "release") {
-        await releaseWorker(targetId);
+        await releaseWorker(runId, targetId);
       } else if (action === "retain") {
-        await retainWorker(targetId);
+        await retainWorker(runId, targetId);
       } else {
         await retryWorker(targetId);
       }
@@ -264,9 +292,11 @@ export const ActivityPanel = memo(function ActivityPanel({
   }
 
   return (
-    <section className="activity" aria-label={t("activity.aria.section")}>
+    <section className="activity" aria-label={t(actionableOnly ? "workbench.pendingActivity" : "activity.aria.section")}>
+      {operatorReceipt?.runId === runId && <div role="status" className="inbox__body"><strong>{t("chat.message.operatorReceipt")}</strong><pre>{operatorReceipt.value}</pre></div>}
+      {actionableOnly && <h2>{t("workbench.pendingActivity")}</h2>}
       <div className="activity__tools">
-        <div className="activity__filters" role="group" aria-label={t("activity.aria.filters")}>
+        {!actionableOnly && <div className="activity__filters" role="group" aria-label={t("activity.aria.filters")}>
           {([
             "all",
             "coordinator",
@@ -286,7 +316,7 @@ export const ActivityPanel = memo(function ActivityPanel({
               ) : null}
             </button>
           ))}
-        </div>
+        </div>}
         <span className={`activity__transport activity__transport--${transport}`}>
           <span aria-hidden="true" /> {t(TRANSPORT_KEY[transport])}
         </span>
@@ -311,7 +341,7 @@ export const ActivityPanel = memo(function ActivityPanel({
       <div className="activity__timeline" aria-live="polite">
         {visible.length === 0 ? (
           <div className="activity__empty">
-            {filter === "needs_reply" ? t("activity.empty.needsReply") : t("activity.empty.none")}
+            {actionableOnly ? t("workbench.noPendingActivity") : filter === "needs_reply" ? t("activity.empty.needsReply") : t("activity.empty.none")}
           </div>
         ) : (
           visible.map((event) => (
@@ -368,6 +398,14 @@ export const ActivityPanel = memo(function ActivityPanel({
                     {t("activity.openStage", { id: event.taskId })}
                   </button>
                 )}
+                {event.kind === "stop_event" && (
+                  <div className="inbox__meta">
+                    {t("inbox.stopEvent", { reason: String((event.technical.payload as { stopReason?: unknown } | undefined)?.stopReason ?? t("worker.unknown")) })}
+                    {event.actionable?.kind === "acknowledge_stop" && event.dispatchId && (
+                      <button type="button" className="btn btn--gate" disabled={disabled || Boolean(busyId)} onClick={() => void acknowledge(event)}>{t("inbox.ackStop")}</button>
+                    )}
+                  </div>
+                )}
 
                 {event.actionable?.kind === "reply" && (
                   <div className="activity-event__reply">
@@ -395,6 +433,9 @@ export const ActivityPanel = memo(function ActivityPanel({
                     <button type="button" className="btn btn--ok" disabled={disabled || Boolean(busyId)} onClick={() => void runAction(event, "release")}>{t("activity.release")}</button>
                     <button type="button" className="btn" disabled={disabled || Boolean(busyId)} onClick={() => void runAction(event, "retain")}>{t("activity.retain")}</button>
                   </div>
+                )}
+                {event.actionable?.kind === "retain" && (
+                  <button type="button" className="btn" disabled={disabled || Boolean(busyId)} onClick={() => void runAction(event, "retain")}>{t("activity.retain")}</button>
                 )}
                 {event.actionable?.kind === "retry" && (
                   <button type="button" className="btn" disabled={disabled || Boolean(busyId)} onClick={() => void runAction(event, "retry")}>{t("activity.retry")}</button>

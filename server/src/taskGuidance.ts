@@ -51,6 +51,7 @@ export async function normalizeTaskMessageReceipt(
   let dispatchId: string | null;
   let taskId: string | null;
   let startReceipt: WorkerStartReceipt | undefined;
+  let destinationRunId: string | null = null;
   if (started) {
     if (row.runId !== input.runId) throw new Error("Follow-up receipt Run identity is missing or mismatched");
     dispatchId = text(row.dispatchId);
@@ -59,10 +60,22 @@ export async function normalizeTaskMessageReceipt(
     startReceipt.requestId ??= requestId;
   } else {
     const message = record(row.message);
-    if (message.run_id !== input.runId) throw new Error("Message receipt Run identity is missing or mismatched");
     const destination = text(message.to_handle) ?? text(message.to);
-    dispatchId = destination?.startsWith("dispatch:") ? destination.slice("dispatch:".length) : null;
-    taskId = dispatchId === input.dispatchId ? input.taskId : null;
+    const messageRun = text(message.run_id);
+    const redirect = messageRun && messageRun !== input.runId && destination === `run:${messageRun}` &&
+      Array.isArray(row.warnings) && row.warnings.some(value => {
+        const warning = record(value);
+        return warning.code === "recipient_run_bound_redirect" && warning.recipient === `dispatch:${input.dispatchId}`;
+      });
+    if (redirect) {
+      destinationRunId = messageRun;
+      dispatchId = input.dispatchId;
+      taskId = input.taskId;
+    } else {
+      if (messageRun !== input.runId) throw new Error("Message receipt Run identity is missing or mismatched");
+      dispatchId = destination?.startsWith("dispatch:") ? destination.slice("dispatch:".length) : null;
+      taskId = dispatchId === input.dispatchId ? input.taskId : null;
+    }
     if (dispatchId && !taskId) {
       const detail = await showWorker(dispatchId);
       if (!detail || detail.dispatchId !== dispatchId || detail.runId !== input.runId || !detail.taskId) {
@@ -73,9 +86,9 @@ export async function normalizeTaskMessageReceipt(
   }
   if (!dispatchId || !taskId) throw new Error("Send receipt lacks authoritative Task/Dispatch identity");
   const receipt: TaskMessageReceipt = {
-    kind: dispatchId === input.dispatchId && !started ? "enqueued" : "follow_up",
+    kind: destinationRunId ? "recipient_run_bound_redirect" : dispatchId === input.dispatchId && !started ? "enqueued" : "follow_up",
     runId: input.runId, taskId, dispatchId, requestedTaskId: input.taskId,
-    requestedDispatchId: input.dispatchId, followUpOf: started ? text(row.followUpOf) : null, requestId,
+    requestedDispatchId: input.dispatchId, followUpOf: started ? text(row.followUpOf) : null, requestId, destinationRunId,
   };
   return { receipt, creationProven: started, ...(startReceipt ? { startReceipt } : {}) };
 }
@@ -92,12 +105,12 @@ async function acceptReceipt(raw: unknown, row: GuidanceSendCheckpoint, deps: Ta
     }, row.requestId, deps.showWorker);
     if (row.receipt && (row.receipt.runId !== result.receipt.runId ||
         row.receipt.taskId !== result.receipt.taskId || row.receipt.dispatchId !== result.receipt.dispatchId ||
-        row.creationProven !== result.creationProven)) {
+        row.receipt.destinationRunId !== result.receipt.destinationRunId || row.creationProven !== result.creationProven)) {
       throw new Error("Recovered guidance identity conflicts with the accepted receipt");
     }
     const ready = (!result.startReceipt || result.startReceipt.status === "ready") &&
       (!row.startEvidence || row.startEvidence.status === "ready");
-    row = { ...row, state: ready ? result.receipt.kind : "unknown", receipt: result.receipt,
+    row = { ...row, state: ready ? (result.receipt.kind === "recipient_run_bound_redirect" ? "enqueued" : result.receipt.kind) : "unknown", receipt: result.receipt,
       creationProven: result.creationProven,
       ...(result.startReceipt && !row.startEvidence ? { startEvidence: { status: result.startReceipt.status, launchMode: result.startReceipt.launchMode } } : {}),
       updatedAt: new Date().toISOString(), error: ready ? null : "follow_up_start_unconfirmed" };

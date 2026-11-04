@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { DagView } from "./components/DagView";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type PointerEvent as ReactPointerEvent } from "react";
 import { ExecControls } from "./components/ExecControls";
 import { ActivityPanel } from "./components/ActivityPanel";
 import { ChatPanel } from "./components/ChatPanel";
@@ -9,6 +8,7 @@ import { RecoveryPanel } from "./components/RecoveryPanel";
 import { RequestAuditPanel } from "./components/RequestAuditPanel";
 import { SchedulerPanel } from "./components/SchedulerPanel";
 import { WorkerPanel } from "./components/WorkerPanel";
+import { CleanupPanel } from "./components/CleanupPanel";
 import { RunPicker, type RunListReadState } from "./components/RunPicker";
 import { RunHealthBadge } from "./components/RunHealthBadge";
 import { LangToggle } from "./components/LangToggle";
@@ -20,8 +20,8 @@ import { usePageVisible } from "./visibility";
 import { LanesPanel } from "./components/LanesPanel";
 import { OperationsAttention, countActionableOperations, countKnownActionableOperations } from "./components/OperationsAttention";
 import { focusOperation, type OperationFocus } from "./operation-navigation";
-import "./compact-header.css";
 import "./operations-nav.css";
+import "./workbench.css";
 import "./read-state.css";
 import { TaskList } from "./components/TaskList";
 import {
@@ -35,6 +35,13 @@ import {
   type TaskStatus,
   type WorkerRowView,
 } from "./types";
+
+const DagView = lazy(() => import("./components/DagView").then((module) => ({ default: module.DagView })));
+
+function GraphMounted({ onMount, children }: { onMount: () => void; children: ReactNode }) {
+  useEffect(() => { onMount(); }, [onMount]);
+  return children;
+}
 
 const EMPTY: DagResponse = {
   runId: "",
@@ -58,7 +65,20 @@ const EMPTY_ACTIVITY: ActivitySnapshot = {
 };
 const EMPTY_ATTEMPTS: RunAttempt[] = [];
 const POLL_MS = 2000;
-const OPERATION_GROUPS = ["decisions", "execution", "diagnostics"] as const;
+const SECTIONS = ["overview", "tasks", "decisions", "executions", "activity", "resources", "settings"] as const;
+type Section = typeof SECTIONS[number];
+
+function readRoute(): { section: Section; task: string | null } {
+  const params = new URLSearchParams(window.location.hash.slice(1));
+  const requested = params.get("section");
+  return { section: SECTIONS.find((section) => section === requested) ?? "overview", task: params.get("task") };
+}
+
+function writeRoute(section: Section, task: string | null) {
+  const params = new URLSearchParams({ section });
+  if (task) params.set("task", task);
+  window.history.pushState(null, "", `${window.location.pathname}${window.location.search}#${params}`);
+}
 const COMMUNICATION_MIN_WIDTH = 380;
 const COMMUNICATION_MAX_WIDTH = 820;
 const CANVAS_MIN_WIDTH = 320;
@@ -69,150 +89,23 @@ function sameJson(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-/**
- * Hand-drawn wobble filters — the whole "drawn with a crayon" illusion.
- *  - #crayon(-b/-c): a coarse waxy waver for node outlines, fills and stamps
- *    (objectBoundingBox — fine for boxes, breaks on zero-height lines). Three
- *    seeds of the same filter; flipping between them on a `steps(1)` keyframe
- *    loop is the classic hand-animation "boiling line". In doodle mode EVERY
- *    outline boils, phase-staggered per node so the flicks don't sync up.
- *  - #pencil-edge(-b/-c): same idea for edges, but in userSpaceOnUse with a
- *    deliberately oversized region so a perfectly horizontal edge (zero-height
- *    bbox) doesn't collapse the filter to nothing. All edges wear it — a DAG
- *    of clean beziers reads as software, a DAG of scrawls reads as a sketch.
- */
-function HandDrawnDefs() {
-  return (
-    <svg className="crayon-defs" aria-hidden="true" focusable="false">
-      <defs>
-        {[
-          ["crayon", 7],
-          ["crayon-b", 23],
-          ["crayon-c", 41],
-        ].map(([id, seed]) => (
-          <filter key={id} id={String(id)} x="-18%" y="-18%" width="136%" height="136%">
-            {/* two frequencies: a slow bend (wonky hand) + a fine scratch (wax grain) */}
-            <feTurbulence
-              type="fractalNoise"
-              baseFrequency="0.013 0.021"
-              numOctaves="3"
-              seed={seed}
-              result="n"
-            />
-            <feDisplacementMap
-              in="SourceGraphic"
-              in2="n"
-              scale="9.5"
-              xChannelSelector="R"
-              yChannelSelector="G"
-            />
-          </filter>
-        ))}
-        {/* fine grain for small glyphs (the whale) — the coarse #crayon moves
-            lines by ~9px, which turns a 44px drawing into mush */}
-        {[
-          ["crayon-fine", 5],
-          ["crayon-fine-b", 17],
-          ["crayon-fine-c", 31],
-        ].map(([id, seed]) => (
-          <filter key={id} id={String(id)} x="-12%" y="-12%" width="124%" height="124%">
-            <feTurbulence
-              type="fractalNoise"
-              baseFrequency="0.06"
-              numOctaves="2"
-              seed={seed}
-              result="n"
-            />
-            <feDisplacementMap
-              in="SourceGraphic"
-              in2="n"
-              scale="2.6"
-              xChannelSelector="R"
-              yChannelSelector="G"
-            />
-          </filter>
-        ))}
-        {/* wax grain for the running node's scribble: a slow wobble warps the
-            stroke, then a fine tooth noise bites translucent pits into it, so
-            the stroke reads as crayon dragged over paper texture */}
-        <filter id="crayon-fill" x="-20%" y="-20%" width="140%" height="140%">
-          <feTurbulence
-            type="fractalNoise"
-            baseFrequency="0.012 0.02"
-            numOctaves="3"
-            seed={13}
-            result="wobble"
-          />
-          <feDisplacementMap
-            in="SourceGraphic"
-            in2="wobble"
-            scale="6"
-            xChannelSelector="R"
-            yChannelSelector="G"
-            result="warped"
-          />
-          <feTurbulence
-            type="fractalNoise"
-            baseFrequency="0.5"
-            numOctaves="2"
-            seed={13}
-            result="tooth"
-          />
-          <feColorMatrix
-            in="tooth"
-            type="matrix"
-            values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  1.1 0 0 0 0.3"
-            result="toothAlpha"
-          />
-          <feComposite in="warped" in2="toothAlpha" operator="in" />
-        </filter>
-        {[
-          ["pencil-edge", 11],
-          ["pencil-edge-b", 29],
-          ["pencil-edge-c", 53],
-        ].map(([id, seed]) => (
-          <filter
-            key={id}
-            id={String(id)}
-            filterUnits="userSpaceOnUse"
-            x="-8000"
-            y="-8000"
-            width="24000"
-            height="24000"
-          >
-            <feTurbulence
-              type="fractalNoise"
-              baseFrequency="0.024"
-              numOctaves="2"
-              seed={seed}
-              result="n"
-            />
-            <feDisplacementMap
-              in="SourceGraphic"
-              in2="n"
-              scale="4.5"
-              xChannelSelector="R"
-              yChannelSelector="G"
-            />
-          </filter>
-        ))}
-      </defs>
-    </svg>
-  );
-}
 
 export default function App() {
   const [dag, setDag] = useState<DagResponse>(EMPTY);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [stageOpen, setStageOpen] = useState(false);
+  const [route, setRoute] = useState(readRoute);
+  const [selectedId, setSelectedId] = useState<string | null>(() => readRoute().task);
+  const [stageOpen, setStageOpen] = useState(() => Boolean(readRoute().task));
   const [communicationOpen, setCommunicationOpen] = useState(false);
   const [communicationWidth, setCommunicationWidth] = useState<number | null>(null);
   const [communicationResizing, setCommunicationResizing] = useState(false);
-  const [communicationTab, setCommunicationTab] = useState<"activity" | "chat">("activity");
-  const [sidePanel, setSidePanel] = useState<"communication" | "operations">("communication");
-  const [operationGroup, setOperationGroup] = useState<typeof OPERATION_GROUPS[number]>("decisions");
-  const [operationsSeen, setOperationsSeen] = useState(false);
   const [operationFocus, setOperationFocus] = useState<OperationFocus | null>(null);
+  const [actionHost, setActionHost] = useState<HTMLElement | null>(null);
+  const operationRef = useRef<HTMLElement | null>(null);
+  const scrollByView = useRef<Record<string, number>>({});
+  const viewKey = stageOpen ? `task:${selectedId}` : route.section;
+  useLayoutEffect(() => {
+    if (operationRef.current) operationRef.current.scrollTop = scrollByView.current[viewKey] ?? 0;
+  }, [viewKey]);
   // Parent/child ownership links (Phase 4) are hideable: on dense graphs they
   // can reduce readability, and they carry no scheduling semantics to lose.
   const [showHierarchy, setShowHierarchy] = useState(true);
@@ -234,13 +127,14 @@ export default function App() {
   const layout: LayoutKind = config.layout || "layered-lr";
   // bump to force a fresh auto-layout (discarding manual drags)
   const [reorgNonce, setReorgNonce] = useState(0);
-  // Unlike reorgNonce, this asks React Flow to reframe the current positions
-  // without discarding nodes the user has manually dragged.
-  const [canvasFitNonce, setCanvasFitNonce] = useState(0);
+  const canvasFitNonce = 0;
   const [mobileTaskView, setMobileTaskView] = useState<"tasks" | "graph">("tasks");
+  const [graphMountedRun, setGraphMountedRun] = useState<string | null>(null);
+  const markGraphMounted = useCallback(() => setGraphMountedRun(runId), [runId]);
+  const graphActive = !stageOpen && route.section === "tasks" && mobileTaskView === "graph" &&
+    !(communicationOpen && window.matchMedia("(max-width: 900px)").matches);
   const [retryingRead, setRetryingRead] = useState(false);
   const stageReturnFocus = useRef<HTMLElement | null>(null);
-  const stageReturnToCommunication = useRef(false);
   const communicationRef = useRef<HTMLElement | null>(null);
   const communicationReturnFocus = useRef<HTMLElement | null>(null);
   const communicationResize = useRef<{
@@ -268,6 +162,18 @@ export default function App() {
   // this page session: a transient fleet-read failure keeps the last good
   // rows on screen next to the error instead of blanking the operations view.
   const [workerRows, setWorkerRows] = useState<WorkerRowView[]>([]);
+  const [fleetRead, setFleetRead] = useState<{ runId: string; at: number } | null>(null);
+  const [fleetExpired, setFleetExpired] = useState(true);
+  useEffect(() => {
+    if (!fleetRead || fleetRead.runId !== runId) {
+      setFleetExpired(true);
+      return;
+    }
+    setFleetExpired(false);
+    const timeout = window.setTimeout(() => setFleetExpired(true), Math.max(0, 10000 - (Date.now() - fleetRead.at)));
+    return () => window.clearTimeout(timeout);
+  }, [fleetRead, runId]);
+  const fleetFresh = Boolean(fleetRead?.runId === runId && !fleetExpired && !workerHistoryLoading && !workerHistoryError && Date.now() - fleetRead.at <= 10000);
   const selectedRunRef = useRef(runId);
   selectedRunRef.current = runId;
   const dagRequestSeq = useRef(0);
@@ -288,6 +194,28 @@ export default function App() {
       .finally(() => setHydrated(true));
   }, []);
 
+  useEffect(() => {
+    const restore = () => {
+      const next = readRoute();
+      setRoute(next);
+      setSelectedId(next.task);
+      setStageOpen(Boolean(next.task));
+      if (window.matchMedia("(max-width: 900px)").matches) setCommunicationOpen(false);
+    };
+    window.addEventListener("popstate", restore);
+    return () => window.removeEventListener("popstate", restore);
+  }, []);
+
+  function navigate(section: Section) {
+    writeRoute(section, null);
+    setRoute({ section, task: null });
+    setStageOpen(false);
+    setOperationFocus(null);
+    // On narrow screens chat is a focused pane, not an overlay. Navigation
+    // must reveal its destination without changing the selected recipient.
+    if (window.matchMedia("(max-width: 900px)").matches) setCommunicationOpen(false);
+  }
+
   // Nested selectors and modal dialogs own their first dismissal. In
   // particular, a Run dialog must return to its still-visible menu trigger.
   useEffect(() => {
@@ -307,26 +235,20 @@ export default function App() {
     setLayout(kind);
   }
 
-  function requestCanvasFit() {
-    setCanvasFitNonce((nonce) => nonce + 1);
-  }
 
   function openCommunication() {
     if (!communicationOpen) {
       const active = document.activeElement;
       communicationReturnFocus.current = active instanceof HTMLElement &&
-        active !== document.body && !active.closest(".communication-center")
-        ? active : document.querySelector<HTMLElement>(".btn--activity");
-      if (communicationWidth === null) setCommunicationWidth(clampCommunicationWidth(620));
-      requestCanvasFit();
+        active !== document.body && !active.closest(".workbench-chat")
+        ? active : document.querySelector<HTMLElement>(".workbench-chat-toggle");
+      if (communicationWidth === null) setCommunicationWidth(clampCommunicationWidth(440));
     }
     setCommunicationOpen(true);
   }
 
   function closeCommunication() {
-    if (communicationOpen) requestCanvasFit();
     setCommunicationOpen(false);
-    stageReturnToCommunication.current = false;
     const target = communicationReturnFocus.current;
     window.requestAnimationFrame(() => {
       if (target?.isConnected) target.focus();
@@ -335,9 +257,9 @@ export default function App() {
 
   function clampCommunicationWidth(width: number): number {
     const workspaceWidth = communicationRef.current?.parentElement?.getBoundingClientRect().width ?? window.innerWidth;
-    // Below the overlay breakpoint the graph no longer needs a permanent
-    // reserve beside the panel; leave only the paper margin used by CSS.
-    const reserve = window.matchMedia("(max-width: 900px)").matches ? 18 : CANVAS_MIN_WIDTH;
+    const narrow = window.matchMedia("(max-width: 900px)").matches;
+    const navWidth = narrow ? 0 : document.querySelector(".workbench-nav")?.getBoundingClientRect().width ?? 0;
+    const reserve = narrow ? 0 : CANVAS_MIN_WIDTH + navWidth;
     const upper = Math.max(280, Math.min(COMMUNICATION_MAX_WIDTH, workspaceWidth - reserve));
     const lower = Math.min(COMMUNICATION_MIN_WIDTH, upper);
     return Math.round(Math.min(Math.max(width, lower), upper));
@@ -358,7 +280,7 @@ export default function App() {
   function moveCommunicationResize(event: ReactPointerEvent<HTMLDivElement>) {
     const resize = communicationResize.current;
     if (!resize || resize.pointerId !== event.pointerId) return;
-    setCommunicationWidth(clampCommunicationWidth(resize.startWidth + event.clientX - resize.startX));
+    setCommunicationWidth(clampCommunicationWidth(resize.startWidth + resize.startX - event.clientX));
   }
 
   function endCommunicationResize(event: ReactPointerEvent<HTMLDivElement>) {
@@ -369,7 +291,6 @@ export default function App() {
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
-    requestCanvasFit();
   }
 
   const refresh = useCallback(async () => {
@@ -392,10 +313,7 @@ export default function App() {
         return;
       }
       dagAppliedSeq.current = seq;
-      // A re-render of the React Flow canvas re-rasterizes every feTurbulence
-      // filter region (the crayon texture) — the most expensive thing this
-      // page does. Identical payloads must keep the SAME state object so
-      // React bails out and a no-op poll never repaints the canvas.
+      // Preserve object identity on unchanged polls.
       setDag((prev) => (sameJson(prev, next) ? prev : next));
       setDagFailure(null);
     } catch (e) {
@@ -405,11 +323,7 @@ export default function App() {
     }
   }, [runId]);
 
-  // The whole page goes silent while hidden (Orca's embedded browser does
-  // NOT throttle background-tab timers — verified in its launch flags), so
-  // the 2s polls would otherwise burn a full core painting filters nobody
-  // can see. Visibility loss tears the intervals down; coming back tears
-  // them straight back up with an immediate refresh.
+  // Pause polling while the page is hidden and refresh when it returns.
   const pageVisible = usePageVisible();
 
   useEffect(() => {
@@ -444,21 +358,25 @@ export default function App() {
       workersAppliedSeq.current = seq;
       setWorkerHistoryLoading(false);
       if (workersResult.status === "fulfilled") {
+        setFleetRead(workersResult.value.partialHostErrors.length ? null : { runId: requestedRun, at: Date.now() });
         const known = startedByRun.current.get(requestedRun) ?? new Set<string>();
         let changed = false;
-        for (const worker of workersResult.value) {
+        for (const worker of workersResult.value.workers) {
           if (!worker.taskId || known.has(worker.taskId)) continue;
           known.add(worker.taskId);
           changed = true;
         }
         startedByRun.current.set(requestedRun, known);
         if (changed) setStartedRevision((n) => n + 1);
-        setWorkerHistoryError(null);
+        setWorkerHistoryError(workersResult.value.partialHostErrors.length
+          ? `${t("worker.partialHostErrors")}: ${JSON.stringify(workersResult.value.partialHostErrors)}`
+          : null);
         // Keep the previous array object on no-op polls — WorkerPanel and
         // the DAG canvas re-render per identity, and identical fleet rows
         // must not repaint anything.
-        setWorkerRows((prev) => (sameJson(prev, workersResult.value) ? prev : workersResult.value));
+        setWorkerRows((prev) => (sameJson(prev, workersResult.value.workers) ? prev : workersResult.value.workers));
       } else {
+        setFleetRead(null);
         setWorkerHistoryError(String((workersResult.reason as Error)?.message ?? workersResult.reason));
         // keep the last good rows visible alongside the error
       }
@@ -470,12 +388,13 @@ export default function App() {
       statusAppliedSeq.current = seq;
       setRunStatus((prev) => (sameJson(prev, statusResult.value) ? prev : statusResult.value));
     }
-  }, [runId]);
+  }, [runId, t]);
 
   useEffect(() => {
     if (!pageVisible) return;
     setWorkerHistoryLoading(Boolean(runId));
     setWorkerHistoryError(null);
+    setFleetRead(null);
     setWorkerRows([]); // a Run switch must not show the previous Run's workers
     refreshExecutionState();
     executionTimer.current = window.setInterval(refreshExecutionState, POLL_MS);
@@ -487,8 +406,8 @@ export default function App() {
   // switching Run invalidates the current selection
   const pickRun = useCallback((id: string) => {
     setRunId(id);
+    setGraphMountedRun(null);
     setSelectedId(null);
-    stageReturnToCommunication.current = false;
     setStageOpen(false);
     setOperationFocus(null);
     setActivityPending(0);
@@ -497,18 +416,18 @@ export default function App() {
     // request. `visibleDag` below also guards the render in the same frame.
     setDag(EMPTY);
     setDagFailure(null);
-  }, []);
+    writeRoute(route.section, null);
+    setRoute({ section: route.section, task: null });
+  }, [route.section]);
 
   const closeStage = useCallback(() => {
+    writeRoute(route.section, null);
+    setRoute({ section: route.section, task: null });
     setStageOpen(false);
-    if (stageReturnToCommunication.current) {
-      stageReturnToCommunication.current = false;
-      setCommunicationOpen(true);
-    }
     window.requestAnimationFrame(() => {
       if (stageReturnFocus.current?.isConnected) stageReturnFocus.current.focus();
     });
-  }, []);
+  }, [route.section]);
 
   const selectStage = useCallback((id: string | null) => {
     if (!id) {
@@ -516,26 +435,13 @@ export default function App() {
       return;
     }
     const active = document.activeElement;
-    stageReturnFocus.current = active instanceof HTMLElement && active !== document.body && !active.closest(".node-panel")
-      ? active
-      : document.querySelector<HTMLElement>(`.react-flow__node[data-id="${CSS.escape(id)}"]`);
-    // The CSS-owned phone/short-window reading view covers the canvas.
-    // Hand a stage link to its inspector, then restore this conversation and
-    // its exact focus target when the inspector closes. Desktop keeps both.
-    const fullCommunication = communicationRef.current !== null &&
-      window.getComputedStyle(communicationRef.current).position === "fixed";
-    stageReturnToCommunication.current = fullCommunication;
-    if (fullCommunication) {
-      if (!communicationRef.current!.contains(stageReturnFocus.current)) {
-        stageReturnFocus.current = communicationRef.current!.querySelector<HTMLElement>(
-          '[role="tab"][aria-selected="true"]',
-        );
-      }
-      setCommunicationOpen(false);
-    }
+    stageReturnFocus.current = active instanceof HTMLElement && active !== document.body ? active : null;
+    writeRoute(route.section, id);
+    setRoute({ section: route.section, task: id });
     setSelectedId(id);
     setStageOpen(true);
-  }, [closeStage]);
+    if (window.matchMedia("(max-width: 900px)").matches) setCommunicationOpen(false);
+  }, [closeStage, route.section]);
 
   const onRunStarting = useCallback((id: string) => {
     setStartingRunId(id);
@@ -615,17 +521,15 @@ export default function App() {
   const knownActionableCount = countKnownActionableOperations(operationSnapshots);
 
   function openOperation(target: OperationFocus) {
-    setOperationGroup(target.kind === "worker" ? "execution" : "decisions");
+    const section = target.kind === "worker" ? "executions" : "decisions";
+    navigate(section);
     setOperationFocus(target);
-    setOperationsSeen(true);
-    setSidePanel("operations");
-    openCommunication();
+    if (window.matchMedia("(max-width: 900px)").matches) setCommunicationOpen(false);
   }
 
   useEffect(() => {
-    if (!communicationOpen || sidePanel !== "operations" || !operationFocus) return;
-    if (focusOperation(communicationRef.current, operationFocus)) setOperationFocus(null);
-  }, [communicationOpen, sidePanel, operationGroup, operationFocus, visibleDag, workerRows, runStatus]);
+    if (!stageOpen && operationFocus && focusOperation(operationRef.current, operationFocus)) setOperationFocus(null);
+  }, [stageOpen, route.section, operationFocus, visibleDag, workerRows, runStatus]);
   const startedTaskIds = useMemo(
     () => new Set(runId ? startedByRun.current.get(runId) ?? [] : []),
     [runId, startedRevision],
@@ -633,6 +537,20 @@ export default function App() {
   const selectedRunExecuting = Boolean(runStatus?.running && runStatus.runId === runId);
   const selectedRunStarting = startingRunId === runId;
   const leadTaskId = runId ? config.leadTaskByRun[runId] ?? null : null;
+  // Human-input and stop-event debt is presentation evidence to stop motion,
+  // never authority to mutate or settle a Dispatch.
+  const pendingDispatchIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (runStatus?.runId === runId) {
+      for (const item of runStatus.inbox.pending) if (item.dispatchId) ids.add(item.dispatchId);
+    }
+    if (activitySnapshot.runId === runId) {
+      for (const event of activitySnapshot.events) {
+        if (event.actionable && event.dispatchId) ids.add(event.dispatchId);
+      }
+    }
+    return [...ids];
+  }, [runId, runStatus, activitySnapshot]);
   // One string drives both the conn pill's tooltip and its accessible name:
   // the pill is focusable (role="status"), so a keyboard user tabbing to it
   // hears the same detail a mouse user sees on hover. The readiness `reason`
@@ -645,14 +563,6 @@ export default function App() {
         ? t("topbar.connDetailReady", { version: readiness.version ?? "", cli: readiness.cli })
         : t("topbar.connDetailChecking"));
 
-  // the toolbar's bottom edge doubles as a crayon progress strip
-  const total = visibleDag.nodes.length || 1;
-  const pctDone = ((counts.completed ?? 0) / total) * 100;
-  const pctFail = ((counts.failed ?? 0) / total) * 100;
-  const pctRun = ((counts.dispatched ?? 0) / total) * 100;
-  // Progress copy assembles from two keys: the failure clause is its own
-  // suffix fragment (separator included) so it only appears when there is
-  // something to report, and each language keeps its own punctuation.
   const completedCount = counts.completed ?? 0;
   const failedCount = counts.failed ?? 0;
   const stageCount = visibleDag.nodes.length;
@@ -666,566 +576,120 @@ export default function App() {
   // (New Run).
 
   return (
-    <div className="app" onKeyDown={(event) => {
+    <div className="workbench" onKeyDown={(event) => {
       if (event.key !== "Escape" || event.defaultPrevented || !(event.target instanceof Element)) return;
-      const menu = event.target.closest<HTMLDetailsElement>(
-        ".runpick__menu[open], .view-menu[open], .exec__settings[open]",
-      );
+      const menu = event.target.closest<HTMLDetailsElement>(".runpick__menu[open], .view-menu[open], .exec__settings[open]");
       if (!menu) return;
       event.preventDefault();
       event.stopPropagation();
       menu.open = false;
       menu.querySelector<HTMLElement>("summary")?.focus();
     }}>
-      <HandDrawnDefs />
-      {/* The header is one Run line on desktop: brand → objective selector →
-          progress → health/connection → execution controls. Narrow layouts
-          wrap these same regions without changing their focus order. */}
-      <header className="topbar">
-        <div className="topbar__brand topbar__brand--compact">
-          {/* the mascot is drawn, not typeset — and it's an ORCA, not a whale:
-              black body with the tall dorsal fin drawn into the outline, white
-              belly, the signature white eye patch. Separate strokes like any
-              doodle. */}
-          <svg className="topbar__logo" viewBox="0 0 78 62" aria-hidden="true" focusable="false">
-            <path
-              className="orca__body"
-              d="M7 36 C8 26 16 18 28 17 C30 12 33 7 38 4 C38 10 40 14 44 16 C52 18 56 24 57 30 C58 34 56 38 53 41 C44 49 22 51 13 46 C9 44 7 40 7 36 Z"
-            />
-            <path
-              className="orca__tail"
-              d="M54 38 C59 36 63 32 64 26 C65 30 65 34 63 37 C67 39 70 43 70 48 C65 46 59 44 53 42"
-            />
-            <path
-              className="orca__belly"
-              d="M9 37 C16 43 30 46 44 44 C49 43 52 42 53 41 C44 49 22 51 13 46 C10 44 8.7 40.5 9 37 Z"
-            />
-            <ellipse className="orca__patch" cx="20" cy="26.5" rx="6" ry="3" transform="rotate(-16 20 26.5)" />
-            <circle className="orca__eye" cx="19" cy="27" r="1.8" />
-            <path className="orca__flipper" d="M30 41 C33 44.5 37 45.5 41 44.5" />
-            <path className="orca__smile" d="M10 39 C13 41.2 16 41.6 19 41" />
-            <g className="orca__spout">
-              <path d="M24 12 C24 8 24 5 23 2" />
-              <path d="M22 12 C20 8 17 6 14 5" />
-              <path d="M26 12 C29 8 31 7 33 6" />
-            </g>
-          </svg>
-          <div className="topbar__brand-text">
-            <div className="topbar__title">{t("topbar.title")}</div>
-          </div>
+      <header className="workbench-header">
+        <div className="workbench-brand">
+          <strong>{t("topbar.title")}</strong>
+          {readiness?.workspace && <span className="workbench-workspace" title={readiness.workspace}>{readiness.workspace.replace(/[\\/]+$/, "").split(/[\\/]/).at(-1) || readiness.workspace}</span>}
         </div>
-        {/* RunPicker keeps the selected objective in the main line; creation,
-            exact-ID navigation, and older pages live in its Run options menu. */}
-        <div className="topbar__run">
-          <RunPicker runId={runId} onPick={pickRun} autoPick={hydrated} onReadStateChange={setRunListRead} />
-        </div>
-        {hasDagSnapshot && (
-          <div className="topbar__progress" role="group" aria-label={progressGroupAria}>
-            <span
-              className="topbar__progress-track"
-              role="progressbar"
-              aria-label={t("topbar.completedStagesAria")}
-              aria-valuemin={0}
-              aria-valuemax={stageCount}
-              aria-valuenow={completedCount}
-              aria-valuetext={progressAria}
-            >
-              <i style={{ width: `${stageCount ? (completedCount / stageCount) * 100 : 0}%` }} />
-            </span>
-            <span className="topbar__progress-label">
-              {stageCount ? t("topbar.doneOf", { done: completedCount, total: stageCount }) : t("topbar.noStages")}
-            </span>
-            {failedCount > 0 && (
-              <span className="topbar__progress-failed">{t("topbar.failedCount", { n: failedCount })}</span>
-            )}
-          </div>
-        )}
-        {/* The conn pill is focusable with a live-region role so its state is
-            reachable and announced without hovering. */}
-        <div className="topbar__status">
-          <LangToggle />
-          <RunHealthBadge runId={runId} />
-          <div
-            className={`conn ${connectionError ? "conn--bad" : execOff || !readiness ? "conn--warn" : "conn--ok"}`}
-            role="status"
-            tabIndex={0}
-            title={connDetail}
-            aria-label={connDetail}
-          >
-            {connectionError ? t("topbar.fetchFailed") : !readiness ? t("topbar.connectionUnknown") : execOff ? t("topbar.viewOnly") : t("topbar.orcaConnected")}
-          </div>
-        </div>
-        <ExecControls
-          runId={runId}
-          labelsById={labelsById}
-          taskIds={visibleDag.nodes.map((n) => n.id)}
-          edges={visibleDag.edges}
-          readyCount={counts.ready ?? 0}
-          startingRunId={startingRunId}
-          status={runStatus}
-          workerHistoryLoading={workerHistoryLoading}
-          workerHistoryError={workerHistoryError}
-          onRunStarting={onRunStarting}
-          onRunStartFinished={onRunStartFinished}
-          onRunStopped={onRunStopped}
-        />
-        <span className="topbar__tape" aria-hidden="true" />
+        <div className="workbench-run"><RunPicker runId={runId} onPick={pickRun} autoPick={hydrated} onReadStateChange={setRunListRead} /></div>
+        <div className="workbench-progress">{hasDagSnapshot && <span aria-label={progressGroupAria}>{stageCount ? t("topbar.doneOf", { done: completedCount, total: stageCount }) : t("topbar.noStages")}</span>}</div>
+        <div className="workbench-health"><RunHealthBadge runId={runId} /></div>
+        <div className="workbench-connection"><div className={`conn ${connectionError ? "conn--bad" : execOff || !readiness ? "conn--warn" : "conn--ok"}`} role="status" tabIndex={0} title={connDetail} aria-label={connDetail}>
+          {connectionError ? t("topbar.fetchFailed") : !readiness ? t("topbar.connectionUnknown") : execOff ? t("topbar.viewOnly") : t("topbar.orcaConnected")}
+        </div></div>
+        <div className="workbench-action-host" ref={setActionHost} />
+        <LangToggle />
+        <button type="button" className="workbench-chat-toggle" aria-pressed={communicationOpen} onClick={communicationOpen ? closeCommunication : openCommunication}>{t("toolbar.chat")}{activityPending > 0 && <span className="activity-badge">{activityPending}</span>}</button>
       </header>
-
-      <div className="layout">
-        <section className="pane pane--dag">
-          <div className="dag-toolbar">
-            <div className="dag-toolbar__left">
-              <button
-                type="button"
-                className={`btn btn--activity${communicationOpen && sidePanel !== "operations" ? " active" : ""}`}
-                aria-pressed={communicationOpen && sidePanel !== "operations"}
-                onClick={() => {
-                  setSidePanel("communication");
-                  openCommunication();
-                }}
-              >
-                {t("toolbar.activityChat")}
-                {activityPending > 0 && <span className="activity-badge">{activityPending}</span>}
-              </button>
-              <button
-                type="button"
-                className={`btn btn--operations${communicationOpen && sidePanel === "operations" ? " active" : ""}`}
-                aria-pressed={communicationOpen && sidePanel === "operations"}
-                aria-label={actionableCount === null
-                  ? knownActionableCount > 0
-                    ? t("toolbar.openOperationsAtLeast", { n: knownActionableCount })
-                    : t("toolbar.openOperationsUnknown")
-                  : t("toolbar.openOperationsCount", { n: actionableCount })}
-                onClick={() => {
-                  setOperationsSeen(true);
-                  setSidePanel("operations");
-                  openCommunication();
-                }}
-              >
-                {t("toolbar.operations")}
-                {knownActionableCount > 0 && (
-                  <span className="operations-badge">
-                    {actionableCount === null ? `${knownActionableCount}+` : actionableCount}
-                  </span>
-                )}
-              </button>
-              <details className="view-menu">
-                <summary title={t("toolbar.viewTitle")}>
-                  <span aria-hidden="true">⌘</span> {t("toolbar.view")}
-                </summary>
-                <div className="view-menu__panel">
-                  <button className="btn btn--ghost menu-close" type="button" onClick={(event) => {
-                    const menu = event.currentTarget.closest("details");
-                    if (menu) {
-                      menu.open = false;
-                      menu.querySelector<HTMLElement>("summary")?.focus();
-                    }
-                  }}>{t("dialog.close")}</button>
-                  <div className="legend" role="group" aria-label={t("toolbar.statusLegendAria")}>
-                    {(Object.keys(STATUS_META) as TaskStatus[]).map((s) => (
-                      <span
-                        key={s}
-                        className={`legend__item${counts[s] ? " legend__item--live" : ""}`}
-                        data-status={s}
-                      >
-                        <span className="legend__dot" style={{ background: STATUS_META[s].color }} />
-                        {t(`status.${s}`)}
-                        {/* keyed by value so the badge re-pops each time it changes */}
-                        {counts[s] ? (
-                          <b className="legend__n" key={counts[s]}>
-                            {counts[s]}
-                          </b>
-                        ) : null}
-                      </span>
-                    ))}
-                  </div>
-                  {/* Phase 4: the two relation grammars, named. The toggle hides
-                      parent links (they are presentation-only, so hiding them
-                      loses nothing the scheduler depends on). */}
-                  <div className="legend legend--relations" role="group" aria-label={t("toolbar.relationLegendAria")}>
-                    <span className="legend__item legend__item--static" title={t("toolbar.dependencyTitle")}>
-                      <span aria-hidden="true" className="legend__glyph legend__glyph--dep">⇢</span>
-                      {t("toolbar.dependency")}
-                    </span>
-                    <span className="legend__item legend__item--static" title={t("toolbar.parentTitle")}>
-                      <span aria-hidden="true" className="legend__glyph legend__glyph--hier">┄</span>
-                      {t("toolbar.parent")}
-                    </span>
-                    <button
-                      type="button"
-                      className={`btn btn--ghost legend__toggle${showHierarchy ? "" : " legend__toggle--off"}`}
-                      aria-pressed={showHierarchy}
-                      title={t("toolbar.hierarchyToggleTitle")}
-                      onClick={() => setShowHierarchy((v) => !v)}
-                    >
-                      {showHierarchy ? t("toolbar.hideParentLinks") : t("toolbar.showParentLinks")}
-                    </button>
-                  </div>
-                  <div className="layout-ctl">
-                    <span className="exec__label">{t("toolbar.layout")}</span>
-                    <div className="seg" role="group" aria-label={t("toolbar.layoutAria")}>
-                      {LAYOUTS.map((l) => (
-                        <button
-                          key={l.kind}
-                          className={layout === l.kind ? "active" : ""}
-                          aria-pressed={layout === l.kind}
-                          title={t(`layout.title.${l.kind}`)}
-                          onClick={() => pickLayout(l.kind)}
-                        >
-                          <span aria-hidden="true">{l.icon}</span> {t(`layout.label.${l.kind}`)}
-                        </button>
-                      ))}
-                    </div>
-                    <button
-                      className="btn btn--ghost"
-                      title={t("toolbar.relayoutTitle")}
-                      onClick={() => setReorgNonce((n) => n + 1)}
-                    >
-                      {t("toolbar.relayout")}
-                    </button>
-                  </div>
-                </div>
-              </details>
-              {hasDagSnapshot && visibleDag.nodes.length > 0 && (
-                <div className="task-view-switch" role="group" aria-label={t("taskView.label")}>
-                  <button type="button" aria-pressed={mobileTaskView === "tasks"} onClick={() => setMobileTaskView("tasks")}>
-                    {t("taskView.tasks")}
-                  </button>
-                  <button type="button" aria-pressed={mobileTaskView === "graph"} onClick={() => {
-                    setMobileTaskView("graph");
-                    requestCanvasFit();
-                  }}>
-                    {t("taskView.graph")}
-                  </button>
-                </div>
-              )}
+      <div className={`workbench-body${communicationOpen ? " workbench-body--chat-open" : ""}`}>
+        <nav className="workbench-nav" aria-label={t("workbench.navigation")}>
+          {SECTIONS.map((section) => <button key={section} type="button" aria-current={route.section === section && !stageOpen ? "page" : undefined} onClick={() => navigate(section)}>
+            {t(`workbench.section.${section}`)}
+            {section === "decisions" && knownActionableCount > 0 && <span className="workbench-nav-count">{actionableCount === null ? `${knownActionableCount}+` : actionableCount}</span>}
+          </button>)}
+        </nav>
+        <main className="workbench-main" ref={operationRef} onScroll={(event) => { scrollByView.current[viewKey] = event.currentTarget.scrollTop; }}>
+          {!hasDagSnapshot && (waitingForData || readError) && <section className="dag-read-state" aria-labelledby="dag-read-title">
+            <h2 id="dag-read-title">{readError ? t(runId ? "read.tasksFailed" : "read.runsFailed") : t(runId ? "read.loadingTasks" : "read.loadingRuns")}</h2>
+            <p role="status">{t(readError ? "read.failedBody" : "read.loadingBody")}</p>
+            {readError && <><button className="btn" type="button" onClick={() => window.location.reload()}>{t("read.reload")}</button><details className="dag-read-details"><summary>{t("read.technicalDetails")}</summary><pre>{readError}</pre></details></>}
+          </section>}
+          {hasDagSnapshot && connError && <section className="dag-read-notice" aria-label={t("read.staleTitle")}><div><strong>{t("read.staleTitle")}</strong><p role="status">{t("read.staleBody")}</p><details className="dag-read-details"><summary>{t("read.technicalDetails")}</summary><pre>{connError}</pre></details></div><button className="btn btn--ghost" type="button" disabled={retryingRead} onClick={() => void retryRead()}>{t(retryingRead ? "read.retrying" : "read.retry")}</button></section>}
+          {!runId && hydrated && runListRead.loaded && !runListRead.error && <div className="empty-run"><p className="empty-run__title">{t("empty.pickRunTitle")}</p><p className="empty-run__body">{t("empty.pickRunBody")} <code>orca orchestration run-create</code> {t("empty.pickRunBodyTail")}</p></div>}
+          <section className="workbench-section" hidden={stageOpen || route.section !== "overview"} aria-label={t("workbench.section.overview")}>
+            <h1>{t("workbench.section.overview")}</h1>
+            {hasDagSnapshot && <div className="workbench-statuses" role="group" aria-label={t("overview.title")}>{(Object.keys(STATUS_META) as TaskStatus[]).map((status) => <span key={status}><span className="legend__dot" style={{ background: STATUS_META[status].color }} />{t(`status.${status}`)} <b>{counts[status] ?? 0}</b></span>)}{connError && <span role="status">{t("overview.stale")}</span>}</div>}
+            <OperationsAttention {...operationSnapshots} onFocus={openOperation} variant="summary" onOpenDecisions={() => navigate("decisions")} />
+            {hasDagSnapshot && visibleDag.nodes.length > 0 && <SchedulerPanel dag={visibleDag} runStatus={runStatus} runId={runId} onSelectTask={selectStage} />}
+          </section>
+          <section className="workbench-section workbench-tasks" hidden={stageOpen || route.section !== "tasks"} aria-label={t("workbench.section.tasks")}>
+            <h1>{t("workbench.section.tasks")}</h1>
+            <div className="workbench-task-toolbar">
+              <div className="workbench-switch" role="group" aria-label={t("taskView.label")}><button type="button" aria-pressed={mobileTaskView === "tasks"} onClick={() => setMobileTaskView("tasks")}>{t("taskView.tasks")}</button><button type="button" aria-pressed={mobileTaskView === "graph"} onClick={() => setMobileTaskView("graph")}>{t("taskView.graph")}</button></div>
+              {hasDagSnapshot && <span>{t("toolbar.taskDepCount", { tasks: visibleDag.nodes.length, deps: visibleDag.edges.length })}</span>}
+              <details className="view-menu"><summary>{t("toolbar.view")}</summary><div className="view-menu__panel">
+                <div className="legend" role="group" aria-label={t("toolbar.statusLegendAria")}>{(Object.keys(STATUS_META) as TaskStatus[]).map((s) => <span className="legend__item" key={s}><span className="legend__dot" style={{ background: STATUS_META[s].color }} />{t(`status.${s}`)} {counts[s] ?? 0}</span>)}</div>
+                <div className="legend" role="group" aria-label={t("toolbar.relationLegendAria")}><span title={t("toolbar.dependencyTitle")}>{t("toolbar.dependency")}</span><span title={t("toolbar.parentTitle")}>{t("toolbar.parent")}</span><button type="button" className="btn btn--ghost" aria-pressed={showHierarchy} title={t("toolbar.hierarchyToggleTitle")} onClick={() => setShowHierarchy((v) => !v)}>{showHierarchy ? t("toolbar.hideParentLinks") : t("toolbar.showParentLinks")}</button></div>
+                <div className="layout-ctl"><span className="exec__label">{t("toolbar.layout")}</span><div className="seg" role="group" aria-label={t("toolbar.layoutAria")}>{LAYOUTS.map((l) => <button key={l.kind} className={layout === l.kind ? "active" : ""} aria-pressed={layout === l.kind} title={t(`layout.title.${l.kind}`)} onClick={() => pickLayout(l.kind)}>{t(`layout.label.${l.kind}`)}</button>)}</div><button className="btn btn--ghost" title={t("toolbar.relayoutTitle")} onClick={() => setReorgNonce((n) => n + 1)}>{t("toolbar.relayout")}</button></div>
+              </div></details>
             </div>
-            <div className="dag-toolbar__right">
-              {hasDagSnapshot && <span className="dag-toolbar__meta">
-                {t("toolbar.taskDepCount", { tasks: visibleDag.nodes.length, deps: visibleDag.edges.length })}
-              </span>}
-            </div>
-
-            {/* the toolbar's bottom rule fills in with crayon as work lands */}
-            <div className="dag-progress" aria-hidden="true">
-              <span className="dag-progress__seg dag-progress__seg--done" style={{ width: `${pctDone}%` }} />
-              <span className="dag-progress__seg dag-progress__seg--run" style={{ width: `${pctRun}%` }} />
-              <span className="dag-progress__seg dag-progress__seg--fail" style={{ width: `${pctFail}%` }} />
-            </div>
-          </div>
-
-          {hasDagSnapshot && (
-            <div className="run-overview" role="group" aria-label={t("overview.title")}>
-              <span className="run-overview__label">{t("overview.title")}</span>
-              {(Object.keys(STATUS_META) as TaskStatus[]).map((status) => (
-                  <span key={status} className="run-overview__stat" data-empty={!counts[status]}>
-                    <span className="legend__dot" style={{ background: STATUS_META[status].color }} />
-                    {t(`status.${status}`)} <b>{counts[status] ?? 0}</b>
-                  </span>
-                ))}
-              {connError && <span className="run-overview__stale" role="status">{t("overview.stale")}</span>}
-            </div>
-          )}
-          <div className="dag-workspace">
-            {/* Independent Operations and Communication panels share this resizable
-                rail. Only Communication has Activity/Chat tabs; switching the
-                top-level panel preserves its last conversation selection.
-                Activity and Chat are two readings of the same live snapshot.
-                Keep this mounted while closed so unread counts and the Chat
-                conversation list stay warm without opening a second stream.
-                The communication surface is a real left rail, not a canvas
-                overlay, so the graph always receives its own usable area. */}
-            <aside
-              ref={communicationRef}
-              className={`communication-center${communicationOpen ? "" : " communication-center--closed"}${communicationResizing ? " communication-center--resizing" : ""}`}
-              aria-label={t(sidePanel === "operations" ? "toolbar.operations" : "toolbar.communicationCenterAria")}
-              aria-hidden={!communicationOpen}
-              style={{ width: communicationWidth === null ? undefined : `${communicationWidth}px` }}
-            >
-                <header className="communication-center__header">
-                  {sidePanel === "operations" ? (
-                    <h2 className="operations-center__title">{t("toolbar.operations")}
-                      {knownActionableCount > 0 && <span className="operations-badge">{actionableCount === null ? `${knownActionableCount}+` : actionableCount}</span>}
-                    </h2>
-                  ) : <div className="communication-center__tabs" role="tablist" aria-label={t("toolbar.communicationViewAria")}>
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={communicationTab === "activity"}
-                      className={communicationTab === "activity" ? "active" : ""}
-                      onClick={() => setCommunicationTab("activity")}
-                    >
-                      {t("toolbar.activity")}
-                      {activityPending > 0 && <span className="activity-badge">{activityPending}</span>}
-                    </button>
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={communicationTab === "chat"}
-                      className={communicationTab === "chat" ? "active" : ""}
-                      onClick={() => setCommunicationTab("chat")}
-                    >
-                      {t("toolbar.chat")}
-                      {activityPending > 0 && <span className="activity-badge">{activityPending}</span>}
-                    </button>
-                  </div>}
-                  <button
-                    type="button"
-                    className="communication-center__close"
-                    aria-label={t(sidePanel === "operations" ? "operations.close" : "toolbar.closeCommunicationAria")}
-                    onClick={closeCommunication}
-                  >
-                    ✕
-                  </button>
-                </header>
-
-                <div className="communication-center__body">
-                  <div hidden={sidePanel !== "communication" || communicationTab !== "activity"}>
-                    <ActivityPanel
-                        runId={runId}
-                        onSelectTask={selectStage}
-                        onResolved={refresh}
-                        onPendingCount={setActivityPending}
-                        onSnapshot={setActivitySnapshot}
-                        disabled={execOff}
-                        disabledReason={readiness?.reason}
-                      />
-                  </div>
-                  {operationsSeen && (
-                    // Keep panel state warm after its first visit. The two
-                    // polling children receive `active` and stop their
-                    // intervals while the Operations panel is hidden.
-                    <div hidden={sidePanel !== "operations"} className="communication-center__operations">
-                      <nav className="operations-nav" aria-label={t("operations.groups")}>
-                        {OPERATION_GROUPS.map((group) => (
-                          <button
-                            key={group}
-                            type="button"
-                            aria-pressed={operationGroup === group}
-                            aria-controls={`operations-${group}`}
-                            onClick={() => { setOperationFocus(null); setOperationGroup(group); }}
-                          >
-                            {t(`operations.${group}`)}
-                          </button>
-                        ))}
-                      </nav>
-                      <section id="operations-decisions" hidden={operationGroup !== "decisions"} aria-label={t("operations.decisions")}>
-                        <OperationsAttention
-                          {...operationSnapshots}
-                          onFocus={openOperation}
-                        />
-                        <p className="operations-intro">{t("operations.decisionsHint")}</p>
-                        {/* Promoted from a collapsed drawer under the timeline to
-                            its own panel: gates, recovery, the durable fleet view,
-                            the mutation audit and capability facts are operational
-                            state, not an afterthought. */}
-                        <GatePanel
-                          gates={visibleDag.gates}
-                          runId={runId}
-                          onResolved={refresh}
-                          disabled={execOff}
-                          disabledReason={readiness?.reason}
-                        />
-                        {/* Recovery no longer polls: App owns /api/run-status and
-                            passes it down, so there is exactly one periodic
-                            caller of that endpoint in the whole app. */}
-                        <RecoveryPanel
-                          runId={runId}
-                          status={runStatus}
-                          taskIds={visibleDag.nodes.map((node) => node.id)}
-                          blockedTaskIds={visibleDag.nodes.filter((node) => node.status === "blocked").map((node) => node.id)}
-                          onRunStarting={onRunStarting}
-                          onRunStartFinished={onRunStartFinished}
-                          onRetried={() => {
-                            void refresh();
-                            void refreshExecutionState();
-                          }}
-                          disabled={execOff}
-                          disabledReason={readiness?.reason}
-                        />
-                      </section>
-                      <section id="operations-execution" hidden={operationGroup !== "execution"} aria-label={t("operations.execution")}>
-                        <p className="operations-intro">{t("operations.executionHint")}</p>
-                        {!workerHistoryLoading && !workerHistoryError && workerRows.length === 0 && <p className="operations-empty">{t("operations.noWorkers")}</p>}
-                        <WorkerPanel
-                          labelsById={labelsById}
-                          focusId={operationFocus?.kind === "worker" ? operationFocus.id : null}
-                          runId={runId}
-                          rows={workerRows}
-                          rowsError={workerHistoryError}
-                          status={runStatus}
-                          disabled={execOff}
-                          disabledReason={readiness?.reason}
-                        />
-                        {/* Phase 7: runtime lane state — workspace identity,
-                            warnings, review, and explicit removal. Its polling
-                            pauses when Operations is out of view. */}
-                        <LanesPanel
-                          runId={runId}
-                          active={communicationOpen && sidePanel === "operations" && operationGroup === "execution"}
-                          disabled={execOff}
-                          disabledReason={readiness?.reason}
-                        />
-                      </section>
-                      <section id="operations-diagnostics" hidden={operationGroup !== "diagnostics"} aria-label={t("operations.diagnostics")}>
-                        <p className="operations-intro">{t("operations.diagnosticsHint")}</p>
-                        <RequestAuditPanel labelsById={labelsById} runId={runId} active={communicationOpen && sidePanel === "operations" && operationGroup === "diagnostics"} />
-                        <CapabilityPanel />
-                      </section>
-                    </div>
-                  )}
-                  <div hidden={sidePanel !== "communication" || communicationTab !== "chat"} className="communication-center__chat">
-                    <ChatPanel
-                      runId={runId}
-                      snapshot={activitySnapshot}
-                      tasks={visibleDag.nodes}
-                      leadTaskId={leadTaskId}
-                      onSelectTask={selectStage}
-                      onResolved={refresh}
-                      coordinatorActive={selectedRunExecuting}
-                      disabled={execOff}
-                      disabledReason={readiness?.reason}
+            {hasDagSnapshot && <div hidden={mobileTaskView !== "tasks"}><TaskList dag={visibleDag} selectedId={stageOpen ? selectedId : null} onSelect={selectStage} /></div>}
+            {hasDagSnapshot && (graphMountedRun === runId || graphActive) && (
+              <div className="workbench-graph" hidden={mobileTaskView !== "graph"}>
+                <Suspense fallback={<p role="status">{t("workbench.loadingGraph")}</p>}>
+                  <GraphMounted onMount={markGraphMounted}>
+                    <DagView
+                      dag={visibleDag} leadTaskId={leadTaskId}
+                      selectedId={stageOpen ? selectedId : null} onSelect={selectStage}
+                      layout={layout} reorgNonce={reorgNonce} fitNonce={canvasFitNonce}
+                      showHierarchy={showHierarchy} workerRows={workerRows}
+                      attempts={runStatus?.runId === runId ? runStatus.attempts : EMPTY_ATTEMPTS}
+                      active={graphActive} fleetFresh={fleetFresh}
+                      pendingDispatchIds={pendingDispatchIds}
                     />
-                  </div>
-                </div>
-                <div
-                  className="communication-center__resize"
-                  role="separator"
-                  aria-label={t("toolbar.resizeCommunicationAria")}
-                  aria-orientation="vertical"
-                  aria-valuemin={280}
-                  aria-valuemax={COMMUNICATION_MAX_WIDTH}
-                  aria-valuenow={communicationWidth ?? undefined}
-                  tabIndex={0}
-                  title={t("toolbar.resizeCommunicationTitle")}
-                  onPointerDown={beginCommunicationResize}
-                  onPointerMove={moveCommunicationResize}
-                  onPointerUp={endCommunicationResize}
-                  onPointerCancel={endCommunicationResize}
-                  onKeyDown={(event) => {
-                    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-                    const current = communicationWidth ?? communicationRef.current?.getBoundingClientRect().width ?? 440;
-                    setCommunicationWidth(clampCommunicationWidth(current + (event.key === "ArrowRight" ? 32 : -32)));
-                    requestCanvasFit();
-                    event.preventDefault();
-                  }}
-                />
-            </aside>
-
-            <div className={`dag-canvas${mobileTaskView === "tasks" && visibleDag.nodes.length > 0 ? " dag-canvas--task-list" : ""}`}>
-              {!hasDagSnapshot && (waitingForData || readError) && (
-                <section className="dag-read-state" aria-labelledby="dag-read-title">
-                  <h2 id="dag-read-title">{readError
-                    ? t(runId ? "read.tasksFailed" : "read.runsFailed")
-                    : t(runId ? "read.loadingTasks" : "read.loadingRuns")}</h2>
-                  <p role="status">{t(readError ? "read.failedBody" : "read.loadingBody")}</p>
-                  {readError && (
-                    <>
-                      <button className="btn" type="button" onClick={() => window.location.reload()}>
-                        {t("read.reload")}
-                      </button>
-                      <details className="dag-read-details">
-                        <summary>{t("read.technicalDetails")}</summary>
-                        <pre>{readError}</pre>
-                      </details>
-                    </>
-                  )}
-                </section>
-              )}
-              {hasDagSnapshot && connError && (
-                <section className="dag-read-notice" aria-label={t("read.staleTitle")}>
-                  <div>
-                    <strong>{t("read.staleTitle")}</strong>
-                    <p role="status">{t("read.staleBody")}</p>
-                    <details className="dag-read-details">
-                      <summary>{t("read.technicalDetails")}</summary>
-                      <pre>{connError}</pre>
-                    </details>
-                  </div>
-                  <button className="btn btn--ghost" type="button" disabled={retryingRead} onClick={() => void retryRead()}>
-                    {t(retryingRead ? "read.retrying" : "read.retry")}
-                  </button>
-                </section>
-              )}
-              {hasDagSnapshot && (
-                <div className="dag-graph">
-                  <DagView
-                    dag={visibleDag}
-                    leadTaskId={leadTaskId}
-                    selectedId={stageOpen ? selectedId : null}
-                    onSelect={selectStage}
-                    layout={layout}
-                    reorgNonce={reorgNonce}
-                    fitNonce={canvasFitNonce}
-                    showHierarchy={showHierarchy}
-                    workerRows={workerRows}
-                    attempts={runStatus?.runId === runId ? runStatus.attempts : EMPTY_ATTEMPTS}
-                  />
-
-                  {/* The scheduler answers what may run next. Communication
-                      remains separate: its records explain what happened. */}
-                  {visibleDag.nodes.length > 0 && (
-                    <SchedulerPanel
-                      dag={visibleDag}
-                      runStatus={runStatus}
-                      runId={runId}
-                      onSelectTask={selectStage}
-                    />
-                  )}
-                </div>
-              )}
-              {hasDagSnapshot && visibleDag.nodes.length > 0 && (
-                <TaskList dag={visibleDag} selectedId={stageOpen ? selectedId : null} onSelect={selectStage} />
-              )}
-
-              {!runId && hydrated && runListRead.loaded && !runListRead.error && (
-                <div className="empty-run">
-                  <p className="empty-run__title">{t("empty.pickRunTitle")}</p>
-                  <p className="empty-run__body">
-                    {t("empty.pickRunBody")}{" "}
-                    <code>orca orchestration run-create</code>{" "}
-                    {t("empty.pickRunBodyTail")}
-                  </p>
-                </div>
-              )}
-
-              {selected && stageOpen && (
-                <NodePanel
-                  key={selected.id}
-                  node={selected}
-                  runId={runId}
-                  isLead={selected.id === leadTaskId}
-                  parentLabel={selectedParentLabel}
-                  childLabels={selectedChildLabels}
-                  readiness={selectedReadiness}
-                  edges={visibleDag.edges}
-                  labelsById={labelsById}
-                  onLeadChange={(taskId) => setLeadTask(runId, taskId)}
-                  permanentlyLocked={startedTaskIds.has(selected.id)}
-                  temporarilyLocked={selectedRunExecuting}
-                  coordinatorStarting={selectedRunStarting}
-                  workerHistoryLoading={workerHistoryLoading}
-                  workerHistoryError={workerHistoryError}
-                  failedStart={Boolean(
-                    runStatus?.runId === runId && runStatus.attempts.some((attempt) =>
-                      attempt.taskId === selected.id &&
-                      attempt.settledVia === "start_failed" &&
-                      attempt.startReceipt?.ok === false,
-                    ),
-                  )}
-                  hasWorkerHistory={workerRows.some((row) => row.taskId === selected.id)}
-                  workerRows={workerRows}
-                  onOpenOperations={(target) => {
-                    setStageOpen(false);
-                    openOperation(target);
-                  }}
-                  onClose={closeStage}
-                />
-              )}
-            </div>
-          </div>
-        </section>
+                  </GraphMounted>
+                </Suspense>
+              </div>
+            )}
+          </section>
+          <section className="workbench-section" hidden={stageOpen || route.section !== "decisions"} aria-label={t("workbench.section.decisions")}>
+            <h1>{t("workbench.section.decisions")}</h1>
+            <OperationsAttention {...operationSnapshots} onFocus={openOperation} />
+            <GatePanel gates={visibleDag.gates} runId={runId} onResolved={refresh} disabled={execOff} disabledReason={readiness?.reason} />
+            <RecoveryPanel runId={runId} status={runStatus} taskIds={visibleDag.nodes.map((node) => node.id)} blockedTaskIds={visibleDag.nodes.filter((node) => node.status === "blocked").map((node) => node.id)} onRunStarting={onRunStarting} onRunStartFinished={onRunStartFinished} onRetried={() => { void refresh(); void refreshExecutionState(); }} disabled={execOff} disabledReason={readiness?.reason} />
+          </section>
+          <section className="workbench-section" hidden={stageOpen || route.section !== "executions"} aria-label={t("workbench.section.executions")}>
+            <h1>{t("workbench.section.executions")}</h1>
+            {!workerHistoryLoading && !workerHistoryError && workerRows.length === 0 && <p>{t("operations.noWorkers")}</p>}
+            <WorkerPanel key={runId} labelsById={labelsById} focusId={operationFocus?.kind === "worker" ? operationFocus.id : null} runId={runId} rows={workerRows} rowsError={workerHistoryError} status={runStatus} disabled={execOff} disabledReason={readiness?.reason} />
+          </section>
+          <section className="workbench-section" hidden={stageOpen || (route.section !== "activity" && route.section !== "decisions")} aria-label={t("workbench.section.activity")}>
+            {route.section === "activity" && <h1>{t("workbench.section.activity")}</h1>}
+            <ActivityPanel actionableOnly={route.section === "decisions"} runId={runId} onSelectTask={selectStage} onResolved={refresh} onPendingCount={setActivityPending} onSnapshot={setActivitySnapshot} disabled={execOff} disabledReason={readiness?.reason} />
+            <div hidden={route.section !== "activity"}><RequestAuditPanel labelsById={labelsById} runId={runId} active={!stageOpen && route.section === "activity"} /></div>
+          </section>
+          <section className="workbench-section" hidden={stageOpen || route.section !== "resources"} aria-label={t("workbench.section.resources")}>
+            <h1>{t("workbench.section.resources")}</h1>
+            <LanesPanel runId={runId} active={!stageOpen && route.section === "resources"} disabled={execOff} disabledReason={readiness?.reason} />
+            <CleanupPanel runId={runId} disabled={execOff} />
+          </section>
+          <section className="workbench-section" hidden={stageOpen || route.section !== "settings"} aria-label={t("workbench.section.settings")}>
+            <h1>{t("workbench.section.settings")}</h1>
+            <ExecControls actionHost={actionHost} runId={runId} labelsById={labelsById} taskIds={visibleDag.nodes.map((n) => n.id)} edges={visibleDag.edges} readyCount={counts.ready ?? 0} startingRunId={startingRunId} status={runStatus} workerHistoryLoading={workerHistoryLoading} workerHistoryError={workerHistoryError} onRunStarting={onRunStarting} onRunStartFinished={onRunStartFinished} onRunStopped={onRunStopped} />
+            <CapabilityPanel />
+          </section>
+          {stageOpen && !selected && hasDagSnapshot && <section className="workbench-detail"><p>{t("workbench.taskUnavailable")} <code>{selectedId}</code></p><button type="button" className="btn" onClick={closeStage}>{t("dialog.close")}</button></section>}
+          {selected && stageOpen && <div className="workbench-detail"><NodePanel key={`${runId}:${selected.id}`} node={selected} runId={runId} isLead={selected.id === leadTaskId} parentLabel={selectedParentLabel} childLabels={selectedChildLabels} readiness={selectedReadiness} edges={visibleDag.edges} labelsById={labelsById} onLeadChange={(taskId) => setLeadTask(runId, taskId)} permanentlyLocked={startedTaskIds.has(selected.id)} temporarilyLocked={selectedRunExecuting} coordinatorStarting={selectedRunStarting} workerHistoryLoading={workerHistoryLoading} workerHistoryError={workerHistoryError} failedStart={Boolean(runStatus?.runId === runId && runStatus.attempts.some((attempt) => attempt.taskId === selected.id && attempt.settledVia === "start_failed" && attempt.startReceipt?.ok === false))} hasWorkerHistory={workerRows.some((row) => row.taskId === selected.id)} workerRows={workerRows} onRefresh={refresh} onOpenOperations={openOperation} onClose={closeStage} /></div>}
+        </main>
+        <aside ref={communicationRef} className={`workbench-chat${communicationOpen ? "" : " workbench-chat--closed"}${communicationResizing ? " workbench-chat--resizing" : ""}`} aria-label={t("toolbar.chat")} aria-hidden={!communicationOpen} style={{ width: communicationWidth === null ? undefined : `${communicationWidth}px` }}>
+          <div className="workbench-chat-resize" role="separator" aria-label={t("toolbar.resizeCommunicationAria")} aria-orientation="vertical" aria-valuemin={280} aria-valuemax={COMMUNICATION_MAX_WIDTH} aria-valuenow={communicationWidth ?? undefined} tabIndex={communicationOpen ? 0 : -1} title={t("toolbar.resizeCommunicationTitle")} onPointerDown={beginCommunicationResize} onPointerMove={moveCommunicationResize} onPointerUp={endCommunicationResize} onPointerCancel={endCommunicationResize} onKeyDown={(event) => {
+            if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+            const current = communicationWidth ?? communicationRef.current?.getBoundingClientRect().width ?? 440;
+            setCommunicationWidth(clampCommunicationWidth(current + (event.key === "ArrowLeft" ? 32 : -32)));
+            event.preventDefault();
+          }} />
+          <header className="workbench-chat-header"><h2>{t("toolbar.chat")}</h2><button type="button" onClick={closeCommunication} aria-label={t("toolbar.closeCommunicationAria")}>×</button></header>
+          <ChatPanel active={communicationOpen} runId={runId} snapshot={activitySnapshot} tasks={visibleDag.nodes} leadTaskId={leadTaskId} onSelectTask={selectStage} onSelectWorker={(id) => openOperation({ kind: "worker", id })} onResolved={refresh} coordinatorActive={selectedRunExecuting} disabled={execOff} disabledReason={readiness?.reason} />
+        </aside>
       </div>
     </div>
   );

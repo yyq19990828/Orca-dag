@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
 import { prepareWorkspaceStateFile, workspaceStateReadPath, WORKSPACE_STATE_FILES } from "./workspaceState";
 import { validateOpenCodeLaunch, type OpenCodeLaunch } from "./openCode";
+import { validateGroupAudience } from "./security";
 import type { OrcaDelivery, TaskMessageReceipt, NativeLaunchMode } from "./orca";
 
 const pExecFile = promisify(execFile);
@@ -82,6 +83,8 @@ export interface MailboxCheckCheckpoint {
   processedMessageIds: string[];
   pendingQuestionIds: string[];
   replyRequests?: Record<string, { requestId: string; from: string; bodyHash: string; state: "prepared" | "unknown" | "completed" }>;
+  /** Stop events are resolved by exact Dispatch evidence, not a fabricated reply. */
+  resolvedStopEvents?: Record<string, { dispatchId: string; evidence: string }>;
   createdAt: string;
   updatedAt: string;
   error: string | null;
@@ -103,12 +106,28 @@ export interface GuidanceSendCheckpoint {
   error: string | null;
 }
 
+export interface OperatorMessageCheckpoint {
+  requestId: string;
+  operation: "reply" | "group";
+  runId: string;
+  target: string;
+  from: string;
+  /** Original message's thread identity, not the routed destination Run. */
+  sourceThreadId?: string | null;
+  bodyHash: string;
+  state: "prepared" | "unknown" | "completed" | "refused";
+  outcome: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 interface SessionStoreFile {
   version: typeof STORE_VERSION;
   bindings: ProviderSessionBinding[];
   openCodeLaunches?: OpenCodeLaunch[];
   mailboxChecks?: MailboxCheckCheckpoint[];
   guidanceSends?: GuidanceSendCheckpoint[];
+  operatorMessages?: OperatorMessageCheckpoint[];
 }
 
 type SessionKey = Pick<ProviderSessionBinding, "runId" | "taskId" | "dispatchId">;
@@ -237,6 +256,14 @@ function validateMailboxCheck(value: unknown): MailboxCheckCheckpoint {
           !["prepared", "unknown", "completed"].includes(String(reply.state))) throw new Error("Invalid mailbox reply request");
     }
   }
+  if (row.resolvedStopEvents !== undefined) {
+    for (const [id, raw] of Object.entries(recordValue(row.resolvedStopEvents, "resolved stop events"))) {
+      assertId(id, "stop event id");
+      const resolution = recordValue(raw, "stop event resolution");
+      assertId(resolution.dispatchId, "stop event dispatchId");
+      if (typeof resolution.evidence !== "string" || !resolution.evidence) throw new Error("Invalid stop event evidence");
+    }
+  }
   if (row.delivery !== null) {
     const delivery = recordValue(row.delivery, "mailbox delivery");
     if (delivery.runId !== row.runId || !Array.isArray(delivery.messages)) throw new Error("Mailbox delivery Run or messages invalid");
@@ -261,9 +288,13 @@ function validateGuidanceSend(value: unknown): GuidanceSendCheckpoint {
   if (row.receipt !== null) {
     const receipt = recordValue(row.receipt, "guidance receipt");
     if (receipt.runId !== row.runId || receipt.requestedTaskId !== row.requestedTaskId || receipt.requestedDispatchId !== row.requestedDispatchId ||
-        (receipt.kind !== "enqueued" && receipt.kind !== "follow_up")) throw new Error("Guidance receipt lineage mismatch");
+        !["enqueued", "follow_up", "recipient_run_bound_redirect"].includes(String(receipt.kind))) throw new Error("Guidance receipt lineage mismatch");
     assertId(receipt.taskId, "receipt taskId");
     assertId(receipt.dispatchId, "receipt dispatchId");
+    if (receipt.kind === "recipient_run_bound_redirect") {
+      assertId(receipt.destinationRunId, "destinationRunId");
+      if (receipt.destinationRunId === row.runId || receipt.taskId !== row.requestedTaskId || receipt.dispatchId !== row.requestedDispatchId) throw new Error("Invalid redirect lineage");
+    } else if (receipt.destinationRunId != null) throw new Error("Unexpected redirect destination");
     if (receipt.followUpOf !== null) assertId(receipt.followUpOf, "followUpOf");
     if (receipt.requestId !== null && receipt.requestId !== row.requestId) throw new Error("Guidance request identity mismatch");
   }
@@ -276,9 +307,28 @@ function validateGuidanceSend(value: unknown): GuidanceSendCheckpoint {
         mode[key] === null || typeof mode[key] === "string")) throw new Error("Invalid guidance launch mode");
     }
   }
-  if ((row.state === "enqueued" || row.state === "follow_up") && (!row.receipt || (row.receipt as Record<string, unknown>).kind !== row.state)) throw new Error("Guidance outcome requires its matching receipt");
+  if ((row.state === "enqueued" || row.state === "follow_up") && (!row.receipt ||
+      ((row.receipt as Record<string, unknown>).kind !== row.state &&
+       !(row.state === "enqueued" && (row.receipt as Record<string, unknown>).kind === "recipient_run_bound_redirect")))) throw new Error("Guidance outcome requires its matching receipt");
   if (row.creationProven && (!row.receipt || (row.receipt as Record<string, unknown>).kind !== "follow_up")) throw new Error("Guidance creation proof requires follow-up receipt");
   return row as unknown as GuidanceSendCheckpoint;
+}
+
+function validateOperatorMessage(value: unknown): OperatorMessageCheckpoint {
+  const row = recordValue(value, "operator message checkpoint");
+  for (const key of ["requestId", "runId", "from"] as const) assertId(row[key], key);
+  if (row.operation === "reply") assertId(row.target, "reply target");
+  else if (row.operation === "group") {
+    if (typeof row.target !== "string" || validateGroupAudience(row.target) !== row.target) throw new Error("Invalid operator message target");
+  }
+  if (row.sourceThreadId != null) assertId(row.sourceThreadId, "source thread id");
+  if (!["reply", "group"].includes(String(row.operation)) ||
+      !["prepared", "unknown", "completed", "refused"].includes(String(row.state)) ||
+      typeof row.bodyHash !== "string" || !/^[a-f0-9]{64}$/.test(row.bodyHash) ||
+      !isIsoDate(row.createdAt) || !isIsoDate(row.updatedAt)) throw new Error("Invalid operator message checkpoint");
+  if (row.outcome !== null) recordValue(row.outcome, "operator message outcome");
+  if (row.state === "completed" && row.outcome === null) throw new Error("Completed operator message requires its receipt");
+  return row as unknown as OperatorMessageCheckpoint;
 }
 
 function validateInput(value: ProviderSessionBindingInput): ProviderSessionBindingInput {
@@ -396,7 +446,7 @@ async function readStore(path: string): Promise<SessionStoreFile> {
   ) {
     throw new Error("session binding store has an unsupported format");
   }
-  if (Object.keys(parsed as Record<string, unknown>).some((key) => !["version", "bindings", "openCodeLaunches", "mailboxChecks", "guidanceSends"].includes(key))) {
+  if (Object.keys(parsed as Record<string, unknown>).some((key) => !["version", "bindings", "openCodeLaunches", "mailboxChecks", "guidanceSends", "operatorMessages"].includes(key))) {
     throw new Error("session binding store contains unknown fields");
   }
   const bindings = ((parsed as Record<string, unknown>).bindings as unknown[]).map(validateBinding);
@@ -418,13 +468,16 @@ async function readStore(path: string): Promise<SessionStoreFile> {
   const inventories = parsed as Record<string, unknown>;
   if (inventories.mailboxChecks !== undefined && !Array.isArray(inventories.mailboxChecks)) throw new Error("Invalid mailbox checkpoint inventory");
   if (inventories.guidanceSends !== undefined && !Array.isArray(inventories.guidanceSends)) throw new Error("Invalid guidance checkpoint inventory");
+  if (inventories.operatorMessages !== undefined && !Array.isArray(inventories.operatorMessages)) throw new Error("Invalid operator message inventory");
   const mailboxChecks = (inventories.mailboxChecks as unknown[] | undefined)?.map(validateMailboxCheck);
   const guidanceSends = (inventories.guidanceSends as unknown[] | undefined)?.map(validateGuidanceSend);
-  for (const rows of [mailboxChecks, guidanceSends]) {
+  const operatorMessages = (inventories.operatorMessages as unknown[] | undefined)?.map(validateOperatorMessage);
+  for (const rows of [mailboxChecks, guidanceSends, operatorMessages]) {
     if (rows && (rows.length > MAX_BINDINGS || new Set(rows.map(row => row.requestId)).size !== rows.length)) throw new Error("Invalid duplicate or oversized critical checkpoint inventory");
   }
   return { version: STORE_VERSION, bindings, ...(openCodeLaunches ? { openCodeLaunches } : {}),
-    ...(mailboxChecks ? { mailboxChecks } : {}), ...(guidanceSends ? { guidanceSends } : {}) };
+    ...(mailboxChecks ? { mailboxChecks } : {}), ...(guidanceSends ? { guidanceSends } : {}),
+    ...(operatorMessages ? { operatorMessages } : {}) };
 }
 
 async function writeStore(path: string, file: SessionStoreFile): Promise<void> {
@@ -432,16 +485,22 @@ async function writeStore(path: string, file: SessionStoreFile): Promise<void> {
   // follow-up receipt are recovery authority, not rotating audit history.
   const completed = (file.mailboxChecks ?? []).filter(row => row.state === "completed").slice(-100);
   const settledGuidance = (file.guidanceSends ?? []).filter(row => row.state === "enqueued" || row.state === "refused").slice(-100);
+  const settledOperator = (file.operatorMessages ?? []).filter(row => row.state === "completed" || row.state === "refused").slice(-100);
   const keptChecks = new Set(completed.map(row => row.requestId));
   const keptGuidance = new Set(settledGuidance.map(row => row.requestId));
+  const keptOperator = new Set(settledOperator.map(row => row.requestId));
+  const neededByMailbox = (row: OperatorMessageCheckpoint) => row.operation === "reply" &&
+    (file.mailboxChecks ?? []).some(check => check.runId === row.runId && check.pendingQuestionIds.includes(row.target));
   const compact: SessionStoreFile = { ...file,
     ...(file.mailboxChecks ? { mailboxChecks: file.mailboxChecks.filter(row => row.state !== "completed" || keptChecks.has(row.requestId)) } : {}),
-    ...(file.guidanceSends ? { guidanceSends: file.guidanceSends.filter(row => !["enqueued", "refused"].includes(row.state) || keptGuidance.has(row.requestId)) } : {}) };
+    ...(file.guidanceSends ? { guidanceSends: file.guidanceSends.filter(row => !["enqueued", "refused"].includes(row.state) || keptGuidance.has(row.requestId)) } : {}),
+    ...(file.operatorMessages ? { operatorMessages: file.operatorMessages.filter(row => !["completed", "refused"].includes(row.state) || keptOperator.has(row.requestId) || neededByMailbox(row)) } : {}) };
   let encoded = `${JSON.stringify(compact, null, 2)}\n`;
   // If payloads fill the store, discard only completed history before failing.
   if (Buffer.byteLength(encoded) > MAX_STORE_BYTES) {
     if (compact.mailboxChecks) compact.mailboxChecks = compact.mailboxChecks.filter(row => row.state !== "completed");
     if (compact.guidanceSends) compact.guidanceSends = compact.guidanceSends.filter(row => !["enqueued", "refused"].includes(row.state));
+    if (compact.operatorMessages) compact.operatorMessages = compact.operatorMessages.filter(row => !["completed", "refused"].includes(row.state) || neededByMailbox(row));
     encoded = `${JSON.stringify(compact, null, 2)}\n`;
   }
   if (Buffer.byteLength(encoded) > MAX_STORE_BYTES) throw new Error("session binding store is full");
@@ -591,8 +650,11 @@ export class ProviderSessionStore {
           throw new Error("Mailbox checkpoint identity or processed evidence cannot change");
         }
         if (existing.pendingQuestionIds.some(id =>
-          !row.pendingQuestionIds.includes(id) && row.replyRequests?.[id]?.state !== "completed")) {
-          throw new Error("Pending question cannot be cleared without a completed reply");
+          !row.pendingQuestionIds.includes(id) && row.replyRequests?.[id]?.state !== "completed" && !row.resolvedStopEvents?.[id])) {
+          throw new Error("Pending input cannot be cleared without durable resolution");
+        }
+        for (const [id, old] of Object.entries(existing.resolvedStopEvents ?? {})) {
+          if (JSON.stringify(row.resolvedStopEvents?.[id]) !== JSON.stringify(old)) throw new Error("Stop event resolution cannot change");
         }
         for (const [id, old] of Object.entries(existing.replyRequests ?? {})) {
           const next = row.replyRequests?.[id];
@@ -625,6 +687,7 @@ export class ProviderSessionStore {
             (existing.receipt && (!row.receipt || existing.receipt.kind !== row.receipt.kind ||
               existing.receipt.runId !== row.receipt.runId || existing.receipt.taskId !== row.receipt.taskId ||
               existing.receipt.dispatchId !== row.receipt.dispatchId ||
+              (existing.receipt.destinationRunId ?? null) !== (row.receipt.destinationRunId ?? null) ||
               (existing.receipt.followUpOf !== null && existing.receipt.followUpOf !== row.receipt.followUpOf) ||
               (existing.receipt.requestId !== null && existing.receipt.requestId !== row.receipt.requestId))) ||
             (["enqueued", "follow_up", "refused"].includes(existing.state) && existing.state !== row.state)) {
@@ -632,6 +695,37 @@ export class ProviderSessionStore {
         }
       } else if (rows.length >= MAX_BINDINGS) throw new Error("Guidance checkpoint inventory is full");
       await writeStore(this.path, { ...file, guidanceSends: [...rows.filter(item => item.requestId !== row.requestId), row] });
+    });
+  }
+
+  async listOperatorMessages(runId?: string): Promise<OperatorMessageCheckpoint[]> {
+    if (runId !== undefined) assertId(runId, "runId");
+    const file = await readStore(workspaceStateReadPath(this.workspaceDir, SESSIONS_FILE));
+    return (file.operatorMessages ?? []).filter(row => runId === undefined || row.runId === runId);
+  }
+
+  async recordOperatorMessage(input: OperatorMessageCheckpoint): Promise<void> {
+    const row = validateOperatorMessage(input);
+    await withFileLock(this.path, async () => {
+      prepareWorkspaceStateFile(this.workspaceDir, SESSIONS_FILE, true);
+      const file = await readStore(this.path);
+      const rows = file.operatorMessages ?? [];
+      const existing = rows.find(item => item.requestId === row.requestId);
+      if (existing) {
+        if (existing.operation !== row.operation || existing.runId !== row.runId ||
+            existing.target !== row.target || existing.from !== row.from || existing.bodyHash !== row.bodyHash ||
+            existing.sourceThreadId !== row.sourceThreadId || existing.createdAt !== row.createdAt ||
+            (["completed", "refused"].includes(existing.state) && JSON.stringify(existing) !== JSON.stringify(row))) {
+          throw new Error("Operator message identity or settled outcome cannot change");
+        }
+      } else {
+        if (rows.length >= MAX_BINDINGS) throw new Error("Operator message inventory is full");
+        if (rows.some(item => item.runId === row.runId && item.operation === row.operation &&
+          item.target === row.target && ["prepared", "unknown"].includes(item.state))) {
+          throw new Error("An operator message to this target remains unresolved");
+        }
+      }
+      await writeStore(this.path, { ...file, operatorMessages: [...rows.filter(item => item.requestId !== row.requestId), row] });
     });
   }
 

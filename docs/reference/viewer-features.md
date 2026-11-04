@@ -10,19 +10,21 @@ For operational step-by-step procedures, consult [Operating the Viewer](../tutor
 
 ---
 
-## Visualization and Layout
+## Sectional Workbench and Visualization
 
-- **Hand-Drawn Crayon Aesthetic:** The canvas renders in a warm sketchbook style using SVG `feTurbulence` filters, pencil borders, and hand-drawn UI components.
-- **Live DAG Visualization:** Task nodes reflect real-time statuses (`pending`, `ready`, `dispatched`, `completed`, `failed`, `blocked`) with distinct colors and corner harness badges. Polling refreshes every 2 seconds.
+- **Modern Sectional Workbench:** A crisp, resource-efficient orchestration workbench (`workbench.css`, `styles.css`) with deep navy navigation, flat surfaces, 1px rules (`#dbe2ea`, `#d8e1eb`), and local system sans typography. Replaces legacy paper/crayon aesthetics and SVG turbulence filters.
+- **Live DAG Visualization:** Task nodes render with fixed dimensions (280×120px; title 16px, summary 14px) and real-time status colors (`pending`, `ready`, `dispatched`, `completed`, `failed`, `blocked`) with corner harness badges. Polling refreshes every 2 seconds.
+- **Lazy Graph Loading:** `DagView` is lazy-loaded on first view (`React.lazy`) and retained in memory after initial mount to keep the initial bundle and memory footprint lean.
 - **Switchable Layout Engines:**
   - **Dagre Layered:** Supports left-to-right (LR) and top-to-bottom (TB) hierarchical layouts.
   - **Force-Directed:** Fruchterman–Reingold physics simulation for clustered graphs.
   - **↻ Re-layout:** Resets manual node drags and recomputes the selected layout algorithm. Layout choices persist in `.orca-dag/config.json`.
-- **Hierarchy vs. Dependencies:** Orca's `parent_id` is drawn as a calm, dotted bracket with a ring on the child node—visually distinct from pencil dependency arrows. Parent links do not influence task readiness or layout and can be toggled via **Hide/Show parent links**.
+- **Hierarchy vs. Dependencies:** Orca's `parent_id` is drawn as a calm, dotted bracket with a ring on the child node—visually distinct from dependency lines. Parent links do not influence task readiness or layout and can be toggled via **Hide/Show parent links**.
 - **Drag-to-Arrange:** Nodes can be freely dragged on canvas. Dragged positions are preserved across live polling cycles, while untouched nodes continue to follow the layout algorithm.
-- **Execution Animations:** Dispatched (running) nodes receive continuous diagonal crayon scribbles. Outgoing edges animate as swimming dashed lines that transition to solid pencil strokes upon task completion.
-- **Explicit Lead Stage:** Operators can designate one Task per Run as the semantic main-agent stage. The selected node receives a double indigo outline and a gold `★ Lead` badge. This is visual viewer metadata and does not grant Orca coordinator authority.
-
+- **Static Edges & Scoped Motion:** Dependency lines remain static (`edge--idle`, `edge--run`, `edge--done`) without continuous flowing animations. Positively evidenced running tasks display a gentle pulsing status marker dot (`@keyframes graph-executing`), which automatically pauses offscreen, when the graph is inactive, or when `prefers-reduced-motion: reduce` is set.
+- **Central Detail Inspector:** Selecting a node in the list or graph opens `NodePanel` in the central reading area (`.workbench-detail`), replacing the central view rather than covering it with an overlay drawer. Closing it returns to the retained scroll offset, selection, and view context.
+- **Persistent Chat Dock:** A resizable right dock (`.workbench-chat`, 440px default, clamped between 380–820px with workspace reservation, fallback 280px) hosts conversation threads and receipts with scoped chat state via `useScopedChatState`. On screens ≤900px, it transforms into a focused single pane hiding the main section.
+- **Explicit Lead Stage:** Operators can designate one Task per Run as the semantic main-agent stage. The selected node receives a double outline and a gold `★ Lead` badge. This is visual viewer metadata and does not grant Orca coordinator authority.
 ---
 
 ## Execution and Coordination
@@ -35,9 +37,9 @@ For operational step-by-step procedures, consult [Operating the Viewer](../tutor
   - **Immediate Compatible Reuse:** Fresh, exact PTY evidence allows immediate terminal reuse for compatible subsequent tasks (`worker-start --terminal`). OpenCode, OMP and Antigravity are excluded to preserve fresh-session and model identity.
   - **Retain for Debugging:** Setting **Retain for debugging** keeps worker terminals open for post-run inspection.
 - **Decision and Integration Gates:**
-  - **Approval Gates:** Operators approve or reject decisions in Activity's expandable Operational details, not floating overlays on the canvas.
+  - **Approval Gates:** Operators approve or reject decisions in the dedicated **Decisions** workbench section (`GatePanel`), with actionable summaries also visible in **Overview** (`OperationsAttention`).
   - **Cross-Lane Integration Gates:** Cross-lane dependencies automatically generate an `[orca-dag:integration]` gate offering only an `integrated` resolution. The downstream task remains blocked until an operator manually verifies that branch code has been integrated.
-- **Blocked Stage Manual Resolution:** Operational details allows reviewed manual completion or explicit retry for a blocked Task whose Dispatch has positively exited according to fleet records.
+- **Blocked Stage Manual Resolution:** The **Decisions** section (`RecoveryPanel`) allows reviewed manual completion or explicit retry for a blocked Task whose Dispatch has positively exited according to fleet records.
 
 ---
 
@@ -51,11 +53,11 @@ For operational step-by-step procedures, consult [Operating the Viewer](../tutor
   - **OpenCode:**
     - **Advisory Discovery & Live Dropdown:** Populated via local workspace discovery (`GET /api/models/opencode`). Discovery is strictly scoped to `local-workspace`; failures produce controlled English diagnostics without leaking stderr. Distinguishes a verified empty catalog (`status: "available"`, `models: []`) from discovery failure (`status: "unavailable"`).
     - **Dropdown and Manual Free-Text Input:** Supports selecting discovered models or free-text input formatted as `provider/model[#variant]`.
-    - **Draft Validation and Persistence:** Manual text input validates against `^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(?:#[A-Za-z0-9._-]{1,64})?$`. Invalid drafts set `aria-invalid` and are not written to the node configuration store until valid. Emptying input resets to default model (`null`).
+    - **Draft Validation and Persistence:** Manual text input validates against `^[A-Za-z0-9._-]{1,128}/[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}(?:#[A-Za-z0-9._-]{1,128})?$`, supporting slash-namespaced model IDs after the first slash (e.g. `openrouter/meta-llama/llama-3.1-70b-instruct#high`). Invalid drafts set `aria-invalid` and are not written to the node configuration store until valid. Emptying input resets to default model (`null`).
     - **Saved Absent Models Retained:** Models saved in node configuration that are absent from the local catalog remain selectable options in the dropdown and are never dropped or wiped.
     - **Launch-Locked Preferences:** Once a Task starts its first Dispatch (or while the coordinator is active), the model dropdown and manual text input are completely disabled (`disabled={launchLocked}`) along with harness, effort, and placement.
   - **Claude:** Free-text model input passed via `worker-start --model`.
-  - **Codex:** Local POSIX current/existing workspaces use native model starts on running Orca ≥ 1.4.217. Older/unknown runtimes and newly created local workspaces retain prestart-and-bind compatibility; remote and Windows use native starts. See [Codex startup boundaries](../tutorials/viewer-operations.md#codex-native-startup-and-compatibility).
+  - **Codex:** Local POSIX current/existing workspaces use native model starts on running Orca ≥ 1.4.217. Local Linux new Git worktrees (`new-child` and `new-top-level`) cut over to native starts on running Orca ≥ 1.4.247, CLI ≥ 1.4.247, and Codex CLI ≥ 0.166.0 (`canUseNativeCodexFreshWorktree`), verified in Run `run_44b240b8e6ee`. Older or unknown runtimes and non-Linux hosts retain prestart-and-bind compatibility; remote and Windows use native starts. See [Codex startup boundaries](../tutorials/viewer-operations.md#codex-native-startup-and-compatibility).
   - **OMP / Antigravity:** Free-text opaque selector, passed unchanged as one native `--model` argument, or omitted for the configured default. Current or exact Existing placement requires both running Orca and resolved CLI ≥ 1.4.245. Creating new Git worktrees (`new-child`, `new-top-level`) or any workspace lane requires BOTH running Orca and resolved CLI ≥ 1.4.246. Local Linux only; remote environments, macOS, and Windows are rejected. New child placement requires a positively identified local managed Git parent; new top-level requires an exact repository identifier (`id:...` or absolute `path:/...`) pointing to a verified local Git repo (rejects ambiguous names, plain folders, foreign hosts, and auto git-init). Workspace lanes share workspace ONLY: the first Task creates or adopts it, dependency-ordered followups reuse exact Existing. Every Task receives a fresh native agent session and Dispatch (never generic terminal reuse, `--terminal`, `--surface` override, or fallback after refusal). Native `worker-start --agent` strictly follows the user's Orca Chat/Terminal setting without inspection or override. Terminal TUI and OMP Native Chat 1.4.245 baselines are preserved; real E2E run `run_67072641a11a` on 1.4.246 verified OMP user-default Chat and Antigravity user-default Terminal across 4 lanes (8 Tasks total, serial workspace handoffs, fresh sessions, zero cleanup debt, setup `skip`, configured-default models). Does not certify new-placement active Stop/restart, Antigravity Chat, Orca-runtime restart, setup `run`/`inherit`, or explicit-model new-placement. Every nonempty effort is rejected, even with a model.
 - **Reasoning Effort:** Claude and Codex expose their supported effort levels only alongside a model. Native launches use `--effort`; compatibility-prestarted Codex receives effort in its launch command. OMP/Antigravity reject every nonempty effort even with a model; saved unsupported values stay visible with an explicit clear action, and clearing the model does not silently remove them.
 - **OpenCode Interface Selection & Native Route Boundaries:**
@@ -79,13 +81,13 @@ For operational step-by-step procedures, consult [Operating the Viewer](../tutor
 - **Remote Environment Placement:** Tasks can execute on connected remote environments (`environment list`) using either an exact remote workspace selector or a new top-level worktree. Ambiguous remote current or child placements are rejected.
 - **Workspace Lanes (Serial Shared Worktrees):** Chains of dependency-ordered tasks can share a single isolated workspace. The first task provisions the workspace; subsequent tasks reuse the exact selector. Concurrent execution within the same lane is prohibited. Native OMP and Antigravity support workspace lanes and new Git worktrees starting at Orca runtime and CLI ≥ 1.4.246 on local Linux. Admission checks and plan preview evaluate the lane's seed placement and fail before any mutation if runtime or CLI is older than 1.4.246. A lane shares the workspace ONLY: each Task receives a fresh native agent session and Dispatch, never reusing terminal processes or falling back after refusal.
 - **Orchestration CLI Compatibility:** `runOrca` appends `--full` to orchestration commands when the resolved CLI is ≥ 1.4.246 (using the cached readiness probe) because 1.4.246 defaults to concise JSON output; CLI 1.4.245 rejects `--full`, so version gating occurs before execution, and uncertain mutations are never retried. Real acceptance verified that a single `POST /api/runs` created `run_2a67b90e6a94` without 500-on-concise failures or duplicate mutations.
-- **Orca-Native Review and Teardown:** Open changed files, diffs, or files in the Orca editor via `file open` / `file diff` / `file open-changed`. Worktree removal is executed strictly via `orca worktree rm` with confirmation, blocked if active or unproven workers remain.
+- **Orca-Native Review, Safe Cleanup, and Teardown:** Open changed files, diffs, or files in the Orca editor via `file open` / `file diff` / `file open-changed`. Worktree removal is executed strictly via `orca worktree rm --worktree <worktree>` with confirmation, blocked if active or unproven workers remain. Cleanup candidate review (`review`) lists discovered workspaces and workers; removal safety rechecks the global complete fleet (`listWorkers(undefined, { includeRemote: true })`) to protect unlisted other-Run chats. An optional native safe `deleteBranch` choice removes branches only if safely merged upstream and displays `preservedBranch` evidence, never force-deleting unmerged branches from Web.
 
 ---
 
 ## Monitoring and Observability
 
-- **Workspace-Scoped Run Picker:** Displays Runs created within the active workspace, with cursor-based pagination and exact Run ID search.
+- **Workspace-Scoped Run Picker:** Displays Runs created within the active workspace using genuinely bounded workspace-scoped pagination (`GET /api/runs/page?limit=1..100&cursor=`), preserving traversal cursors across refreshes and reporting foreign/unknown Runs honestly (`workspace.owned: false`).
 - **Run Health Badge & Removed Work:** Real-time badge indicating whether the selected Run is `viewer-owned`, `external`, `unbound`, or `inconsistent`, with per-source counts, warnings, and optional removed-work ledger evidence:
   - **Removed Work Summary (`health.removedWork`):** Displays removal metrics (tasks, dispatches, workers, terminals, coverage `complete`/`partial`, recordedSince, lastRemovedAt, and `activeWorkersAtRemoval`). When unsupported or absent on the host, `removedWork` is `null` and displayed as unavailable; missing evidence is never zero-padded.
   - **On-Demand Paginated History:** History entries are loaded on-demand via `GET /api/runs/:runId/removed-work` only when explicitly expanding "View removed-work details", avoiding eager payload bloat.
@@ -94,13 +96,13 @@ For operational step-by-step procedures, consult [Operating the Viewer](../tutor
   - **Future Kind Resilience:** Tolerates unknown removal kinds by marking them `unreadable: true` and rendering them safely.
   - **Immutable & No Reset:** The removal ledger is append-only audit data; no reset button or mutation action exists in the viewer.
 - **Runtime Capability Matrix:** Evaluates active Orca runtime capability advertisements against canonical orchestration specifications.
-- **Scheduler and Ready Queue:** Displays ready tasks in ID order, available worker concurrency, and evidence-backed wait reasons (unmet dependency, gate, concurrency limit, or unknown).
+- **Scheduler, Ready Queue, and Canonical Gate Creation:** Displays ready tasks in ID order, available worker concurrency, and evidence-backed wait reasons (unmet dependency, gate, concurrency limit, or unknown). The Stage inspector provides canonical approval gate creation (`POST /api/gates`) for same-Run not-yet-dispatched Tasks, protected by coordinator lifecycle locking and request auditing.
 - **Communication Center (Activity & Chat):**
-  - **Activity Timeline:** Real-time Server-Sent Events (SSE) stream of coordinator checks, transitions, and technical receipts with bounded polling fallback.
-  - **Chat Panel:** Stage-scoped conversations displaying assignment instructions, worker reports, and question/answer threads.
+  - **Activity Timeline:** Real-time Server-Sent Events (SSE) stream of coordinator checks, transitions, and technical receipts with bounded polling fallback. Pauses/closes when the browser tab is hidden (`document.visibilityState === 'hidden'`), retaining unread counts and refreshing on return.
+  - **Chat Panel:** Stage-scoped conversations displaying assignment instructions, worker reports, question/answer threads, and distinct non-replyable `stopReason` escalation events (`kind: "stop_event"`).
   - **Live Check Receipts:** Live log of coordinator inbox polling passes, message types, and agent summaries.
-- **Coordinator Group Messaging:** Send audited announcements to `@all` or discovered worktree audiences from an active coordinator. Lifecycle message types cannot be broadcast.
-- **Workers Panel:** Fleet inspector showing liveness (`live`, `unverifiable`, `exited`), attention flags, agent wait states, execution host, requested vs. effective settings, and output logs with source badges (`auto`, `terminal`, `transcript`). Includes client-side log search and CSV/text download.
+- **Coordinator Group Messaging:** Send audited announcements to `@all` or discovered worktree audiences from an active coordinator via durable operator messaging helpers. Lifecycle message types cannot be broadcast.
+- **Workers Panel:** Fleet inspector showing liveness (`live`, `unverifiable`, `exited`), attention flags, agent wait states, execution host, requested vs. effective settings, partial host errors (`partialHostErrors`), eligible active Keep-open, explicit Release/Retain, native `autoReleaseAt`, and output logs with source badges (`auto`, `terminal`, `transcript`). Selection and request generation guards prevent stale async detail and output responses from rendering under newer selections. NextAction maps inspect/read/release without prescribing abandon; explicit Abandon remains a separately confirmed fencing action. Includes client-side log search and CSV/text download.
 
 ---
 

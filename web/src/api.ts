@@ -141,7 +141,7 @@ async function mutate<T = unknown>(
       const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
       if (!res.ok) {
         throw new ApiError(
-          String(json.error ?? `HTTP ${res.status}`),
+          `${String(json.error ?? `HTTP ${res.status}`)}${typeof json.requestId === "string" ? ` (requestId: ${json.requestId})` : ""}`,
           typeof json.code === "string" ? json.code : null,
           res.status,
         );
@@ -196,26 +196,17 @@ export async function fetchRunsPage(opts: { cursor?: string; limit?: number } = 
   if (opts.cursor) params.set("cursor", opts.cursor);
   if (opts.limit) params.set("limit", String(opts.limit));
   const qs = params.toString();
-  const page = await get<Partial<RunsPageView>>(`/api/runs${qs ? `?${qs}` : ""}`);
+  const page = await get<Partial<RunsPageView>>(`/api/runs/page${qs ? `?${qs}` : ""}`);
   return { runs: page.runs ?? [], nextCursor: page.nextCursor ?? null };
 }
 
-/**
- * Exact Run ID lookup (Phase 7). Lets the operator open one Run by its full
- * id even when pagination has not reached it. A 404 means "no such Run in
- * this workspace" — never an invitation to search Orca globally.
- */
-export async function fetchRunById(runId: string): Promise<OrcaRun> {
-  const { run } = await get<{ run: OrcaRun | null }>(`/api/runs/${encodeURIComponent(runId)}`);
-  if (!run) {
-    throw new ApiError(`Run ${runId} was not found in this workspace.`, "run_not_found", 404);
+/** Exact lookup returns workspace evidence separately from the Run itself. */
+export async function fetchRunById(runId: string): Promise<{ run: OrcaRun; workspace: { owned: boolean; evidence: string } }> {
+  const result = await get<{ run: OrcaRun | null; workspace: { owned: boolean; evidence: string } }>(`/api/runs/${encodeURIComponent(runId)}`);
+  if (!result.run) {
+    throw new ApiError(`Run ${runId} was not found.`, "run_not_found", 404);
   }
-  return run;
-}
-
-export async function createRun(objective: string): Promise<OrcaRun> {
-  const { run } = await post<{ run: OrcaRun }>("/api/runs", { objective });
-  return run;
+  return { run: result.run, workspace: result.workspace };
 }
 
 /** The DAG of one Run. */
@@ -238,11 +229,11 @@ export async function fetchActivity(runId: string): Promise<ActivitySnapshot> {
  * has started at least once, regardless of liveness or outcome, and the rows
  * render historical workers even when this viewer is not coordinating.
  */
-export async function fetchWorkers(runId: string): Promise<WorkerRowView[]> {
-  const { workers } = await get<{ workers: WorkerRowView[] }>(
+export async function fetchWorkers(runId: string): Promise<{ workers: WorkerRowView[]; partialHostErrors: unknown[] }> {
+  const result = await get<{ workers: WorkerRowView[]; partialHostErrors: unknown[] }>(
     `/api/workers?run=${encodeURIComponent(runId)}`,
   );
-  return workers ?? [];
+  return { workers: result.workers ?? [], partialHostErrors: result.partialHostErrors ?? [] };
 }
 
 /** Exact Run-scoped provider-session bindings; reading this does not probe them. */
@@ -372,15 +363,30 @@ export async function startRun(
   });
 }
 
+export type CoordinatorControl = { confirmed: true; coordinatorHandle: string | null; consumerGeneration: number | null };
+
+/** Fetch current binding evidence before asking for explicit coordinator control. */
+export async function fetchCoordinatorControl(runId: string): Promise<CoordinatorControl> {
+  const { run } = await get<{ run: { id: string; coordinator_handle: unknown; consumer_generation: unknown } }>(`/api/runs/${encodeURIComponent(runId)}`);
+  if (!run || run.id !== runId ||
+      !(run.coordinator_handle === null || typeof run.coordinator_handle === "string") ||
+      !(run.consumer_generation === null || typeof run.consumer_generation === "number")) {
+    throw new ApiError("Coordinator binding evidence is unavailable.", "coordinator_control_unknown", 409);
+  }
+  return { confirmed: true, coordinatorHandle: run.coordinator_handle, consumerGeneration: run.consumer_generation };
+}
+
 /** Record a reviewed result on a blocked Task whose Dispatch cannot report. */
 export async function resolveBlockedWorker(
   dispatchId: string,
   runId: string,
   result: string,
+  coordinatorControl?: CoordinatorControl,
 ): Promise<void> {
   await post(`/api/workers/${encodeURIComponent(dispatchId)}/resolve-blocked`, {
     runId,
     result,
+    coordinatorControl,
     acknowledgeUnknownProvider: true,
   });
 }
@@ -390,9 +396,13 @@ export async function stopRun(): Promise<{ clean: boolean; results: StopResultEn
 }
 
 /** Reply to a worker question/escalation (the run's inbox). */
-export async function replyToMessage(id: string, body: string, runId: string): Promise<void> {
-  await post(`/api/messages/${encodeURIComponent(id)}/reply`, { body, runId });
+export async function replyToMessage(id: string, body: string, runId: string, coordinatorControl?: CoordinatorControl): Promise<Record<string, unknown>> {
+  return post(`/api/messages/${encodeURIComponent(id)}/reply`, { body, runId, coordinatorControl });
 }
+export async function acknowledgeStopEvent(runId: string, messageId: string, dispatchId: string): Promise<void> {
+  await post(`/api/messages/${encodeURIComponent(messageId)}/acknowledge-stop-event`, { runId, dispatchId });
+}
+
 
 /** The returned identity may be a follow-up if the target settled during send. */
 export async function sendTaskMessage(taskId: string, body: string, runId: string): Promise<TaskMessageReceipt> {
@@ -401,11 +411,12 @@ export async function sendTaskMessage(taskId: string, body: string, runId: strin
     throw new ApiError("task_message_response_invalid", "task_message_response_invalid", 502);
   }
   const receipt = value as Record<string, unknown>;
-  if (receipt.ok !== true || (receipt.kind !== "enqueued" && receipt.kind !== "follow_up") ||
+  if (receipt.ok !== true || (receipt.kind !== "enqueued" && receipt.kind !== "follow_up" && receipt.kind !== "recipient_run_bound_redirect") ||
       receipt.runId !== runId || receipt.requestedTaskId !== taskId ||
       ![receipt.runId, receipt.taskId, receipt.dispatchId, receipt.requestedTaskId, receipt.requestedDispatchId]
         .every((field) => typeof field === "string" && field.length > 0) ||
       !(receipt.followUpOf === null || typeof receipt.followUpOf === "string") ||
+      !(receipt.destinationRunId === null || typeof receipt.destinationRunId === "string") ||
       !(receipt.requestId === null || typeof receipt.requestId === "string")) {
     throw new ApiError("task_message_response_invalid", "task_message_response_invalid", 502);
   }
@@ -437,15 +448,15 @@ export async function sendGroupMessage(payload: {
   body: string;
   type?: "status" | "question";
   priority?: "low" | "normal" | "high" | "urgent" | null;
-}): Promise<void> {
-  await post("/api/messages/group", payload);
+}): Promise<Record<string, unknown>> {
+  return post("/api/messages/group", payload);
 }
 
 /** Explicitly release a settled worker terminal (resolves cleanup debt). */
-export async function releaseWorker(dispatchId: string): Promise<WorkerTerminalReceiptView> {
+export async function releaseWorker(runId: string, dispatchId: string): Promise<WorkerTerminalReceiptView> {
   const { receipt } = await post<{ receipt: WorkerTerminalReceiptView }>(
     `/api/workers/${encodeURIComponent(dispatchId)}/release`,
-    {},
+    { runId },
   );
   return receipt;
 }
@@ -457,10 +468,12 @@ export async function releaseWorker(dispatchId: string): Promise<WorkerTerminalR
  * `sourceChanged` + warnings.
  */
 export async function fetchWorkerOutput(
+  runId: string,
   dispatchId: string,
   opts: { source?: string; cursor?: string; limit?: number } = {},
 ): Promise<WorkerOutputView> {
   const params = new URLSearchParams();
+  params.set("run", runId);
   if (opts.source) params.set("source", opts.source);
   if (opts.cursor) params.set("cursor", opts.cursor);
   if (opts.limit) params.set("limit", String(opts.limit));
@@ -472,10 +485,10 @@ export async function fetchWorkerOutput(
 }
 
 /** Explicit debug retention — keep a settled worker's terminal live. */
-export async function retainWorker(dispatchId: string): Promise<WorkerTerminalReceiptView> {
+export async function retainWorker(runId: string, dispatchId: string): Promise<WorkerTerminalReceiptView> {
   const { receipt } = await post<{ receipt: WorkerTerminalReceiptView }>(
     `/api/workers/${encodeURIComponent(dispatchId)}/retain`,
-    {},
+    { runId },
   );
   return receipt;
 }
@@ -511,9 +524,13 @@ export async function retryWorker(id: string): Promise<RetryWorkerResult> {
   };
 }
 
-export async function resolveGate(id: string, resolution: string, runId: string): Promise<void> {
-  await post(`/api/gates/${encodeURIComponent(id)}/resolve`, { resolution, runId });
+export async function resolveGate(id: string, resolution: string, runId: string, coordinatorControl?: CoordinatorControl): Promise<void> {
+  await post(`/api/gates/${encodeURIComponent(id)}/resolve`, { resolution, runId, coordinatorControl });
 }
+export async function createGate(runId: string, taskId: string, question: string, coordinatorControl?: CoordinatorControl): Promise<{ requestId: string; receipt: unknown }> {
+  return post("/api/gates", { runId, taskId, question, coordinatorControl });
+}
+
 
 /** Load the persisted viewer config (harness choices, concurrency, layout, Run). */
 export async function fetchConfig(): Promise<Partial<ViewerConfig>> {
@@ -629,6 +646,10 @@ export async function fetchLocalWorkspaces(force = false): Promise<OrcaWorktreeV
   localWorkspaceCache = { at: Date.now(), workspaces };
   return workspaces;
 }
+export async function removeCleanupWorktree(runId: string, worktree: string, deleteBranch: boolean): Promise<{ requestId: string; receipt: { worktree: string; archiveHookOverride: unknown; preservedBranch: unknown; raw: unknown } }> {
+  return post("/api/worktrees/remove", { runId, worktree, deleteBranch });
+}
+
 
 /** Orca-discovered LOCAL repositories (for the new-top-level repo picker). */
 export async function fetchLocalRepos(force = false): Promise<OrcaRepoView[]> {

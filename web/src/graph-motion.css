@@ -1,0 +1,120 @@
+/* Dimensions are supplied from the layout solver's shared constants. */
+.task-node.task-node {
+  box-sizing: border-box;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: visible;
+  padding: 8px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+  background: #fff;
+  color: #172b45;
+  font-family: inherit;
+  box-shadow: none;
+}
+
+.task-node.task-node--selected {
+  border-color: #2563a8;
+  outline: 2px solid #2563a8;
+  outline-offset: 1px;
+}
+
+.react-flow__node:focus-visible .task-node {
+  outline: 2px solid #2563a8;
+  outline-offset: 3px;
+}
+
+.task-node .task-node__title {
+  min-width: 0;
+  color: #172b45;
+  overflow: hidden;
+  font-size: 16px;
+  font-weight: 650;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-node--lead .task-node__title { padding-right: 58px; }
+.task-node__lead-badge {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  color: #40546d;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 20px;
+}
+.task-node .task-node__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  flex: 0 0 20px;
+  min-width: 0;
+}
+.task-node__status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--node-status-ink);
+  font-size: 14px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.task-node__marker {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 8px;
+  height: 8px;
+}
+.task-node__marker-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--node-status);
+}
+.task-node__marker-dot--executing {
+  animation: graph-executing 1.6s ease-in-out infinite;
+}
+@keyframes graph-executing {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .task-node__marker-dot--executing { animation: none; }
+}
+.task-node__harness {
+  overflow: hidden;
+  color: #52657a;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-node .task-node__summary,
+.task-node .task-node__planned {
+  flex: 0 0 20px;
+  min-width: 0;
+  overflow: hidden;
+  color: #52657a;
+  font-size: 14px;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-node .react-flow__handle {
+  width: 6px;
+  height: 6px;
+  border: 1px solid #fff;
+  background: #8092a8;
+}
+.react-flow__edge.edge--idle .react-flow__edge-path { stroke: #aab8c8; stroke-width: 1.5; }
+.react-flow__edge.edge--run .react-flow__edge-path { stroke: #b27825; stroke-width: 1.5; }
+.react-flow__edge.edge--done .react-flow__edge-path { stroke: #43896b; stroke-width: 1.5; }
+.hierarchy-edge__link { stroke: #8999ac; stroke-width: 1.2; stroke-dasharray: 3 4; }
+.hierarchy-edge__ring { fill: #fff; stroke: #8999ac; stroke-width: 1.2; }

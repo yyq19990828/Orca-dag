@@ -38,8 +38,8 @@ npm run verify:live -- http://127.0.0.1:8787
 - **仅限源码、显式运行**：`verify:live` 不属于 `npm run check` 或默认 CI；需要对空闲的本地 viewer 主动执行。
 - **产生真实费用**：测试会动态创建一个全新的 Run，并在当前工作区内启动 3 个真实的 Codex Task。任务 A 与 B 分别独立写入输入文件，任务 C 在依赖满足后读取计算并验证结果数值 `51`。**该过程会直接消耗所配置 AI 模型服务商的真实 Token 配额**。
 - **无侵入旁路观察**：所有 worker 的启动、派发与结算完全由 viewer 自带的 coordinator 正常调度驱动；测试脚本仅作为旁路客户端观察执行状态，绝不在 worker 内部植入等待测试标记的侵入式代码。
-- **状态不明时坚决不盲动**：若启动结果呈现为 `unknown`，验证器持续保持观察，绝不擅自重试或盲目取消。
-- **超时与证据留存**：观察超时上限为 15 分钟；若超时仍未落定，验证器保留正在运行的 worker 并如实返回 `unverifiable`，绝不虚假冒充通过。验证产生的完整证据保存在 `.orca-dag/<timestamp>-verification-*/` 目录下；测试完成后自动还原原工作区并发设置，并保持该测试 Run 处于选中状态。
+- **状态不明与不完整观测**：若启动结果呈现为 `unknown`，验证器持续保持观察，绝不擅自重试或盲目取消。验证脚本通过 `GET /api/workers` 读取 `inventory.workers`；若存在 `partialHostErrors`，验证器保持等待，并在持续异常时如实保留 `unverifiable` 裁定，绝不虚假冒充通过。
+- **超时与证据留存**：观察超时上限为 15 分钟；若超时仍未落定，验证器保留正在运行的 worker 并如实返回 `unverifiable`。验证产生的完整证据保存在 `.orca-dag/<timestamp>-verification-*/` 目录下。本地 Linux Orca 1.4.247 + Codex CLI 0.166.0 已在 `.orca-dag/20261104T031219975Z-abcd/native-codex-verification.json` 记录独立原生基线，并于 `.orca-dag/20261104T031219975Z-abcd/viewer-codex-verification.json` 完成真实的 Viewer coordinator 新工作树端到端验证（Run `run_44b240b8e6ee`）；Native Chat 保持未测状态。旧版或未知运行时保留现有兼容适配器。测试完成后自动还原原工作区并发设置，并保持该测试 Run 处于选中状态。
 
 ## 独立二进制打包与交叉编译
 

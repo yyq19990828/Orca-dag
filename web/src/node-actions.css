@@ -4,16 +4,16 @@
   gap: 7px;
   margin: 13px 0 16px;
   padding: 11px 0 0;
-  border-top: 1px dashed var(--line-strong);
+  border-top: 1px solid var(--line-strong);
 }
 
 .node-panel__action {
   padding: 5px 9px;
-  border: 1.5px solid var(--line-strong);
-  border-radius: 9px 7px 8px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
   background: var(--paper-2);
   color: var(--ink);
-  font: 12px var(--font-body);
+  font: 14px var(--font-body);
   cursor: pointer;
 }
 
@@ -25,6 +25,76 @@
 .node-panel__action:focus-visible {
   outline: 2px solid var(--sky-ink);
   outline-offset: 2px;
+}
+
+/* Configuration fields share a control rhythm; explanatory copy grows naturally. */
+.node-panel {
+  container-type: inline-size;
+  min-width: 0;
+  font: 16px/1.6 var(--font-body);
+  overflow-wrap: anywhere;
+}
+
+.node-panel__group .node-panel__field {
+  min-width: 0;
+  gap: 6px;
+  margin-bottom: 20px;
+}
+
+.node-panel__group .node-panel__key {
+  margin: 0;
+  font: 600 14px/1.5 var(--font-body);
+}
+
+.node-panel__group :is(.doodle-select, .node-panel__custom) {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  margin-top: 0;
+  font: 16px/1.5 var(--font-body);
+}
+
+.node-panel__group .doodle-select__value {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.node-panel__group .node-panel__hint {
+  margin-top: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.node-panel .placement__row {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
+}
+
+.node-panel .placement__row .placement__field {
+  display: grid;
+  grid-template-rows: 1fr auto;
+  align-items: end;
+}
+
+.node-panel .placement__creation {
+  min-width: 0;
+}
+
+.node-panel .placement__comment {
+  width: 100%;
+  min-width: 0;
+  font-size: 16px;
+}
+
+.node-panel__action {
+  min-height: 44px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+@container (max-width: 380px) {
+  .node-panel .placement__row { grid-template-columns: minmax(0, 1fr); }
 }
 
 [data-operation-kind] {

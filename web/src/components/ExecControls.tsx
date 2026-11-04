@@ -23,11 +23,17 @@ import {
 } from "../harness";
 import { HARNESSES, UNVERIFIED_HARNESSES, OPEN_CODE_UIS, isOpenCodeUi, type DagEdge, type RunStatus } from "../types";
 import { lanePlanProblems } from "../placement";
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, type ReactNode } from "react";
+import { createPortal } from "react-dom";
  
 
 const CUSTOM = "__custom__";
 const KNOWN = HARNESSES as readonly string[];
+
+function ActionMount({ host, children }: { host?: HTMLElement | null; children: ReactNode }) {
+  const content = <div className="workbench-exec-actions">{children}</div>;
+  return host ? createPortal(content, host) : content;
+}
 
 /**
  * Short human label for the coordinator's §6.3 phase — a table of dictionary
@@ -77,6 +83,7 @@ export function ExecControls({
   onRunStarting,
   onRunStartFinished,
   onRunStopped,
+  actionHost,
 }: {
   /** Run to execute. Mutations are Run-scoped since Orca 1.4.160. */
   runId: string;
@@ -107,6 +114,7 @@ export function ExecControls({
    * poller this component just lost — receipts flow up, state flows down.
    */
   onRunStopped?: () => void | Promise<void>;
+  actionHost?: HTMLElement | null;
 }) {
   const dialog = useDecisionDialog();
   // Every user-visible string in this panel is translated — the settings
@@ -454,6 +462,7 @@ export function ExecControls({
           </label>
         </div>
       </details>
+      <ActionMount host={actionHost}>
       {/* Hard-disabling a busy trigger blurs it before the dialog can remember
           it. Handlers reject repeat clicks; policy locks stay native-disabled. */}
       <button
@@ -604,6 +613,7 @@ export function ExecControls({
           ))}
         </div>
       )}
+      </ActionMount>
     </div>
   );
 }

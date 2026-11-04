@@ -17,13 +17,13 @@ Start with the project README for installation and a first Run. Choose a guide b
 | Topic | Contents |
 | --- | --- |
 | [Compatibility and verified versions](reference/compatibility.md) | Viewing/execution floors, launch-path requirements, and the recorded real-runtime verification matrix |
-| [Viewer features](reference/viewer-features.md) | Canvas, launch controls, messages, recovery, audit evidence, and interface language |
+| [Viewer features](reference/viewer-features.md) | Sectional workbench, DAG canvas, launch controls, messages, recovery, audit evidence, and interface language |
 | [Architecture and boundaries](reference/architecture.md) | Run/Task/Dispatch ownership, coordinator safety, CLI/workspace resolution, and source layout |
 | [HTTP API and security](reference/http-api.md) | Loopback access, mutation tokens, readiness, and the complete route inventory |
 
 ## Development
 
 - [Development and releases](development.md): source setup, checks, opt-in real-provider verification, packaging, and npm/GitHub releases.
-- [UI layout design](ui-layout.md): presentation rules and layout acceptance scenarios.
+- [UI layout design](ui-layout.md): Sectional workbench presentation rules, responsive behavior, and browser verification.
 
 Orca remains the authority for lifecycle operations. Obtain command syntax from the installed runtime's orchestration guide and follow each worker's live preamble; these documents do not grant authority to stop, retry, or release an unknown worker.

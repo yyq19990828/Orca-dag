@@ -32,7 +32,7 @@
 .launch-preview__requested {
   margin-top: 0.75rem;
   padding-top: 0.6rem;
-  border-top: 1px dashed var(--line-strong);
+  border-top: 1px solid var(--line-strong);
 }
 
 .launch-preview__requested h4 {
@@ -127,14 +127,14 @@
   flex: 0 1 auto;
   gap: 3px;
   color: var(--ink-soft);
-  font-size: 13px;
+  font-size: 14px;
   text-align: end;
   overflow-wrap: anywhere;
 }
 
 .launch-preview__task-route strong {
   color: var(--ink);
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .launch-preview__chevron {
@@ -178,7 +178,7 @@
   min-height: 44px;
   padding: 0.3rem 0.65rem;
   border: 1px solid var(--line-strong);
-  border-radius: 9px 11px 8px 10px;
+  border-radius: 6px;
   background: var(--paper);
   color: var(--ink);
   font: inherit;

@@ -175,7 +175,16 @@ export const LanesPanel = memo(function LanesPanel({
     [dialog, t],
   );
 
-  if (!runId || loadedFor !== runId) return null;
+  if (!runId) return null;
+
+  if (loadedFor !== runId) {
+    return <div className="gates lanes" data-testid="lanes-panel">
+      <div className="gate inbox__item">
+        <div className="gate__badge">{t("lane.badge")}</div>
+        <div className="inbox__body" role="status">{t("lane.pending")}</div>
+      </div>
+    </div>;
+  }
 
   return (
     <div className="gates lanes" data-testid="lanes-panel">

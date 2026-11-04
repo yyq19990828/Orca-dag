@@ -95,7 +95,7 @@ describe("provider session identity", () => {
       requestedTaskId: "task_original", requestedDispatchId: "ctx_original",
       state: "unknown", creationProven: true, createdAt: now, updatedAt: now, error: "start_unconfirmed",
       receipt: { kind: "follow_up", runId: "run_followup", taskId: "task_followup", dispatchId: "ctx_followup",
-        requestedTaskId: "task_original", requestedDispatchId: "ctx_original", followUpOf: "ctx_original", requestId: "request_followup" },
+        requestedTaskId: "task_original", requestedDispatchId: "ctx_original", followUpOf: "ctx_original", requestId: "request_followup", destinationRunId: null },
       startEvidence: { status: "outcome_unknown", launchMode: { mode: "terminal", preferred: null, reason: null, detail: null } },
     };
     await store.recordGuidanceSend(row);
@@ -119,10 +119,11 @@ describe("provider session identity", () => {
     assert.equal(restored.delivery?.messages[0].body, message.body);
     assert.equal(restored.delivery?.deliveryAcknowledged, true);
     assert.deepEqual(restored.pendingQuestionIds, [message.id]);
-    await assert.rejects(() => new ProviderSessionStore(workspace).recordMailboxCheck({ ...check, processedMessageIds: [] }), /processed/);
+    await assert.rejects(() => new ProviderSessionStore(workspace).recordMailboxCheck({ ...check, processedMessageIds: [] }));
     await assert.rejects(() => new ProviderSessionStore(workspace).recordMailboxCheck({
       ...check, pendingQuestionIds: [], state: "completed",
-    }), /completed reply/);
+    }));
+    assert.deepEqual((await new ProviderSessionStore(workspace).listMailboxChecks("run_mixed"))[0], check);
   });
 
   it("does not truncate or replace a prepared request when its delivery exceeds the store budget", async () => {

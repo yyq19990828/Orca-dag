@@ -221,7 +221,7 @@ const KNOWN_HARNESS_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
  *  - the whole value still ends up as ONE argv element, quoted as a single
  *    argument on the legacy shell path (see `startOpencodeWorker`).
  */
-export const OPENCODE_MODEL_PATTERN = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(?:#[A-Za-z0-9._-]{1,64})?$/;
+export const OPENCODE_MODEL_PATTERN = /^[A-Za-z0-9._-]{1,128}\/[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}(?:#[A-Za-z0-9._-]{1,128})?$/;
 /** Verified claude/codex presets take free-text model names via `worker-start --model`. */
 const PLAIN_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._+/-]{0,127}$/;
 

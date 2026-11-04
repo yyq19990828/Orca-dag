@@ -24,6 +24,7 @@ import {
   OrcaCliError,
   canonicalCapabilitySupported,
   checkReadiness,
+  canUseNativeCodexFreshWorktree,
   compareVersions,
   coordinatorTerminalCommand,
   coordinatorTitle,
@@ -156,7 +157,7 @@ function writeScript(
     /** Cursor-keyed worker-list receipts; `__first__` is the no-cursor page. */
     workerPages?: Record<
       string,
-      { workers?: unknown[]; page?: { hasMore?: boolean; nextCursor?: string | null } }
+      { workers?: unknown[]; partialHostErrors?: unknown[]; page?: { hasMore?: boolean; nextCursor?: string | null } }
     >;
     /** Cursor-keyed run-list receipts (top-level nextCursor); `__first__` = no cursor. */
     runPages?: Record<string, { runs?: unknown[]; nextCursor?: string | null }>;
@@ -730,6 +731,33 @@ describe("uninstall coordinator sweep", () => {
 });
 
 // --- readiness --------------------------------------------------------------
+
+describe("certified native Codex worktree route", () => {
+  it("requires both ready Orca versions and a recognized local Codex version", async () => {
+    useRuntime({ workspace: root });
+    const dir = mkdtempSync(join(root, "codex-version-"));
+    const executable = join(dir, "codex");
+    const previous = process.env.PATH;
+    const readiness: OrcaReadiness = {
+      cli: "orca", workspace: root, worktree: "current", cliVersion: "1.4.247",
+      version: "1.4.247", runtimeState: "ready", executionEnabled: true, reason: null,
+    };
+    try {
+      process.env.PATH = dir + delimiter + (previous ?? "");
+      writeFileSync(executable, "#!/bin/sh\nprintf 'codex-cli 0.166.0\\n'\n", { mode: 0o755 });
+      assert.equal(await canUseNativeCodexFreshWorktree(readiness), true);
+      assert.equal(await canUseNativeCodexFreshWorktree({ ...readiness, version: "1.4.246" }), false);
+      assert.equal(await canUseNativeCodexFreshWorktree({ ...readiness, cliVersion: null }), false);
+      writeFileSync(executable, "#!/bin/sh\nprintf 'codex-cli 0.165.0\\n'\n");
+      assert.equal(await canUseNativeCodexFreshWorktree(readiness), false);
+      writeFileSync(executable, "#!/bin/sh\nprintf 'unknown\\n'\n");
+      assert.equal(await canUseNativeCodexFreshWorktree(readiness), false);
+    } finally {
+      if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("evaluateReadiness", () => {
   it("keeps missing, malformed, and prerelease runtime versions view-only", () => {
@@ -2407,7 +2435,7 @@ describe("listWorkers --include-remote (Phase 6, fake CLI)", () => {
         },
       ],
     });
-    const rows = await listWorkers("run_x", { includeRemote: true });
+    const { workers: rows } = await listWorkers("run_x", { includeRemote: true });
     assert.equal(rows.length, 1);
     assert.deepEqual(rows[0].projection?.host, { kind: "environment", id: "env_remote" });
     assert.equal(rows[0].projection?.liveness?.verdict, "unverifiable");
@@ -2438,6 +2466,7 @@ describe("listWorkers --include-remote (Phase 6, fake CLI)", () => {
         },
         [cursor1]: {
           workers: [],
+          partialHostErrors: [{ host: "remote-a", error: "unreachable" }],
           page: { hasMore: true, nextCursor: cursor2 },
         },
         [cursor2]: {
@@ -2456,12 +2485,14 @@ describe("listWorkers --include-remote (Phase 6, fake CLI)", () => {
               },
             },
           ],
+          partialHostErrors: [{ host: "remote-b", error: "timeout" }],
           page: { hasMore: false, nextCursor: null },
         },
       },
     });
 
-    const rows = await listWorkers("run_pages", { includeRemote: true });
+    const { workers: rows, partialHostErrors } = await listWorkers("run_pages", { includeRemote: true });
+    assert.deepEqual(partialHostErrors, [{ host: "remote-a", error: "unreachable" }, { host: "remote-b", error: "timeout" }]);
     assert.deepEqual(
       rows.map((row) => [row.dispatchId, row.taskId, row.workerState]),
       [

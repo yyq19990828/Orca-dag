@@ -49,6 +49,7 @@ export type RequestOperation =
   | "check"
   | "send"
   | "reply"
+  | "gate-create"
   | "worktree-remove"
   | "terminal-focus"
   | "file-open"

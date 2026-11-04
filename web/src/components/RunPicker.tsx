@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createRun, fetchRunById, fetchRunsPage } from "../api";
+import { fetchRunById, fetchRunsPage } from "../api";
 import { useT } from "../i18n";
-import { useReadiness } from "../harness";
 import type { OrcaRun } from "../types";
 import { usePageVisible } from "../visibility";
 import { DoodleSelect } from "./DoodleSelect";
-import { useDecisionDialog } from "./DecisionDialog";
 
 /**
  * Run selector — cursor-paginated with exact-ID navigation (Phase 7).
@@ -16,9 +14,9 @@ import { useDecisionDialog } from "./DecisionDialog";
  *
  * History loads as bounded cursor pages: the polled first page keeps the
  * newest Runs fresh, picker.loadOlder walks the opaque cursor, and an exact Run
- * ID can be opened directly even when pagination has not reached it. Every
- * path preserves workspace ownership — that check lives server-side, and a
- * miss renders as "not found in this workspace", never a global lookup.
+ * ID can be opened directly even when pagination has not reached it.
+ * Workspace ownership is checked server-side; exact lookup reports separate
+ * ownership evidence and does not claim an unproven Run belongs here.
  *
  * A Run is a namespace, not a graph — nothing stops several unrelated DAGs
  * living in one Run. The orca-dag skill tells your agent to create a fresh
@@ -48,11 +46,7 @@ export function RunPicker({
   /** First-read failure is not an empty workspace; App uses this for recovery. */
   onReadStateChange?: (state: RunListReadState) => void;
 }) {
-  const dialog = useDecisionDialog();
   const t = useT();
-  // Browsing Runs remains read-only; only creating one needs runtime readiness.
-  const readiness = useReadiness();
-  const execOff = readiness !== null && !readiness.executionEnabled;
   // Newest page (polled) + accumulated older pages + exact-ID pins, deduped
   // for display. The ref mirrors the combined list so the poll's newest-Run
   // fallback can see Runs that only exist on an older page or via a pin —
@@ -65,10 +59,12 @@ export function RunPicker({
   const [loadingMore, setLoadingMore] = useState(false);
   const [listRead, setListRead] = useState<RunListReadState>({ loaded: false, error: null });
   const loadPending = useRef(false);
+  const firstPageRef = useRef<OrcaRun[]>([]);
+  const historyStarted = useRef(false);
   const [err, setErr] = useState<string | null>(null);
+  const [ownership, setOwnership] = useState<Record<string, { owned: boolean; evidence: string }>>({});
   const [exactId, setExactId] = useState("");
   const [exactBusy, setExactBusy] = useState(false);
-  const [creating, setCreating] = useState(false);
   const combined = dedupeById([...pinned, ...firstPage, ...older]);
 
   useEffect(() => {
@@ -82,8 +78,11 @@ export function RunPicker({
     loadPending.current = true;
     try {
       const page = await fetchRunsPage({ limit: PAGE_SIZE });
+      const previous = firstPageRef.current;
+      firstPageRef.current = page.runs;
+      setOlder((current) => dedupeById([...previous, ...current]));
       setFirstPage(page.runs);
-      setNextCursor(page.nextCursor);
+      if (!historyStarted.current) setNextCursor(page.nextCursor);
       setErr(null);
       setListRead((previous) => previous.loaded && !previous.error ? previous : { loaded: true, error: null });
     } catch (e) {
@@ -94,19 +93,24 @@ export function RunPicker({
     }
   }, []);
 
-  // Newest-Run fallback, evaluated on the combined list AFTER a page lands.
-  // It must consider every loaded page and pin — checking only the polled
-  // first page would auto-switch away from a Run the user reached via an
-  // older page or an exact-ID open.
+  // A saved selection may be outside the bounded first page. Preserve it and
+  // resolve it explicitly rather than replacing it with a newer Run.
   useEffect(() => {
-    if (
-      autoPick &&
-      combined.length > 0 &&
-      !combined.some((r) => r.id === runId)
-    ) {
-      onPick(combined[0].id);
-    }
+    if (autoPick && !runId && combined.length > 0) onPick(combined[0].id);
   }, [autoPick, combined, runId, onPick]);
+
+  useEffect(() => {
+    if (!autoPick || !runId) return;
+    let alive = true;
+    void fetchRunById(runId).then(({ run, workspace }) => {
+      if (!alive) return;
+      setPinned((previous) => dedupeById([run, ...previous]));
+      setOwnership((previous) => ({ ...previous, [run.id]: workspace }));
+    }).catch((error) => {
+      if (alive) setErr(String((error as Error).message ?? error));
+    });
+    return () => { alive = false; };
+  }, [autoPick, runId]);
 
   // Interval paused while the tab is hidden (Orca never throttles
   // background timers, so the 10s list poll would run forever unseen). The
@@ -122,6 +126,7 @@ export function RunPicker({
 
   async function loadOlder() {
     if (!nextCursor || loadingMore) return;
+    historyStarted.current = true;
     setLoadingMore(true);
     setErr(null);
     try {
@@ -141,7 +146,8 @@ export function RunPicker({
     setExactBusy(true);
     setErr(null);
     try {
-      const run = await fetchRunById(id);
+      const { run, workspace } = await fetchRunById(id);
+      setOwnership((prev) => ({ ...prev, [run.id]: workspace }));
       setPinned((prev) => dedupeById([run, ...prev]));
       setExactId("");
       onPick(run.id);
@@ -152,28 +158,6 @@ export function RunPicker({
     }
   }
 
-  async function onCreate() {
-    const objective = await dialog.prompt({
-      title: t("picker.createTitle"),
-      message: t("picker.createMessage"),
-      fieldLabel: t("picker.createFieldLabel"),
-      placeholder: t("picker.createPlaceholder"),
-      confirmLabel: t("picker.createConfirm"),
-      required: true,
-    });
-    if (!objective?.trim()) return;
-    setCreating(true);
-    setErr(null);
-    try {
-      const run = await createRun(objective.trim());
-      onPick(run.id);
-      await load();
-    } catch (e) {
-      setErr(String((e as Error).message ?? e));
-    } finally {
-      setCreating(false);
-    }
-  }
 
   const current = combined.find((r) => r.id === runId);
   const placeholder = runId || (listRead.error
@@ -202,9 +186,14 @@ export function RunPicker({
           // the durable id in the option hint and trigger title for precise
           // navigation without spending the whole top row on an opaque id.
           label: r.objective?.trim() || r.id,
-          hint: r.id,
+          hint: ownership[r.id] && !ownership[r.id].owned
+            ? `${r.id} · ${t("picker.unprovenOwnership")} · ${ownership[r.id].evidence}`
+            : r.id,
         }))}
       />
+      {current && ownership[current.id] && !ownership[current.id].owned && (
+        <span className="runpick__error" role="status">{t("picker.unprovenOwnership")}: {ownership[current.id].evidence}</span>
+      )}
       <details className="runpick__menu">
         <summary aria-label={t("picker.moreAria")} title={t("picker.moreTitle")}>
           <span aria-hidden="true">⋯</span>
@@ -217,15 +206,6 @@ export function RunPicker({
               menu.querySelector<HTMLElement>("summary")?.focus();
             }
           }}>{t("dialog.close")}</button>
-          <button
-            type="button"
-            className="btn btn--ghost"
-            onClick={onCreate}
-            disabled={disabled || creating || execOff}
-            title={(execOff && readiness?.reason) || t("picker.newRunTitle")}
-          >
-            {t("picker.newRun")}
-          </button>
           {nextCursor && (
             <button
               type="button"

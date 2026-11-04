@@ -15,6 +15,7 @@ import {
 } from "../harness";
 import { useLang, useT } from "../i18n";
 import { useDecisionDialog } from "./DecisionDialog";
+import { useCoordinatorControl } from "./useCoordinatorControl";
 import { NativeLaunchEvidence } from "./NativeLaunchEvidence";
 import type {
   ProviderSessionBindingView,
@@ -82,6 +83,7 @@ export const RecoveryPanel = memo(function RecoveryPanel({
   disabledReason?: string | null;
 }) {
   const dialog = useDecisionDialog();
+  const withControl = useCoordinatorControl();
   useConfig();
   // The row memos below build translated fallbacks with the non-reactive `t`,
   // so `lang` rides in their dependency lists.
@@ -138,11 +140,15 @@ export const RecoveryPanel = memo(function RecoveryPanel({
     } else {
       loadErrors.push(String((bindingsResult.reason as Error)?.message ?? bindingsResult.reason));
     }
-    if (workersResult.status === "fulfilled") setWorkerRows(workersResult.value);
-    else loadErrors.push(String((workersResult.reason as Error)?.message ?? workersResult.reason));
+    if (workersResult.status === "fulfilled") {
+      setWorkerRows(workersResult.value.workers);
+      if (workersResult.value.partialHostErrors.length) {
+        loadErrors.push(`${t("worker.partialHostErrors")}: ${JSON.stringify(workersResult.value.partialHostErrors)}`);
+      }
+    } else loadErrors.push(String((workersResult.reason as Error)?.message ?? workersResult.reason));
     if (loadErrors.length > 0) setSessionLoadError(loadErrors.join(" · "));
     setSessionLoading(false);
-  }, [runId]);
+  }, [runId, t]);
 
   // The list read is passive; provider status is probed only from an explicit
   // per-session button. A Run change also discards observations from the old Run.
@@ -402,7 +408,7 @@ export const RecoveryPanel = memo(function RecoveryPanel({
     setBusyId(row.dispatchId);
     setErr(null);
     try {
-      await resolveBlockedWorker(row.dispatchId, runId, result.trim());
+      await withControl(runId, (control) => resolveBlockedWorker(row.dispatchId, runId, result.trim(), control));
       await loadSessionRecovery();
       onRetried();
     } catch (error) {

@@ -9,6 +9,7 @@ import {
   WORKTREE_ARCHIVE_HOOK_FAILED,
   abandonWorkerReceipt,
   bindRun,
+  canUseNativeCodexFreshWorktree,
   checkReadiness,
   closeTerminal,
   closeReleasedOpenCodeTui,
@@ -46,11 +47,9 @@ import {
   readWorkerOutput,
   releaseWorker,
   removeWorktree,
-  replyToMessage,
   resolveGate,
   retainWorker,
   runOrca,
-  sendCoordinatorGroupMessage,
   showRepo,
   showRun,
   listRemovedWork,
@@ -70,18 +69,21 @@ import {
   OrcaReadiness,
   OrcaRun,
 } from "./orca";
+import { performOperatorReply, performOperatorGroupSend, preflightOperatorMessage } from "./operatorMessages";
 import type { PlacementSpec } from "./config";
 import { buildRunHealth, type RunHealthView } from "./runHealth";
 import { loadConfig, saveConfig } from "./config";
 import { validateMergeInputProtocol } from "./stageGit";
 import {
   answerInboxItem,
+  acknowledgeStopEvent,
   coordinatorStatus as liveCoordinatorStatus,
   noteManualRelease,
   retryWorker,
   sendTaskGuidance,
   startCoordinator,
   stopCoordinator,
+  withLifecycleMutation,
 } from "./coordinator";
 import {
   assertDiscoveredWorktreeAudience,
@@ -180,7 +182,7 @@ function fail(res: express.Response, err: unknown): void {
     code === "unverified_harness" || code === "invalid_placement" || code === "unsupported_effort" || code === "invalid_stage_plan" ? 400 :
     code === "run_required" || code === "run_not_found"
       ? 409
-      : code === "coordinator_conflict"
+      : code === "coordinator_conflict" || code === "coordinator_control_required" || code === "inventory_incomplete" || code === "gate_not_eligible" || code === "stop_event_not_found"
         ? 409 // another live viewer owns this workspace's coordinator slot
         : code === WORKTREE_ARCHIVE_HOOK_FAILED ||
             code === "abandon_refused" ||
@@ -197,7 +199,7 @@ function fail(res: express.Response, err: unknown): void {
               code === "guidance_capacity" ||
               code === "guidance_unknown" ||
               code === "guidance_reconciled" ||
-              code === "reply_unknown" ||
+              code === "reply_unknown" || code === "operator_message_unknown" || code === "operator_message_reconciled" ||
               code === "dispatch_not_active" ||
               code === "inbox_item_not_found" ||
               code === "message_not_found" ||
@@ -215,7 +217,8 @@ function fail(res: express.Response, err: unknown): void {
   // migration, which plain `run-use` refuses while it still has live work.
   const recovery = e?.recoveryCommand ?? null;
   const message = recovery ? `${e.message}\n\nUnblock with: ${recovery}` : String(e?.message ?? err);
-  res.status(status).json({ error: message, code, recoveryCommand: recovery });
+  const requestId = err && typeof err === "object" && "requestId" in err ? err.requestId : undefined;
+  res.status(status).json({ error: message, code, recoveryCommand: recovery, ...(typeof requestId === "string" ? { requestId } : {}) });
 }
 
 /**
@@ -232,30 +235,40 @@ function route(h: (req: express.Request, res: express.Response) => Promise<void>
   };
 }
 
-/**
- * Run a mutating orchestration call as the bound coordinator.
- *
- * Mutations (`gate-resolve`, `dispatch`, `worker-start`, …) are rejected unless
- * the caller is the live Orca terminal currently bound to the Run, so we borrow
- * one. If the coordinator loop is already running we reuse its terminal;
- * otherwise we create one, bind, act, and close it again so we don't sit on the
- * Run's coordinator slot (which would keep the user's agent fenced).
- */
-async function asCoordinator<T>(runId: string, worktree: string, fn: (from: string) => Promise<T>): Promise<T> {
-  const live = liveCoordinatorStatus();
-  if (live.running && live.coordinatorHandle && live.runId === runId) {
-    return fn(live.coordinatorHandle);
-  }
-  // NEVER reuse the loop's terminal here: rebinding it to another Run would
-  // fence the running coordinator, and the finally below would then close its
-  // terminal. A throwaway uniquely-titled terminal keeps the paths independent.
-  const handle = await createTempCoordinatorTerminal(worktree);
-  try {
-    await bindRun(runId, handle);
-    return await fn(handle);
-  } finally {
-    await closeTerminal(handle);
-  }
+/** One-off mutations never silently fence another coordinator. */
+async function asCoordinator<T>(
+  runId: string, worktree: string, fn: (from: string) => Promise<T>, control?: unknown, lifecycleLocked = false,
+): Promise<T> {
+  const work = async (): Promise<T> => {
+    const live = liveCoordinatorStatus();
+    let run;
+    try { run = (await showRun(runId))?.run; } catch { run = null; }
+    if (!run || run.id !== runId || typeof run.consumer_generation !== "number" ||
+        !(run.coordinator_handle === null || typeof run.coordinator_handle === "string")) {
+      throw new OrcaCliError("Run binding cannot be verified; inspect the Run before taking control.", "coordinator_control_required");
+    }
+    if (live.running && live.runId === runId && live.coordinatorHandle &&
+        run.coordinator_handle === live.coordinatorHandle) return fn(live.coordinatorHandle);
+    const consent = control && typeof control === "object" ? control as Record<string, unknown> : null;
+    if (live.running || consent?.confirmed !== true ||
+        consent.coordinatorHandle !== run.coordinator_handle ||
+        consent.consumerGeneration !== run.consumer_generation) {
+      throw new OrcaCliError("Explicit control confirmation matching the current Run binding is required; taking control fences its current coordinator.", "coordinator_control_required");
+    }
+    const handle = await createTempCoordinatorTerminal(worktree);
+    try {
+      const fresh = (await showRun(runId))?.run;
+      if (!fresh || fresh.id !== runId || fresh.coordinator_handle !== run.coordinator_handle ||
+          fresh.consumer_generation !== run.consumer_generation || liveCoordinatorStatus().running) {
+        throw new OrcaCliError("Run binding changed; inspect it and confirm control again.", "coordinator_control_required");
+      }
+      await bindRun(runId, handle);
+      return await fn(handle);
+    } finally {
+      await closeTerminal(handle);
+    }
+  };
+  return lifecycleLocked ? work() : withLifecycleMutation(work);
 }
 
 /**
@@ -268,7 +281,7 @@ async function resolveReplyIdentity(
   runId: string,
   messageId: string,
   seed?: { taskId?: string | null; dispatchId?: string | null },
-): Promise<{ taskId: string | null; dispatchId: string | null }> {
+): Promise<{ taskId: string | null; dispatchId: string | null; sourceThreadId: string | null }> {
   let taskId = seed?.taskId ?? null;
   let dispatchId = seed?.dispatchId ?? null;
   let source: Awaited<ReturnType<typeof listRunMessages>>[number] | null = null;
@@ -303,8 +316,8 @@ async function resolveReplyIdentity(
   if (!taskId || !dispatchId) {
     // Run/message scope is already established above. An unavailable fleet
     // leaves activity identity unknown; it cannot invalidate the native reply.
-    const rows = await listWorkers(runId, { includeRemote: true }).catch(() => null);
-    const row = rows?.find(
+    const inventory = await listWorkers(runId, { includeRemote: true }).catch(() => null);
+    const row = inventory?.workers.find(
       (candidate) =>
         (dispatchId !== null && candidate.dispatchId === dispatchId) ||
         (taskId !== null && candidate.taskId === taskId) ||
@@ -313,7 +326,7 @@ async function resolveReplyIdentity(
     taskId ??= row?.taskId ?? null;
     dispatchId ??= row?.dispatchId ?? null;
   }
-  return { taskId, dispatchId };
+  return { taskId, dispatchId, sourceThreadId: source ? (source.thread_id ?? source.id) : null };
 }
 
 /**
@@ -502,7 +515,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       const [tasks, page, workers, config, history] = await Promise.all([
         presentationTasks(runId),
         listRunMessagePage(runId).catch(() => ({ messages: [], window: null })),
-        presentationWorkers(runId, { includeRemote: true }).catch(() => []),
+        presentationWorkers(runId, { includeRemote: true }).then(result => result.workers).catch(() => []),
         loadConfig(workspaceDir),
         activityJournal.listHistory(runId),
       ]);
@@ -1037,48 +1050,41 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
     }),
   );
 
-  /**
-   * Cursor-paged Run lookup — ONE raw `run-list` page, verbatim.
-   *
-   * `GET /api/runs` (below) remains the fully-materialized, workspace-scoped
-   * picker feed; this route is the paging primitive for surfaces that want to
-   * walk the registry without the unbounded sweep. The opaque `nextCursor` is
-   * passed through byte-for-byte (null = last page), so pagination semantics
-   * stay exactly Orca's own — a stale cursor surfaces whatever the runtime
-   * does with it, never a synthesized empty page.
-   *
-   * Run records carry no workspace field, so each row is annotated with the
-   * CHEAP local evidence only (this process created it / the workspace
-   * config names it); exact workspace ownership needs the task-creator
-   * marker and lives on `GET /api/runs/:runId`.
-   */
+  /** One bounded native Run page, filtered using positive workspace evidence. */
   app.get(
     "/api/runs/page",
     route(async (req, res) => {
       const cursor = validateText(req.query.cursor, "cursor", 512);
       const configuredRunId = (await loadConfig(workspaceDir)).runId;
-      // listRuns() follows every page internally; for one HTTP page we ask
-      // the CLI directly through the same adapter contract (limit 100, the
-      // runtime's documented ceiling) so the cursor stays honest.
-      const args = ["orchestration", "run-list", "--limit", "100"];
+      const limitValue = req.query.limit === undefined ? 100 : Number(req.query.limit);
+      if (!Number.isInteger(limitValue) || limitValue < 1 || limitValue > 100) throw new ValidationError("limit must be an integer from 1 to 100", "invalid_pagination");
+      const args = ["orchestration", "run-list", "--limit", String(limitValue)];
       if (cursor) args.push("--cursor", cursor);
       const receipt = await runOrca<{ runs?: unknown; nextCursor?: unknown }>(args);
       if (!Array.isArray(receipt.runs)) {
         throw new OrcaCliError("run-list returned an invalid receipt: runs must be an array", "invalid_pagination");
       }
       const rawNext = receipt.nextCursor;
-      const nextCursor =
-        typeof rawNext === "string" && rawNext.length > 0 ? rawNext : null;
-      const runs = (receipt.runs as OrcaRun[])
-        .filter((r) => r && typeof r.id === "string" && r.legacy !== 1);
-      res.json({
-        runs: runs.map((run) => ({
-          ...run,
-          viewerCreated: viewerCreatedRunIds.has(run.id),
-          configured: configuredRunId === run.id,
-        })),
-        nextCursor,
-      });
+      if (rawNext !== null && rawNext !== undefined && typeof rawNext !== "string") {
+        throw new OrcaCliError("run-list returned an invalid cursor", "invalid_pagination");
+      }
+      const nextCursor = typeof rawNext === "string" && rawNext.length ? rawNext : null;
+      const candidates = (receipt.runs as OrcaRun[]).filter((r) => r && typeof r.id === "string" && r.legacy !== 1);
+      const marker = `::${workspaceDir}@@`;
+      const owned = new Array<boolean>(candidates.length).fill(false);
+      let nextIndex = 0;
+      await Promise.all(Array.from({ length: Math.min(8, candidates.length) }, async () => {
+        while (nextIndex < candidates.length) {
+          const index = nextIndex++;
+          const run = candidates[index];
+          if (viewerCreatedRunIds.has(run.id) || configuredRunId === run.id) { owned[index] = true; continue; }
+          try {
+            owned[index] = (await listTasks(run.id, { brief: true })).some(task =>
+              typeof task.created_by_process_incarnation === "string" && task.created_by_process_incarnation.includes(marker));
+          } catch { /* Unknown ownership is never shown as workspace-owned. */ }
+        }
+      }));
+      res.json({ runs: candidates.filter((_run, index) => owned[index]), nextCursor });
     }),
   );
 
@@ -1212,7 +1218,9 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         isNativeFreshPreset(harnessByTask[task.id] ?? defaultHarness));
       // A blocked Task can still own a pending/unknown native Dispatch even
       // without task.dispatch_id. Today's launch preference never replaces it.
-      const nativeFleet = nativeCandidates.length ? await listWorkers(runId, { includeRemote: true }) : [];
+      const nativeInventory = nativeCandidates.length ? await listWorkers(runId, { includeRemote: true }) : { workers: [], partialHostErrors: [] };
+      if (nativeInventory.partialHostErrors.length) throw new OrcaCliError("Worker inventory is incomplete", "inventory_incomplete");
+      const nativeFleet = nativeInventory.workers;
       const nativeTasks = nativeCandidates.filter(task => !nativeFleet.some(row =>
         row.runId === runId && row.taskId === task.id &&
         (row.dispatchStatus === "pending" || row.dispatchStatus === "dispatched")));
@@ -1252,6 +1260,14 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         : null;
       const runtimeVersion = runtimeStatus?.runtime?.appVersion ?? null;
       const capabilities = runtimeStatus?.runtime?.capabilities ?? [];
+      const codexFreshCandidate = process.platform === "linux" && tasks.some(task => {
+        const laneId = laneByTask[task.id];
+        const placement = laneId ? worktreeLanes[laneId]?.placement : placementByTask[task.id];
+        return (harnessByTask[task.id] ?? defaultHarness) === "codex" &&
+          !environmentByTask[task.id] &&
+          (placement?.kind === "new-child" || placement?.kind === "new-top-level");
+      });
+      const certifiedCodexFresh = codexFreshCandidate && await canUseNativeCodexFreshWorktree();
       const entries = tasks.map((task) => {
         const harness = harnessByTask[task.id] ?? defaultHarness;
         const model = modelByTask[task.id] ?? null;
@@ -1274,7 +1290,10 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
           : KNOWN_HARNESSES.has(harness)
             ? {
                 route: "supervised" as const,
-                reason: "The selected harness uses the supervised worker path; compatibility depends on its Orca launcher.",
+                reason: harness === "codex" && certifiedCodexFresh && !environment &&
+                  (placement.kind === "new-child" || placement.kind === "new-top-level")
+                  ? "Certified local Codex new-worktree launches use Orca's native supervised worker path; for a lane this applies to its seed. Readiness is rechecked at launch."
+                  : "The selected harness uses the supervised worker path; compatibility depends on its Orca launcher.",
                 reasonCode: "supervisedCaveat",
                 limitations: [],
               }
@@ -1544,10 +1563,12 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
    * host would let one session be mistaken for work on another server.
    */
   const exactSessionScope = async (runId: string, taskId: string, dispatchId: string) => {
-    const [tasks, workers] = await Promise.all([
+    const [tasks, inventory] = await Promise.all([
       listTasks(runId),
       listWorkers(runId, { includeRemote: true }),
     ]);
+    if (inventory.partialHostErrors.length) throw new OrcaCliError("Worker inventory is incomplete", "inventory_incomplete");
+    const workers = inventory.workers;
     const task = tasks.find((candidate) => candidate.id === taskId && candidate.run_id === runId);
     const row = workers.find((candidate) =>
       candidate.runId === runId &&
@@ -1693,12 +1714,14 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       if (live.running) {
         throw new OrcaCliError("Stop the viewer coordinator before manually resolving a blocked Stage.", "resume_not_allowed");
       }
-      const [tasks, rows, gates, bindings] = await Promise.all([
+      const [tasks, inventory, gates, bindings] = await Promise.all([
         listTasks(runId),
         listWorkers(runId, { includeRemote: true }),
         listGates(runId),
         providerSessions.list(runId),
       ]);
+      if (inventory.partialHostErrors.length) throw new OrcaCliError("Worker inventory is incomplete", "inventory_incomplete");
+      const rows = inventory.workers;
       const row = rows.find((item) => item.runId === runId && item.dispatchId === dispatchId);
       const task = tasks.find((item) => item.id === row?.taskId && item.run_id === runId);
       if (!row || !task || task.status !== "blocked" ||
@@ -1730,8 +1753,30 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       }
       // The Task is the durable DAG status. The historical Dispatch remains
       // failed in Orca's accounting; the activity entry names the human action.
-      await asCoordinator(runId, worktree, (from) =>
-        taskUpdate(task.id, "completed", runId, from, JSON.stringify(result.trim())),
+      await asCoordinator(runId, worktree, async (from) => {
+        const [freshTasks, freshInventory, freshGates] = await Promise.all([
+          listTasks(runId), listWorkers(runId, { includeRemote: true }), listGates(runId),
+        ]);
+        const freshTask = freshTasks.find(item => item.id === task.id && item.run_id === runId);
+        const freshRow = freshInventory.workers.find(item => item.dispatchId === dispatchId);
+        const previousIds = new Set(rows.filter(item => item.taskId === task.id).map(item => item.dispatchId));
+        if (freshInventory.partialHostErrors.length || freshTask?.status !== "blocked" ||
+            freshRow?.taskId !== task.id || freshRow.dispatchStatus !== "failed" ||
+            freshRow.projection?.liveness?.verdict !== "exited" ||
+            freshInventory.workers.some(item => item.taskId === task.id &&
+              (!previousIds.has(item.dispatchId) || item.dispatchStatus === "dispatched" || item.dispatchStatus === "pending")) ||
+            freshGates.some(gate => gate.taskId === task.id && gate.status === "pending")) {
+          throw new OrcaCliError("Stage evidence changed while taking control.", "resume_not_allowed");
+        }
+        if (binding) {
+          const observation = await providerSessions.probe(binding);
+          if (observation.status === "active" || observation.status === "idle") {
+            throw new OrcaCliError("The exact provider session is still active or idle.", "resume_not_allowed");
+          }
+        }
+        return taskUpdate(task.id, "completed", runId, from, JSON.stringify(result.trim()));
+      },
+        req.body?.coordinatorControl,
       );
       await recordActivity(createViewerActivity({
         runId,
@@ -2036,8 +2081,8 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
           gateError: gates.error,
           messages: messages.value,
           messageError: messages.error,
-          workers: workers.value,
-          workerError: workers.error,
+          workers: workers.value?.workers ?? null,
+          workerError: workers.error ?? (workers.value?.partialHostErrors.length ? "Worker inventory has partial host errors" : null),
         },
         workspaceDir,
       });
@@ -2104,7 +2149,8 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         res.status(400).json({ error: "run query parameter required", code: "run_required" });
         return;
       }
-      const workers = await presentationWorkers(runId, { includeRemote: true });
+      const inventory = await presentationWorkers(runId, { includeRemote: true });
+      const workers = inventory.workers;
       // A damaged/unreadable viewer history file must not hide Orca's worker
       // inventory. The API can still backfill supervised rows from Orca.
       const saved = await launchHistory.list(runId).catch(() => new Map());
@@ -2154,7 +2200,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
           row.launchEvidence = { agent: observed.agent, source: "worker-show" };
         }));
       }
-      res.json({ workers: enriched });
+      res.json({ workers: enriched, partialHostErrors: inventory.partialHostErrors });
     }),
   );
 
@@ -2226,6 +2272,10 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         res.status(400).json({ error: "dispatch id required" });
         return;
       }
+      const runId = validateId(req.query.run, "run");
+      if (!runId) throw new ValidationError("run query parameter required", "run_required");
+      const evidence = await revalidateWorkerForMutation(dispatchId, runId);
+      if (!evidence.ok) { res.status(evidence.status).json(evidence.body); return; }
       const source = validateText(req.query.source, "source", 16);
       if (source && !["auto", "terminal", "transcript"].includes(source)) {
         throw new ValidationError(
@@ -2457,9 +2507,9 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         res.status(400).json({ error: "body and runId required" });
         return;
       }
-      await requireExecutionEnabled();
       const live = coordinatorStatus();
       if (live.running && live.runId === runId && live.coordinatorHandle) {
+        await requireExecutionEnabled();
         // Capture the Run-scoped conversation before answerInboxItem removes
         // it from the pending inbox. Preserve Task/Dispatch identity in the
         // optimistic journal row so it renders in the correct thread before
@@ -2484,8 +2534,12 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         res.json({ ok: true, via: "coordinator" });
         return;
       }
+      const recovered = await preflightOperatorMessage({ operation: "reply", runId, messageId, body }, { store: providerSessions });
+      if (recovered) { res.json({ ok: true, via: "adhoc", requestId: recovered.requestId, receipt: recovered.outcome }); return; }
+      await requireExecutionEnabled();
       const identity = await resolveReplyIdentity(runId, messageId);
-      await asCoordinator(runId, worktree, (from) => replyToMessage(messageId, body, from));
+      const { requestId, outcome } = await asCoordinator(runId, worktree, (from) =>
+        performOperatorReply({ runId, messageId, body, from, sourceThreadId: identity.sourceThreadId }, { store: providerSessions }), req.body?.coordinatorControl);
       await recordActivity(
         createViewerActivity({
           runId,
@@ -2494,12 +2548,26 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
           summary: body,
           taskId: identity.taskId,
           dispatchId: identity.dispatchId,
-          threadId: messageId,
+          threadId: identity.sourceThreadId,
         }),
       );
-      res.json({ ok: true, via: "adhoc" });
+      res.json({ ok: true, via: "adhoc", requestId, receipt: outcome });
     }),
   );
+
+  app.post("/api/messages/:id/acknowledge-stop-event", requireToken(policy), route(async (req, res) => {
+    const runId = validateId(req.body?.runId, "runId");
+    const messageId = validateId(req.params.id, "message id");
+    const dispatchId = validateId(req.body?.dispatchId, "dispatchId");
+    if (!runId || !messageId || !dispatchId) throw new ValidationError("runId, messageId and dispatchId required");
+    await requireExecutionEnabled();
+    const live = liveCoordinatorStatus();
+    if (!live.running || live.runId !== runId || !live.coordinatorHandle) {
+      throw new OrcaCliError("This viewer does not control the selected Run.", "not_running");
+    }
+    await acknowledgeStopEvent(runId, messageId, dispatchId);
+    res.json({ ok: true });
+  }));
 
   /**
    * Send proactive coordinator guidance to one active Task attempt.
@@ -2578,7 +2646,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         listWorkers(runId, { includeRemote: true }),
         listWorktrees(),
       ]);
-      const workers = workersResult.status === "fulfilled" ? workersResult.value : null;
+      const workers = workersResult.status === "fulfilled" ? workersResult.value.workers : null;
       const worktrees = worktreesResult.status === "fulfilled" ? worktreesResult.value : null;
       res.json({
         runId,
@@ -2590,7 +2658,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         workersError:
           workersResult.status === "rejected"
             ? String((workersResult.reason as Error)?.message ?? workersResult.reason).slice(0, 300)
-            : null,
+            : workersResult.value.partialHostErrors.length ? "Worker inventory has partial host errors" : null,
         worktreesError:
           worktreesResult.status === "rejected"
             ? String((worktreesResult.reason as Error)?.message ?? worktreesResult.reason).slice(0, 300)
@@ -2629,6 +2697,8 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         res.status(400).json({ error: "body and runId required" });
         return;
       }
+      const recovered = await preflightOperatorMessage({ operation: "group", runId, audience, subject, body, type, priority }, { store: providerSessions });
+      if (recovered) { res.json({ ok: true, audience, type, priority, requestId: recovered.requestId, receipt: recovered.outcome }); return; }
       // Worktree audiences must name a workspace Orca itself discovered, in
       // this send's own discovery read — a stale or client-supplied list is
       // exactly the free-text hole this route exists to close. Other address
@@ -2653,15 +2723,8 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
           "not_running",
         );
       }
-      const receipt = await sendCoordinatorGroupMessage({
-        runId,
-        audience,
-        subject,
-        body,
-        type,
-        priority,
-        from: live.coordinatorHandle,
-      });
+      const { requestId, outcome: receipt } = await asCoordinator(runId, worktree, (from) =>
+        performOperatorGroupSend({ runId, audience, subject, body, type, priority, from }, { store: providerSessions }));
       // Journal the accepted enqueue receipt: the optimistic row renders the
       // send immediately (with audience + requested priority as provenance)
       // and `removeJournalMessageDuplicates` supersedes it once the durable
@@ -2680,7 +2743,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
           payload: receipt,
         }),
       );
-      res.json({ ok: true, audience, type, priority, receipt });
+      res.json({ ok: true, audience, type, priority, requestId, receipt });
     }),
   );
 
@@ -2943,9 +3006,14 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         res.status(400).json({ error: "dispatch id required" });
         return;
       }
+      const runId = validateId(req.body?.runId, "runId");
+      if (!runId) throw new ValidationError("runId required", "run_required");
+      const evidence = await revalidateWorkerForMutation(dispatchId, runId);
+      if (!evidence.ok) { res.status(evidence.status).json(evidence.body); return; }
       await requireExecutionEnabled();
       const { requestId, receipt } = await terminalMutationWithLedger("worker-release", dispatchId, (r) =>
         releaseWorker(dispatchId, { retryRequestId: r }),
+        { runId, taskId: evidence.detail.taskId },
       );
       // Fold the receipt into the coordinator projection — a KNOWN terminal
       // state resolves the attempt + its debt; unknown/pending keeps them.
@@ -2957,11 +3025,10 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         await retainOpenCodeTui(dispatchId);
       }
       noteManualRelease(dispatchId, tuiDecision ?? receipt.state);
-      const live = coordinatorStatus();
-      if (live.runId) {
+      if (evidence.detail.runId) {
         await recordActivity(
           createViewerActivity({
-            runId: live.runId,
+            runId,
             kind: "release",
             dispatchId,
             title: "Coordinator released a worker",
@@ -2987,17 +3054,21 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         res.status(400).json({ error: "dispatch id required" });
         return;
       }
+      const runId = validateId(req.body?.runId, "runId");
+      if (!runId) throw new ValidationError("runId required", "run_required");
+      const evidence = await revalidateWorkerForMutation(dispatchId, runId);
+      if (!evidence.ok) { res.status(evidence.status).json(evidence.body); return; }
       await requireExecutionEnabled();
       const { requestId, receipt } = await terminalMutationWithLedger("worker-retain", dispatchId, (r) =>
         retainWorker(dispatchId, { retryRequestId: r }),
+        { runId, taskId: evidence.detail.taskId },
       );
       if (receipt.state === "retained") await retainOpenCodeTui(dispatchId);
       noteManualRelease(dispatchId, receipt.state);
-      const live = coordinatorStatus();
-      if (live.runId) {
+      if (evidence.detail.runId) {
         await recordActivity(
           createViewerActivity({
-            runId: live.runId,
+            runId,
             kind: "release",
             dispatchId,
             title: "Coordinator retained a worker",
@@ -3156,6 +3227,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
     flags: {
       runHooks: boolean;
       force: boolean;
+      deleteBranch?: boolean;
       allowFailedArchiveHook: boolean;
       evidenceRequestId: string | null;
       /** Requested Run scope; null falls back to a positively-matched lane. */
@@ -3209,6 +3281,37 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       ownedSelectors: new Set([worktree, `path:${workspaceDir}`]),
       activeSelectors,
     });
+    const custodyRunId = flags.runId ?? laneRunScopeFor(selector, status);
+    if (!custodyRunId || !row.path || row.isMainWorktree !== false || row.path === workspaceDir) {
+      throw new OrcaCliError("Worktree identity, Run scope, or non-main status is not proven.", "worktree_in_use");
+    }
+    const [terminals, inventory] = await Promise.all([
+      // A workspace can host workers from other Runs, including Native Chat
+      // sessions absent from terminal-list. Selected Run scopes the receipt,
+      // not the safety inventory for destroying the shared workspace.
+      listTerminals(), listWorkers(undefined, { includeRemote: true }),
+    ]);
+    const activeWorkers = inventory.workers.filter(worker =>
+      worker.dispatchStatus === "dispatched" || worker.dispatchStatus === "pending" || !worker.dispatchStatus);
+    const unknownWorkers = activeWorkers.filter(worker => !worker.resource?.worktreeId);
+    const occupyingWorkers = inventory.workers.filter(worker =>
+      worker.resource?.worktreeId === row.id &&
+      (worker.dispatchStatus === "dispatched" || worker.dispatchStatus === "pending" ||
+        !worker.dispatchStatus || worker.terminalState !== "released"));
+    const occupyingTerminals = terminals.filter(terminal =>
+      terminal.worktreeId === row.id || terminal.worktreePath === row.path);
+    if (inventory.partialHostErrors.length || unknownWorkers.length || occupyingWorkers.length || occupyingTerminals.length) {
+      // A normal native worktree can retain its initial shell after its worker
+      // releases. Name that blocker rather than implying another hidden agent;
+      // never close a non-worker terminal implicitly on the operator's behalf.
+      const reasons = [
+        ...(inventory.partialHostErrors.length ? ["Some execution hosts could not be observed."] : []),
+        ...(unknownWorkers.length ? [`Unsettled workers have unknown workspace identity: ${unknownWorkers.slice(0, 8).map(worker => worker.dispatchId).join(", ")}.`] : []),
+        ...(occupyingWorkers.length ? [`Inspect worker custody before removal: ${occupyingWorkers.slice(0, 8).map(worker => worker.dispatchId).join(", ")}.`] : []),
+        ...(occupyingTerminals.length ? [`Close these terminals explicitly in Orca first: ${occupyingTerminals.slice(0, 8).map(terminal => terminal.handle).join(", ")}.`] : []),
+      ];
+      throw new OrcaCliError(`Cannot remove worktree. ${reasons.join(" ")}`, "worktree_in_use");
+    }
 
     // Waiver evidence is read from THIS workspace's durable ledger: the id
     // must name a previous removal attempt against the SAME selector that
@@ -3248,6 +3351,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
           removeWorktree(selector, {
             runHooks: flags.runHooks,
             force: flags.force,
+            deleteBranch: flags.deleteBranch,
             allowFailedArchiveHook: flags.allowFailedArchiveHook,
           }),
         (r) => ({
@@ -3323,6 +3427,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       const result = await removeWorktreeThroughOrca(selector, {
         runHooks,
         force,
+        deleteBranch: req.body?.deleteBranch === true,
         allowFailedArchiveHook,
         evidenceRequestId,
         runId,
@@ -3371,6 +3476,46 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       res.json({ ok: true, ...result });
     }),
   );
+  /** Create an approval gate only before this Task has ever dispatched. */
+  app.post(
+    "/api/gates",
+    requireToken(policy),
+    route(async (req, res) => {
+      const runId = validateId(req.body?.runId, "runId");
+      const taskId = validateId(req.body?.taskId, "taskId");
+      const question = validateText(req.body?.question, "question", 2000);
+      if (!runId || !taskId || !question) throw new ValidationError("runId, taskId and question required");
+      await requireExecutionEnabled();
+      const result = await withLifecycleMutation(async () => {
+        const assertEligible = async () => {
+          const [tasks, inventory, gates] = await Promise.all([
+            listTasks(runId), listWorkers(runId, { includeRemote: true }), listGates(runId),
+          ]);
+          const task = tasks.find(item => item.id === taskId && item.run_id === runId);
+          if (!task || task.dispatch_id || ["dispatched", "completed", "failed"].includes(task.status) ||
+              inventory.partialHostErrors.length || inventory.workers.some(row => row.taskId === taskId) ||
+              gates.some(gate => gate.taskId === taskId && gate.status === "pending")) {
+            throw new OrcaCliError("Task is dispatched, gated, absent, or its dispatch history is incomplete.", "gate_not_eligible");
+          }
+        };
+        await assertEligible();
+        const requestId = newRequestId();
+        await requestLedger.record({ requestId, operation: "gate-create", runId, taskId, dispatchId: null, target: taskId });
+        const receipt = await asCoordinator(runId, worktree, async from => {
+          await assertEligible();
+          return runOrca<Record<string, unknown>>([
+            "orchestration", "gate-create", "--task", taskId, "--question", question,
+            "--options", JSON.stringify(["approved", "rejected"]), "--from", from,
+          ]);
+        }, req.body?.coordinatorControl, true);
+        await requestLedger.record({ requestId, operation: "gate-create", runId, taskId, dispatchId: null,
+          target: taskId, settledLocally: true, note: "gate created" });
+        return { requestId, receipt };
+      });
+      res.json({ ok: true, ...result });
+    }),
+  );
+
 
   /** Resolve a decision gate (human approval) — a Run-scoped mutation. */
   app.post(
@@ -3389,7 +3534,10 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       }
       // gate-resolve is a Run-scoped mutation (it needs the bound coordinator).
       await requireExecutionEnabled();
-      await asCoordinator(runId, worktree, (from) => resolveGate(gateId, resolution, from));
+      if (!(await listGates(runId)).some(gate => gate.id === gateId)) {
+        throw new OrcaCliError("Gate does not belong to the selected Run.", "gate_not_eligible");
+      }
+      await asCoordinator(runId, worktree, (from) => resolveGate(gateId, resolution, from), req.body?.coordinatorControl);
       res.json({ ok: true });
     }),
   );

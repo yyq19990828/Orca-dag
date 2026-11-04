@@ -50,17 +50,18 @@ npx orca-orchestration-launcher
 
 ## 核心特性
 
-- **可视化与手绘美学**：SVG `feTurbulence` 蜡笔风格描边、状态动态涂鸦动画、层级与依赖连线分离、dagre/力导向布局自由切换。
+- **现代分节式工作台与实时 DAG**：采用深蓝导航与清晰 1px 边框的低噪现代化工作台，实时状态更新（2 秒轮询），任务列表与懒加载 DAG 画布自由切换（支持 dagre 分层与力导向布局），中央任务详情区与常驻可调整大小的右侧通信侧栏。
 - **Agent 启动控制**：逐节点选择 harness，受支持的适配器提供模型/effort 覆盖；OpenCode 可选自动、Mini TUI 或完整 TUI。
 - **工作区放置与 Lane**：支持 4 种本地放置及 2 种远程放置；lane 中的任务串行共用隔离工作区，跨工作区汇合需要人工确认集成。
-- **监控与审计**：实时 Activity 事件流、按阶段分组的 Chat、check receipt、worker 干预、后台会话恢复及变更请求审计。
+- **监控与审计**：实时 Activity 事件流（页面隐藏时自动暂停、恢复时刷新重连）、按阶段分组的 Chat、check receipt、worker 干预、后台会话恢复及变更请求审计。
+- **运维与治理**：Run 作用域限定的 worker 操作（输出、释放、保留）、按需工作区清理与原生合并分支安全清理、未派发任务的规范审批门创建，以及有界的工作区 Run 分页。
 - **中英双语原生支持**：顶栏一键无缝切换中英文，语言偏好随浏览器持久化，底层诊断与报错保持英文原文对齐。
 
 ## 关键安全边界与原则
 
 - **任务定义不可变**：spec、标题与依赖不能原地修改，状态和结果仍可更新。调整定义须新建 Run；不要用 `reset --tasks` 重绘，它会清空所有 Run。
 - **未知不等于死亡**：unknown 或断连的 worker 仍占用并发槽位；不确定性不能授权自动重试、取消或替代启动。
-- **消息、恢复与证据**：不同运行时的收件箱语义不同；遵循已安装的指南，并在带类型的指导发送中检查实际 Task/Dispatch 身份。`sessions.json` 中的关键恢复账本（`mailboxChecks`、`guidanceSends`）具有权威恢复效力，不能在不支持的旧版读取器间安全热降级。输出与原生界面回执只是观测，不证明 Task 已完成。详见[编排教程](docs/tutorials/orchestration_zh.md#会遇到的-worker-与收件箱参数)与 [HTTP API](docs/reference/http-api_zh.md#指导消息投递恢复与后续任务生命周期)。
+- **消息、coordinator 权限与恢复**：不同运行时的收件箱与 coordinator 语义不同；遵循已安装的指南。官方公共编排契约为 contract 1（`orchestration.contract.v1`），运行时协议为 3，联盟生命周期结算协议为 3，控制邮件协议为 2；`[orca-dag:merge-inputs-v3]` 是本地 viewer 契约标记。一次性 coordinator 变更拒绝隐式接管（必须携带显式控制确认，否则报 409 `coordinator_control_required`）。StopReason 升级是事件，非可回复提问。`sessions.json` 中的关键恢复账本（`mailboxChecks`、`guidanceSends`、`operatorMessages`）具有权威恢复效力，不能在不支持的旧版读取器间安全热降级。Worker 输出、释放和保留严格限制在选定 Run 范围内。未完成的远程观测（`partialHostErrors`）跨 worker 列表各页汇总保留，绝不因主机错误清除债务。工作树清理使用 `worktree` 参数，保护活跃/主工作区，仅安全删除已合并分支（返回 `preservedBranch` 证据）。详见[编排教程](docs/tutorials/orchestration_zh.md#会遇到的-worker-与收件箱参数)与 [HTTP API](docs/reference/http-api_zh.md#指导消息投递恢复与后续任务生命周期)。
 - **本地控制面**：服务监听 `127.0.0.1`，不启用 CORS，变更请求需要 `X-Orca-Dag-Token`。自定义命令须显式启用。
 - **OMP / Antigravity**：本地 Linux 的 Current 或精确 Existing 要求运行中的 Orca 与解析后的 CLI 均 ≥ **1.4.245**；新建 Git 工作树（`new-child`、`new-top-level`）和工作区 lane 要求两者均 ≥ **1.4.246**。Lane 只共享工作区，不复用 agent 会话。原生 `worker-start --agent` 遵循 Orca 的 Chat/Terminal 设置；模型 selector 原样传递，拒绝非空 effort。详见[放置、输出、Stop 与验证边界](docs/reference/compatibility_zh.md#验证边界与限制说明)。
 - **Native Chat 状态局限**：正在工作的结构化 worker 在 Orca fleet 中仍可能显示 `unverifiable / missing_status`、provider 为空、活动未知。已在 **1.4.245** 的 OMP 上复现；**1.4.246** 源码与函数级复现仍存在该缺口。上游 [PR #34068](https://github.com/stablyai/orca/pull/34068) 截至 **2026-11-03** 仍未合并。缺失状态不证明启动失败，也不授权替代启动；详见[已验证行为与安全处理](docs/tutorials/viewer-operations_zh.md#已知局限)。

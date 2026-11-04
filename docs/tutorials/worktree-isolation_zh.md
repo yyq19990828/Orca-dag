@@ -98,9 +98,9 @@ Workspace lanes 面板可能显示 `planned`、`creating`、`active`、`integrat
 
 ### 已提交 Stage 的交接
 
-需要保证**先合并、后开发**的汇合点，应拆成两个有依赖关系的 Task。第一个是合并准备 Task，spec 同时包含 `[orca-dag:merge-prep]` 和 `[orca-dag:merge-inputs-v3]`，直接依赖所有来源 Stage。在原生 1.4.247 运行时中，`orca orchestration ask` 没有 `--subject` 与 `--payload` 参数（原生 subject 固定为 `'Question'`，`payload.question` 包含完整提问文本）。因此合并准备 Task 的 spec 必须要求 worker **在任何 Git 修改之前**，向已绑定的 coordinator 请求不可变依赖提交，其完整提问文本必须严格且仅为 `[orca-dag:merge-inputs-v3]`，不带任何额外说明文字，并等待精确的不可变 commit SHA 回执；然后才合并、解决冲突、提交并保持工作区干净。两个标记均为必需项；缺乏 `[orca-dag:merge-inputs-v3]` 标记的旧可运行合并 spec 在建图校验时会被直接拒绝，须新建 Run 重新规划，不可原地修改；保留历史 Run。不要依赖启动后盲发消息传递关键输入。第二个是开发 Task，依赖合并准备 Task，并放在同一个工作树。两者可以选择相同 harness，但 Orca 不保证复用同一个 agent 会话。
+需要保证**先合并、后开发**的汇合点，应拆成两个有依赖关系的 Task。第一个是合并准备 Task，spec 同时包含 `[orca-dag:merge-prep]` 和 `[orca-dag:merge-inputs-v3]`，直接依赖所有来源 Stage。在原生 1.4.247 运行时中，`orca orchestration ask` 没有 `--subject` 与 `--payload` 参数（原生 subject 固定为 `'Question'`，`payload.question` 包含完整提问文本）。因此合并准备 Task 的 spec 必须要求 worker **在任何 Git 修改之前**，向已绑定的 coordinator 请求不可变依赖提交，其完整提问文本必须严格且仅为 `[orca-dag:merge-inputs-v3]`，不带任何额外说明文字，并等待精确的不可变 commit SHA 回执；然后才合并、解决冲突、提交并保持工作区干净。两个标记均为必需项；缺乏 `[orca-dag:merge-inputs-v3]` 标记的旧可运行合并 spec 在建图校验时会被直接拒绝，须新建 Run 重新规划，不可原地修改；保留历史 Run。官方公共编排契约为 contract 1（`orchestration.contract.v1`），运行时协议为 3，联盟生命周期结算协议为 3，控制邮件协议为 2；`[orca-dag:merge-inputs-v3]` 为本地 viewer 契约标记（非全局上游版本名），切勿重命名。不要依赖启动后盲发消息传递关键输入。第二个是开发 Task，依赖合并准备 Task，并放在同一个工作树。两者可以选择相同 harness，但 Orca 不保证复用同一个 agent 会话。
 
-**合并握手验证：** viewer coordinator 与 StageGit 存储使用不可变提交快照并核验 Git 祖先关系。1.4.247 真实运行验收已通过一次精确提问/回复完成 4 个 Task、3 个工作树的握手；详见[验证矩阵](../reference/compatibility_zh.md)。缺乏 V3 标记的旧可运行 spec 必须在全新 Run 中重新规划。
+**合并握手验证：** viewer coordinator 与 StageGit 存储使用不可变提交快照并核验 Git 祖先关系。1.4.247 真实运行验收已通过一次精确提问/回复完成 4 个 Task、3 个工作树的握手；详见[验证矩阵](../reference/compatibility_zh.md)。缺乏本地 merge-inputs-v3 标记的旧可运行 spec 必须在全新 Run 中重新规划。
 
 只要 Run 中有合并准备 Task，viewer 就会把启动时的 Git HEAD 固定为基准提交。新 Stage 工作树从这个提交创建；不要再设置各节点的 base branch。每个成功 Stage 都必须以干净、已提交的工作树结束。viewer 将实际工作树路径、分支、Dispatch 和 HEAD SHA 记入仓库 Git 元数据中的 `orca-dag/stage-git/`；coordinator 在回复输入前，必须依据此证据核验请求方的精确合并 Task 与 Dispatch，并核对发送者句柄匹配 `dispatch:<dispatchId>`，随后通过持久化 reply 发送输入。冲突如何解决由 agent 判断；合并须保留来源提交的祖先关系。viewer 在确认所有依赖 SHA 都是目标干净 HEAD 的祖先后，才记录合并准备完成，并检查后续开发 Task 是否在该已验证工作树启动。证据缺失时下游任务会暂停，错误显示在 Run 状态中。
 
@@ -116,4 +116,4 @@ Workspace lanes 面板可能显示 `planned`、`creating`、`active`、`integrat
 
 ## 审核和移除工作树
 
-通过 **Workspace lanes → Changed files / Diff** 在 Orca 中打开经过证实的精确工作区。来源工作树还有未处理的文件或提交时，不要丢弃它。移除可移除的 Git 工作树前，viewer 要求 lane 归属已落定，并要求输入确认文本，随后才调用 `orca worktree rm`。活跃、保留、待释放或无法核实的 worker 都会阻止移除。归档 hook 失败时仍视为拒绝；viewer 不会自动豁免，也不强删目录。只释放已落定 worker 的终端，不足以证明工作树可以移除。
+通过 **Workspace lanes → Changed files / Diff** 在 Orca 中打开经过证实的精确工作区。来源工作树还有未处理的文件或提交时，不要丢弃它。工作树移除调用通过请求体参数 `worktree`（`POST /api/worktrees/remove`，而非 `selector`）传递。对于可移除的 Git 工作树，viewer 提供按需候选审查（`review`），校验归属落定并要求输入确认文本，随后才调用 `orca worktree rm --worktree <worktree>`。活跃、保留、待释放、主工作区或无法核实的资源都会阻止移除。可选的原生安全 `deleteBranch: boolean` 选项仅在分支已安全合并到上游时删除分支并返回 `receipt.preservedBranch` 证据，绝不从 Web 端强删未合并分支。归档 hook 失败时仍视为拒绝；viewer 不会自动豁免，也不强删目录。只释放已落定 worker 的终端，不足以证明工作树可以移除。

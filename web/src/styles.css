@@ -1,40 +1,35 @@
-/* ============================================================
-   Orca DAG Viewer — "fresh crayon sketchbook" theme
-   Paper + crayon. Hand-drawn wobble lives on nodes & buttons;
-   everything else stays soft and airy.
-   ============================================================ */
+
 
 :root {
-  --paper: #fcfaf4;
-  --paper-2: #f5f1e6;
-  --paper-3: #efe9db;
-  --ink: #4a4754;
-  --ink-soft: #6f6a78;
-  --ink-faint: #77727f;
-  --line: #e3ddcd;
-  --line-strong: #d3ccb8;
+  --paper: #ffffff;
+  --paper-2: #f5f7fa;
+  --paper-3: #e9eef5;
+  --ink: #18283e;
+  --ink-soft: #465b73;
+  --ink-faint: #53677d;
+  --line: #d8e1eb;
+  --line-strong: #b5c3d2;
 
-  --sky: #7bb7e0;
-  --sky-ink: #3e7ba6;
-  --sky-wash: #eaf4fb;
-  --blush: #f2a0a6;
-  --blush-ink: #c85f66;
-  --blush-wash: #fdeef0;
-  --meadow: #7fc98c;
-  --butter: #f0b94e;
-  --coral: #ea6b5e;
-  --coral-ink: #a13f35;
-  --flame: #f0975e;
-  --lilac: #b79fe0;
-  --lilac-ink: #6f5aa4;
+  --sky: #2865c7;
+  --sky-ink: #2054a5;
+  --sky-wash: #eaf2ff;
+  --blush: #d45a65;
+  --blush-ink: #a22d3b;
+  --blush-wash: #fff0f1;
+  --meadow: #237a51;
+  --butter: #9a6200;
+  --coral: #b53632;
+  --coral-ink: #9d2c29;
+  --flame: #a65413;
+  --lilac: #6654aa;
+  --lilac-ink: #514187;
 
-  --shadow-sticker: 3px 3px 0 rgba(74, 71, 84, 0.16);
-  --shadow-soft: 0 8px 22px rgba(74, 71, 84, 0.09);
+  --shadow-sticker: none;
+  --shadow-soft: none;
 
-  --font-display: "ZCOOL KuaiLe", "Fredoka", "PingFang SC", "Microsoft YaHei", sans-serif;
-  /* Latin falls to Fredoka; every CJK glyph falls to ZCOOL KuaiLe so body text
-     is hand-drawn too, matching the headings. */
-  --font-body: "Fredoka", "ZCOOL KuaiLe", "PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif;
+  --font-display: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  
+  --font-body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
 
   font-family: var(--font-body);
   color-scheme: light;
@@ -54,17 +49,12 @@ body,
 body {
   color: var(--ink);
   background-color: var(--paper);
-  /* faint paper grain */
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E");
+  
+  
 }
 
-/* hidden SVG holding the crayon displacement filters */
-.crayon-defs {
-  position: absolute;
-  width: 0;
-  height: 0;
-  overflow: hidden;
-}
+
+
 
 .app {
   display: flex;
@@ -72,12 +62,7 @@ body {
   height: 100vh;
 }
 
-/* ---------- top bar (a taped paper header) ----------
-   Three regions: brand · flexible Run context · Run/Orca status. On desktop
-   they share one row (the middle region owns all spare width and centers the
-   Run picker in it); below 1024px the Run context drops to its own row, and
-   below 620px that Run row spans the full header — see the header media
-   queries at the end of this section. */
+
 .topbar {
   position: relative;
   display: flex;
@@ -85,28 +70,10 @@ body {
   gap: 18px;
   padding: 12px 22px;
   background: var(--paper);
-  border-bottom: 2.5px dashed var(--line-strong);
+  border-bottom: 1px solid var(--line-strong);
 }
-/* a strip of washi tape holding the header down onto the page below. Sits on
-   the topbar's bottom edge, not its top — anything above it is clipped by the
-   viewport. */
-.topbar__tape {
-  position: absolute;
-  bottom: -11px;
-  left: 44%;
-  width: 96px;
-  height: 21px;
-  z-index: 2;
-  transform: rotate(-2.5deg);
-  background: repeating-linear-gradient(
-    -45deg,
-    rgba(123, 183, 224, 0.28) 0 6px,
-    rgba(123, 183, 224, 0.14) 6px 12px
-  );
-  border-left: 1px dashed rgba(62, 123, 166, 0.3);
-  border-right: 1px dashed rgba(62, 123, 166, 0.3);
-  pointer-events: none;
-}
+
+
 .topbar__brand {
   display: flex;
   align-items: center;
@@ -121,33 +88,20 @@ body {
 .topbar__brand-text {
   min-width: 0;
 }
-/* the mascot: a whale doodled in the same crayon as the graph. The wobble is
-   the fine-grain filter (small drawing, small grain) — pinned to ONE seed now.
-   The idle loops it used to wear (whale-boil flipping #crayon-fine/-b/-c
-   ~2fps, whale-bob swimming on 5.5s) were continuous motion outside the
-   quiet budget: `.exec__pulse` is the only thing left that may run forever,
-   so the whale just sits at its rest tilt, texture intact. */
+
 .topbar__logo {
   width: 46px;
   height: 38px;
   overflow: visible;
-  filter: url(#crayon-fine) drop-shadow(1px 1.5px 0 rgba(74, 71, 84, 0.18));
-  transform: rotate(-6deg);
+  
+  
   transform-origin: 50% 70%;
 }
 /* one-shot hover feedback only: the dive plays once per hover and drops out of
    the effect stack when it lands */
-.topbar__brand:hover .topbar__logo {
-  animation: whale-dive 0.7s ease-in-out;
-}
-@keyframes whale-dive {
-  40% { transform: rotate(14deg) translateY(-7px) scale(1.12); }
-  70% { transform: rotate(-12deg) translateY(2px) scale(0.97); }
-}
-/* an orca, drawn in crayon: soft-black body (pure black would punch a hole in
-   the pastel page), white belly and eye patch crayoned over the top — a doodle
-   is layered strokes, so the white slightly overshooting the silhouette is
-   part of the charm, not a bug */
+
+
+
 .orca__body {
   fill: var(--ink);
   stroke: #35323e;
@@ -188,8 +142,7 @@ body {
   stroke-width: 3.4;
   stroke-linecap: round;
 }
-/* a static wisp: the puff scale/opacity loop (spout-puff, 5.5s infinite) went
-   with the whale's idle swim — the spout is drawn open, never animated */
+
 .orca__spout {
   transform-origin: 24px 12px;
 }
@@ -201,27 +154,12 @@ body {
   color: var(--ink);
   letter-spacing: 0.5px;
 }
-/* a crayon underline that draws itself in on load */
-.topbar__title::after {
-  content: "";
-  position: absolute;
-  left: -2px;
-  right: -2px;
-  bottom: -3px;
-  height: 3px;
-  border-radius: 2px;
-  background: linear-gradient(90deg, var(--sky) 0%, var(--lilac) 60%, transparent 100%);
-  opacity: 0.55;
-  transform-origin: left center;
-  animation: underline-draw 0.85s cubic-bezier(0.35, 0.9, 0.4, 1) 0.25s backwards;
-}
-@keyframes underline-draw {
-  from { transform: scaleX(0); opacity: 0; }
-  to { transform: scaleX(1); opacity: 0.55; }
-}
+
+
+
 .topbar__subtitle {
   margin-top: 3px;
-  font-size: 12.5px;
+  font-size: 14px;
   color: var(--ink-soft);
   /* first thing to give way when the Run context needs the row's width —
      truncates instead of wrapping the header taller or overflowing */
@@ -250,13 +188,13 @@ body {
   align-items: center;
   gap: 7px;
   font-family: var(--font-display);
-  font-size: 12.5px;
+  font-size: 14px;
   padding: 5px 13px;
-  border-radius: 13px 11px 12px 10px;
-  border: 2px solid var(--line-strong);
+  border-radius: 6px;
+  border: 1px solid var(--line-strong);
   background: var(--paper);
   color: var(--ink-soft);
-  /* a status pill reads as one stamp — its label never wraps mid-text */
+  
   white-space: nowrap;
   transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
 }
@@ -267,10 +205,7 @@ body {
   border-radius: 50%;
   background: currentColor;
 }
-/* healthy link: green stamp; broken link: an anxious red — colour + label say
-   it outright. The conn-beat heartbeat and conn-alarm blink (both infinite)
-   are gone: only `.exec__pulse` may run indefinitely, and a connection chip
-   is a status, so it reads the static way everything else does now. */
+
 .conn--ok {
   color: #58ab6b;
   border-color: #bfe4c7;
@@ -363,60 +298,46 @@ body {
   background: var(--paper-2);
 }
 
-/* ---------- buttons (crayon stickers) ---------- */
+
 .btn {
   position: relative;
+  min-height: 40px;
   font-family: var(--font-display);
-  border: 3px solid var(--ink);
-  border-radius: 15px 11px 16px 10px;
+  border: 1px solid var(--ink);
+  border-radius: 6px;
   padding: 9px 20px;
   font-size: 14px;
   letter-spacing: 0.4px;
   cursor: pointer;
   color: var(--ink);
   background: var(--paper);
-  box-shadow: var(--shadow-sticker);
-  transition: transform 0.12s cubic-bezier(0.3, 1.4, 0.5, 1), box-shadow 0.12s ease,
-    filter 0.12s ease, background 0.15s ease;
+  
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
 }
 .btn:hover:not(:disabled) {
-  transform: translate(-1px, -2px) rotate(-0.7deg);
-  box-shadow: 4px 5px 0 rgba(74, 71, 84, 0.18);
+  
+  
 }
 .btn:active:not(:disabled) {
-  transform: translate(2px, 2px) rotate(0.3deg);
-  box-shadow: 1px 1px 0 rgba(74, 71, 84, 0.18);
-  filter: brightness(0.97);
+  
+  
+  
 }
 .btn:disabled,
 .btn[aria-disabled="true"] {
-  opacity: 0.5;
+  opacity: 1;
   cursor: not-allowed;
 }
-/* the sticker peels a little when pressed — a highlight sweeping across the wax */
-.btn:not(:disabled)::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  background: linear-gradient(115deg, transparent 35%, rgba(255, 255, 255, 0.55) 50%, transparent 65%);
-  background-size: 260% 100%;
-  background-position: 130% 0;
-  opacity: 0;
-  pointer-events: none;
-  transition: background-position 0.5s ease, opacity 0.2s ease;
-}
-.btn:hover:not(:disabled)::after {
-  opacity: 1;
-  background-position: -30% 0;
-}
+
+
+
 .btn--ghost {
   padding: 7px 15px;
-  font-size: 13px;
-  border-width: 2px;
+  font-size: 14px;
+  border-width: 1px;
   border-color: var(--line-strong);
   color: var(--ink-soft);
-  box-shadow: 2px 2px 0 rgba(74, 71, 84, 0.1);
+  
 }
 .btn--ghost:hover {
   color: var(--ink);
@@ -429,8 +350,8 @@ body {
 .btn--lang {
   min-width: 44px;
   padding: 5px 10px;
-  border-width: 2px;
-  font-size: 12.5px;
+  border-width: 1px;
+  font-size: 14px;
 }
 
 /* ---------- dag toolbar ---------- */
@@ -440,7 +361,7 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 10px 16px;
-  border-bottom: 2.5px dashed var(--line-strong);
+  border-bottom: 1px solid var(--line-strong);
   background: var(--paper);
   gap: 12px;
   flex-wrap: wrap;
@@ -460,11 +381,11 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12.5px;
+  font-size: 14px;
   color: var(--ink-soft);
   font-weight: 500;
   opacity: 0.6;
-  transition: opacity 0.25s ease, transform 0.15s ease;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
 }
 /* a status only earns full contrast once something is actually in it */
 .legend__item--live {
@@ -478,12 +399,12 @@ body {
 .legend__dot {
   width: 12px;
   height: 12px;
-  border-radius: 40% 55% 48% 52%;
-  border: 1.5px solid rgba(74, 71, 84, 0.25);
-  transition: transform 0.2s cubic-bezier(0.3, 1.5, 0.5, 1);
+  border-radius: 6px;
+  border: 1px solid rgba(74, 71, 84, 0.25);
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
 }
 .legend__item:hover .legend__dot {
-  transform: scale(1.35) rotate(12deg);
+  
 }
 /* the "running" swatch used to throb in time with the nodes it stands for; it
    now holds still like everything else on the canvas — the swatch's own status
@@ -491,19 +412,16 @@ body {
 .legend__n {
   font-family: var(--font-display);
   font-weight: 400;
-  font-size: 11.5px;
+  font-size: 14px;
   line-height: 1;
   padding: 2.5px 6px 2px;
-  border-radius: 8px 6px 7px 5px;
+  border-radius: 6px;
   background: var(--paper-2);
-  border: 1.5px solid var(--line);
+  border: 1px solid var(--line);
   color: var(--ink);
-  animation: count-bump 0.34s cubic-bezier(0.2, 1.6, 0.4, 1);
+  
 }
-@keyframes count-bump {
-  from { transform: scale(0.5) rotate(-8deg); opacity: 0; }
-  to { transform: scale(1) rotate(0); opacity: 1; }
-}
+
 /* Phase 4: relation legend — names the two edge grammars and hosts the
    parent-links hide toggle. Static (no live counts): these describe how the
    graph is drawn, not how it is doing. */
@@ -531,20 +449,19 @@ body {
 }
 .legend__toggle {
   padding: 3px 10px;
-  font-size: 11.5px;
-  border-radius: 9px 7px 8px 6px;
+  font-size: 14px;
+  border-radius: 6px;
 }
 .legend__toggle--off {
   opacity: 0.65;
 }
 .dag-toolbar__meta {
   font-family: var(--font-display);
-  font-size: 12.5px;
+  font-size: 14px;
   color: var(--ink-soft);
 }
 
-/* the toolbar's bottom rule doubles as a crayon progress strip: completed →
-   running → failed, each segment growing in place as the run advances */
+
 .dag-progress {
   position: absolute;
   left: 0;
@@ -559,28 +476,16 @@ body {
   transition: width 0.6s cubic-bezier(0.25, 0.9, 0.3, 1);
 }
 .dag-progress__seg--done {
-  background: repeating-linear-gradient(
-    62deg,
-    var(--meadow) 0 3px,
-    color-mix(in srgb, var(--meadow) 55%, transparent) 3px 5px
-  );
+  background: var(--meadow);
 }
 .dag-progress__seg--run {
-  background: repeating-linear-gradient(
-    62deg,
-    var(--butter) 0 3px,
-    color-mix(in srgb, var(--butter) 45%, transparent) 3px 5px
-  );
+  background: var(--butter);
   background-size: 14px 100%;
   /* the stripes used to crawl (progress-crawl, 1.1s infinite); the running
      segment now just sits there striped — colour + width still say "running" */
 }
 .dag-progress__seg--fail {
-  background: repeating-linear-gradient(
-    62deg,
-    var(--coral) 0 3px,
-    color-mix(in srgb, var(--coral) 45%, transparent) 3px 5px
-  );
+  background: var(--coral);
 }
 
 /* layout switcher — segmented control + re-org */
@@ -591,15 +496,15 @@ body {
 }
 .seg {
   display: inline-flex;
-  border: 2px solid var(--line-strong);
-  border-radius: 11px 9px 12px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
   overflow: hidden;
   background: var(--paper);
 }
 .seg button {
   position: relative;
   font-family: var(--font-display);
-  font-size: 12px;
+  font-size: 14px;
   letter-spacing: 0.3px;
   padding: 5px 10px;
   border: none;
@@ -609,7 +514,7 @@ body {
   transition: background 0.16s ease, color 0.16s ease;
 }
 .seg button + button {
-  border-left: 2px solid var(--line-strong);
+  border-left: 1px solid var(--line-strong);
 }
 .seg button:hover:not(.active) {
   color: var(--ink);
@@ -619,7 +524,7 @@ body {
   background: var(--sky-wash);
   color: var(--ink);
 }
-/* the active tab is coloured in with a crayon swipe, not a hard fill */
+
 .seg button.active::after {
   content: "";
   position: absolute;
@@ -627,23 +532,17 @@ body {
   right: 5px;
   bottom: 3px;
   height: 2.5px;
-  border-radius: 2px;
+  border-radius: 1px;
   background: var(--sky);
   transform-origin: left center;
-  animation: seg-swipe 0.3s cubic-bezier(0.3, 0.9, 0.35, 1);
+  
 }
-@keyframes seg-swipe {
-  from { transform: scaleX(0); }
-  to { transform: scaleX(1); }
-}
+
 /* re-layout button: the arrow spins when you ask for a re-org */
 .layout-ctl .btn--ghost:active:not(:disabled) {
-  animation: reorg-spin 0.6s cubic-bezier(0.3, 0.9, 0.3, 1);
+  
 }
-@keyframes reorg-spin {
-  from { transform: rotate(0) translate(2px, 2px); }
-  to { transform: rotate(360deg) translate(2px, 2px); }
-}
+
 
 /* ---------- dag canvas ---------- */
 .dag-workspace {
@@ -661,21 +560,8 @@ body {
   min-height: 0;
   background: var(--paper-2);
 }
-/* the page curls away at the edges — a soft vignette gives the paper depth
-   without touching anything interactive */
-.dag-canvas::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  z-index: 4;
-  background: radial-gradient(
-    120% 95% at 50% 45%,
-    transparent 55%,
-    rgba(120, 110, 88, 0.07) 82%,
-    rgba(120, 110, 88, 0.16) 100%
-  );
-}
+
+
 .react-flow {
   background: transparent;
 }
@@ -692,22 +578,18 @@ body {
   pointer-events: none;
 }
 .dag-empty > * {
-  animation: empty-in 0.6s cubic-bezier(0.2, 0.85, 0.3, 1) backwards;
+  
 }
-.dag-empty > *:nth-child(2) { animation-delay: 0.1s; }
-.dag-empty > *:nth-child(3) { animation-delay: 0.2s; }
-@keyframes empty-in {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
-}
+.dag-empty > *:nth-child(2) {  }
+.dag-empty > *:nth-child(3) {  }
+
 .dag-empty__doodle {
   font-size: 46px;
-  transform: rotate(-8deg);
+  
   opacity: 0.8;
   transform-origin: 50% 85%;
-  /* the entrance only — the idle rocking (doodle-sway) was a loop, so the
-     crayon sits still on the blank page once it has landed */
-  animation: empty-in 0.6s cubic-bezier(0.2, 0.85, 0.3, 1) backwards;
+  
+  
 }
 .dag-empty__title {
   font-family: var(--font-display);
@@ -715,579 +597,162 @@ body {
   color: var(--ink);
 }
 .dag-empty__hint {
-  font-size: 13.5px;
+  font-size: 14px;
   line-height: 1.8;
 }
 .dag-empty__hint code {
-  font-family: "Fredoka", ui-monospace, monospace;
-  font-size: 12.5px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 14px;
   color: var(--sky-ink);
   background: var(--sky-wash);
   padding: 1px 6px;
   border-radius: 6px;
 }
 
-/* ---------- task node (a doodled sticker) ----------
-   Doodle mode: every outline is drawn twice (the classic sketch double-stroke)
-   and wobbles hard — the waxy #crayon / #crayon-b filters stay pinned to one
-   seed each, so the texture is there but nothing flickers: the old steps(1)
-   boil loop (three reseeded filters flipping ~2fps, phase-staggered via --i)
-   is gone with the rest of the continuous canvas motion. Each sticker also
-   sits at its own slight tilt (--tilt, set from paint order in TSX) — `rotate`
-   is the independent CSS property, so hover/entrance transforms compose with
-   it. */
-.task-node {
-  position: relative;
-  width: 210px;
-  min-height: 72px;
-  padding: 12px 15px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 7px;
-  background: var(--wash, var(--paper));
-  border-radius: 17px 12px 18px 11px;
-  cursor: pointer;
-  rotate: var(--tilt, 0deg);
-  box-shadow: var(--shadow-soft);
-  transition: transform 0.16s cubic-bezier(0.3, 1.2, 0.5, 1), box-shadow 0.16s ease,
-    opacity 0.3s ease;
-}
-.task-node:hover {
-  transform: translateY(-3px) rotate(-1deg);
-  box-shadow: 0 13px 26px rgba(74, 71, 84, 0.16);
-}
-.task-node:active {
-  transform: translateY(-1px) rotate(0.4deg) scale(0.985);
-}
+
+
+
+
 /* first stroke: bold ink outline. Lives on ::before so text stays crisp. */
-.task-node::before {
-  content: "";
-  position: absolute;
-  inset: -1.5px;
-  border-radius: inherit;
-  border: 3.5px solid var(--crayon-ink, var(--crayon, var(--ink-soft)));
-  filter: url(#crayon);
-  pointer-events: none;
-  /* above the scribble: the colouring runs underneath the outline, so it can
-     fill to the very edge without ever crossing the line */
-  z-index: 2;
-  transition: border-width 0.15s ease;
-}
+
 /* second stroke: the lighter "went over it again" line, offset and pinned to
    its own reseeded filter so the two strokes never read as one */
-.task-node::after {
-  content: "";
-  position: absolute;
-  inset: -4px;
-  border-radius: inherit;
-  border: 2px solid var(--crayon, var(--ink-soft));
-  opacity: 0.5;
-  filter: url(#crayon-b);
-  transform: rotate(0.5deg);
-  pointer-events: none;
-  z-index: 2;
-}
-.task-node--selected {
-  transform: translateY(-2px);
-}
-.task-node--selected::before {
-  border-width: 4px;
-}
+
+
+
 /* selection: circled with a fat red marker, drawn in one gesture. The path
    carries pathLength=100 so the dash draw needs no measured length. */
-.task-node__lasso {
-  position: absolute;
-  inset: -13px -11px;
-  width: calc(100% + 22px);
-  height: calc(100% + 26px);
-  overflow: visible;
-  pointer-events: none;
-  z-index: 3;
-  filter: url(#crayon);
-}
-.task-node__lasso path {
-  fill: none;
-  stroke: var(--coral);
-  stroke-width: 4.5;
-  stroke-linecap: round;
-  opacity: 0.85;
-  stroke-dasharray: 100;
-  /* drawn end-state at rest + `backwards` fill: the circle lands complete and
-     the animation then leaves the effect stack instead of lingering finished */
-  stroke-dashoffset: 0;
-  animation: lasso-draw 0.4s cubic-bezier(0.5, 0.05, 0.4, 1) backwards;
-}
-@keyframes lasso-draw {
-  /* explicit `from`: the base offset is now the drawn state (0), so the
-     implicit start would animate nothing */
-  from { stroke-dashoffset: 100; }
-  to { stroke-dashoffset: 0; }
-}
-.task-node__title {
-  font-family: var(--font-display);
-  font-size: 14px;
-  color: var(--ink);
-  line-height: 1.35;
-  letter-spacing: 0.3px;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.task-node__row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-}
-.task-node__status {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--ink);
-  font-size: 12px;
-  font-weight: 600;
-}
-.task-node__status .dot {
-  width: 9px;
-  height: 9px;
-  border-radius: 45% 55% 50% 50%;
-}
-.task-node__harness {
-  font-family: "Fredoka", ui-monospace, monospace;
-  font-size: 10.5px;
-  color: var(--ink-soft);
-  background: var(--paper);
-  border: 1.5px solid var(--line-strong);
-  border-radius: 9px 5px 10px 5px;
-  padding: 1px 7px;
-  rotate: -1.5deg;
-  transition: transform 0.18s cubic-bezier(0.3, 1.5, 0.5, 1), color 0.18s ease,
-    border-color 0.18s ease;
-}
-.task-node:hover .task-node__harness {
-  transform: rotate(-2.5deg) scale(1.06);
-  color: var(--ink);
-  border-color: var(--ink-soft);
-}
+
+
+
+
+
+
+
+
+
 .dot {
   display: inline-block;
 }
 
-/* ---------- in-progress: crayon scribbles the box in ----------
-   While the task runs, a scrawl sits over the box, fully drawn
-   (see .task-node__scribble below). */
-.task-node__title,
-.task-node__row {
-  position: relative;
-  z-index: 1;
-}
 
-/* one unbroken colouring pass, chopped into back-and-forth zigzag legs
-   chained end-to-end — rendered ONCE, already complete. The legs used to draw
-   themselves in order (delay = leg index × per-leg duration), hold, then fade
-   in a wave oldest-first while DagView remounted the svg on a JS timer; that
-   whole cycle is gone, so the pass is simply there, deterministic per node id
-   and identical on every poll. Strokes stay translucent and vary in width,
-   and a grain filter chews their edges into wax tooth. */
-.task-node__scribble {
-  position: absolute;
-  /* clip at the inner edge of the border; the outline (z-index 2, 3.5px
-     wide) sits on top and hides the cut stroke ends, so the fill reads
-     full-bleed without anything poking outside */
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  border-radius: inherit;
-  overflow: hidden;
-  z-index: 0;
-  pointer-events: none;
-}
-.task-node__scribble path {
-  fill: none;
-  stroke: var(--crayon, #d98a3d);
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  filter: url(#crayon-fill);
-  /* pathLength={100} normalizes each leg so the dash math is exact, and
-     offset 0 pins the whole leg down: fully coloured in, forever */
-  stroke-dasharray: 100;
-  stroke-dashoffset: 0;
-}
-/* dispatched / completed / failed all share the ONE static pass above — the
-   old `--final` modifier (frozen final frame vs. animating pass) and the
-   scribble-leg / scribble-fade keyframes went away with the redraw cycle. */
 
-/* ---------- per-status character ----------------------------------------
-   Every state gets its own hand: waiting is faint, ready wears a dashed ring,
-   running wears a solid ring, done and failed are signed off by hand. All of
-   it is still — colour, borders, labels and stamps carry the meaning now.
-   ------------------------------------------------------------------------ */
 
-/* pending — pencilled in lightly, not yet committed to (but still legible
-   from across the room — this is a doodle, not a ghost) */
-.task-node[data-status="pending"] {
-  opacity: 0.88;
-}
-.task-node[data-status="pending"]:hover {
-  opacity: 1;
-}
 
-/* ready — a dashed ring just outside the card: "pick me next". It used to
-   breathe (ready-breathe, 2.5s infinite); now it holds a fixed mid-bright
-   opacity so the ring still reads without ever animating. */
-.task-node__aura {
-  position: absolute;
-  inset: -7px;
-  border-radius: inherit;
-  pointer-events: none;
-}
-.task-node[data-status="ready"] .task-node__aura {
-  border: 2.5px dashed color-mix(in srgb, var(--crayon) 75%, transparent);
-  opacity: 0.6;
-}
-/* dispatched — a solid ring parked just outside the card (it used to radiate
-   outward on a 1.9s loop). The ring, the inked scribble, the status dot and
-   the label do the talking; nothing pulses. */
-.task-node[data-status="dispatched"] .task-node__aura {
-  inset: -6px;
-  border: 3px solid color-mix(in srgb, var(--crayon) 60%, transparent);
-  opacity: 0.8;
-  transform: scale(1.04);
-}
-/* a running node keeps the same pinned outline seed as the idle graph (the
-   old rule just sped its boil up), and its status dot sits at full size and
-   full opacity instead of throbbing — colour + label still say "running" */
-.task-node[data-status="dispatched"] .task-node__status .dot {
-  scale: 1.15;
-}
 
-/* completed / failed — a tick or a scribbled cross signed into the corner,
-   drawn stroke-first then settling */
-.task-node__stamp {
-  position: absolute;
-  right: -12px;
-  bottom: -13px;
-  width: 46px;
-  height: 36px;
-  overflow: visible;
-  pointer-events: none;
-  z-index: 2;
-  filter: url(#crayon);
-}
-.task-node__stamp path {
-  fill: none;
-  stroke-width: 5;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-dasharray: 90;
-  /* base = the DRAWN state, and the fill is `backwards` (not `forwards`):
-     the delay still hides the stroke, but once the draw lands the animation
-     drops out of effect entirely — so `document.getAnimations()` holds no
-     finished-but-filling leftovers on every completed node in the canvas */
-  stroke-dashoffset: 0;
-  animation: stamp-draw 0.5s cubic-bezier(0.5, 0, 0.35, 1) backwards;
-}
-.task-node__stamp--ok path {
-  stroke: #4d9e62;
-}
-.task-node__stamp--bad path {
-  stroke: #cf4a3c;
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 /* the cross's second stroke lands a beat after the first */
-.task-node__stamp--bad path:nth-child(2) {
-  animation-delay: 0.16s;
-}
-@keyframes stamp-draw {
-  from { stroke-dashoffset: 90; }
-  to { stroke-dashoffset: 0; }
-}
+
+
 /* done work presses flat onto the page — less lift than live work */
-.task-node[data-status="completed"] {
-  box-shadow: 0 3px 10px rgba(74, 71, 84, 0.07);
-}
-.task-node[data-status="failed"] .task-node__title {
-  text-decoration: line-through;
-  text-decoration-color: color-mix(in srgb, var(--crayon) 65%, transparent);
-  text-decoration-thickness: 2px;
-}
+
+
 
 /* lead stage — semantic ownership is an indigo layer around the normal
    status treatment, never a replacement for the status border or wash. The
    ring and badge are absolutely positioned so React Flow's measured card size
    and handle coordinates remain unchanged. */
-.task-node--lead,
-.task-node--lead[data-status="completed"] {
-  box-shadow:
-    0 0 0 3px #5147b8,
-    0 0 0 6px rgba(81, 71, 184, 0.2),
-    0 3px 10px rgba(74, 71, 84, 0.07);
-}
-.task-node--lead:hover {
-  box-shadow:
-    0 0 0 3px #5147b8,
-    0 0 0 6px rgba(81, 71, 184, 0.24),
-    0 13px 26px rgba(74, 71, 84, 0.16);
-}
-.task-node--lead:active {
-  box-shadow:
-    0 0 0 3px #5147b8,
-    0 0 0 6px rgba(81, 71, 184, 0.24),
-    1px 1px 0 rgba(74, 71, 84, 0.18);
-}
-.task-node__lead-ring {
-  position: absolute;
-  inset: -8px;
-  border: 2.5px solid #5147b8;
-  border-radius: inherit;
-  filter: url(#crayon-fine);
-  pointer-events: none;
-  z-index: 3;
-  opacity: 0.9;
-}
-.task-node__lead-badge {
-  position: absolute;
-  top: -19px;
-  left: 12px;
-  z-index: 4;
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  padding: 3px 8px 3px 7px;
-  border: 2px solid #5147b8;
-  border-radius: 8px 5px 9px 6px;
-  background: var(--butter);
-  color: #3f378d;
-  box-shadow: 2px 2px 0 rgba(81, 71, 184, 0.2);
-  font-family: var(--font-display);
-  font-size: 10.5px;
-  line-height: 1;
-  rotate: -2deg;
-  pointer-events: none;
-  white-space: nowrap;
-}
+
+
+
+
+
 
 /* ---------- the moment a status flips ---------- */
 /* a ring flicked outward from the card, once, on the poll that changed it */
-.task-node__ripple {
-  position: absolute;
-  inset: -2px;
-  border-radius: inherit;
-  border: 3px solid var(--crayon, var(--ink-soft));
-  pointer-events: none;
-  animation: status-ripple 0.85s cubic-bezier(0.15, 0.7, 0.3, 1) forwards;
-}
-@keyframes status-ripple {
-  0% { transform: scale(1); opacity: 0.9; }
-  100% { transform: scale(1.35); opacity: 0; }
-}
-/* ...and the outline is re-inked, pressed harder for a beat — a one-shot
-   flash, no boil loop for it to fight with any more */
-.task-node--pop::before {
-  animation: crayon-restate 0.55s ease-out;
-}
-@keyframes crayon-restate {
-  0% { border-width: 3.5px; }
-  35% { border-width: 7px; }
-  100% { border-width: 3.5px; }
-}
 
-/* crayon sparks flicked off the corner the moment a task lands done */
-.task-node__sparks {
-  position: absolute;
-  top: -30px;
-  right: -26px;
-  width: 58px;
-  height: 58px;
-  overflow: visible;
-  pointer-events: none;
-  z-index: 3;
-  filter: url(#crayon);
-  transform-origin: 30% 80%;
-  animation: sparks-burst 0.8s cubic-bezier(0.2, 0.8, 0.3, 1) forwards;
-}
-.task-node__sparks path {
-  fill: none;
-  stroke: var(--butter);
-  stroke-width: 4.5;
-  stroke-linecap: round;
-}
-.task-node__sparks path:nth-child(2n) {
-  stroke: var(--meadow);
-}
-@keyframes sparks-burst {
-  0% { opacity: 0; transform: scale(0.3) rotate(-14deg); }
-  25% { opacity: 1; transform: scale(1.05) rotate(3deg); }
-  70% { opacity: 1; transform: scale(1.12) rotate(0deg); }
-  100% { opacity: 0; transform: scale(1.2) rotate(4deg); }
-}
+
+
+
+
+
+
+
+
+
+
 
 /* react-flow handles: quiet little anchor dots */
-.react-flow__handle {
-  width: 7px;
-  height: 7px;
-  background: var(--paper);
-  border: 1.5px solid var(--line-strong);
-}
-/* pencil edges — every dependency is a scrawled line, not a bezier. The
-   #pencil-edge filter is userSpaceOnUse (a zero-height horizontal bbox would
-   collapse an objectBoundingBox filter); it stays pinned to its base seed —
-   the steps() loop that flipped all three seeds (pencil-edge/-b/-c) like a
-   boiling pencil test is gone, so the web of lines holds still. */
-.react-flow__edge-path {
-  stroke: #6f6757;
-  stroke-width: 3.2;
-  stroke-linecap: round;
-  filter: url(#pencil-edge);
-  transition: stroke 0.4s ease, stroke-width 0.3s ease, opacity 0.3s ease;
-}
-.react-flow__edge.selected .react-flow__edge-path {
-  stroke: var(--sky);
-}
+
+
+
+
 /* a dependency not yet reached stays lighter and dashed — solid ink is
    reserved for lines the work has actually touched */
-.react-flow__edge.edge--idle .react-flow__edge-path {
-  opacity: 0.68;
-  stroke-width: 3;
-  stroke-dasharray: 7 9;
-}
-/* a satisfied dependency gets inked in green — and presses down once, hard, on
-   the poll where its upstream node completed. (A dash-offset "draw" would need
-   the path length, which varies per edge; a press-on flash reads the same and
-   works at any length.) The flash is one-shot: once the class sticks, the
-   stroke simply stays green. */
-.react-flow__edge.edge--done .react-flow__edge-path {
-  stroke: #4f9e5d;
-  stroke-width: 3.4;
-  animation: edge-ink 0.65s cubic-bezier(0.3, 0.9, 0.35, 1);
-}
-@keyframes edge-ink {
-  0% { stroke: #6f6757; stroke-width: 2.6; }
-  40% { stroke: #3c8a4a; stroke-width: 5.5; }
-  100% { stroke: #4f9e5d; stroke-width: 3.4; }
-}
+
+
+
+
 /* hovering an edge lifts it out of the tangle */
-.react-flow__edge:hover .react-flow__edge-path {
-  stroke-width: 4.2;
-  opacity: 1;
-}
-/* execution: an edge leaving a running node is first a faint dashed pencil
-   sketch, then a solid pencil stroke inked over it from source to target —
-   both strokes just sitting there now (the WAAPI trace that used to advance
-   the solid stroke on a measured, per-edge loop lives on in the CSS only as
-   plain styling). The wobble comes from the #pencil-edge filter — defined with
-   filterUnits="userSpaceOnUse" so a perfectly horizontal edge (zero-height
-   bounding box) doesn't collapse the filter region to nothing. */
-.pencil-edge {
-  filter: url(#pencil-edge);
-}
-.pencil-edge__sketch {
-  stroke: #8f8672;
-  stroke-width: 2.4;
-  stroke-linecap: round;
-  stroke-dasharray: 7 9;
-  opacity: 0.55;
-}
+
+
+
+
 /* the solid over-stroke: full length at rest. Dasharray/offset used to be
    owned by an infinite WAAPI animation (draw → hold → fade, timed from the
    measured path length); with that gone the stroke renders complete and static */
-.pencil-edge__draw {
-  stroke: #4a4231;
-  stroke-width: 3.8;
-  stroke-linecap: round;
-  opacity: 0.95;
-}
 
-/* ---------- hierarchy edges (Phase 4) ----------
-   Parent → child OWNERSHIP, drawn in a deliberately different grammar from
-   the dependency pencils: a calm rounded bracket, fine dotted graphite, an
-   open ring resting on the child end, and — the clearest signal — no motion
-   at all. Ownership never moves work forward, so nothing on it may read as
-   flow. These edges are excluded from every layout algorithm (see DagView)
-   and can be hidden from the toolbar toggle. */
-.hierarchy-edge__link {
-  stroke: #a89a7c;
-  stroke-width: 2.2;
-  stroke-linecap: round;
-  stroke-dasharray: 1.5 7;
-  opacity: 0.8;
-  transition: opacity 0.25s ease, stroke-width 0.2s ease;
-}
+
+
+
 /* the open ring marks the child: who this belongs to */
-.hierarchy-edge__ring {
-  fill: var(--paper);
-  stroke: #a89a7c;
-  stroke-width: 2;
-  opacity: 0.9;
-}
+
 /* hovering an ownership link dims its neighbours' competition and thickens
    the dash a touch — same affordance as dependency hover, quieter */
-.react-flow__edge:hover .hierarchy-edge__link {
-  opacity: 1;
-  stroke-width: 2.8;
-}
 
-/* ---------- gates (a pinned note) ---------- */
+
+/* Operational panels participate in the route's reading flow. */
 .gates {
-  position: absolute;
-  top: 16px;
-  left: 16px;
-  right: 380px;
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 11px;
-  z-index: 6;
-  pointer-events: none;
+  align-items: stretch;
+  gap: 12px;
+  container: operational-panel / inline-size;
+  min-width: 0;
+  width: 100%;
 }
 .gate {
-  pointer-events: auto;
-  position: relative;
-  width: fit-content;
-  min-width: 300px;
-  max-width: 440px;
-  background: #f7f1fc;
-  border: 2px solid var(--lilac);
-  border-radius: 16px 13px 16px 12px;
-  padding: 14px 16px 14px;
-  box-shadow: var(--shadow-sticker);
-  transform: rotate(-0.6deg);
-  /* pinned to the board. The old pair here (gate-pin entrance + gate-nudge
-     "nudge until someone deals with it" every 5s) is down to the entrance
-     alone, which is declared once in the "gate note drops onto the canvas"
-     block below (gate-in) — same one-shot drop, nothing repeating after it. */
+  min-width: 0;
+  width: 100%;
+  background: var(--paper);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 14px 16px;
+  overflow-wrap: anywhere;
 }
-@keyframes gate-pin {
-  0% { opacity: 0; transform: rotate(-7deg) translateY(-22px) scale(1.06); }
-  60% { opacity: 1; transform: rotate(1.5deg) translateY(3px) scale(1); }
-  100% { opacity: 1; transform: rotate(-0.6deg) translateY(0) scale(1); }
+.cleanup > .btn { align-self: flex-start; }
+@container operational-panel (max-width: 420px) {
+  .workers__toggle, .audit__toggle { flex-wrap: wrap; }
+  .workers__summary, .audit__summary { flex-basis: 100%; }
 }
-/* a soft lilac halo resting behind the card — it used to pulse on a 2.4s
-   loop; now it is just an outline at a fixed opacity, still marking the note
-   as pending attention */
-.gate::after {
-  content: "";
-  position: absolute;
-  inset: -5px;
-  border-radius: inherit;
-  border: 2.5px solid var(--lilac);
-  opacity: 0.5;
-  transform: scale(1.02);
-  pointer-events: none;
-}
-.gate::before {
-  content: "📍";
-  position: absolute;
-  top: -13px;
-  left: 16px;
-  font-size: 20px;
-  transform: rotate(-10deg);
-  z-index: 1;
-}
+
+
+
+
 .gate__badge {
   font-family: var(--font-display);
-  font-size: 12px;
+  font-size: 14px;
   color: #7b5cb8;
   letter-spacing: 0.5px;
   margin-bottom: 7px;
@@ -1313,7 +778,7 @@ body {
 }
 .btn--gate {
   padding: 6px 16px;
-  font-size: 13px;
+  font-size: 14px;
 }
 .btn--ok {
   background: var(--meadow);
@@ -1326,10 +791,7 @@ body {
   border-color: #c23b2e;
 }
 
-/* ---------- application-owned decision dialogs ----------
-   Native alert/confirm/prompt dialogs freeze the browser surface and make the
-   viewer impossible to automate. This paper card keeps decisions inside the
-   app while preserving the same explicit, blocking-at-the-call-site contract. */
+
 .decision-dialog__backdrop {
   position: fixed;
   inset: 0;
@@ -1338,8 +800,8 @@ body {
   place-items: center;
   padding: 24px;
   background: rgba(55, 52, 63, 0.46);
-  backdrop-filter: blur(2px);
-  animation: decision-backdrop-in 160ms ease-out both;
+  
+  
 }
 
 .decision-dialog {
@@ -1347,46 +809,24 @@ body {
   width: min(480px, calc(100vw - 32px));
   max-height: min(640px, calc(100vh - 32px));
   overflow: auto;
-  background:
-    linear-gradient(rgba(252, 250, 244, 0.94), rgba(252, 250, 244, 0.94)),
-    repeating-linear-gradient(0deg, transparent 0 25px, rgba(123, 183, 224, 0.12) 25px 26px);
-  border: 3px solid var(--sky);
-  border-radius: 19px 14px 21px 13px;
-  box-shadow: 7px 9px 0 rgba(45, 70, 88, 0.2), 0 24px 60px rgba(35, 31, 45, 0.28);
-  transform: rotate(-0.35deg);
-  animation: decision-card-in 190ms cubic-bezier(0.2, 0.85, 0.3, 1.1) both;
+  background: var(--paper-2);
+  border: 1px solid var(--sky);
+  border-radius: 6px;
+  
+  
+  
 }
 
-.decision-dialog::after {
-  content: "";
-  position: absolute;
-  inset: 6px;
-  z-index: -1;
-  border: 1.5px dashed color-mix(in srgb, var(--sky) 62%, transparent);
-  border-radius: 13px 18px 12px 17px;
-  pointer-events: none;
-}
+
 
 .decision-dialog--danger {
   border-color: var(--coral);
-  box-shadow: 7px 9px 0 rgba(133, 54, 46, 0.2), 0 24px 60px rgba(35, 31, 45, 0.28);
+  
 }
 
-.decision-dialog--danger::after {
-  border-color: color-mix(in srgb, var(--coral) 62%, transparent);
-}
 
-.decision-dialog__tape {
-  position: absolute;
-  top: -2px;
-  left: 50%;
-  width: 86px;
-  height: 21px;
-  background: rgba(240, 185, 78, 0.57);
-  border: 1px solid rgba(172, 126, 34, 0.22);
-  transform: translate(-50%, -48%) rotate(1.5deg);
-  clip-path: polygon(3% 7%, 98% 0, 94% 93%, 5% 100%, 0 77%);
-}
+
+
 
 .decision-dialog form {
   padding: 30px 30px 25px;
@@ -1414,12 +854,12 @@ body {
   height: 34px;
   color: var(--sky-ink);
   background: var(--sky-wash);
-  border: 2px solid var(--sky);
-  border-radius: 47% 53% 45% 55%;
+  border: 1px solid var(--sky);
+  border-radius: 6px;
   font-family: var(--font-display);
   font-size: 21px;
   font-weight: 700;
-  transform: rotate(-4deg);
+  
 }
 
 .decision-dialog--danger .decision-dialog__mark {
@@ -1447,7 +887,7 @@ body {
   gap: 7px;
   margin-top: 19px;
   color: var(--ink-soft);
-  font-size: 12px;
+  font-size: 14px;
 }
 
 .decision-dialog__field input {
@@ -1456,16 +896,16 @@ body {
   padding: 9px 12px;
   color: var(--ink);
   background: rgba(255, 255, 255, 0.72);
-  border: 2px solid var(--line-strong);
-  border-radius: 11px 8px 12px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
   outline: none;
   font: 14px var(--font-body);
-  box-shadow: inset 1px 2px 0 rgba(74, 71, 84, 0.06);
+  
 }
 
 .decision-dialog__field input:focus {
   border-color: var(--sky);
-  box-shadow: 0 0 0 3px rgba(123, 183, 224, 0.2);
+  
 }
 
 .decision-dialog__actions {
@@ -1481,16 +921,9 @@ body {
   padding: 8px 16px;
 }
 
-@keyframes decision-backdrop-in {
-  from { opacity: 0; }
-}
 
-@keyframes decision-card-in {
-  from {
-    opacity: 0;
-    transform: translateY(10px) scale(0.97) rotate(-0.35deg);
-  }
-}
+
+
 
 @media (max-width: 520px) {
   .decision-dialog__backdrop {
@@ -1506,52 +939,29 @@ body {
   }
 }
 
-/* ---------- node action panel (a taped index card) ---------- */
+
 .node-panel {
-  position: absolute;
-  top: 16px;
-  right: 16px;
-  width: 348px;
-  max-height: calc(100% - 32px);
-  overflow-y: auto;
+  position: static;
+  width: 100%;
+  min-width: 0;
   background: var(--paper);
-  border: 2px solid var(--line-strong);
-  border-radius: 18px 15px 18px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
   padding: 0 18px 18px;
-  z-index: 5;
-  box-shadow: var(--shadow-soft);
 }
-.node-panel::before {
-  content: "";
-  position: absolute;
-  top: -11px;
-  left: 50%;
-  width: 66px;
-  height: 22px;
-  transform: translateX(-50%) rotate(-2deg);
-  background: rgba(240, 185, 78, 0.35);
-  border: 1px dashed rgba(179, 127, 22, 0.4);
-  border-radius: 3px;
-  transition: transform 0.3s cubic-bezier(0.3, 1.4, 0.5, 1), background 0.3s ease;
-}
-.node-panel:hover::before {
-  transform: translateX(-50%) rotate(2.5deg) scaleX(1.08);
-  background: rgba(240, 185, 78, 0.5);
-}
+
+
 /* the card's contents drop in one line at a time, like it's being written */
 .node-panel > * {
-  animation: panel-row-in 0.32s cubic-bezier(0.2, 0.85, 0.3, 1) backwards;
+  
 }
-.node-panel > *:nth-child(2) { animation-delay: 0.05s; }
-.node-panel > *:nth-child(3) { animation-delay: 0.1s; }
-.node-panel > *:nth-child(4) { animation-delay: 0.15s; }
-.node-panel > *:nth-child(5) { animation-delay: 0.2s; }
-.node-panel > *:nth-child(6) { animation-delay: 0.25s; }
-.node-panel > *:nth-child(n + 7) { animation-delay: 0.3s; }
-@keyframes panel-row-in {
-  from { opacity: 0; transform: translateY(7px); }
-  to { opacity: 1; transform: translateY(0); }
-}
+.node-panel > *:nth-child(2) {  }
+.node-panel > *:nth-child(3) {  }
+.node-panel > *:nth-child(4) {  }
+.node-panel > *:nth-child(5) {  }
+.node-panel > *:nth-child(6) {  }
+.node-panel > *:nth-child(n + 7) {  }
+
 .node-panel__topline {
   position: sticky;
   top: 0;
@@ -1574,11 +984,11 @@ body {
   cursor: pointer;
   font-size: 15px;
   line-height: 1;
-  transition: color 0.15s ease, transform 0.25s cubic-bezier(0.3, 1.5, 0.5, 1);
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
 }
 .node-panel__close:hover {
   color: var(--coral);
-  transform: rotate(90deg) scale(1.2);
+  
 }
 .node-panel__status {
   display: flex;
@@ -1586,12 +996,12 @@ body {
   gap: 7px;
   color: var(--ink);
   font-family: var(--font-display);
-  font-size: 12.5px;
+  font-size: 14px;
 }
 .node-panel__status .dot {
   width: 10px;
   height: 10px;
-  border-radius: 45% 55% 50% 50%;
+  border-radius: 6px;
 }
 .node-panel__title {
   font-family: var(--font-display);
@@ -1605,8 +1015,8 @@ body {
   margin-bottom: 15px;
 }
 .node-panel__id code {
-  font-family: "Fredoka", ui-monospace, monospace;
-  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 14px;
   color: var(--sky-ink);
   word-break: break-all;
 }
@@ -1617,8 +1027,8 @@ body {
   gap: 10px;
   margin: 0 0 15px;
   padding: 9px 10px;
-  border: 2px solid rgba(81, 71, 184, 0.42);
-  border-radius: 12px 9px 13px 8px;
+  border: 1px solid rgba(81, 71, 184, 0.42);
+  border-radius: 6px;
   background: rgba(239, 237, 255, 0.72);
 }
 .node-panel__lead-state {
@@ -1627,7 +1037,7 @@ body {
   gap: 8px;
   color: #5147b8;
   font-family: var(--font-display);
-  font-size: 13px;
+  font-size: 14px;
 }
 .node-panel__lead-state > span:first-child {
   color: #d49b23;
@@ -1642,26 +1052,26 @@ body {
   margin-top: 3px;
   color: var(--ink-soft);
   font-family: var(--font-body);
-  font-size: 10.5px;
+  font-size: 14px;
   line-height: 1.35;
 }
 .node-panel__lead-mark,
 .node-panel__lead-clear {
-  border: 2px solid #5147b8;
-  border-radius: 10px 7px 11px 7px;
+  border: 1px solid #5147b8;
+  border-radius: 6px;
   background: var(--paper);
   color: #5147b8;
   cursor: pointer;
   font-family: var(--font-display);
-  font-size: 11.5px;
+  font-size: 14px;
   padding: 6px 9px;
-  transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
 }
 .node-panel__lead-mark:hover,
 .node-panel__lead-clear:hover {
-  transform: translateY(-1px) rotate(-0.5deg);
+  
   background: #f5f3ff;
-  box-shadow: 2px 2px 0 rgba(81, 71, 184, 0.18);
+  
 }
 .node-panel__lead-clear {
   flex: none;
@@ -1676,10 +1086,10 @@ body {
   gap: 6px;
   margin: -5px 0 13px;
   padding: 7px 9px;
-  border-radius: 9px 7px 10px 7px;
+  border-radius: 6px;
   background: rgba(240, 185, 78, 0.15);
   color: var(--ink-soft);
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.45;
 }
 .node-panel__history--warn {
@@ -1689,7 +1099,7 @@ body {
 .node-panel__lock {
   margin-top: -5px;
   background: rgba(81, 71, 184, 0.1);
-  border: 1.5px solid rgba(81, 71, 184, 0.25);
+  border: 1px solid rgba(81, 71, 184, 0.25);
   color: #5147b8;
   font-family: var(--font-body);
 }
@@ -1699,7 +1109,7 @@ body {
   flex-direction: column;
 }
 .node-panel__group {
-  border-top: 1.5px dashed var(--line-strong);
+  border-top: 1px solid var(--line-strong);
   padding-top: 12px;
   margin-top: 3px;
 }
@@ -1712,10 +1122,10 @@ body {
 }
 .node-panel__actual-worktree {
   padding: 9px 10px;
-  border-radius: 10px 8px 11px 8px;
+  border-radius: 6px;
   background: var(--sky-wash);
   color: var(--ink);
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.45;
 }
 .node-panel__actual-worktree code {
@@ -1727,7 +1137,7 @@ body {
   align-items: center;
   gap: 8px;
   font-family: var(--font-display);
-  font-size: 11.5px;
+  font-size: 14px;
   letter-spacing: 0.4px;
   color: var(--ink-soft);
   margin-bottom: 6px;
@@ -1736,7 +1146,7 @@ body {
   margin: 0;
   overflow: hidden;
   color: var(--ink);
-  font-size: 12.5px;
+  font-size: 14px;
   line-height: 1.5;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1760,11 +1170,11 @@ body {
   padding: 2px 7px;
   color: var(--sky-ink);
   background: transparent;
-  border: 1.5px dashed var(--sky);
-  border-radius: 8px 6px 9px 5px;
+  border: 1px solid var(--sky);
+  border-radius: 6px;
   cursor: pointer;
   font: inherit;
-  font-size: 10.5px;
+  font-size: 14px;
 }
 .node-panel__spec-toggle:hover {
   background: var(--sky-wash);
@@ -1787,10 +1197,10 @@ body {
   overflow: hidden;
   background: var(--paper);
   border: 0;
-  border-right: 2px solid var(--line-strong);
-  border-radius: 0 14px 14px 0;
-  box-shadow: 7px 0 14px rgba(74, 71, 84, 0.08);
-  animation: communication-in 0.2s ease-out backwards;
+  border-right: 1px solid var(--line-strong);
+  border-radius: 6px;
+  
+  
 }
 .communication-center--resizing,
 .communication-center--resizing * {
@@ -1800,24 +1210,8 @@ body {
 .communication-center--closed {
   display: none;
 }
-.communication-center::before {
-  content: "";
-  position: absolute;
-  top: 1px;
-  left: 47%;
-  z-index: 2;
-  width: 72px;
-  height: 19px;
-  background: rgba(123, 183, 224, 0.28);
-  border-right: 1px dashed rgba(62, 123, 166, 0.34);
-  border-left: 1px dashed rgba(62, 123, 166, 0.34);
-  rotate: -2deg;
-  pointer-events: none;
-}
-@keyframes communication-in {
-  from { opacity: 0; transform: translateX(-10px); }
-  to { opacity: 1; transform: translateX(0); }
-}
+
+
 .communication-center__header {
   position: relative;
   z-index: 1;
@@ -1828,7 +1222,7 @@ body {
   gap: 12px;
   padding: 15px 14px 10px;
   background: var(--paper);
-  border-bottom: 2px dashed var(--line);
+  border-bottom: 1px solid var(--line);
 }
 .communication-center__tabs {
   display: flex;
@@ -1842,15 +1236,15 @@ body {
   color: var(--ink-soft);
   background: transparent;
   border: 0;
-  border-radius: 9px 7px 10px 6px;
+  border-radius: 6px;
   cursor: pointer;
   font-family: var(--font-display);
-  font-size: 13px;
+  font-size: 14px;
 }
 .communication-center__tabs button.active {
   color: #5147b8;
   background: rgba(183, 159, 224, 0.18);
-  box-shadow: inset 0 -2px 0 #5147b8;
+  
 }
 .communication-center__close {
   padding: 5px;
@@ -1862,7 +1256,7 @@ body {
 }
 .communication-center__close:hover {
   color: var(--coral);
-  rotate: 8deg;
+  
 }
 .communication-center__body {
   flex: 1;
@@ -1891,11 +1285,7 @@ body {
   right: 1px;
   width: 5px;
   height: 54px;
-  background: repeating-linear-gradient(
-    180deg,
-    rgba(81, 71, 184, 0.42) 0 4px,
-    transparent 4px 8px
-  );
+  background: var(--paper-2);
   border-radius: 4px;
   content: "";
   opacity: 0.45;
@@ -1909,7 +1299,7 @@ body {
   opacity: 1;
 }
 .communication-center__resize:focus-visible {
-  outline: 2px dashed #5147b8;
+  outline: 2px solid #5147b8;
   outline-offset: -3px;
 }
 .communication-center__chat {
@@ -1918,27 +1308,26 @@ body {
      compact layout must respond to the rail itself. */
   container: chat-panel / inline-size;
 }
-/* Operations is a full communication-center TAB now (promoted out of the
-   collapsed drawer it used to be under the Activity timeline): page-level
-   padding, and the gates layout overrides that let floating panels live
-   inline in this narrow rail. */
 .communication-center__operations {
   padding: 10px 14px 16px;
 }
-.communication-center__operations .gates {
-  position: static;
-  display: flex;
-  width: 100%;
-  align-items: stretch;
-  margin-bottom: 10px;
-  pointer-events: auto;
+
+/* Full native selectors must remain readable before a destructive decision,
+   including path segments with no natural break points in a narrow rail. */
+.cleanup .inbox__meta {
+  margin-left: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
-.communication-center__operations .gate {
-  width: 100%;
-  min-width: 0;
-  max-width: none;
-  animation: none;
-  transform: none;
+.cleanup__identity,
+.cleanup__receipt {
+  display: block;
+  max-width: 100%;
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .btn--activity {
@@ -1952,7 +1341,7 @@ body {
 .btn--activity.active,
 .btn--activity:hover {
   background: rgba(183, 159, 224, 0.25);
-  box-shadow: 2px 2px 0 rgba(81, 71, 184, 0.16);
+  
 }
 .activity-badge,
 .activity__count {
@@ -1965,7 +1354,7 @@ body {
   background: var(--coral);
   border-radius: 999px;
   font-family: var(--font-body);
-  font-size: 10px;
+  font-size: 14px;
   line-height: 1;
 }
 
@@ -1992,11 +1381,11 @@ body {
   padding: 4px 7px;
   color: var(--ink-soft);
   background: transparent;
-  border: 1.5px solid transparent;
-  border-radius: 8px 6px 9px 5px;
+  border: 1px solid transparent;
+  border-radius: 6px;
   cursor: pointer;
   font: inherit;
-  font-size: 10.5px;
+  font-size: 14px;
 }
 .activity__filters button.active {
   color: var(--sky-ink);
@@ -2009,7 +1398,7 @@ body {
   align-items: center;
   gap: 5px;
   color: var(--ink-soft);
-  font-size: 10.5px;
+  font-size: 14px;
 }
 .activity__transport > span {
   width: 7px;
@@ -2019,7 +1408,7 @@ body {
 }
 .activity__transport--live > span {
   background: var(--meadow);
-  box-shadow: 0 0 0 3px rgba(127, 201, 140, 0.16);
+  
 }
 .activity__notice,
 .activity__error,
@@ -2028,9 +1417,9 @@ body {
   padding: 12px;
   color: var(--ink-soft);
   background: var(--paper-2);
-  border: 1.5px dashed var(--line-strong);
-  border-radius: 11px 8px 12px 8px;
-  font-size: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  font-size: 14px;
   line-height: 1.5;
 }
 .activity__error {
@@ -2057,7 +1446,7 @@ body {
   top: 15px;
   bottom: -17px;
   left: 9px;
-  border-left: 2px dashed var(--line-strong);
+  border-left: 1px solid var(--line-strong);
 }
 .activity-event:last-child .activity-event__rail::after {
   display: none;
@@ -2070,19 +1459,19 @@ body {
   width: 14px;
   height: 14px;
   background: var(--sky);
-  border: 2px solid var(--paper);
-  border-radius: 47% 53% 45% 55%;
-  box-shadow: 0 0 0 1.5px var(--sky-ink);
+  border: 1px solid var(--paper);
+  border-radius: 6px;
+  
 }
-.activity-event--success .activity-event__rail > span { background: var(--meadow); box-shadow: 0 0 0 1.5px #3e9a55; }
-.activity-event--warning .activity-event__rail > span { background: var(--butter); box-shadow: 0 0 0 1.5px #b37f16; }
-.activity-event--error .activity-event__rail > span { background: var(--coral); box-shadow: 0 0 0 1.5px #c23b2e; }
+.activity-event--success .activity-event__rail > span { background: var(--meadow);  }
+.activity-event--warning .activity-event__rail > span { background: var(--butter);  }
+.activity-event--error .activity-event__rail > span { background: var(--coral);  }
 .activity-event__content {
   min-width: 0;
   padding: 10px 11px;
-  background: rgba(245, 241, 230, 0.58);
-  border: 1.5px solid var(--line);
-  border-radius: 12px 9px 13px 8px;
+  background: var(--paper-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
 }
 .activity-event--lead .activity-event__content {
   background: rgba(239, 237, 255, 0.68);
@@ -2094,12 +1483,12 @@ body {
   align-items: center;
   gap: 4px 7px;
   color: var(--ink-soft);
-  font-size: 9.5px;
+  font-size: 14px;
 }
 .activity-event__actor {
   color: var(--ink);
   font-family: var(--font-display);
-  font-size: 11px;
+  font-size: 14px;
 }
 .activity-event__lead {
   color: #5147b8;
@@ -2111,13 +1500,13 @@ body {
   margin: 6px 0 4px;
   color: var(--ink);
   font-family: var(--font-display);
-  font-size: 12.5px;
+  font-size: 14px;
   line-height: 1.35;
 }
 .activity-event p {
   margin: 0;
   color: var(--ink-soft);
-  font-size: 11.5px;
+  font-size: 14px;
   line-height: 1.55;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
@@ -2127,13 +1516,13 @@ body {
   display: inline-block;
   margin-top: 7px;
   color: var(--sky-ink);
-  font-size: 10px;
+  font-size: 14px;
 }
 .activity-event__task {
   padding: 0;
   background: transparent;
   border: 0;
-  border-bottom: 1px dashed currentColor;
+  border-bottom: 1px solid currentColor;
   cursor: pointer;
 }
 .activity-event__reply {
@@ -2149,10 +1538,10 @@ body {
   padding: 7px 8px;
   color: var(--ink);
   background: #fff;
-  border: 1.5px solid var(--line-strong);
-  border-radius: 9px 7px 10px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
   font: inherit;
-  font-size: 11.5px;
+  font-size: 14px;
 }
 .activity-event__actions {
   display: flex;
@@ -2162,7 +1551,7 @@ body {
 .activity-event__details {
   margin-top: 8px;
   color: var(--ink-soft);
-  font-size: 10.5px;
+  font-size: 14px;
 }
 .activity-event__details summary {
   cursor: pointer;
@@ -2174,311 +1563,93 @@ body {
   background: #fff;
   border-radius: 7px;
   font-family: ui-monospace, monospace;
-  font-size: 9.5px;
+  font-size: 14px;
   line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
 /* ---------- task-grouped coordinator chat ------------------------------ */
-/* Keep sketchbook lettering for titles, not sustained conversation reading.
-   The rem scale also respects browser text-size preferences in a resized rail. */
+
 .chat,
 .chat__empty {
   --chat-text-size: 1rem;
   --chat-note-size: 0.875rem;
-  --chat-meta-size: 0.8125rem;
+  --chat-meta-size: 0.875rem;
   --chat-link-color: color-mix(in srgb, var(--sky-ink) 65%, var(--ink));
   --ink-faint: var(--ink-soft);
   font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   font-size: var(--chat-text-size);
   line-height: 1.6;
 }
-.chat {
-  display: grid;
-  height: 100%;
-  min-height: 0;
-  grid-template-columns: minmax(180px, 28%) minmax(0, 1fr);
-  overflow: hidden;
-}
+
 .chat__empty {
   margin: 18px;
   padding: 18px;
   color: var(--ink-soft);
   background: var(--paper-2);
-  border: 1.5px dashed var(--line-strong);
-  border-radius: 12px 9px 13px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
   font-size: var(--chat-text-size);
   line-height: 1.55;
 }
-.chat__threads {
-  display: flex;
-  min-width: 0;
-  min-height: 0;
-  flex-direction: column;
-  background: rgba(245, 241, 230, 0.55);
-  border-right: 1px dashed var(--line-strong);
-}
-.chat__threads-title {
-  display: flex;
-  flex: none;
-  justify-content: space-between;
-  padding: 12px 14px 8px;
-  color: var(--ink-soft);
-  font-family: var(--font-display);
-  font-size: 1rem;
-  letter-spacing: 0.02em;
-}
-.chat__thread-list {
-  min-height: 0;
-  overflow-y: auto;
-}
-.chat-thread__section {
-  padding: 7px 11px 5px;
-  color: var(--ink-soft);
-  border-top: 1.5px dashed var(--line);
-  font-size: var(--chat-meta-size);
-  font-weight: 600;
-  line-height: 1.4;
-}
-.chat-thread {
-  position: relative;
-  display: grid;
-  width: 100%;
-  grid-template-columns: 30px minmax(0, 1fr);
-  gap: 8px;
-  padding: 12px 14px;
-  color: var(--ink);
-  text-align: left;
-  background: transparent;
-  border: 0;
-  border-top: 1px dashed rgba(211, 204, 184, 0.7);
-  cursor: pointer;
-  font: inherit;
-}
-.chat-thread:hover {
-  background: rgba(123, 183, 224, 0.1);
-}
-.chat-thread:active {
-  transform: scale(0.99);
-}
-.chat-thread:focus-visible {
-  outline: 2px solid var(--chat-link-color);
-  outline-offset: -3px;
-}
-.chat-thread--active {
-  background: rgba(183, 159, 224, 0.16);
-  box-shadow: inset 3px 0 0 #5147b8;
-}
-.chat-thread--system {
-  background:
-    repeating-linear-gradient(135deg, rgba(139, 135, 152, 0.035) 0 4px, transparent 4px 9px),
-    rgba(245, 241, 230, 0.72);
-  border-top-color: rgba(139, 135, 152, 0.42);
-}
-.chat-thread--system:hover {
-  background:
-    repeating-linear-gradient(135deg, rgba(62, 123, 166, 0.05) 0 4px, transparent 4px 9px),
-    rgba(231, 241, 247, 0.72);
-}
-.chat-thread--system.chat-thread--active {
-  background:
-    repeating-linear-gradient(135deg, rgba(62, 123, 166, 0.06) 0 4px, transparent 4px 9px),
-    rgba(231, 241, 247, 0.84);
-  box-shadow: inset 3px 0 0 var(--sky-ink);
-}
 
-/* --- stage-state signalling (matches the runtime-summary pulse palette and
-   STATUS_META, so list / conversation / DAG canvas tell one story) ------- */
-.chat-thread[data-state="run-active"] { --thread-state: var(--meadow); }
-.chat-thread[data-state="running"]   { --thread-state: var(--butter); }
-.chat-thread[data-state="waiting"]   { --thread-state: var(--butter); }
-.chat-thread[data-state="ready"]     { --thread-state: var(--sky); }
-.chat-thread[data-state="completed"] { --thread-state: var(--meadow); }
-.chat-thread[data-state="failed"]    { --thread-state: var(--coral); }
-.chat-thread[data-state="blocked"]   { --thread-state: var(--lilac); }
-.chat-thread[data-state="unknown"]   { --thread-state: var(--ink-faint); }
-/* The state rides the row's left edge as a short crayon tick, inset top and
-   bottom so the full-height selection bar (active rows) stays visible
-   beneath it; rows without a state leave the spine transparent. */
-.chat-thread::before {
-  content: "";
-  position: absolute;
-  top: 9px;
-  bottom: 9px;
-  left: 0;
-  width: 3px;
-  border-radius: 0 2px 2px 0;
-  background: var(--thread-state, transparent);
-  pointer-events: none;
-}
-/* Live states wear a dashed halo around the row — a static state edge (it
-   used to breathe on a 2.2s loop; a fixed opacity still says "live" here and
-   echoes the DAG node rings). */
-.chat-thread[data-state="running"]::after,
-.chat-thread[data-state="waiting"]::after,
-.chat-thread[data-state="run-active"]::after {
-  content: "";
-  position: absolute;
-  inset: 2px;
-  border: 1.5px dashed color-mix(in srgb, var(--thread-state, var(--butter)) 65%, transparent);
-  border-radius: 7px;
-  pointer-events: none;
-  opacity: 0.6;
-}
-.chat-thread__avatar--pair {
-  font-size: 11.5px;
-  letter-spacing: 0.02em;
-}
-.chat-thread__avatar {
-  display: grid;
-  width: 30px;
-  height: 30px;
-  place-items: center;
-  color: var(--chat-link-color);
-  background: var(--sky-wash);
-  border: 1.5px solid var(--sky);
-  border-radius: 48% 52% 45% 55%;
-  font-family: var(--font-display);
-  font-size: 16.5px;
-}
-.chat-thread__avatar--lead {
-  color: #5147b8;
-  background: rgba(183, 159, 224, 0.2);
-  border-color: #8a78ca;
-}
-.chat-thread__avatar--system {
-  color: var(--ink-soft);
-  background: rgba(252, 250, 244, 0.92);
-  border-color: var(--line-strong);
-  border-style: dashed;
-  border-radius: 8px 6px 9px 5px;
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 /* two-letter initials need a smaller hand than a single glyph */
-.chat-thread__avatar--pair {
-  font-size: 11.5px;
-  letter-spacing: 0.02em;
-}
-/* --- stage status on the thread's edge -----------------------------------
-   The same state palette as the runtime-summary pulse and STATUS_META, so
-   list, conversation body and DAG canvas all tell one story: a crayon bar
-   rides the row's left edge, and only live stages (running / waiting /
-   active run control) get the dashed/striped variant — statically, since the
-   marching fill (thread-edge-march) was another continuous loop. The bar
-   paints over the active row's purple inset bar: an actively-selected stage
-   shows its state colour first, the lilac wash still marks the selection. */
-.chat-thread[data-state="run-active"] { --thread-state: var(--meadow); }
-.chat-thread[data-state="running"],
-.chat-thread[data-state="waiting"] { --thread-state: var(--butter); }
-.chat-thread[data-state="ready"] { --thread-state: var(--sky); }
-.chat-thread[data-state="completed"] { --thread-state: var(--meadow); }
-.chat-thread[data-state="failed"] { --thread-state: var(--coral); }
-.chat-thread[data-state="blocked"] { --thread-state: var(--lilac); }
-.chat-thread[data-state="unknown"] { --thread-state: var(--ink-faint); }
-.chat-thread[data-state]::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 3px;
-  background: var(--thread-state);
-  opacity: 0.45;
-  pointer-events: none;
-}
-.chat-thread[data-state].chat-thread--active::before {
-  opacity: 0.95;
-}
-/* the march itself: a dashed fill, static — it used to scroll one period per
-   step on a 1.15s loop; the stripes just sit there now */
-.chat-thread[data-state="running"]::after,
-.chat-thread[data-state="waiting"]::after,
-.chat-thread[data-state="run-active"]::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 3px;
-  background: repeating-linear-gradient(
-    180deg,
-    var(--thread-state) 0 5px,
-    transparent 5px 9px
-  );
-  opacity: 0.95;
-  pointer-events: none;
-}
-.chat-thread__copy,
-.chat-thread__topline {
-  min-width: 0;
-}
-.chat-thread__topline {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.chat-thread__topline strong {
-  display: -webkit-box;
-  overflow: hidden;
-  min-width: 0;
-  flex: 1 1 100%;
-  font-family: var(--font-display);
-  font-size: 1rem;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-.chat-thread__topline time {
-  color: var(--ink-soft);
-  margin-left: auto;
-  font-size: var(--chat-meta-size);
-  font-variant-numeric: tabular-nums;
-}
-.chat-thread__system-label {
-  flex: none;
-  padding: 1px 4px;
-  color: var(--chat-link-color);
-  background: rgba(123, 183, 224, 0.12);
-  border: 1px solid rgba(62, 123, 166, 0.24);
-  border-radius: 5px 4px 6px 3px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  line-height: 1.25;
-  text-transform: uppercase;
-}
-.chat-thread__preview {
-  display: block;
-  overflow: hidden;
-  margin-top: 3px;
-  color: var(--ink-soft);
-  font-size: var(--chat-note-size);
-  line-height: 1.5;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.chat-thread__badge {
-  position: absolute;
-  right: 9px;
-  bottom: 7px;
-  display: grid;
-  min-width: 22px;
-  height: 22px;
-  place-items: center;
-  padding: 0 4px;
-  color: #fff;
-  background: var(--coral);
-  border-radius: 999px;
-  font-size: 12.75px;
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 .chat__conversation {
   display: flex;
   min-width: 0;
   min-height: 0;
   flex-direction: column;
-  background: rgba(252, 250, 244, 0.82);
+  background: var(--paper);
 }
 .chat__conversation-head {
   display: flex;
@@ -2487,7 +1658,7 @@ body {
   justify-content: space-between;
   gap: 12px;
   padding: 14px 18px;
-  border-bottom: 1.5px dashed var(--line);
+  border-bottom: 1px solid var(--line);
 }
 .chat__conversation-head > div {
   min-width: 0;
@@ -2512,8 +1683,8 @@ body {
   color: var(--chat-link-color);
   background: rgba(123, 183, 224, 0.12);
   border: 1px solid rgba(62, 123, 166, 0.24);
-  border-radius: 5px 4px 6px 3px;
-  font-size: 0.75rem;
+  border-radius: 6px;
+  font-size: 0.875rem;
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
@@ -2532,14 +1703,14 @@ body {
   min-width: 0;
   margin-top: 6px;
   color: var(--ink-soft);
-  font-size: 13.5px;
+  font-size: 14px;
 }
 .chat-presence__dot {
   width: 7px;
   height: 7px;
   background: var(--line-strong);
   border-radius: 50%;
-  box-shadow: 0 0 0 2px rgba(211, 204, 184, 0.3);
+  
 }
 .chat-presence strong {
   color: var(--ink);
@@ -2559,16 +1730,16 @@ body {
 }
 .chat-presence[data-state="dispatched"][data-liveness="live"] .chat-presence__dot {
   background: var(--butter);
-  box-shadow: 0 0 0 2px rgba(240, 185, 78, 0.22);
+  
 }
 .chat-presence[data-state="completed"] .chat-presence__dot {
   background: var(--meadow);
-  box-shadow: 0 0 0 2px rgba(127, 201, 140, 0.22);
+  
 }
 .chat-presence[data-state="failed"] .chat-presence__dot,
 .chat-presence[data-liveness="unverifiable"] .chat-presence__dot {
   background: var(--coral);
-  box-shadow: 0 0 0 2px rgba(234, 107, 94, 0.2);
+  
 }
 .chat__conversation-head button {
   min-height: 36px;
@@ -2576,8 +1747,8 @@ body {
   padding: 6px 10px;
   color: var(--chat-link-color);
   background: transparent;
-  border: 1.5px dashed var(--sky);
-  border-radius: 8px 6px 9px 5px;
+  border: 1px solid var(--sky);
+  border-radius: 6px;
   cursor: pointer;
   font: inherit;
   font-size: var(--chat-note-size);
@@ -2597,8 +1768,8 @@ body {
   width: fit-content;
   max-width: min(94%, 65ch);
   padding: 14px 16px;
-  border: 1.5px solid var(--line);
-  border-radius: 12px 12px 12px 5px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
 }
 .chat-message--incoming {
   align-self: flex-start;
@@ -2608,10 +1779,10 @@ body {
   align-self: flex-end;
   background: var(--sky-wash);
   border-color: rgba(62, 123, 166, 0.38);
-  border-radius: 12px 12px 5px;
+  border-radius: 6px;
 }
 .chat-message--brief {
-  border-style: dashed;
+  border-style: solid;
 }
 .chat-message--worker_done.chat-message--success {
   border-color: rgba(62, 154, 85, 0.34);
@@ -2685,16 +1856,16 @@ body {
   margin-top: 8px;
   overflow-y: auto;
   padding: 10px 0;
-  border-top: 1px dashed var(--line);
+  border-top: 1px solid var(--line);
 }
 .chat-message--system {
   align-self: center;
   max-width: min(100%, 65ch);
   color: var(--ink-soft);
   text-align: left;
-  background: rgba(245, 241, 230, 0.72);
-  border-style: dashed;
-  border-radius: 9px 7px 10px 6px;
+  background: var(--paper-2);
+  border-style: solid;
+  border-radius: 6px;
 }
 .chat-message--system > span {
   color: var(--ink);
@@ -2743,7 +1914,7 @@ body {
   bottom: -7px;
   left: 6px;
   width: 1px;
-  background: repeating-linear-gradient(180deg, rgba(139, 135, 152, 0.38) 0 3px, transparent 3px 6px);
+  background: var(--paper-2);
   content: "";
 }
 .chat-checkpoint__dot {
@@ -2753,26 +1924,26 @@ body {
   width: 6px;
   height: 6px;
   background: var(--line-strong);
-  border: 1px solid rgba(252, 250, 244, 0.96);
+  border: 1px solid var(--paper);
   border-radius: 50%;
-  box-shadow: 0 0 0 1px rgba(139, 135, 152, 0.24);
+  
 }
 .chat-checkpoint--important .chat-checkpoint__dot {
   background: var(--sky);
-  box-shadow: 0 0 0 1px rgba(62, 123, 166, 0.32);
+  
 }
 .chat-checkpoint--error .chat-checkpoint__dot {
   background: var(--coral);
-  box-shadow: 0 0 0 1px rgba(164, 67, 56, 0.28);
+  
 }
 .chat-checkpoint__copy {
   display: grid;
   min-width: 0;
   gap: 3px;
   padding: 8px 10px;
-  background: rgba(245, 241, 230, 0.48);
-  border: 1px dashed rgba(211, 204, 184, 0.82);
-  border-radius: 7px 5px 8px 4px;
+  background: var(--paper-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
 }
 .chat-checkpoint__head {
   display: flex;
@@ -2821,7 +1992,7 @@ body {
   color: var(--lilac-ink);
 }
 .chat-checkpoint__toggle:focus-visible {
-  outline: 1px dashed currentColor;
+  outline: 1px solid currentColor;
   outline-offset: 2px;
 }
 .chat-checkpoint__chevron {
@@ -2830,7 +2001,7 @@ body {
   font-size: 18px;
   line-height: 0.7;
   transform: rotate(0deg);
-  transition: transform 140ms ease;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
 }
 .chat-checkpoint__toggle[aria-expanded="true"] .chat-checkpoint__chevron {
   transform: rotate(90deg);
@@ -2845,8 +2016,8 @@ body {
   padding: 3px 6px;
   color: var(--chat-link-color);
   background: rgba(123, 183, 224, 0.12);
-  border: 1px dashed rgba(62, 123, 166, 0.4);
-  border-radius: 6px 4px 7px 3px;
+  border: 1px solid rgba(62, 123, 166, 0.4);
+  border-radius: 6px;
   cursor: pointer;
   font: inherit;
 }
@@ -2864,7 +2035,7 @@ body {
 .chat-checkpoint__receipt-details {
   min-width: 0;
   padding-top: 3px;
-  border-top: 1px dashed rgba(211, 204, 184, 0.72);
+  border-top: 1px solid var(--line);
 }
 .chat-checkpoint__receipt-details > summary {
   width: max-content;
@@ -2876,7 +2047,7 @@ body {
   font-size: var(--chat-meta-size);
 }
 .chat-checkpoint__receipt-details > summary:focus-visible {
-  outline: 1px dashed currentColor;
+  outline: 1px solid currentColor;
   outline-offset: 2px;
 }
 .chat-checkpoint__receipt-details[open] > summary {
@@ -2923,7 +2094,7 @@ body {
 .chat-checkpoint__messages {
   margin: 0;
   padding-top: 5px;
-  border-top: 1px dashed rgba(211, 204, 184, 0.7);
+  border-top: 1px solid var(--line);
 }
 .chat-checkpoint__messages > summary {
   display: inline-flex;
@@ -2943,7 +2114,7 @@ body {
   color: var(--lilac-ink);
 }
 .chat-checkpoint__messages > summary:focus-visible {
-  outline: 1px dashed currentColor;
+  outline: 1px solid currentColor;
   outline-offset: 2px;
 }
 .chat-checkpoint__messages[open] > summary .chat-checkpoint__chevron {
@@ -2962,7 +2133,7 @@ body {
   gap: 6px;
   align-items: baseline;
   padding-left: 7px;
-  border-left: 2px solid rgba(211, 204, 184, 0.82);
+  border-left: 1px solid var(--line);
 }
 .chat-checkpoint__message-type {
   color: var(--chat-link-color);
@@ -2983,7 +2154,7 @@ body {
 .chat-checkpoint__agents {
   margin: 0;
   padding-top: 5px;
-  border-top: 1px dashed rgba(211, 204, 184, 0.7);
+  border-top: 1px solid var(--line);
 }
 .chat-checkpoint__evidence {
   display: grid;
@@ -3007,7 +2178,7 @@ body {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 1px 6px;
   padding-left: 7px;
-  border-left: 2px solid rgba(123, 177, 212, 0.46);
+  border-left: 1px solid rgba(123, 177, 212, 0.46);
 }
 .chat-checkpoint__agent > span {
   overflow: hidden;
@@ -3046,18 +2217,13 @@ body {
   margin-top: 2px;
   padding: 6px 8px;
   color: var(--ink-soft);
-  background: rgba(245, 241, 230, 0.62);
-  border: 1px dashed rgba(211, 204, 184, 0.9);
-  border-radius: 8px 6px 9px 5px;
+  background: var(--paper-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
   font-size: var(--chat-meta-size);
   line-height: 1.5;
 }
-/* The pulse dot must agree with the status words beside it: a state-driven
-   colour (palette mirrors STATUS_META in web/src/types.ts, so the DAG canvas
-   and the chat never disagree). Live states wear a STATIC halo ring — the
-   1.8s chat-check-pulse loop is gone with the rest of the continuous motion,
-   so a settled colour + halo say "running" and a plain dot says "done",
-   with nothing beating forever. */
+
 .chat-runtime-summary__pulse {
   width: 7px;
   height: 7px;
@@ -3069,12 +2235,12 @@ body {
   --pulse-color: var(--meadow);
 }
 .chat-runtime-summary[data-state="run-active"] {
-  --pulse-halo: rgba(127, 201, 140, 0.42);
+  
 }
 .chat-runtime-summary[data-state="running"],
 .chat-runtime-summary[data-state="waiting"] {
   --pulse-color: var(--butter);
-  --pulse-halo: rgba(240, 185, 78, 0.45);
+  
 }
 .chat-runtime-summary[data-state="ready"] {
   --pulse-color: var(--sky);
@@ -3088,12 +2254,7 @@ body {
 .chat-runtime-summary[data-state="unknown"] {
   --pulse-color: var(--ink-faint);
 }
-.chat-runtime-summary[data-state="run-active"] .chat-runtime-summary__pulse,
-.chat-runtime-summary[data-state="running"] .chat-runtime-summary__pulse,
-.chat-runtime-summary[data-state="waiting"] .chat-runtime-summary__pulse {
-  /* a held ring where the ripple used to travel: still marks "live", never moves */
-  box-shadow: 0 0 0 3px var(--pulse-halo);
-}
+
 .chat-runtime-summary strong {
   overflow: hidden;
   min-width: 0;
@@ -3119,8 +2280,8 @@ body {
   overflow-y: auto;
   overscroll-behavior-y: contain;
   padding: 14px 18px;
-  background: rgba(245, 241, 230, 0.48);
-  border-top: 1.5px dashed var(--line);
+  background: var(--paper-2);
+  border-top: 1px solid var(--line);
 }
 .chat__compose-row {
   display: grid;
@@ -3136,8 +2297,8 @@ body {
   padding: 12px 14px;
   color: var(--ink);
   background: #fff;
-  border: 1.5px solid var(--line-strong);
-  border-radius: 10px 8px 11px 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
   font: inherit;
   font-size: var(--chat-text-size);
   line-height: 1.6;
@@ -3183,9 +2344,7 @@ body {
   line-height: 1.6;
 }
 
-/* Phase 6: Run-control group composer. A sticker-row of doodle selects
-   (audience / type / priority), the audience estimate, and the enqueue-only
-   note — all in the same crayon vocabulary as the rest of the panel. */
+
 .chat__group-composer {
   display: flex;
   flex-direction: column;
@@ -3193,8 +2352,8 @@ body {
   margin-bottom: 10px;
   padding: 9px 10px 11px;
   background: rgba(255, 252, 240, 0.6);
-  border: 1.5px dashed var(--line-strong);
-  border-radius: 12px 9px 13px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
 }
 .chat__group-controls {
   display: flex;
@@ -3232,8 +2391,8 @@ body {
   padding: 10px 12px;
   color: var(--ink);
   background: #fff;
-  border: 1.5px solid var(--line-strong);
-  border-radius: 9px 7px 10px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
   font: inherit;
   font-size: var(--chat-text-size);
   line-height: 1.6;
@@ -3246,24 +2405,21 @@ body {
   line-height: 1.45;
 }
 
-/* Phase 6: outgoing group bubbles. A double-ruled crayon border separates a
-   deliberate Run-wide broadcast from ordinary one-to-one guidance, and the
-   enqueue note under the body carries the only guarantee a send receipt
-   ever had. */
+
 .chat-message--group {
   border-color: rgba(62, 123, 166, 0.55);
   border-style: double;
-  border-width: 3.5px;
+  border-width: 1px;
   background: rgba(214, 233, 245, 0.5);
 }
 .chat-message__audience {
   padding: 1px 5px;
-  border-radius: 5px 4px 6px 3px;
+  border-radius: 6px;
   color: var(--chat-link-color);
   background: rgba(123, 183, 224, 0.24);
   border: 1px solid rgba(62, 123, 166, 0.45);
   max-width: 100%;
-  font-size: 0.75rem;
+  font-size: 0.875rem;
   overflow-wrap: anywhere;
   font-weight: 600;
   letter-spacing: 0.04em;
@@ -3283,7 +2439,7 @@ body {
     inset: 0 auto 0 0;
     width: min(560px, calc(100% - 18px));
     max-width: calc(100% - 18px);
-    border-radius: 0 14px 14px 0;
+    border-radius: 6px;
   }
   .activity__tools {
     align-items: flex-start;
@@ -3298,45 +2454,14 @@ body {
    Keep conversations available above the message pane instead of squeezing
    both columns until message metadata and controls spill out. */
 @container chat-panel (max-width: 640px) {
-  .chat {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: 8.5rem minmax(0, 1fr);
-  }
-  .chat__threads {
-    border-right: 0;
-    border-bottom: 1px dashed var(--line-strong);
-  }
-  .chat__threads-title {
-    padding: 6px 12px 2px;
-    font-size: var(--chat-note-size);
-  }
-  .chat__thread-list {
-    display: flex;
-    min-width: 0;
-    flex: 1;
-    overflow-x: auto;
-    overflow-y: hidden;
-  }
-  .chat-thread__section,
-  .chat-thread__avatar {
-    display: none;
-  }
-  .chat-thread {
-    width: 12.5rem;
-    max-width: 90%;
-    height: 100%;
-    flex: 0 0 12.5rem;
-    grid-template-columns: minmax(0, 1fr);
-    align-content: start;
-    padding: 6px 12px;
-  }
-  .chat-thread__topline time {
-    flex: none;
-    font-size: var(--chat-meta-size);
-  }
-  .chat-thread__preview {
-    font-size: var(--chat-meta-size);
-  }
+  
+  
+  
+  
+  
+  
+  
+  
 }
 @container chat-panel (max-width: 400px) {
   .chat__conversation-head,
@@ -3414,23 +2539,23 @@ body {
 .node-panel__custom {
   width: 100%;
   font-family: var(--font-body);
-  font-size: 13px;
+  font-size: 14px;
   padding: 8px 11px;
-  border-radius: 11px 9px 12px 8px;
-  border: 2px solid var(--line-strong);
+  border-radius: 6px;
+  border: 1px solid var(--line-strong);
   background: var(--paper);
   color: var(--ink);
   margin-top: 8px;
-  font-family: "Fredoka", ui-monospace, monospace;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 .node-panel__custom:focus {
   outline: none;
   border-color: var(--sky);
-  box-shadow: 0 0 0 3px var(--sky-wash);
+  
 }
 .node-panel__custom:disabled,
 .node-panel input:disabled {
-  opacity: 0.58;
+  opacity: 1;
   cursor: not-allowed;
   background: #efede6;
   border-color: var(--line-strong);
@@ -3438,19 +2563,17 @@ body {
 .node-panel__field--row {
   flex-direction: row;
   justify-content: space-between;
-  font-size: 12.5px;
+  font-size: 14px;
   color: var(--ink-soft);
 }
 .node-panel__hint {
   margin-top: 5px;
-  font-size: 11px;
+  font-size: 14px;
   color: var(--ink-soft);
   line-height: 1.5;
 }
 
-/* Launch controls are reading/editing tools, not display lettering. Keep the
-   paper frame, but make long opaque model selectors and locked plans legible.
-   The portal stays scoped to this group through the open trigger below. */
+
 .node-panel__group--agent {
   font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   font-size: 14px;
@@ -3493,15 +2616,15 @@ body {
   opacity: 1;
   color: var(--ink);
   background: var(--paper-2);
-  border-style: dashed;
-  box-shadow: none;
+  border-style: solid;
+  
 }
 .node-panel__group--agent .doodle-select:disabled .doodle-select__chev {
   display: none;
 }
 .node-panel__group--agent .node-panel__hint {
   margin-top: 0;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.6;
   overflow-wrap: anywhere;
 }
@@ -3511,7 +2634,7 @@ body {
 .node-panel__launch-notes {
   margin: 0 0 18px;
   color: var(--ink-soft);
-  font-size: 13px;
+  font-size: 14px;
 }
 .node-panel__launch-notes summary {
   cursor: pointer;
@@ -3550,45 +2673,26 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__search 
 }
 body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hint {
   font: inherit;
-  font-size: 13px;
+  font-size: 14px;
   white-space: normal;
   overflow-wrap: anywhere;
 }
 
-/* A phone inspector is the current reading/editing surface. Do not squeeze
-   its form into the strip left by the wrapped toolbar, or leave covered
-   background controls in keyboard navigation. Canvas geometry is preserved. */
 @media (max-width: 620px), (max-width: 900px) and (max-height: 600px) {
-  .node-panel {
-    position: fixed;
-    inset: 8px;
-    width: auto;
-    max-width: calc(100% - 16px);
-    max-height: calc(100dvh - 16px);
-    z-index: 20;
-  }
-  .node-panel__close {
-    min-width: 44px;
-    min-height: 44px;
-  }
-  .app:has(.node-panel) :is(.topbar, .dag-toolbar, .run-overview),
-  .app:has(.node-panel) .dag-workspace > :not(.dag-canvas),
-  .app:has(.node-panel) .dag-canvas > :not(.node-panel) {
-    visibility: hidden;
-    contain: paint;
-  }
+  .node-panel__close { min-width: 44px; min-height: 44px; }
+  .btn { min-height: 44px; }
 }
 
 /* Phase 4: scheduler state + ownership relations on the node card. */
 .node-panel__scheduler {
-  border: 1.5px dashed var(--line-strong);
-  border-radius: 12px 9px 13px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
   padding: 9px 11px;
-  background: rgba(245, 241, 230, 0.55);
+  background: var(--paper-2);
 }
 .node-panel__relation {
   margin: 0;
-  font-size: 12px;
+  font-size: 14px;
   color: var(--ink);
   line-height: 1.5;
 }
@@ -3609,7 +2713,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   gap: 5px;
 }
 .node-panel__readiness li {
-  font-size: 11.5px;
+  font-size: 14px;
   line-height: 1.5;
   color: var(--ink);
   padding-left: 16px;
@@ -3626,26 +2730,14 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 .node-panel__readiness li[data-code="waiting_for_capacity"]::before { content: "⏳"; }
 .node-panel__readiness li[data-code="unknown"]::before { content: "?"; }
 
-/* ---------- scheduler / ready-queue panel (Phase 4) ----------
-   A compact, read-only operations surface on the canvas: the current ready
-   wave, viewer-coordinator capacity, and evidence-backed reasons for
-   everything waiting. Deliberately SEPARATE from Activity/Chat — that rail
-   answers "what happened"; this card answers "what runs next, and why not
-   the rest". Mirrors the node card's paper look, docked top-left so it
-   never collides with the node detail card on the right. */
+
 .scheduler-panel {
-  position: absolute;
-  top: 16px;
-  left: 16px;
-  width: 296px;
-  max-height: calc(100% - 32px);
-  overflow-y: auto;
+  min-width: 0;
+  width: 100%;
   background: var(--paper);
-  border: 2px solid var(--line-strong);
-  border-radius: 15px 18px 14px 17px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
   padding: 13px 14px;
-  z-index: 4;
-  box-shadow: var(--shadow-soft);
   display: flex;
   flex-direction: column;
   gap: 9px;
@@ -3662,24 +2754,24 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   color: var(--ink);
 }
 .scheduler-panel__wave {
-  font-size: 11px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--sky-ink);
   background: var(--sky-wash);
-  border: 1.5px solid var(--sky);
-  border-radius: 9px 7px 8px 6px;
+  border: 1px solid var(--sky);
+  border-radius: 6px;
   padding: 2.5px 8px;
   white-space: nowrap;
 }
 .scheduler-panel__capacity {
   margin: 0;
-  font-size: 11.5px;
+  font-size: 14px;
   color: var(--ink-soft);
   line-height: 1.45;
 }
 .scheduler-panel__capacity b {
   color: var(--ink);
-  font-size: 12.5px;
+  font-size: 14px;
 }
 .scheduler-panel__section {
   display: flex;
@@ -3688,7 +2780,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 .scheduler-panel__key {
   margin: 0;
-  font-size: 10.5px;
+  font-size: 14px;
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -3708,18 +2800,18 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   gap: 6px;
   max-width: 100%;
   font-family: var(--font-body);
-  font-size: 11.5px;
+  font-size: 14px;
   color: var(--ink);
   background: var(--sky-wash);
-  border: 1.5px solid var(--sky);
-  border-radius: 10px 8px 11px 7px;
+  border: 1px solid var(--sky);
+  border-radius: 6px;
   padding: 4px 9px;
   cursor: pointer;
-  transition: transform 0.15s cubic-bezier(0.3, 1.5, 0.5, 1), box-shadow 0.15s ease;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
 }
 .scheduler-panel__chip:hover {
-  transform: translateY(-1px) rotate(-0.6deg);
-  box-shadow: var(--shadow-sticker);
+  
+  
 }
 .scheduler-panel__chip .dot {
   width: 8px;
@@ -3729,18 +2821,18 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 /* a ready chip parked on capacity: no free slot — dashed border says "held" */
 .scheduler-panel__chip--queued {
-  border-style: dashed;
+  border-style: solid;
   background: var(--paper-2);
   color: var(--ink-soft);
 }
 .scheduler-panel__hint {
   margin: 0;
-  font-size: 10.5px;
+  font-size: 14px;
   color: var(--ink-soft);
   line-height: 1.45;
 }
 .scheduler-panel__hint--alone {
-  font-size: 11.5px;
+  font-size: 14px;
 }
 .scheduler-panel__waiting {
   margin: 0;
@@ -3755,7 +2847,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   flex-direction: column;
   gap: 1px;
   padding-bottom: 6px;
-  border-bottom: 1px dashed var(--line);
+  border-bottom: 1px solid var(--line);
 }
 .scheduler-panel__waiting-row:last-child {
   border-bottom: none;
@@ -3767,7 +2859,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   gap: 6px;
   align-self: flex-start;
   font-family: var(--font-body);
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--ink);
   background: none;
@@ -3786,7 +2878,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   flex: none;
 }
 .scheduler-panel__reason {
-  font-size: 11px;
+  font-size: 14px;
   color: var(--ink-soft);
   line-height: 1.5;
   display: -webkit-box;
@@ -3821,26 +2913,26 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 .exec__label {
   font-family: var(--font-display);
-  font-size: 12px;
+  font-size: 14px;
   color: var(--ink-soft);
 }
 /* Inline note under a control (e.g. why "Custom…" is disabled). */
 .exec__hint {
   font-family: var(--font-body);
-  font-size: 11px;
+  font-size: 14px;
   font-style: italic;
   color: var(--ink-soft);
 }
 .exec__custom,
 .exec__num {
   font-family: var(--font-body);
-  font-size: 12.5px;
+  font-size: 14px;
   padding: 5px 9px;
-  border-radius: 10px 8px 11px 8px;
-  border: 2px solid var(--line-strong);
+  border-radius: 6px;
+  border: 1px solid var(--line-strong);
   background: var(--paper);
   color: var(--ink);
-  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
 }
 .exec__custom:hover:not(:disabled),
 .exec__num:hover:not(:disabled) {
@@ -3848,13 +2940,10 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 .exec__custom {
   width: 100px;
-  font-family: "Fredoka", ui-monospace, monospace;
-  animation: field-unfold 0.25s cubic-bezier(0.2, 1, 0.3, 1);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  
 }
-@keyframes field-unfold {
-  from { opacity: 0; width: 0; padding-left: 0; padding-right: 0; }
-  to { opacity: 1; width: 100px; }
-}
+
 .exec__num {
   width: 52px;
 }
@@ -3862,7 +2951,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 .exec__num:focus {
   outline: none;
   border-color: var(--sky);
-  box-shadow: 0 0 0 3px var(--sky-wash);
+  
   transform: translateY(-1px);
 }
 .exec__live {
@@ -3872,7 +2961,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 .exec__running {
   font-family: var(--font-display);
-  font-size: 12.5px;
+  font-size: 14px;
   color: var(--butter);
   display: inline-flex;
   align-items: center;
@@ -3883,16 +2972,10 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   height: 9px;
   border-radius: 50%;
   background: var(--butter);
-  animation: pulse 1.1s ease-in-out infinite;
+  
 }
-@keyframes pulse {
-  0%, 100% { opacity: 0.35; transform: scale(0.85); }
-  50% { opacity: 1; transform: scale(1.1); }
-}
-/* one bead per busy worker — the pool at a glance. The beads used to bob out
-   of phase on a 0.95s loop (a second heartbeat next to `.exec__pulse`); the
-   quiet budget allows exactly ONE indefinite animation in the app and this
-   isn't it, so the beads hold still and still count the busy workers. */
+
+
 .exec__beads {
   display: inline-flex;
   gap: 3px;
@@ -3901,7 +2984,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 .exec__beads i {
   width: 5px;
   height: 9px;
-  border-radius: 3px;
+  border-radius: 1px;
   background: var(--butter);
 }
 .btn--run {
@@ -3909,41 +2992,32 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   color: #fff;
   border-color: #4f9e5d;
   padding: 7px 18px;
-  font-size: 13.5px;
+  font-size: 14px;
 }
-/* work is sitting ready and nobody has pressed Run — used to tap the user on
-   the shoulder every few seconds (run-attract, 4s infinite); it now just sits
-   a little proud of the page, a raised sticker that reads "press me" without
-   ever moving on its own */
+
 .btn--attract {
-  box-shadow: 4px 5px 0 rgba(74, 71, 84, 0.18);
+  
 }
 .btn--stop-run {
   background: var(--coral);
   color: #fff;
   border-color: #c23b2e;
   padding: 7px 18px;
-  font-size: 13.5px;
+  font-size: 14px;
 }
 .exec__err {
-  font-size: 12px;
+  font-size: 14px;
   color: var(--coral);
   max-width: 260px;
-  animation: err-jolt 0.42s cubic-bezier(0.36, 0.07, 0.19, 0.97);
+  
 }
-@keyframes err-jolt {
-  0% { opacity: 0; transform: translateX(0); }
-  25% { opacity: 1; transform: translateX(-5px); }
-  50% { transform: translateX(4px); }
-  75% { transform: translateX(-2px); }
-  100% { transform: translateX(0); }
-}
+
 .node-panel__result {
   margin: 0;
-  font-family: "Fredoka", ui-monospace, monospace;
-  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 14px;
   background: var(--paper-2);
-  border: 1.5px solid var(--line);
+  border: 1px solid var(--line);
   border-radius: 10px;
   padding: 9px;
   white-space: pre-wrap;
@@ -3957,17 +3031,17 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   padding: 9px;
   color: var(--ink);
   background: var(--paper-2);
-  border: 1.5px solid var(--line);
+  border: 1px solid var(--line);
   border-radius: 10px;
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.55;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 .node-result {
   padding: 10px;
-  background: rgba(245, 241, 230, 0.72);
-  border: 1.5px solid var(--line);
+  background: var(--paper-2);
+  border: 1px solid var(--line);
   border-radius: 10px;
 }
 .node-result__head {
@@ -3983,7 +3057,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   background: var(--paper-3);
   border-radius: 999px;
   font-family: var(--font-display);
-  font-size: 9px;
+  font-size: 14px;
   text-transform: capitalize;
 }
 .node-result[data-outcome="succeeded"] .node-result__outcome {
@@ -3996,32 +3070,32 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 .node-result__head time {
   color: var(--ink-soft);
-  font-size: 9px;
+  font-size: 14px;
   font-variant-numeric: tabular-nums;
 }
 .node-result > strong {
   display: block;
   color: var(--ink);
   font-family: var(--font-display);
-  font-size: 11.5px;
+  font-size: 14px;
   line-height: 1.35;
 }
 .node-result > p {
   margin: 5px 0 0;
   color: var(--ink-soft);
-  font-size: 10.5px;
+  font-size: 14px;
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
 .node-result__files {
   margin-top: 9px;
   padding-top: 7px;
-  border-top: 1px dashed var(--line-strong);
+  border-top: 1px solid var(--line-strong);
 }
 .node-result__files > span {
   color: var(--ink);
   font-family: var(--font-display);
-  font-size: 9.5px;
+  font-size: 14px;
 }
 .node-result__files ul {
   display: grid;
@@ -4035,17 +3109,17 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 .node-result__files li {
   min-width: 0;
   color: var(--ink-soft);
-  font-size: 9px;
+  font-size: 14px;
   overflow-wrap: anywhere;
 }
 .node-result__files code,
 .node-result__report code {
-  font-family: "Fredoka", ui-monospace, monospace;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 .node-result__details {
   margin-top: 9px;
   color: var(--ink-soft);
-  font-size: 9px;
+  font-size: 14px;
 }
 .node-result__details summary {
   min-height: 28px;
@@ -4056,7 +3130,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 .node-result__details p {
   max-height: 160px;
   overflow-y: auto;
-  font-size: 9.5px;
+  font-size: 14px;
   line-height: 1.5;
   white-space: pre-wrap;
 }
@@ -4081,27 +3155,27 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   padding: 7px;
   color: var(--ink);
   background: var(--paper);
-  border: 1px dashed var(--line);
+  border: 1px solid var(--line);
   border-radius: 7px;
-  font-family: "Fredoka", ui-monospace, monospace;
-  font-size: 8.5px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 14px;
   white-space: pre-wrap;
 }
 
 /* ---------- react-flow chrome ---------- */
 .react-flow__controls {
-  border-radius: 13px 11px 13px 10px;
+  border-radius: 6px;
   overflow: hidden;
-  box-shadow: var(--shadow-soft);
-  border: 2px solid var(--line-strong);
-  animation: panel-in 0.4s cubic-bezier(0.2, 0.8, 0.3, 1) 0.2s backwards;
+  
+  border: 1px solid var(--line-strong);
+  
 }
 .react-flow__controls button {
   background: var(--paper);
-  border-bottom: 1.5px solid var(--line);
+  border-bottom: 1px solid var(--line);
   fill: var(--ink);
   color: var(--ink);
-  transition: background 0.15s ease, transform 0.15s cubic-bezier(0.3, 1.5, 0.5, 1);
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
 }
 .react-flow__controls button:hover {
   background: var(--sky-wash);
@@ -4112,92 +3186,33 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 /* the anchor dot on a running node's outgoing side takes the stroke's colour
    (it used to throb on dot-throb's 1.15s loop) */
-.task-node[data-status="dispatched"] .react-flow__handle-right,
-.task-node[data-status="dispatched"] .react-flow__handle-bottom {
-  border-color: var(--butter);
-  background: var(--butter);
-}
+
 .react-flow__attribution {
   display: none;
 }
 
-/* ============================================================
-   Motion — nodes pop onto the paper as the DAG grows.
-   ============================================================ */
+
 /* `backwards` (not `forwards`) so the held end-state doesn't override the
    node's :hover lift once the entrance finishes. Plays once per node — React
    Flow reuses the DOM node across status polls, so it won't replay.
    `--i` is the node's paint order, so the graph draws itself in sequence
    rather than all at once; capped so a 50-node DAG doesn't crawl. */
-.task-node {
-  animation: node-in 0.5s cubic-bezier(0.2, 0.9, 0.3, 1.2) backwards;
-  animation-delay: min(calc(var(--i, 0) * 55ms), 900ms);
-}
-@keyframes node-in {
-  from {
-    opacity: 0;
-    transform: scale(0.3) rotate(-11deg);
-  }
-  60% {
-    transform: scale(1.07) rotate(2.5deg);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1) rotate(0);
-  }
-}
+
+
 .node-panel {
-  animation: panel-in 0.26s cubic-bezier(0.2, 0.8, 0.3, 1) backwards;
-}
-@keyframes panel-in {
-  from {
-    opacity: 0;
-    transform: translateX(12px) rotate(0.4deg);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0) rotate(0);
-  }
+  
 }
 
-/* ---------- failed: crayon slipped off the line ---------------------------
-   A one-shot wobble the moment a task flips to failed. */
-.task-node[data-status="failed"] {
-  animation: fail-shake 0.5s ease-in-out 0.15s;
-}
-@keyframes fail-shake {
-  0%,
-  100% {
-    transform: translateX(0);
-  }
-  20% {
-    transform: translateX(-4px) rotate(-0.7deg);
-  }
-  40% {
-    transform: translateX(4px) rotate(0.6deg);
-  }
-  60% {
-    transform: translateX(-3px) rotate(-0.4deg);
-  }
-  80% {
-    transform: translateX(2px);
-  }
-}
+
+
+
+
 
 /* ---------- gate note drops onto the canvas ----------------------------- */
 .gate {
-  animation: gate-in 0.5s cubic-bezier(0.2, 0.9, 0.3, 1.25) backwards;
+  
 }
-@keyframes gate-in {
-  from {
-    opacity: 0;
-    transform: translateY(-18px) rotate(-2.5deg);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) rotate(-0.6deg);
-  }
-}
+
 
 /* ---------- a11y quality floor ---------- */
 :focus-visible {
@@ -4208,26 +3223,14 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 @media (prefers-reduced-motion: reduce) {
   * {
     transition: none !important;
-    animation: none !important;
+    
   }
-  /* Nothing hides a loop here any more: since the boil/scribble/trace/aura/
-     crawl/nudge/march/confetti/whale-swim/conn-beat/chat-pulse/bead-bob/
-     run-attract loops were deleted outright (CSS keyframes and the JS timers
-     + WAAPI calls that fed them) — leaving only `.exec__pulse`, which this
-     block stops too — reduced motion has no hidden JS or Web Animations
-     timeline to keep alive; this block only has to hand the one-shot reveals
-     their end states. */
+  
   /* a few animations do real work — they reveal something rather than just
      decorate it. Without them running, hand the end state over directly. */
-  .task-node__stamp path,
-  .task-node__lasso path,
-  .doodle-select__check path {
-    stroke-dashoffset: 0;
-  }
-  /* the sparks are pure celebration; still, they'd otherwise freeze mid-air */
-  .task-node__sparks {
-    display: none;
-  }
+  
+  
+  
   .topbar__title::after,
   .seg button.active::after {
     transform: none;
@@ -4235,16 +3238,12 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   .exec__custom {
     width: 100px;
   }
-  /* the ripple is a kinetic flourish with no still form worth keeping */
-  .task-node__ripple {
-    display: none;
-  }
-  /* the ready ring, the running ring, the gate halo and the live-thread
-     edge are all static state carriers now — they survive this block exactly
-     as they render, borders and colours intact */
+  
+  
+  
 }
 
-/* --- Run picker (doodle-styled like everything else) --------------------- */
+
 /* Tasks are Run-scoped since Orca 1.4.160, so the topbar always names the Run
    whose DAG is on screen. Lives in the header's flexible middle region, so it
    must be able to shrink (the dropdown's value ellipsizes) and to wrap the
@@ -4257,20 +3256,14 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   flex-wrap: wrap;
 }
 
-/* the DoodleSelect sits inline in the topbar and mustn't grow past its label;
-   min-width: 0 is what lets it yield width when the header gets tight */
+
 .runpick .doodle-select {
   width: auto;
   max-width: 240px;
   min-width: 0;
 }
 
-/* ---------- DoodleSelect (hand-drawn dropdown, no native <select>) ----------
-   The trigger stays in the "soft and airy" register — wonky radii, sticker
-   shadow, a scribbled chevron — while the dropdown panel is a little paper
-   card with a tape strip and a crayon-dashed outline, in the same vocabulary
-   as the pinned notes. The panel is portalled to document.body (fixed), so
-   .node-panel's overflow-y can't clip it. */
+
 .doodle-select {
   position: relative;
   display: inline-flex;
@@ -4278,42 +3271,42 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   gap: 8px;
   width: 100%;
   font-family: var(--font-body);
-  font-size: 13px;
+  font-size: 14px;
   color: var(--ink);
   text-align: left;
   padding: 8px 11px;
-  border-radius: 12px 9px 13px 8px;
-  border: 2px solid var(--line-strong);
+  border-radius: 6px;
+  border: 1px solid var(--line-strong);
   background: var(--paper);
   cursor: pointer;
-  box-shadow: 2px 2px 0 rgba(74, 71, 84, 0.1);
-  transition: border-color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+  
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
 }
 .doodle-select:hover:not(:disabled) {
   border-color: var(--ink-soft);
-  transform: translateY(-1px) rotate(-0.4deg);
+  
 }
 .doodle-select:focus {
   outline: none;
   border-color: var(--sky);
-  box-shadow: 0 0 0 3px var(--sky-wash);
+  
 }
 .doodle-select--open {
   border-color: var(--sky);
-  box-shadow: 0 0 0 3px var(--sky-wash);
+  
   transform: none;
 }
 .doodle-select:disabled {
   color: var(--ink-soft);
-  opacity: 0.6;
+  opacity: 1;
   cursor: not-allowed;
 }
 /* compact variant for the toolbars, sized like the old inline controls */
 .doodle-select--sm {
   width: auto;
-  font-size: 12.5px;
+  font-size: 14px;
   padding: 5px 9px;
-  border-radius: 10px 8px 11px 8px;
+  border-radius: 6px;
 }
 .doodle-select__value {
   flex: 1;
@@ -4325,15 +3318,14 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 .doodle-select__value--dim {
   color: var(--ink-soft);
 }
-/* the chevron is drawn, not typeset — fine grain so a small glyph stays
-   legible (the coarse #crayon would mush it). It flips when the card opens. */
+
 .doodle-select__chev {
   flex: none;
   width: 13px;
   height: 9px;
   overflow: visible;
-  filter: url(#crayon-fine);
-  transition: transform 0.22s cubic-bezier(0.3, 1.4, 0.5, 1);
+  
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
 }
 .doodle-select__chev path {
   fill: none;
@@ -4348,7 +3340,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   transform: rotate(180deg);
 }
 
-/* the dropdown: a paper card that drops out of the trigger's pocket */
+
 .doodle-select__panel {
   position: fixed;
   z-index: 60;
@@ -4356,37 +3348,28 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   flex-direction: column;
   padding: 10px;
   background: var(--paper);
-  border: 2px solid var(--line-strong);
-  border-radius: 16px 13px 17px 12px;
-  box-shadow: var(--shadow-sticker);
-  transform: rotate(-0.5deg);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  
+  
   transform-origin: 18px top;
-  animation: doodle-panel-in 0.22s cubic-bezier(0.2, 1.2, 0.3, 1) backwards;
+  
 }
 .doodle-select__panel--up {
   transform-origin: 18px bottom;
 }
-@keyframes doodle-panel-in {
-  from {
-    opacity: 0;
-    transform: translateY(-9px) rotate(-2.2deg) scale(0.96);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) rotate(-0.5deg) scale(1);
-  }
-}
-/* crayon-dashed outline, same hand as the empty-Run note */
+
+
 .doodle-select__panel::before {
   content: "";
   position: absolute;
   inset: -2px;
   border-radius: inherit;
-  border: 2.5px dashed var(--line-strong);
-  filter: url(#crayon);
+  border: 1px solid var(--line-strong);
+  
   pointer-events: none;
 }
-/* a strip of washi tape holding the card to the page */
+
 .doodle-select__panel::after {
   content: "";
   position: absolute;
@@ -4394,44 +3377,40 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   left: 24px;
   width: 52px;
   height: 18px;
-  transform: rotate(-3deg);
-  background: repeating-linear-gradient(
-    -45deg,
-    rgba(240, 185, 78, 0.32) 0 6px,
-    rgba(240, 185, 78, 0.16) 6px 12px
-  );
-  border-left: 1px dashed rgba(179, 127, 22, 0.35);
-  border-right: 1px dashed rgba(179, 127, 22, 0.35);
+  
+  background: var(--paper-2);
+  border-left: 1px solid rgba(179, 127, 22, 0.35);
+  border-right: 1px solid rgba(179, 127, 22, 0.35);
   pointer-events: none;
 }
 .doodle-select__panel--up::after {
   top: auto;
   bottom: -10px;
-  transform: rotate(3deg);
+  
 }
 
-/* search box — a doodled magnifier leading the input */
+
 .doodle-select__search {
   display: flex;
   align-items: center;
   gap: 7px;
   margin-bottom: 8px;
   padding: 6px 9px;
-  border: 2px solid var(--line-strong);
-  border-radius: 10px 8px 11px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
   background: var(--paper);
-  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
 }
 .doodle-select__search:focus-within {
   border-color: var(--sky);
-  box-shadow: 0 0 0 3px var(--sky-wash);
+  
 }
 .doodle-select__mag {
   flex: none;
   width: 13px;
   height: 13px;
   overflow: visible;
-  filter: url(#crayon-fine);
+  
 }
 .doodle-select__mag circle,
 .doodle-select__mag path {
@@ -4447,7 +3426,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   background: transparent;
   outline: none;
   font-family: var(--font-body);
-  font-size: 13px;
+  font-size: 14px;
   color: var(--ink);
 }
 .doodle-select__search input::placeholder {
@@ -4475,9 +3454,9 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   align-items: center;
   gap: 8px;
   padding: 7px 10px;
-  border-radius: 10px 8px 11px 7px;
+  border-radius: 6px;
   cursor: pointer;
-  transition: background 0.14s ease, transform 0.14s ease;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
 }
 .doodle-select__opt--active {
   background: var(--paper-2);
@@ -4498,25 +3477,25 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   gap: 1px;
 }
 .doodle-select__opt-label {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--ink);
   word-break: break-word;
 }
 .doodle-select__opt-hint {
-  font-family: "Fredoka", ui-monospace, monospace;
-  font-size: 10.5px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 14px;
   color: var(--ink-soft);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* the tick draws itself in like the node stamps */
+
 .doodle-select__check {
   flex: none;
   width: 15px;
   height: 13px;
   overflow: visible;
-  filter: url(#crayon-fine);
+  
 }
 .doodle-select__check path {
   fill: none;
@@ -4526,11 +3505,11 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   stroke-linejoin: round;
   stroke-dasharray: 100;
   stroke-dashoffset: 100;
-  animation: lasso-draw 0.3s cubic-bezier(0.5, 0.05, 0.4, 1) forwards;
+  
 }
 .doodle-select__empty {
   padding: 12px 10px;
-  font-size: 12.5px;
+  font-size: 14px;
   color: var(--ink-soft);
   text-align: center;
 }
@@ -4541,15 +3520,15 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   margin-left: 8px;
   padding: 2px 8px;
   font-family: var(--font-display);
-  font-size: 11px;
+  font-size: 14px;
   color: #b37f16;
   background: #fdf4e1;
-  border: 1.5px solid var(--butter);
-  border-radius: 8px 6px 9px 5px;
-  animation: err-jolt 0.42s cubic-bezier(0.36, 0.07, 0.19, 0.97);
+  border: 1px solid var(--butter);
+  border-radius: 6px;
+  
 }
 
-/* Empty state when no Run is selected yet — a note doodled on the page. */
+
 .empty-run {
   position: absolute;
   top: 50%;
@@ -4558,19 +3537,19 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   padding: 22px 26px;
   text-align: center;
   background: var(--paper);
-  border-radius: 18px 14px 19px 13px;
-  box-shadow: var(--shadow-sticker);
-  transform: translate(-50%, -50%) rotate(-0.8deg);
+  border-radius: 6px;
+  
+  
   z-index: 5;
-  animation: gate-pin 0.5s cubic-bezier(0.2, 1.5, 0.4, 1) backwards;
+  
 }
 .empty-run::before {
   content: "";
   position: absolute;
   inset: -2px;
   border-radius: inherit;
-  border: 3px dashed var(--line-strong);
-  filter: url(#crayon);
+  border: 1px solid var(--line-strong);
+  
   pointer-events: none;
 }
 .empty-run__title {
@@ -4581,13 +3560,13 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 .empty-run__body {
   margin: 0;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.7;
   color: var(--ink-soft);
 }
 .empty-run__body code {
-  font-family: "Fredoka", ui-monospace, monospace;
-  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 14px;
   color: var(--sky-ink);
   background: var(--sky-wash);
   padding: 1px 6px;
@@ -4595,8 +3574,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 
 /* ---------- inbox (worker questions, escalations, cleanup debt) ---------- */
-/* Reuses the pinned-gate card; escalations get a coral border, debt cards a
-   pencil-grey one, so "answer me" and "decide for me" read differently. */
+
 .inbox__item--escalation {
   border-color: var(--coral);
   background: #fdf0ee;
@@ -4607,17 +3585,17 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 .inbox__debt::after {
   border-color: var(--line-strong);
-  animation: none;
+  
   opacity: 0.4;
 }
 .inbox__meta {
   margin-left: 8px;
-  font-size: 10.5px;
+  font-size: 14px;
   color: var(--ink-soft);
   letter-spacing: 0;
 }
 .inbox__body {
-  font-size: 12.5px;
+  font-size: 14px;
   color: var(--ink-soft);
   white-space: pre-wrap;
   word-break: break-word;
@@ -4639,7 +3617,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 .recovery__active-session-candidates > summary {
   cursor: pointer;
   font-family: var(--font-display);
-  font-size: 13px;
+  font-size: 14px;
   color: var(--sky-ink);
 }
 .recovery__active-session-candidates > summary::marker {
@@ -4650,11 +3628,11 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   min-width: 0;
   padding: 6px 10px;
   font: inherit;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--ink);
   background: #fff;
-  border: 1.5px solid var(--line-strong);
-  border-radius: 9px 7px 10px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
 }
 .inbox__input:focus {
   outline: none;
@@ -4670,17 +3648,17 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   margin-left: 8px;
   padding: 2px 8px;
   font-family: var(--font-display);
-  font-size: 11px;
+  font-size: 14px;
   color: #3e9a55;
   background: #ebf7ee;
-  border: 1.5px solid var(--meadow);
-  border-radius: 8px 6px 9px 5px;
+  border: 1px solid var(--meadow);
+  border-radius: 6px;
 }
 .exec__done {
   color: #3e9a55;
 }
 .exec__done .exec__pulse {
-  animation: none;
+  
   background: var(--meadow);
 }
 
@@ -4688,12 +3666,12 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 .exec__stop-report {
   margin-top: 6px;
   padding: 6px 10px;
-  font-size: 11.5px;
+  font-size: 14px;
   font-family: var(--font-display);
   color: var(--ink-soft);
   background: var(--paper);
-  border: 1.5px dashed var(--line-strong);
-  border-radius: 9px 7px 10px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
 }
 .exec__stop-report--warn {
   color: #c23b2e;
@@ -4704,7 +3682,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   margin: 6px 0 0;
   padding-left: 16px;
   font-family: var(--font-mono, monospace);
-  font-size: 10.5px;
+  font-size: 14px;
   line-height: 1.6;
   word-break: break-all;
 }
@@ -4712,7 +3690,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 /* --- Workers panel (Phase 5 observability) -------------------------------- */
 
 .workers__row + .workers__row {
-  border-top: 2px dashed var(--paper-edge, #d8d3c4);
+  border-top: 1px solid var(--paper-edge, #d8d3c4);
   margin-top: 6px;
   padding-top: 6px;
 }
@@ -4733,22 +3711,21 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 
 .workers__liveness {
   flex: none;
-  font-size: 11px;
+  font-size: 14px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   padding: 1px 8px;
   border-radius: 999px;
-  border: 2px solid currentColor;
+  border: 1px solid currentColor;
 }
 
-/* Only the three renderable verdicts get colors; anything else renders
-   unverifiable and reads as "we don't know", not "it's dead". */
+/* Exit is a liveness observation, not evidence of failure. */
 .workers__liveness[data-verdict="live"] {
   color: #3e9a55;
 }
 .workers__liveness[data-verdict="exited"] {
-  color: #c23b2e;
+  color: #52647a;
 }
 .workers__liveness[data-verdict="unverifiable"],
 .workers__liveness:not([data-verdict]) {
@@ -4771,11 +3748,11 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   white-space: pre-wrap;
   word-break: break-word;
   background: #faf8f0;
-  border: 2px solid #e6e1d2;
+  border: 1px solid #e6e1d2;
   border-radius: 8px;
   padding: 8px;
   margin: 0;
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.45;
 }
 
@@ -4787,15 +3764,13 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   color: var(--coral, #c23b2e);
 }
 
-/* Phase 6: structured-read source picker in the workers panel. Kept native
-   (unlike DoodleSelect) — it is a tiny utility control, and the crayon look
-   for it would cost more than it says. */
+
 .workers__source {
   font: inherit;
-  font-size: 12px;
+  font-size: 14px;
   color: #6b6557;
   background: #faf8f0;
-  border: 2px solid #e6e1d2;
+  border: 1px solid #e6e1d2;
   border-radius: 8px;
   padding: 2px 6px;
 }
@@ -4810,6 +3785,11 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   gap: 8px;
   flex-wrap: wrap;
   margin: 4px 0 6px;
+}
+.workers__filters select {
+  flex: 1 1 190px;
+  min-width: 0;
+  min-height: 40px;
 }
 
 /* The qualified working state never restyles the collapsed chip: the row
@@ -4826,20 +3806,16 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   opacity: 0.85;
 }
 
-/* Dispatch ids are long; let them shrink and ellipsize inside the row. */
 .workers__dispatch {
-  font-size: 11px;
-  max-width: 16ch;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  vertical-align: bottom;
+  min-width: 0;
+  font-size: 14px;
+  overflow-wrap: anywhere;
 }
 
 /* Raw receipts: collapsed by default, diagnostics only (never the main
    evidence surface). */
 .workers__raw {
-  font-size: 12px;
+  font-size: 14px;
   color: #6b6557;
 }
 
@@ -4852,11 +3828,11 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   max-height: 240px;
   overflow: auto;
   background: #faf8f0;
-  border: 2px dashed #e6e1d2;
+  border: 1px solid #e6e1d2;
   border-radius: 8px;
   padding: 8px;
   margin: 4px 0 0;
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-word;
@@ -4880,10 +3856,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   cursor: pointer;
 }
 
-/* ---------- Run ownership / health (operations epic Phase 1) ----------
-   A compact chip beside the Run selector plus a peek panel. Tones follow
-   the .conn indicator: meadow = viewer-owned, butter = external/mismatch,
-   coral = unverifiable, plain paper = unbound. */
+
 .runhealth {
   position: relative;
 }
@@ -4892,10 +3865,10 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   align-items: center;
   gap: 6px;
   font-family: var(--font-display);
-  font-size: 12.5px;
+  font-size: 14px;
   padding: 5px 12px;
-  border-radius: 12px 14px 11px 13px;
-  border: 2px solid var(--line-strong);
+  border-radius: 6px;
+  border: 1px solid var(--line-strong);
   background: var(--paper);
   color: var(--ink-soft);
   cursor: pointer;
@@ -4919,7 +3892,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 .runhealth__flag {
   font-family: var(--font-body);
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1;
   padding: 2px 6px;
   border-radius: 9px;
@@ -4927,7 +3900,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   color: #fff;
 }
 .runhealth__info-dot {
-  font-size: 10.5px;
+  font-size: 14px;
   line-height: 1;
   width: 14px;
   height: 14px;
@@ -4935,7 +3908,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  border: 1.5px solid currentColor;
+  border: 1px solid currentColor;
 }
 .runhealth__panel {
   position: absolute;
@@ -4944,10 +3917,10 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   z-index: 60;
   width: 340px;
   padding: 12px 14px;
-  border: 2px solid var(--line-strong);
-  border-radius: 14px 12px 15px 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
   background: var(--paper);
-  box-shadow: var(--shadow-sticker);
+  
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -4959,19 +3932,19 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   align-items: baseline;
 }
 .runhealth__key {
-  font-size: 11px;
+  font-size: 14px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--ink-faint);
   min-width: 74px;
 }
 .runhealth__val {
-  font-size: 12.5px;
+  font-size: 14px;
   color: var(--ink);
 }
 .runhealth__detail {
   margin: 0;
-  font-size: 12.5px;
+  font-size: 14px;
   color: var(--ink-soft);
 }
 .runhealth__warnings {
@@ -4983,7 +3956,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   gap: 6px;
 }
 .runhealth__warning {
-  font-size: 12.5px;
+  font-size: 14px;
   line-height: 1.45;
   color: var(--ink);
 }
@@ -4995,12 +3968,12 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 .runhealth__clean {
   margin: 0;
-  font-size: 12px;
+  font-size: 14px;
   color: var(--ink-faint);
 }
 
 .runhealth__removed {
-  border-top: 1px dashed var(--line);
+  border-top: 1px solid var(--line);
   padding-top: 8px;
   display: flex;
   flex-direction: column;
@@ -5009,7 +3982,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 .runhealth__removed h3,
 .runhealth__removed p {
   margin: 0;
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.4;
 }
 .runhealth__removed h3 {
@@ -5025,7 +3998,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 .runhealth__removed-list {
   max-height: 220px;
   overflow: auto;
-  font-size: 11.5px;
+  font-size: 14px;
 }
 .runhealth__removed-list ul {
   list-style: none;
@@ -5066,9 +4039,11 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 .cap {
   display: flex;
   flex-direction: column;
+  container: capability / inline-size;
+  min-width: 0;
   gap: 8px;
   padding-top: 10px;
-  border-top: 2px dashed var(--line);
+  border-top: 1px solid var(--line);
 }
 .cap__title {
   margin: 0;
@@ -5082,43 +4057,51 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 .cap__runtime {
   font-family: var(--font-body);
-  font-size: 11.5px;
+  font-size: 14px;
   color: var(--ink-faint);
 }
 .cap__note {
   margin: 0;
-  font-size: 12px;
+  font-size: 14px;
   color: var(--ink-soft);
 }
 .cap__error {
   margin: 0;
-  font-size: 12px;
+  font-size: 14px;
   color: var(--coral);
 }
 .cap__list {
   list-style: none;
   margin: 0;
   padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  display: grid;
+  gap: 0;
 }
 .cap__item {
   display: grid;
-  grid-template-columns: minmax(120px, auto) auto 1fr;
-  gap: 8px;
-  align-items: baseline;
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 0.65fr) minmax(0, 2fr);
+  gap: 8px 12px;
+  align-items: start;
+  min-width: 0;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+@container capability (max-width: 620px) {
+  .cap__item { grid-template-columns: minmax(0, 1fr) minmax(120px, auto); }
+  .cap__explain { grid-column: 1 / -1; }
 }
 .cap__label {
-  font-size: 12.5px;
+  font-size: 14px;
   color: var(--ink);
 }
 .cap__state {
-  font-size: 11px;
+  font-size: 14px;
   padding: 2px 8px;
-  border-radius: 9px 11px 10px 12px;
-  border: 1.5px solid var(--line-strong);
-  white-space: nowrap;
+  border-radius: 6px;
+  border: 1px solid var(--line-strong);
+  justify-self: start;
+  overflow-wrap: anywhere;
 }
 .cap__state--on {
   color: #3e9a55;
@@ -5135,40 +4118,18 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   background: var(--paper-2);
 }
 .cap__explain {
-  font-size: 11.5px;
+  font-size: 14px;
   color: var(--ink-faint);
 }
 
-/* --- Phase 3: threaded chat + history integrity --------------------------- */
+
 
 /* Conversation-row indicators. The unread dot is durable evidence only
    (an explicit unread marker in the Orca inbox row); absence renders
    nothing so an unknown read state never looks unread. */
-.chat-thread__unread {
-  flex: none;
-  width: 8px;
-  height: 8px;
-  background: var(--coral);
-  border-radius: 999px;
-  box-shadow: 0 0 0 1.5px rgba(234, 107, 94, 0.28);
-}
-/* Urgent badge sits left of the pending-replies badge (right: 9px). */
-.chat-thread__urgent {
-  position: absolute;
-  right: 36px;
-  bottom: 7px;
-  display: grid;
-  min-width: 20px;
-  height: 20px;
-  place-items: center;
-  padding: 0 4px;
-  color: #8a4a12;
-  background: rgba(240, 185, 78, 0.24);
-  border: 1.5px solid rgba(179, 127, 22, 0.5);
-  border-radius: 999px;
-  font-size: 12.75px;
-  font-weight: 700;
-}
+
+
+
 
 /* History-completeness warning: fires on a saturated global inbox window
    even when this Run has few rows — few rows here do not prove the Run's
@@ -5181,8 +4142,8 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   padding: 9px 12px;
   color: #8a4a12;
   background: rgba(240, 185, 78, 0.14);
-  border: 1.5px dashed rgba(179, 127, 22, 0.45);
-  border-radius: 11px 8px 12px 8px;
+  border: 1px solid rgba(179, 127, 22, 0.45);
+  border-radius: 6px;
   font-size: var(--chat-note-size);
   line-height: 1.45;
 }
@@ -5198,8 +4159,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   margin-top: 3px;
 }
 
-/* Message-level metadata chips wrap as the rail shrinks; the timestamp
-   stays right-aligned on whichever line has room for it. */
+
 .chat-message__meta > * {
   flex: none;
 }
@@ -5216,8 +4176,8 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 .chat-message__read,
 .chat-message__provenance {
   padding: 1px 5px;
-  border-radius: 5px 4px 6px 3px;
-  font-size: 0.75rem;
+  border-radius: 6px;
+  font-size: 0.875rem;
   font-weight: 600;
   letter-spacing: 0.04em;
   line-height: 1.25;
@@ -5238,13 +4198,11 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 .chat-message__provenance {
   color: var(--ink-soft);
-  background: rgba(245, 241, 230, 0.9);
-  border: 1px dashed var(--line-strong);
+  background: var(--paper-2);
+  border: 1px solid var(--line-strong);
 }
 
-/* Reply context: a compact, evidence-backed quote of the threaded parent.
-   Rendered only when Orca's own thread_id resolves inside this Run's
-   history — never reconstructed. */
+
 .chat-message__reply-context {
   overflow: hidden;
   margin: 4px 0 1px;
@@ -5253,7 +4211,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   text-overflow: ellipsis;
   white-space: nowrap;
   background: rgba(123, 183, 224, 0.1);
-  border-left: 2.5px solid rgba(62, 123, 166, 0.4);
+  border-left: 1px solid rgba(62, 123, 166, 0.4);
   border-radius: 4px;
   font-size: var(--chat-note-size);
 }
@@ -5267,10 +4225,10 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 .activity-event__flag {
   padding: 1px 5px;
   color: var(--ink-soft);
-  background: rgba(245, 241, 230, 0.9);
-  border: 1px dashed var(--line-strong);
-  border-radius: 5px 4px 6px 3px;
-  font-size: 9.5px;
+  background: var(--paper-2);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  font-size: 14px;
   font-weight: 600;
   letter-spacing: 0.04em;
   line-height: 1.25;
@@ -5289,7 +4247,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 .activity-event__thread {
   margin: 2px 0 0;
   color: var(--sky-ink);
-  font-size: 10px;
+  font-size: 14px;
 }
 
 /* --- Phase 5: recovery and output audit ----------------------------------- */
@@ -5306,13 +4264,13 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 
 .workers__srcbadge {
   flex: none;
-  font-size: 11px;
+  font-size: 14px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   padding: 1px 8px;
   border-radius: 999px;
-  border: 2px solid currentColor;
+  border: 1px solid currentColor;
   color: var(--sky-ink, #3e7ba6);
 }
 
@@ -5325,9 +4283,9 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 
 .workers__flag {
-  font-size: 10px;
+  font-size: 14px;
   color: var(--ink-soft, #8b8798);
-  border: 1px dashed var(--line-strong, #d3ccb8);
+  border: 1px solid var(--line-strong, #d3ccb8);
   border-radius: 999px;
   padding: 0 6px;
 }
@@ -5336,10 +4294,10 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
    .workers__source — it filters, it never fetches. */
 .workers__search {
   font: inherit;
-  font-size: 12px;
+  font-size: 14px;
   color: var(--ink, #4a4754);
   background: #faf8f0;
-  border: 2px solid #e6e1d2;
+  border: 1px solid #e6e1d2;
   border-radius: 8px;
   padding: 2px 8px;
   width: 100%;
@@ -5347,7 +4305,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 
 .workers__download {
   font: inherit;
-  font-size: 11px;
+  font-size: 14px;
   background: none;
   border: none;
   padding: 0;
@@ -5364,7 +4322,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 /* The receipt of a manual release/retain, with archive facts kept visibly
    separate from the authoritative fleet state. */
 .workers__decision {
-  border-left: 3px solid var(--line-strong, #d3ccb8);
+  border-left: 1px solid var(--line-strong, #d3ccb8);
   padding-left: 8px;
 }
 
@@ -5374,7 +4332,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 
 .audit__row + .audit__row {
-  border-top: 2px dashed var(--paper-edge, #d8d3c4);
+  border-top: 1px solid var(--paper-edge, #d8d3c4);
   margin-top: 6px;
   padding-top: 6px;
 }
@@ -5395,18 +4353,18 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 
 .audit__toggle:disabled {
   cursor: wait;
-  opacity: 0.7;
+  opacity: 1;
 }
 
 .audit__op {
   flex: none;
-  font-size: 10px;
+  font-size: 14px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   padding: 1px 7px;
   border-radius: 999px;
-  border: 2px solid currentColor;
+  border: 1px solid currentColor;
   color: var(--sky-ink, #3e7ba6);
 }
 
@@ -5423,11 +4381,11 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
    it must read as "unknown", never as an error or a clearance. */
 .audit__state {
   flex: none;
-  font-size: 11px;
+  font-size: 14px;
   font-weight: 700;
   padding: 1px 8px;
   border-radius: 999px;
-  border: 2px solid currentColor;
+  border: 1px solid currentColor;
 }
 
 .audit__state[data-state="completed"] {
@@ -5448,18 +4406,18 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 
 .audit__state[data-state="other"] {
   color: var(--ink-soft, #8b8798);
-  border-style: dashed;
+  border-style: solid;
 }
 
 .audit__hint {
   margin-left: auto;
   flex: none;
-  font-size: 11px;
+  font-size: 14px;
   color: var(--ink-soft, #8b8798);
 }
 
 .audit__note {
-  font-size: 12px;
+  font-size: 14px;
   color: var(--ink-soft, #8b8798);
 }
 
@@ -5470,11 +4428,11 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 
 .audit__receipt {
-  font-size: 12px;
+  font-size: 14px;
   padding: 4px 8px;
   border-radius: 8px;
   background: #faf8f0;
-  border: 2px solid #e6e1d2;
+  border: 1px solid #e6e1d2;
 }
 
 .audit__receipt--completed {
@@ -5494,7 +4452,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 
 .audit__outcome {
-  font-size: 12px;
+  font-size: 14px;
   color: var(--ink-soft, #8b8798);
 }
 
@@ -5503,11 +4461,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   user-select: none;
 }
 
-/* --- Phase 7: placement editor, workspace lanes, per-worker intervention ---
-   Everything below renders in the same crayon register: paper washes, wonky
-   radii, dashed outlines where evidence is missing, and one accent per
-   meaning (butter = creating, sky = active, lilac = waiting on a human,
-   meadow = settled, coral = destructive, ink-faint dashes = unknown). */
+
 
 /* Placement editor inside the node panel: mode picker on top, then the
    creation-only metadata grid. Creation fields render ONLY for the two
@@ -5525,8 +4479,8 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   gap: 6px;
 }
 .placement__creation {
-  border: 2px dashed var(--line-strong);
-  border-radius: 12px 9px 13px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
   background: var(--paper-2);
   padding: 10px;
   display: flex;
@@ -5543,7 +4497,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   flex-direction: column;
   gap: 5px;
   min-width: 0;
-  font-size: 12px;
+  font-size: 14px;
   color: var(--ink-soft);
 }
 .placement__field .node-panel__custom {
@@ -5551,18 +4505,18 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 .placement__comment {
   font-family: var(--font-body);
-  font-size: 13px;
+  font-size: 14px;
   color: var(--ink);
   background: var(--paper);
-  border: 2px solid var(--line-strong);
-  border-radius: 10px 8px 12px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
   padding: 7px 9px;
   resize: vertical;
 }
 .placement__comment:focus {
   outline: none;
   border-color: var(--sky);
-  box-shadow: 0 0 0 3px var(--sky-wash);
+  
 }
 .placement__warn {
   color: var(--coral);
@@ -5572,11 +4526,11 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 .node-panel__lane-remove {
   align-self: flex-start;
   font-family: var(--font-body);
-  font-size: 12px;
+  font-size: 14px;
   color: var(--coral);
   background: none;
   border: none;
-  border-bottom: 1.5px dashed var(--coral);
+  border-bottom: 1px solid var(--coral);
   padding: 1px 2px;
   cursor: pointer;
 }
@@ -5595,7 +4549,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   flex-direction: column;
   gap: 7px;
   padding: 10px 0 4px;
-  border-top: 1.5px dashed var(--line-strong);
+  border-top: 1px solid var(--line-strong);
 }
 .lanes__row:first-of-type {
   border-top: none;
@@ -5609,17 +4563,17 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 .lanes__state {
   font-family: var(--font-display);
-  font-size: 12px;
+  font-size: 14px;
   padding: 2px 10px;
-  border-radius: 10px 12px 9px 13px;
-  border: 2px solid var(--line-strong);
+  border-radius: 6px;
+  border: 1px solid var(--line-strong);
   background: var(--paper);
   color: var(--ink-soft);
   white-space: nowrap;
 }
 .lanes__state[data-state="planned"] {
   color: var(--ink-soft);
-  border-style: dashed;
+  border-style: solid;
 }
 .lanes__state[data-state="creating"] {
   color: #b37f16;
@@ -5644,7 +4598,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 .lanes__state[data-state="unverifiable"] {
   color: var(--coral);
   border-color: var(--coral);
-  border-style: dashed;
+  border-style: solid;
   background: #fdece9;
 }
 .lanes__state[data-state="removal_blocked"] {
@@ -5654,16 +4608,16 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 .lanes__state[data-state="removed"] {
   color: var(--ink-faint);
-  border-style: dashed;
+  border-style: solid;
 }
 .lanes__id {
-  font-size: 12.5px;
+  font-size: 14px;
 }
 .lanes__facts {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  font-size: 12.5px;
+  font-size: 14px;
   color: var(--ink);
 }
 .lanes__facts i {
@@ -5671,21 +4625,21 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 .lanes__hint {
   margin: 0;
-  font-size: 11.5px;
+  font-size: 14px;
 }
 .lanes__warning {
   color: #b3540e;
   background: #fdf1e3;
-  border: 1.5px dashed #eedeb4;
-  border-radius: 9px 12px 10px 13px;
+  border: 1px solid #eedeb4;
+  border-radius: 6px;
   padding: 5px 9px;
-  font-size: 12.5px;
+  font-size: 14px;
 }
 
 /* Per-worker intervention buttons share the row with release/retain; a
    touch of separation keeps "lifecycle decision" apart from "intervention". */
 .workers__ctl {
-  border-style: dashed;
+  border-style: solid;
 }
 
 /* Run picker: exact-ID navigation + older-page control. The exact field is
@@ -5703,17 +4657,17 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   width: 150px;
   min-width: 0;
   font-family: var(--font-body);
-  font-size: 12.5px;
+  font-size: 14px;
   color: var(--ink);
   background: var(--paper);
-  border: 2px solid var(--line-strong);
-  border-radius: 10px 8px 12px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
   padding: 6px 9px;
 }
 .runpick__exact-input:focus {
   outline: none;
   border-color: var(--sky);
-  box-shadow: 0 0 0 3px var(--sky-wash);
+  
 }
 .runpick__exact-input::placeholder {
   color: var(--ink-faint);
@@ -5728,12 +4682,12 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 .gate__explain {
   margin: 0 0 11px;
-  font-size: 12.5px;
+  font-size: 14px;
   line-height: 1.55;
   color: var(--ink-soft);
 }
 .gate__explain code {
-  font-size: 11.5px;
+  font-size: 14px;
   background: var(--paper);
   border: 1px solid var(--line-strong);
   border-radius: 6px;
@@ -5749,11 +4703,11 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   flex-wrap: wrap;
 }
 .cap__umbrella {
-  font-size: 10px;
+  font-size: 14px;
   letter-spacing: 0.4px;
   color: var(--ink-faint);
-  border: 1.5px dashed var(--line-strong);
-  border-radius: 8px 10px 9px 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
   padding: 1px 7px;
   white-space: nowrap;
 }
@@ -5768,8 +4722,8 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   gap: 0;
   margin-inline-start: auto;
   overflow: hidden;
-  border: 1.5px solid var(--line-strong);
-  border-radius: 10px 8px 11px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
   background: var(--paper);
 }
 
@@ -5823,3 +4777,14 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 .scheduler-panel__chip {
   overflow-wrap: anywhere;
 }
+
+/* Shared browser and control states */
+html { font-size: 16px; }
+body { line-height: 1.5; caret-color: var(--sky-ink); }
+::selection { background: #cddfff; color: #10243f; }
+:focus-visible { outline: 2px solid #2054a5 !important; outline-offset: 2px; }
+input::placeholder, textarea::placeholder { color: #53677d; opacity: 1; }
+button:disabled, input:disabled, select:disabled, textarea:disabled, [aria-disabled="true"] { color: #53677d; cursor: not-allowed; }
+code, pre, kbd, samp { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.btn { border: 1px solid var(--line-strong); border-radius: 6px; font-weight: 600; }
+.btn:hover:not(:disabled) { background: var(--paper-2); border-color: var(--sky-ink); }

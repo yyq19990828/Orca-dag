@@ -3,6 +3,7 @@ import { resolveGate } from "../api";
 import { useT } from "../i18n";
 import type { Gate } from "../types";
 import { useDecisionDialog } from "./DecisionDialog";
+import { useCoordinatorControl } from "./useCoordinatorControl";
 
 /**
  * Pending decision gates. Resolving one is a Run-scoped mutation, so the server
@@ -42,6 +43,7 @@ export const GatePanel = memo(function GatePanel({
 }) {
   const t = useT();
   const dialog = useDecisionDialog();
+  const withControl = useCoordinatorControl();
   const [busyId, setBusyId] = useState<string | null>(null);
   const pending = gates.filter((g) => g.status === "pending" || g.status === "open" || !g.resolution);
 
@@ -51,7 +53,7 @@ export const GatePanel = memo(function GatePanel({
     if (disabled || busyId === gate.id) return;
     setBusyId(gate.id);
     try {
-      await resolveGate(gate.id, resolution, runId);
+      await withControl(runId, (control) => resolveGate(gate.id, resolution, runId, control));
       onResolved();
     } catch (err) {
       await dialog.alert({

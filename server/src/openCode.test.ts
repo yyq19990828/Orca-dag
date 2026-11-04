@@ -570,7 +570,8 @@ describe("API-preselected OpenCode full TUI", () => {
       assert.equal(stop.operation, "worker-abandon");
       assert.equal(stop.settledLocally, true);
       const release = await fetch(`${base}/api/workers/${started.dispatchId}/release`, { method: "POST",
-        headers: { "X-Orca-Dag-Token": policy.token } });
+        headers: { "Content-Type": "application/json", "X-Orca-Dag-Token": policy.token },
+        body: JSON.stringify({ runId: "run_test" }) });
       assert.equal(release.status, 200);
       assert.equal((await store.listOpenCodeLaunches())[0].state, "retained");
       assert.equal(calls(orcaLog, "close").length, 0); assert.equal(calls(orcaLog, "worker-stop").length, 0);
@@ -619,7 +620,7 @@ describe("API-preselected OpenCode full TUI", () => {
     const journal = load(process.env.FAKE_OPENCODE_JOURNAL!);
     journal.bindings = []; journal.openCodeLaunches[0].dispatchId = null; journal.openCodeLaunches[0].state = "prepared";
     writeFileSync(process.env.FAKE_OPENCODE_JOURNAL!, JSON.stringify(journal));
-    await recoverOpenCodeTuiBindings("run_test", await listWorkers("run_test"));
+    await recoverOpenCodeTuiBindings("run_test", (await listWorkers("run_test")).workers);
     assert.equal((await store.list())[0].dispatchId, started.dispatchId);
     assert.equal(calls(orcaLog, "worker-start").length, 1);
   });

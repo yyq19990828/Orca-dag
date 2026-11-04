@@ -6,18 +6,18 @@
 
 本参考文档对 orca-dag viewer 的核心特性进行分类梳理，涵盖界面呈现、执行调度、多 agent 与模型支持、工作树隔离、监控审计及双语本地化规范。关于逐步操作流程请参考[操作教程](../tutorials/viewer-operations_zh.md)，底层版本门槛请参考[兼容性矩阵](compatibility_zh.md)。
 
-## DAG 可视化与布局算法
+## 分节式工作台与 DAG 可视化
 
-- **手绘蜡笔设计风格**：采用 SVG `feTurbulence` 滤镜生成波动手绘描边，搭配米色速写本底色画布。
-- **状态感知配色与 Harness 徽章**：节点按 `pending / ready / dispatched / completed / failed / blocked` 映射专属颜色，并在节点右上角明确标注其绑定的执行 harness。
+- **现代分节式工作台**：采用深蓝导航与清晰 1px 边框（`#dbe2ea`、`#d8e1eb`）的低噪现代化工作台（`workbench.css`、`styles.css`），配合本地系统无衬线字体，完全取代旧有纸张与蜡笔手绘风格及 SVG 湍流滤镜。
+- **状态感知配色与 Harness 徽章**：节点具有固定尺寸（280×120px，标题 16px，数据 14px），按 `pending / ready / dispatched / completed / failed / blocked` 映射专属颜色，并在节点右上角明确标注其绑定的执行 harness。轮询周期为 2 秒。
+- **DAG 画布懒加载**：`DagView` 在首次进入“任务”图视图时才进行动态懒加载（`React.lazy`），并在挂载后常驻内存，大幅降低首屏渲染负载与内存消耗。
 - **布局算法即时切换**：顶栏提供横向分层（LR）、纵向分层（TB，基于 dagre / Sugiyama）以及力导向布局（Fruchterman–Reingold）；提供 **↻ Re-layout** 一键重置自动排版，用户的布局选择自动保存至工作区配置。
 - **自由拖拽与持久化**：用户可手动拖拽节点微调排版，拖拽后的坐标在后台实时轮询刷新中保持固定；未手动调整的节点继续跟随自动布局算法。
-- **层级关系与执行依赖分离**：Task 的 `parent_id` 以淡色点线括弧（子节点端带小圆环）呈现，与带有箭头的铅笔质感依赖连线明确区分。父子关系不影响任务就绪判定与拓扑调度，可在顶栏通过 **Hide/Show parent links** 控制显隐。
-- **生动的执行期动画**：
-  - `dispatched`（执行中）节点表面呈现连续循环的蜡笔斜纹涂鸦动画；
-  - 执行中节点向外流出的依赖连线先以游动虚线草稿呈现，随后以铅笔笔触沿有向箭头向下游逐步加粗描绘为实线。
-- **显式主代理阶段（Lead Stage）**：支持将 Run 中的某个关键阶段标记为语义上的主导 Agent。被标记节点叠加专属的靛蓝双层外框与金色 `★ Lead` 徽章，同时保留底层状态颜色。此功能仅为 viewer 本地展示元数据，不改变底层协调者权限。
-
+- **层级关系与执行依赖分离**：Task 的 `parent_id` 以淡色点线括弧（子节点端带小圆环）呈现，与带有实线箭头的依赖连线明确区分。父子关系不影响任务就绪判定与拓扑调度，可在顶栏通过 **Hide/Show parent links** 控制显隐。
+- **静态连线与受控动效**：依赖连线保持静态实线（`edge--idle`、`edge--run`、`edge--done`），消除持续流动的虚线循环。仅对具有明确执行证据的运行中任务显示轻量脉冲圆点（`@keyframes graph-executing`），并在页面隐藏、图非激活或启用 `prefers-reduced-motion: reduce` 时自动停用。
+- **中央详情阅读区（NodePanel）**：在列表或图中选中节点时，在中央主区域（`.workbench-detail`）就地展开详情，替代原有的浮动遮罩抽屉。关闭详情时完整恢复原视图、滚动位置与焦点。
+- **常驻通信侧栏**：右侧常驻可调节宽度的通信面板（`.workbench-chat`，默认 440px，在 380–820px 间根据视口预留空间动态缩放，极限场景回退 280px），草稿与状态通过 `useScopedChatState` 实施精准隔离。在 ≤900px 视口下展开时自动切换为聚焦单面板，隐藏中央主区域。
+- **显式主代理阶段（Lead Stage）**：支持将 Run 中的某个关键阶段标记为语义上的主导 Agent。被标记节点叠加专属的金色 `★ Lead` 徽章，同时保留底层状态颜色。此功能仅为 viewer 本地展示元数据，不改变底层协调者权限。
 ## 执行调度与协调者生命周期
 
 - **▶ Run with Orca / ⏹ Stop 控制**：
@@ -42,11 +42,11 @@
   - `opencode` harness：
     - **建议性发现与下拉选单**：通过本地工作区模型发现接口（`GET /api/models/opencode`）动态加载。作用域限定于 `local-workspace`；失败时提供受控英文诊断且不泄露 stderr。明确区分成功但目录为空（`status: "available"`、空 `models`）与发现失败（`status: "unavailable"`）。
     - **下拉选单与手动自由文本输入**：支持直接从发现目录中选取，亦可在文本框中手动填写 `provider/model[#variant]`。
-    - **草稿校验与持久化规则**：自由文本输入校验严格匹配 `/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(?:#[A-Za-z0-9._-]{1,64})?$/` 正则。不合法的输入被标记为 `aria-invalid`，且绝不写入节点配置存储；清空文本框则重置恢复为默认模型（`null`）。
+    - **草稿校验与持久化规则**：自由文本输入校验严格匹配 `/^[A-Za-z0-9._-]{1,128}\/[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}(?:#[A-Za-z0-9._-]{1,128})?$/` 正则，支持首斜杠后带命名空间的多段路径（如 `openrouter/meta-llama/llama-3.1-70b-instruct#high`）。不合法的输入被标记为 `aria-invalid`，且绝不写入节点配置存储；清空文本框则重置恢复为默认模型（`null`）。
     - **已保存但不在目录中的模型保留**：若节点此前保存的模型在本地发现目录中不存在（如自定义 provider 或宿主环境差异），该模型依然作为候选项保留在下拉列表中，绝不自动抹除。
     - **启动锁定（Launch-Locked）**：任务一旦派发过首次 Dispatch 或协调者处于运行中，模型下拉选单与手动输入文本框连同 harness、effort、placement 一同置灰禁用（`disabled={launchLocked}`）。
   - `claude` 通过 `worker-start --model` 传递模型；
-  - 本地 POSIX Codex 在当前/已有工作区、运行中的 Orca ≥ 1.4.217 时使用原生模型启动；旧版/未知运行时及本地新建工作区保留预启动绑定路径，远程与 Windows 使用原生路径。详见[Codex 启动边界](../tutorials/viewer-operations_zh.md#codex-原生启动与兼容路径)。
+  - 本地 POSIX Codex 在当前/已有工作区、运行中的 Orca ≥ 1.4.217 时使用原生模型启动；新建子工作树与新建顶层工作树在本地 Linux、Orca ≥ 1.4.247、CLI ≥ 1.4.247 且 Codex CLI ≥ 0.166.0 时切换至原生启动（`canUseNativeCodexFreshWorktree`），并在 Run `run_44b240b8e6ee` 中完成真实端到端验证。旧版/未知运行时及非 Linux 环境保留预启动绑定路径，远程与 Windows 使用原生路径。详见[Codex 启动边界](../tutorials/viewer-operations_zh.md#codex-原生启动与兼容路径)。
   - **OMP / Antigravity**：自由文本形式的完整 selector，原样作为单个原生 `--model` 参数传递，或省略以使用已配置默认模型。Current 或精确 Existing 放置要求运行中的 Orca 与解析后的 CLI 均 ≥ 1.4.245。创建新建 Git 工作树（`new-child`、`new-top-level`）或任何工作区 Lane 则要求运行中的 Orca 与解析后的 CLI 均 ≥ 1.4.246。仅限本地 Linux；远程环境、macOS 与 Windows 均被拒绝。新建 child 放置必须具有明确正向识别的本地被托管 Git 父工作区；新建 top-level 放置要求精确的仓库标识符（`id:...` 或绝对路径 `path:/...`）指向已验证的本地 Git 仓库（拒绝模糊名称、普通目录、异构主机仓库且不自动 git-init）。工作区 Lane 仅共享工作区：首个 Task 创建或接纳工作区，后续依赖有序 Task 复用精确 Existing。每个 Task 均分配全新的原生 agent 会话与 Dispatch（绝不进行通用终端复用、禁止 `--terminal` 或 `--surface` 覆盖，拒绝后绝不回退）。原生 `worker-start --agent` 严格遵循用户的 Orca Chat/Terminal 设置，viewer 不检查或覆盖偏好。保留 1.4.245 的 Terminal TUI 与 OMP Native Chat 验证基线；1.4.246 上的真实端到端 Run `run_67072641a11a` 验证了 OMP 用户默认 Chat 与 Antigravity 用户默认 Terminal 在 4 条 Lane 下的串行工作区交接（共 8 个 Task、全新原生会话、零清理债务、setup `skip` 与配置默认模型）。不代表已实测新放置下的活动 Stop/重启、Antigravity Chat、Orca 运行时重启、setup `run`/`inherit` 或显式模型新放置。所有非空 effort 均被拒绝，即使同时指定模型。
 - **推理力度（Effort）**：`claude`、`codex` 可选择各自支持的力度，且必须同时设置模型；清空模型会清空 effort。原生启动传递 `--effort`，兼容预启动 Codex 则在启动命令中设置。OMP/Antigravity 拒绝所有非空 effort，即使同时指定模型；已保存的不支持值保持可见并提供明确清除入口，清空模型不会静默删除它们。
 - **OpenCode 启动模式与原生路由边界**：
@@ -58,7 +58,7 @@
 
 ## 工作区隔离、放置矩阵与 Lanes
 
-- **按工作区隔离的 Run 视图**：Orca 编排注册表全局共享，但 viewer 仅展示任务创建者身份与当前工作区匹配的 Run，杜绝跨工作区混淆。支持新建 Run、游标分页加载历史 Run 以及精确 ID 查询。
+- **按工作区隔离的 Run 视图**：Orca 编排注册表全局共享，但 viewer 仅展示任务创建者身份与当前工作区匹配的 Run，杜绝跨工作区混淆。基于有界的工作区 Run 分页接口（`GET /api/runs/page?limit=1..100&cursor=`）加载历史，刷新保留遍历游标，外来 Run 如实标记 `workspace.owned: false`。
 - **Run 健康度徽标与已移除工作**：直观展示 Run 当前归属与健康状态（`viewer-owned / external / unbound / inconsistent`），包含各来源计数、警告以及可选的已移除工作账本证据：
   - **已移除工作摘要（`health.removedWork`）**：展示已移除指标（tasks、dispatches、workers、terminals、覆盖范围 `complete` 或 `partial`、记录起始时间、最近移除时间以及 `activeWorkersAtRemoval`）。宿主不支持或数据缺失时为 `null`，明确提示不可用，缺失数据绝不补 0。
   - **按需分页明细**：仅在操作者显式点击“View removed-work details / 查看已移除工作明细”时通过 `GET /api/runs/:runId/removed-work` 按需拉取历史记录，避免初次数据膨胀。
@@ -76,21 +76,21 @@
 - **工作区 Lane（串行复用工作区）**：支持将一组依赖有序的任务绑定至一条共享的本地非 current 工作区 Lane。同一 Lane 内的任务严格串行执行（同一时刻仅允许一个活动 Dispatch），不同 Lane 之间受 Max parallel 约束并行。若工作区身份证据不足，Lane 冻结为 `unverifiable`，绝不盲目挪移或随意重置。原生 OMP 与 Antigravity 在本地 Linux、运行中的 Orca 与已解析 CLI 均 ≥ 1.4.246 时支持工作区 Lane 与新建 Git 工作树。准入检查与计划预览会评估 Lane 的种子放置，若版本低于 1.4.246 则在发起任何变更前直接拒绝。Lane 仅共享工作区：每个 Task 均分配全新的原生 agent 会话与 Dispatch，绝不复用终端进程或在拒绝后降级回退。
 - **CLI 编排兼容性**：当解析后的 CLI ≥ 1.4.246 时，`runOrca` 会根据缓存的就绪探针为编排命令追加 `--full` 参数，防止 1.4.246 默认的精简 JSON 导致数据缺失；CLI 1.4.245 拒绝 `--full`，因此在调用前完成版本判断，遇到不确定响应绝不重试变更。真实验收证实单次 `POST /api/runs` 即可创建 Run（`run_2a67b90e6a94`），避免了因精简响应误报 500 或重复变更的问题。
 - **跨 Lane 汇合集成门**：当某个任务的上游依赖分布于不同的工作区 Lane 时，即使上游任务全部成功，也并不代表代码已经合并。协调者会自动建立幂等的跨 Lane 集成门（`[orca-dag:integration]`），强制要求人工介入并在确认代码集成后标记 `integrated`，viewer 自身绝不擅自执行 Git 分支合并或提交。
-- **原生代码审阅与清理**：任务完成后，支持直接在 Orca 编辑器中打开精确工作区的改动文件和 diff 对比；工作树清理强制调用 `orca worktree rm`，且必须在 worker 归属落定并经人工确认后方可执行。
+- **原生代码审阅、安全清理与回收**：任务完成后，支持直接在 Orca 编辑器中打开精确工作区的改动文件和 diff 对比；工作树清理强制使用 `worktree` 字段调用 `orca worktree rm --worktree <worktree>`。提供按需候选审查（`review`）清单，清理安全判定会重新核查全局完整 fleet 列表（`listWorkers(undefined, { includeRemote: true })`），以覆盖未出现在终端列表中的其他 Run Chat；带安全删除已合并分支原生选项（`deleteBranch`）并显示 `preservedBranch` 证据，绝不从 Web 端强行删除未合并分支；受主工作区与活跃工作区保护。
 
 ## 监控、会话通信与审计
 
-- **独立 Stage 卡片与通信中心**：
-  - 选中节点右侧弹出设置与 spec 详情卡片；
-  - 专用左侧栏集成 Activity 时间线与 Chat 会话面板。Activity 采用 SSE 实时事件流，Chat 将 Run 作用域内的事件按执行阶段分组呈现，展示协调者派工气泡与 worker 上报。
-- **双向会话与指导投递**：支持直接回复 worker 提出的升级提问，亦可向经证实仍处于活跃状态的 Dispatch 主动投递持久化指导消息。
+- **独立 Stage 卡片与规范审批门创建**：
+  - 选中节点右侧弹出设置与 spec 详情卡片；可直接为同 Run 尚未派发的任务创建规范审批门（`POST /api/gates`），受 coordinator 生命周期锁保护；
+  - 专用左侧栏集成 Activity 时间线与 Chat 会话面板。Activity 采用 SSE 实时事件流，在页面隐藏时（`document.visibilityState === 'hidden'`）自动暂停连接，重新可见时刷新重连，保留轨道收起期间的未读计数；Chat 展示协调者派工气泡、worker 上报，并区分可回复提问与非可回复的原生 `stopReason` 升级事件（`kind: 'stop_event'`）。
+- **双向会话与指导投递**：支持直接回复 worker 提出的升级提问，亦可向经证实仍处于活跃状态的 Dispatch 主动投递持久化指导消息（支持嵌套 coordinator 重定向，不篡夺子所有权）。
 - **实时 Coordinator Check 流**：每轮协调者检查均会在聊天区下方留下有界的实时 receipt 回执（记录空检查、消息类型、耗时以及实际观测到的 agent/模型状态），心跳与状态更新直接在此展现，不再污染聊天历史。
-- **协调者群发广播**：支持向白名单受众（`@all` 或已发现的工作树列表）发送经过预览确认的广播指导，严格禁止发送生命周期消息。
+- **协调者群发广播**：支持向白名单受众（`@all` 或已发现的工作树列表）发送经过预览确认的广播指导，通过持久化操作员消息助手落盘，严格禁止发送生命周期消息。
 - **单 Dispatch 级运维干预**：
   - 针对存活的 Dispatch 发起单点终止（`worker-stop`）；
   - 针对已退出或结果未知的尝试发起放弃（`worker-abandon`）；
   - 针对本地报告等待输入的 worker 发起终端聚焦（`terminal switch`，严格依赖新鲜的 `agentWait` 证据）。
-- **Workers 详细面板**：提供完整的 fleet 监控视图，展示存活状态、执行主机、请求与实际生效的启动参数对比、带来源标记（auto/terminal/transcript）的输出日志，并支持对已加载日志的关键词搜索和本地文件下载。
+- **Workers 详细面板**：提供完整的 fleet 监控视图，展示存活状态、执行主机、请求与实际生效的启动参数对比、部分主机错误汇总（`partialHostErrors`）、主动 Keep-open、显式 Release/Retain、原生 `autoReleaseAt`，以及带来源标记（auto/terminal/transcript）的输出日志。选择与请求生成代际标记防止旧异步结果覆盖新选中内容。NextAction 映射 inspect/read/release 绝不预设 abandon；显式 Abandon 为独立确认的权限隔离动作。支持对已加载日志的关键词搜索和本地文件下载。
 
 ## 后台会话恢复与阻断处理
 

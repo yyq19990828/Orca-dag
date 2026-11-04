@@ -64,15 +64,16 @@ Orca 1.4.226 沿确切的 `--retry-of` 链累计启动失败的 `worker-start`�
 
 ## Coordinator 安全边界与读取效率
 
-- **收件箱协议**：旧版 FIFO check 重放最旧未确认 Delivery；处理全部消息，并处理 ACK 返回的后续批次。V3 消费式 check 在读取时确认，单独 ACK 不获取下一批。读取时的传输确认与本地处理完成严格区分：持久化消费式 check UUID、批次投递、已处理消息 ID 以及未决提问均 checkpoint 记录在 `.orca-dag/sessions.json`（`mailboxChecks`）中并支持跨重启恢复。丢失的消费响应通过只读 `request-show` 依据原始请求身份恢复，绝不发起新变更。已确认批次在人工提问未落定时继续流转。`--peek` 仅用于观察；不要为了监控而消费 worker 的收件箱。
-- **指导消息与后续任务生命周期**：产生原生影响前，先将请求及请求目标身份持久化到 `guidanceSends`。接受回执后区分请求与实际 Task/Dispatch ID、`enqueued` 与 `follow_up`；账本记录 `creationProven` 及清洗后的不可变启动证据（`status`, `launchMode`）。未决指导占用并发配额并阻止盲目重发。只读调和先前操作时返回 `guidance_reconciled`，绝不将其当作新内容已投递。Run Stop 覆盖全部 viewer 拥有的后续根任务，并将未决发送或未知清理结果报告为显式债务。
+- **收件箱协议与版本术语**：官方公共编排契约为 `contract 1`（`orchestration.contract.v1`），运行时协议为 3，联盟生命周期结算协议为 3（`ORCHESTRATION_FEDERATION_LIFECYCLE_SETTLEMENT_PROTOCOL_VERSION`），控制邮件协议为 2；`orchestration.federation-lifecycle-settlement.v1` 为联盟结算能力标识。本地 V3 迁移与 `[orca-dag:merge-inputs-v3]` 握手标记为本地 viewer 契约/标记，非全局上游版本名；持久化标记切勿重命名。旧版 FIFO check 重放最旧未确认 Delivery；处理全部消息，并处理 ACK 返回的后续批次。消费式 check 在读取时确认，单独 ACK 不获取下一批。读取时的传输确认与本地处理完成严格区分：持久化消费式 check UUID、批次投递、已处理消息 ID、未决提问及操作员消息记录均保存在 `.orca-dag/sessions.json`（`mailboxChecks`、`guidanceSends`、`operatorMessages`）中并支持跨重启恢复。丢失的消费响应通过只读 `request-show` 依据原始请求身份恢复，绝不发起新变更。已确认批次在人工提问未落定时继续流转。`--peek` 仅用于观察；不要为了监控而消费 worker 的收件箱。
+- **指导消息、后续任务生命周期与嵌套重定向**：产生原生影响前，先将请求及请求目标身份持久化到 `guidanceSends`。接受回执后区分请求与实际 Task/Dispatch ID、`enqueued` 与 `follow_up`；指导消息亦支持正面证实的嵌套重定向 `recipient_run_bound_redirect`，明确区分源 Task/Dispatch 与实际目标 Run（`destinationRunId`），不篡夺子所有权，不凭空生成 worker。账本记录 `creationProven` 及清洗后的不可变启动证据（`status`, `launchMode`）。未决指导占用并发配额并阻止盲目重发。只读调和先前操作时返回 `guidance_reconciled`，绝不将其当作新内容已投递。Run Stop 覆盖全部 viewer 拥有的后续根任务，并将未决发送或未知清理结果报告为显式债务。
+- **Stop 事件与真实提问语义分离**：原生 `stopReason` 升级（`finished`, `errored`, `needs-input`, `exited`）作为事件记录在 `PendingInboxItem.kind === 'stop_event'` 中，与可回复提问（`kind === 'question'`）严格区分。其落定必须遵循精确 Dispatch 引导、操作员决断或权威结算，绝不伪造回复或合成成功。
 - **历史启动模式读取**：Stop 或重启后，worker 详情可从关键账本恢复不可变的后续启动模式元组。必须匹配实际 Run、Task 与 Dispatch，不能误用请求目标父任务。证据缺失或不可读时仍为未知；展示证据恢复不授予变更权限。
 - **已提交 Stage 合并握手**：要求跨工作区已提交代码交接的合并点必须同时声明 `[orca-dag:merge-prep]` 与 `[orca-dag:merge-inputs-v3]`。原生 1.4.247 `ask` 不提供 `--subject` 与 `--payload` 参数（原生 subject 固定为 `'Question'`，`payload.question` 包含完整提问文本）。worker 必须在任何 Git 修改前，发起提问文本严格且仅为 `[orca-dag:merge-inputs-v3]` 的提问。coordinator 在校验当前合并 Task/Dispatch 归属、发送方句柄及干净依赖后，通过 StageGit 返回不可变 commit SHA 回执。缺乏 V3 标记的旧可运行合并 spec 在建图校验时会被直接拒绝，须新建 Run 重新规划。
-- **关键状态恢复与热降级防线**：`.orca-dag/sessions.json` 持久化关键恢复账本（`mailboxChecks` 与 `guidanceSends`），作为故障恢复依据而非滚动审计日志。不支持新字段的旧版读取器会直接报错（`session binding store contains unknown fields`）；包含未结算关键账本的 `sessions.json` 无法安全热降级至旧版读取器。
-- **清理债务核验**：可回收的清理债务（reclaimable debt）严格根据新鲜的 fleet 记录重新核验，在 viewer 外部完成的 release 同样能抵消旧债务；未知的清理结果将持续阻止标记完成。
+- **关键状态恢复与热降级防线**：`.orca-dag/sessions.json` 持久化关键恢复账本（`mailboxChecks`、`guidanceSends` 与 `operatorMessages`），作为故障恢复依据而非滚动审计日志。非活跃操作员提问回复与群发消息助手（`operatorMessages.ts`）在调用 Orca CLI 前在 `operatorMessages` 落盘，通过只读 `request-show` 调和未知结果（先前以不同内容完成报 `operator_message_reconciled`，未解决报 `operator_message_unknown`）。不支持新字段的旧版读取器会直接报错（`session binding store contains unknown fields`）；包含未结算关键账本的 `sessions.json` 无法安全热降级至旧版读取器。
+- **清理债务与不完整远程观测**：可回收的清理债务（reclaimable debt）严格根据新鲜的 fleet 记录重新核验，在 viewer 外部完成的 release 同样能抵消旧债务。`listWorkers` 返回有类型的 `WorkerInventory`（`{ workers: OrcaWorkerRow[], partialHostErrors: unknown[] }`），跨页汇总保留 `partialHostErrors`；远端主机缺失代表证据不全，绝不误判为已退出或借此清除债务。工作树移除清理安全判定重新核验全局完整 fleet 列表（`listWorkers(undefined, { includeRemote: true })`）而非仅当前选定 Run，确保未在终端列表中登记的其他 Run Native Chat worker 依然能有效保护共享工作区免遭误删。
 - **Helper 管理与谱系隔离**：同 Run 内的 helper worker 严格归其活动创建者管理。viewer 读取精确的 Dispatch lineage，不将 `parent_id` 视为所有权；仅在证实创建者已落定后方才接管 helper，归属不可读时保持等待。Stop 命令如实报告委派工作，绝不擅自终止它。可见的活动 worker 占用派工预算，但 helper 可在 viewer 外部启动，因此 **Max parallel 不是整个 Orca 运行时的全局硬上限**。
 - **终端精确复用**：自动终端复用必须具备相同 agent、相同工作区且新鲜、已连接的 PTY 证据。仅凭 Chat handle 不能证明 PTY 存活；OpenCode、OMP、Antigravity 因需保留前端、新会话与模型身份，均不参与通用复用。
-- **并发读取共享与免缓存**：DAG、Workers、Activity、Health 的并发 GET 请求在底层 task/fleet/gate 读取未完成时共享请求，并严格按 Run 和参数隔离。不引入过期结果缓存，关键操作的前置检查始终强制读取最新证据。
+- **作用域限定操作与并发读取共享**：Worker 输出、释放和保留严格限制在选定 Run 范围内（GET 用 `run` 查询参数，变更用 `runId` 请求体）。未限定作用域的请求审计保持可用。DAG、Workers、Activity、Health 的并发 GET 请求共享底层读取，严格按 Run 和参数隔离。页面隐藏时（`document.visibilityState === 'hidden'`）暂停 Activity 事件流连接，重新可见时刷新重连，保留轨道收起期间的未读计数。展示缓存绝不作为最终变更管辖权凭据。
 
 ## 权限模型：为什么 viewer 要占一个终端
 
@@ -81,7 +82,7 @@ Orca 对所有编排 API 的调用均通过 `resolveRunScope` 进行权限校验
 - **只读操作**（`task-list` / `gate-list`）：只要显式携带 `--run <id>` 参数即绕过 consumer 校验，**任何本地进程均可无条件读取**。viewer 的日常状态轮询仅依赖此特性。
 - **写与协调操作**（`dispatch` / `gate-resolve` / `task-create` 以及 `worker-start`）：强制要求调用者绑定当前 Run。Orca 原生聊天界面使用会话内部身份；外部 viewer 则通过 `--from <handle>` 使用绑定的终端身份。
 - **终端命名与工作区 Hash 隔离**：viewer 启动协调时会创建标题形如 `orca-dag coordinator · <workspace-hash> · <instance-id>` 的专属终端，并执行 `run-use` 绑定。标题中的 `<workspace-hash>` 保证不同工作区的 viewer 各自管理自己的终端，互不干扰；若第二个 viewer 试图连接**同一工作区**，服务端直接返回 `409 coordinator_conflict`，绝不发生静默抢占或误关已有终端。
-- **Fencing 机制**：`run-use` 绑定会触发版本递增，原 coordinator（无论是开发者的 agent 终端还是原生聊天）会被权限隔离（fenced）。若需交回控制权，有资格的协调者可在其终端执行 `orca orchestration run-use --id <run>` 重新恢复绑定。
+- **Fencing 机制与显式变更确认**：`run-use` 绑定会触发版本递增，原 coordinator 会被权限隔离。对未处于当前 viewer 活跃调度下的 Run 发起一次性变更（`asCoordinator`）时，强制要求提供与当前 Run 绑定匹配的显式控制确认（`coordinatorControl: { confirmed: true, coordinatorHandle: string | null, consumerGeneration: number | null }`），否则报 `409 coordinator_control_required`。绝不隐式夺权或静默绑定临时终端。若需交回控制权，有资格的协调者可在其终端执行 `run-use` 重新恢复绑定。
 - **Worker 边界（Orca ≥ 1.4.242）**：已派工的 worker 禁止绑定自身或祖先 Run，亦不能使用 `--takeover-legacy`；其收信与回报遵循当前有效的 preamble。停止执行时，viewer 会主动关闭其专有协调者终端，将 Run 资源安全让出。
 
 ## CLI 解析、工作区与执行能力判定
@@ -111,7 +112,8 @@ server/src/
   app.ts                 Express API 应用路由与静态 SPA 托管
   activity.ts            Run 作用域事件解析与有界 Activity 日志流
   requestLedger.ts       变更请求持久化账本（.orca-dag/requests.jsonl）与 request-show 对账
-  providerSessions.ts    持久化 sessions.json 存储：管理会话绑定、mailboxChecks 与 guidanceSends
+  providerSessions.ts    持久化 sessions.json 存储：管理会话绑定、mailboxChecks、guidanceSends 与 operatorMessages
+  operatorMessages.ts    非活跃操作员提问回复与群发消息助手，带 sessions.json 预落盘与只读恢复
   taskGuidance.ts        主动 worker 指导消息、带类型回执与只读恢复
   stageGit.ts            Git Stage 提交证据、不可变基准快照与合并输入握手
   security.ts            回环安全策略：进程级 mutation token、参数校验、自定义命令放行开关
@@ -126,24 +128,28 @@ server/src/
   uninstall.ts           实现 orca-dag uninstall：反向卸载 skill、清理忽略规则、回收残留终端
   webAssets.ts           编译期内嵌前端资源与 skill 文件的内存加载器
 web/src/
-  App.tsx                应用外壳、2秒轮询、蜡笔手绘 SVG filter 滤镜定义
+  App.tsx                分节式工作台外壳、分节路由与 URL Hash 状态管理、2 秒轮询、执行防护
   components/
-    DagView.tsx          基于 React Flow 的 DAG 画布，支持状态变色、harness 徽章与蜡笔涂鸦动画
-    ExecControls.tsx     默认 harness、最多并行数、Run/Stop 控制与状态条
-    NodePanel.tsx        任务详情只读 spec、主阶段标记、启动参数覆盖与放置编辑器
+    DagView.tsx          懒加载 React Flow DAG 画布，280x120 节点渲染，受控脉冲动效，静态连线
+    TaskList.tsx         无障碍垂直任务列表视图，展示就绪/阻断原因与状态标识
+    ExecControls.tsx     Header 顶栏传送动作组（Run/Stop）与 Settings 分节启动参数配置面板
+    NodePanel.tsx        中央详情阅读区：只读 spec 预览、主阶段标记、启动参数覆盖、放置编辑器与审批门创建
     PlacementEditor.tsx  4 种本地放置模式与 2 种远程放置模式编辑器及校验
     LanesPanel.tsx       Workspace lanes 运行时状态、代码审阅入口与显式移除
-    ActivityPanel.tsx    实时事件时间线、技术证据展开与上下文操作
-    ChatPanel.tsx        阶段会话与实时 coordinator check 流
+    ActivityPanel.tsx    实时事件时间线（单条共享 SSE 连接）、技术证据展开与上下文操作
+    ChatPanel.tsx        常驻通信侧栏：会话列表、气泡消息、实时 check 回执与受众预览
+    useScopedChatState.ts 作用域状态容器：按 Run 和会话作用域隔离草稿、回执与繁忙状态
     GatePanel.tsx        审批门与跨 lane 集成门决策卡片
-    RunPicker.tsx        Run 切换器、新建 Run、游标分页加载与精确 ID 查找
-    DoodleSelect.tsx     手绘蜡笔风格下拉选择组件
+    RunPicker.tsx        Run 切换器、游标分页加载与精确 ID 查找
     WorkerPanel.tsx      Fleet 状态视图、来源标记输出、搜索、日志下载与终端生命周期控制
     RequestAuditPanel.tsx 变更请求审计面板，集成 request-show 实时状态探测
   harness.ts             响应式配置 store（与 /api/config 同步）
   placement.ts           客户端放置与 lane 规则预检逻辑
-  layout.ts              DAG 布局算法：dagre 分层（横向/纵向）与 Fruchterman–Reingold 力导向
+  layout.ts              DAG 布局算法：dagre 分层（横向/纵向，280x120 节点）与力导向排版
   types.ts / api.ts      前端核心类型与 API 客户端请求封装
+  workbench.css          分节式工作台布局、200px 导航栏、顶栏、中央详情区及响应式断点
+  chat-dock.css          常驻右侧通信面板、气泡消息、会话列表及输入框样式
+  graph-motion.css       任务节点（280x120）、静态连线与受控执行中圆点脉冲动效
 scripts/
   build-binary.mjs       打包流程：前端构建 → 资源内嵌 → bun compile 生成单文件独立二进制
   build-npm.mjs          前端构建 + esbuild 服务端打包 → 生成 dist-npm/ 发布包

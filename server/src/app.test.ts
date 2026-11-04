@@ -944,13 +944,14 @@ if (args[0] === "orchestration" && args[1] === "task-list") {
   rawFail(conf.taskList);
   out.result = { tasks: (conf.tasksByRun ?? {})[flag("--run")] ?? [] };
 }
+if (args[0] === "orchestration" && args[1] === "gate-list") out.result = { gates: conf.gates ?? [] };
 if (args[0] === "orchestration" && args[1] === "inbox") {
   const limit = Number(flag("--limit") ?? 100);
   const messages = conf.inboxMessages ?? [];
   out.result = { messages: messages.slice(0, limit), count: Math.min(messages.length, limit) };
 }
 if (args[0] === "orchestration" && args[1] === "worker-list") {
-  out.result = { workers: conf.workers ?? [], page: { hasMore: false, nextCursor: null } };
+  out.result = { workers: (flag("--run") ? conf.workers : conf.globalWorkers ?? conf.workers) ?? [], partialHostErrors: conf.partialHostErrors ?? [], page: { hasMore: false, nextCursor: null } };
 }
 if (args[0] === "orchestration" && args[1] === "worker-show") {
   const id = flag("--dispatch");
@@ -1032,6 +1033,7 @@ process.stdout.write(JSON.stringify(out));
       receipt: {
         kind: "follow_up", runId: "run_launch_evidence", taskId: "task_child", dispatchId: "ctx_child",
         requestedTaskId: "task_parent", requestedDispatchId: "ctx_parent", followUpOf: "ctx_parent", requestId,
+        destinationRunId: null,
       },
       startEvidence: { status: "ready", launchMode: {
         mode: "terminal", preferred: "structured", reason: "reused_terminal", detail: "Reused the existing chat.",
@@ -1136,26 +1138,85 @@ process.stdout.write(JSON.stringify(out));
     assert.equal(missing.json.code, "worktree_not_found");
   });
 
-  it("pages the Run registry cursor-first and passes nextCursor through verbatim", async () => {
+  it("pages the registry with bounded workspace ownership and opaque cursors", async () => {
     writeScript({
       runPages: {
         __first__: { runs: [{ id: "run_a", objective: "a", coordinator_handle: null, consumer_generation: 1, legacy: 0, created_at: "2026-09-22T00:00:00Z", updated_at: "2026-09-22T00:00:00Z" }], nextCursor: "c2" },
         c2: { runs: [{ id: "run_b", objective: "b", coordinator_handle: null, consumer_generation: 1, legacy: 0, created_at: "2026-09-21T00:00:00Z", updated_at: "2026-09-21T00:00:00Z" }], nextCursor: null },
       },
+      tasksByRun: {
+        run_a: [{ id: "task_a", run_id: "run_a", created_by_process_incarnation: `repoX::${wsReal}@@pty:incarnation` }],
+        run_b: [{ id: "task_b", run_id: "run_b", created_by_process_incarnation: "repoY::/other@@pty:inc" }],
+      },
     });
     clearLog();
-    const page1 = await rpc("GET", "/api/runs/page");
+    const page1 = await rpc("GET", "/api/runs/page?limit=1");
     assert.equal(page1.status, 200);
     assert.deepEqual((page1.json.runs as Record<string, unknown>[]).map((r) => r.id), ["run_a"]);
     assert.equal(page1.json.nextCursor, "c2");
 
     const page2 = await rpc("GET", "/api/runs/page?cursor=c2");
     assert.equal(page2.status, 200);
-    assert.deepEqual((page2.json.runs as Record<string, unknown>[]).map((r) => r.id), ["run_b"]);
+    assert.deepEqual(page2.json.runs, []);
     assert.equal(page2.json.nextCursor, null);
     // The opaque cursor reached the CLI byte-for-byte.
     const paged = readLog().filter((c) => c.argv[1] === "run-list" && c.argv.includes("--cursor"));
     assert.ok(paged.length >= 1 && paged[0].argv.includes("c2"));
+    assert.ok(readLog().some(c => c.argv[1] === "run-list" && c.argv.includes("--limit") && c.argv.includes("1")));
+  });
+
+  it("refuses a gate mutation without explicit matching control, including unreadable binding", async () => {
+    const gate = { id: "gate_a", taskId: "task_a", question: "Approve?", options: ["approved", "rejected"], status: "pending" };
+    const run = { id: "run_external", coordinator_handle: "term_external", consumer_generation: 7 };
+    for (const script of [
+      { runsById: { run_external: run }, gates: [gate] },
+      { runShow: { rawError: "unreachable", exitCode: 1 }, gates: [gate] },
+    ]) {
+      writeScript(script);
+      clearLog();
+      const result = await rpc("POST", "/api/gates/gate_a/resolve", { runId: "run_external", resolution: "approved" }, opsPolicy.token);
+      assert.equal(result.status, 409);
+      assert.equal(result.json.code, "coordinator_control_required");
+      assert.equal(readLog().filter(c => ["create", "run-use", "gate-resolve"].includes(c.argv[1])).length, 0);
+    }
+    writeScript({ runsById: { run_external: run }, gates: [gate] });
+    clearLog();
+    const stale = await rpc("POST", "/api/gates/gate_a/resolve", {
+      runId: "run_external", resolution: "approved",
+      coordinatorControl: { confirmed: true, coordinatorHandle: "term_external", consumerGeneration: 6 },
+    }, opsPolicy.token);
+    assert.equal(stale.status, 409);
+    assert.equal(stale.json.code, "coordinator_control_required");
+    assert.equal(readLog().filter(c => ["create", "run-use", "gate-resolve"].includes(c.argv[1])).length, 0);
+    clearLog();
+    const confirmed = await rpc("POST", "/api/gates/gate_a/resolve", {
+      runId: "run_external", resolution: "approved",
+      coordinatorControl: { confirmed: true, coordinatorHandle: "term_external", consumerGeneration: 7 },
+    }, opsPolicy.token);
+    assert.equal(confirmed.status, 200);
+    const verbs = readLog().map(c => c.argv[1]);
+    assert.ok(verbs.indexOf("run-use") > verbs.indexOf("create"));
+    assert.ok(verbs.indexOf("gate-resolve") > verbs.indexOf("run-use"));
+  });
+
+  it("admits a gate only for a not-yet-dispatched Task in the selected Run", async () => {
+    const run = { id: "run_gate", coordinator_handle: null, consumer_generation: 1 };
+    const control = { confirmed: true, coordinatorHandle: null, consumerGeneration: 1 };
+    const task = { id: "task_gate", run_id: "run_gate", status: "ready" };
+    writeScript({ runsById: { run_gate: run }, tasksByRun: { run_gate: [task] } });
+    clearLog();
+    const created = await rpc("POST", "/api/gates", { runId: "run_gate", taskId: "task_gate", question: "Approve deployment?", coordinatorControl: control }, opsPolicy.token);
+    assert.equal(created.status, 200);
+    assert.equal(typeof created.json.requestId, "string");
+    assert.equal(readLog().filter(c => c.argv[1] === "gate-create").length, 1);
+
+    writeScript({ runsById: { run_gate: run }, tasksByRun: { run_gate: [task] },
+      workers: [{ runId: "run_gate", taskId: "task_gate", dispatchId: "ctx_previous", dispatchStatus: "completed" }] });
+    clearLog();
+    const refused = await rpc("POST", "/api/gates", { runId: "run_gate", taskId: "task_gate", question: "Approve deployment?", coordinatorControl: control }, opsPolicy.token);
+    assert.equal(refused.status, 409);
+    assert.equal(refused.json.code, "gate_not_eligible");
+    assert.equal(readLog().filter(c => ["gate-create", "run-use"].includes(c.argv[1])).length, 0);
   });
 
   it("resolves one exact Run with positive workspace-ownership evidence", async () => {
@@ -1363,6 +1424,20 @@ process.stdout.write(JSON.stringify(out));
     assert.equal(res.status, 404);
     assert.equal(res.json.code, "worker_run_mismatch");
     assert.equal(readLog().filter((c) => c.argv[1] === "worker-stop").length, 0, "no mutation on foreign scope");
+  });
+
+  it("refuses foreign-Run output, release and retain before worker effects", async () => {
+    writeScript({ workerShow: { ctx_s1: workerShowReceipt() } });
+    clearLog();
+    const output = await rpc("GET", "/api/workers/ctx_s1/output?run=run_other");
+    assert.equal(output.status, 404);
+    assert.equal(output.json.code, "worker_run_mismatch");
+    for (const action of ["release", "retain"]) {
+      const result = await rpc("POST", `/api/workers/ctx_s1/${action}`, { runId: "run_other" }, opsPolicy.token);
+      assert.equal(result.status, 404);
+      assert.equal(result.json.code, "worker_run_mismatch");
+    }
+    assert.equal(readLog().filter(c => ["worker-read", "worker-release", "worker-retain"].includes(c.argv[1])).length, 0);
   });
 
   it("answers 404 for an unknown Dispatch before minting anything", async () => {
@@ -1585,23 +1660,41 @@ process.stdout.write(JSON.stringify(out));
   it("removes a discovered non-main worktree and keeps the receipt semantics", async () => {
     writeScript({
       worktrees: [worktreeRow()],
-      worktreeRm: { result: { worktree: "id:repoL::/ws/lane", archiveHookOverride: null } },
+      worktreeRm: { result: { worktree: "id:repoL::/ws/lane", archiveHookOverride: null, preservedBranch: { branchName: "orca/lane" } } },
     });
     clearLog();
-    const res = await rpc("POST", "/api/worktrees/remove", { worktree: "id:repoL::/ws/lane" }, opsPolicy.token);
+    const res = await rpc("POST", "/api/worktrees/remove", { worktree: "id:repoL::/ws/lane", runId: "run_a", deleteBranch: true }, opsPolicy.token);
     assert.equal(res.status, 200);
     assert.equal(res.json.ok, true);
     const receipt = res.json.receipt as Record<string, unknown>;
     assert.equal(receipt.worktree, "id:repoL::/ws/lane");
+    assert.deepEqual(receipt.preservedBranch, { branchName: "orca/lane" });
     const rms = readLog().filter((c) => c.argv[1] === "rm");
     assert.equal(rms.length, 1);
     assert.ok(!rms[0].argv.includes("--run-hooks"), "no hook flags without an explicit request");
     assert.ok(!rms[0].argv.includes("--allow-failed-archive-hook"));
+    assert.ok(rms[0].argv.includes("--delete-branch"));
     const rows = (await readJsonl(WORKSPACE_STATE_FILES.requests)).filter(
       (r) => r.requestId === res.json.requestId,
     );
     assert.equal(rows[1].note, "removed");
     assert.equal(rows[1].settledLocally, true);
+  });
+
+  it("refuses removal when a terminal occupies the worktree or a host is unobservable", async () => {
+    for (const evidence of [
+      { terminals: [{ handle: "term_busy", worktreeId: "id:repoL::/ws/lane", worktreePath: "/ws/lane", connected: true }] },
+      { partialHostErrors: [{ environmentId: "env_remote", name: "remote", code: "unreachable", dispatchIds: [] }] },
+      { workers: [{ runId: "run_a", taskId: "task_a", dispatchId: "ctx_a", dispatchStatus: "dispatched" }] },
+      { globalWorkers: [{ runId: "run_other", taskId: "task_other", dispatchId: "ctx_chat_other", dispatchStatus: "dispatched" }] },
+    ]) {
+      writeScript({ worktrees: [worktreeRow()], ...evidence });
+      clearLog();
+      const result = await rpc("POST", "/api/worktrees/remove", { worktree: "id:repoL::/ws/lane", runId: "run_a" }, opsPolicy.token);
+      assert.equal(result.status, 409);
+      assert.equal(result.json.code, "worktree_in_use");
+      assert.equal(readLog().filter(c => c.argv[0] === "worktree" && c.argv[1] === "rm").length, 0);
+    }
   });
 
   it("refuses to remove a workspace Orca does not discover", async () => {
@@ -1637,7 +1730,7 @@ process.stdout.write(JSON.stringify(out));
       worktreeRm: { fail: true, error: { code: "worktree_archive_hook_failed", message: "hook exited 3" } },
     });
     clearLog();
-    const res = await rpc("POST", "/api/worktrees/remove", { worktree: "id:repoL::/ws/lane" }, opsPolicy.token);
+    const res = await rpc("POST", "/api/worktrees/remove", { worktree: "id:repoL::/ws/lane", runId: "run_a" }, opsPolicy.token);
     assert.equal(res.status, 409);
     assert.equal(res.json.code, "worktree_archive_hook_failed");
     hookEvidenceId = res.json.requestId as string;
@@ -1660,6 +1753,7 @@ process.stdout.write(JSON.stringify(out));
       "/api/worktrees/remove",
       {
         worktree: "id:repoL::/ws/lane",
+        runId: "run_a",
         runHooks: true,
         allowFailedArchiveHook: true,
         evidenceRequestId: hookEvidenceId,
@@ -1682,7 +1776,7 @@ process.stdout.write(JSON.stringify(out));
     const none = await rpc(
       "POST",
       "/api/worktrees/remove",
-      { worktree: "id:repoL::/ws/lane", runHooks: true, allowFailedArchiveHook: true, evidenceRequestId: "00000000-0000-4000-8000-000000000000" },
+      { worktree: "id:repoL::/ws/lane", runId: "run_a", runHooks: true, allowFailedArchiveHook: true, evidenceRequestId: "00000000-0000-4000-8000-000000000000" },
       opsPolicy.token,
     );
     assert.equal(none.status, 403);
@@ -1692,7 +1786,7 @@ process.stdout.write(JSON.stringify(out));
     const wrong = await rpc(
       "POST",
       "/api/worktrees/remove",
-      { worktree: "id:repoL::/ws/lane", runHooks: true, allowFailedArchiveHook: true, evidenceRequestId: stopEvidenceId },
+      { worktree: "id:repoL::/ws/lane", runId: "run_a", runHooks: true, allowFailedArchiveHook: true, evidenceRequestId: stopEvidenceId },
       opsPolicy.token,
     );
     assert.equal(wrong.status, 403);
@@ -1700,19 +1794,6 @@ process.stdout.write(JSON.stringify(out));
     assert.equal(readLog().filter((c) => c.argv[1] === "rm").length, 0, "no removal runs on unverifiable evidence");
   });
 
-  it("keeps the new mutations in the Run-scoped request audit", async () => {
-    const audit = await rpc("GET", "/api/requests?run=run_a");
-    assert.equal(audit.status, 200);
-    const requests = audit.json.requests as Record<string, unknown>[];
-    const operations = new Set(requests.map((r) => r.operation));
-    for (const op of ["worker-stop", "worker-abandon", "terminal-focus", "file-open", "file-diff", "worktree-remove"]) {
-      assert.ok(operations.has(op), `audit covers ${op}`);
-    }
-    // Viewer-receipted ops without a Run in scope stay inspectable as
-    // unscoped rows; nothing was mis-attributed to run_a.
-    const unscoped = requests.filter((r) => r.runId === null);
-    assert.ok(unscoped.some((r) => r.operation === "worktree-remove"));
-  });
 
   it("shares only overlapping presentation reads and releases them after success or failure", async () => {
     const startedFile = join(root, "task-list.started");

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useT } from "../i18n";
 import { STATUS_META, type DagResponse } from "../types";
 import "./task-list.css";
@@ -11,14 +12,18 @@ export interface TaskListProps {
 /** A Run-scoped, read-only task index for narrow screens and keyboard users. */
 export function TaskList({ dag, selectedId, onSelect }: TaskListProps) {
   const t = useT();
+  const [filter, setFilter] = useState("");
+  const query = filter.trim().toLocaleLowerCase();
+  const nodes = dag.nodes.filter((node) => `${node.label} ${node.id}`.toLocaleLowerCase().includes(query));
 
   return (
     <section className="task-list" aria-label={t("taskList.aria")}>
-      {dag.nodes.length === 0 ? (
-        <p className="task-list__empty">{t("taskList.empty")}</p>
+      <label className="workbench-task-filter">{t("workbench.taskFilter")} <input value={filter} onChange={(event) => setFilter(event.target.value)} /></label>
+      {nodes.length === 0 ? (
+        <p className="task-list__empty">{t(query ? "workbench.noMatchingTasks" : "taskList.empty")}</p>
       ) : (
         <ul className="task-list__items">
-          {dag.nodes.map((node) => {
+          {nodes.map((node) => {
             const readiness = dag.readiness?.[node.id];
             const meta = STATUS_META[node.status];
             return (
@@ -36,6 +41,7 @@ export function TaskList({ dag, selectedId, onSelect }: TaskListProps) {
                       {t(`status.${node.status}`)}
                     </span>
                   </span>
+                  <code>{node.id}</code>
                   {readiness?.reasons.map((reason, index) => (
                     <span className="task-list__reason" key={`${readiness.codes[index] ?? "reason"}-${index}`}>
                       {reason}

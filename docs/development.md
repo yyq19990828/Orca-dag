@@ -40,9 +40,9 @@ npm run verify:live -- http://127.0.0.1:8787
 - **Prerequisites:** A local viewer must be running and idle at the specified URL.
 - **Workflow:** The script creates a new Run containing three tasks. Tasks A and B run in parallel to generate independent inputs. Task C depends on A and B, computing and validating the result `51`.
 - **Coordinator Ownership:** The viewer coordinator independently manages worker launches, execution, and settlement. The verifier observes parallelism non-invasively without artificial test hooks.
-- **Handling Unknowns:** Dispatches in an unknown or unverified state are kept under observation. They are **never** automatically retried or cancelled.
+- **Handling Unknowns & Incomplete Observations:** Dispatches in an unknown or unverified state are kept under observation; they are **never** automatically retried or cancelled. The verifier uses `inventory.workers` from `GET /api/workers` and keeps verification waiting if `partialHostErrors` are reported, retaining an `unverifiable` verdict rather than asserting success.
 - **Observation Deadline:** After 15 minutes, the verifier reports `unverifiable`, not success. It leaves the coordinator and workers untouched; it does not change Orca Task or Dispatch outcomes.
-- **Evidence Retention:** Test execution artifacts and logs are preserved in `.orca-dag/<timestamp>-verification-*/`. Concurrency limits are restored to their previous settings, and the verification Run remains selected in the viewer.
+- **Evidence Retention & Baseline Notice:** Test execution artifacts and logs are preserved in `.orca-dag/<timestamp>-verification-*/`. An independent native baseline for local Linux Orca 1.4.247 + Codex CLI 0.166.0 (model `gpt-6.1-terra` / effort `xhigh` in `new-child` and `new-top-level` placements) was recorded in `.orca-dag/20261104T031219975Z-abcd/native-codex-verification.json`, and definitive real-runtime Viewer coordinator E2E verification for native fresh-worktrees passed in `.orca-dag/20261104T031219975Z-abcd/viewer-codex-verification.json` (`run_44b240b8e6ee`). Native Chat remains untested. Older or unknown runtimes retain the compatibility adapter. Concurrency limits are restored to their previous settings, and the verification Run remains selected in the viewer.
 
 ---
 

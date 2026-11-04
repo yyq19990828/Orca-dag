@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { fetchEnvironments, fetchModels, fetchWorkerDetail, type ModelDiscoveryResult } from "../api";
+import { createGate, fetchEnvironments, fetchModels, fetchWorkerDetail, type ModelDiscoveryResult } from "../api";
 import { useT, type Translator } from "../i18n";
 import { lanePlanProblems, laneLabel, laneProblemPrefix } from "../placement";
 import { workerWorkspaceLabel } from "../workerWorkspace";
+import { useDecisionDialog } from "./DecisionDialog";
+import { useCoordinatorControl } from "./useCoordinatorControl";
 import {
   effectiveHarness,
   allLaneIds,
@@ -52,7 +54,7 @@ const INHERIT = "__inherit__";
 const CUSTOM = "__custom__";
 const NEW_LANE = "__new_lane__";
 const KNOWN = HARNESSES as readonly string[];
-const OPEN_CODE_MODEL = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(?:#[A-Za-z0-9._-]{1,64})?$/;
+const OPEN_CODE_MODEL = /^[A-Za-z0-9._-]{1,128}\/[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}(?:#[A-Za-z0-9._-]{1,128})?$/;
 
 /** Short seed summary for a lane picker row (never the raw placement JSON). */
 function laneSpecOf(laneId: string, t: Translator): string {
@@ -91,6 +93,7 @@ interface NodePanelProps {
   hasWorkerHistory?: boolean;
   /** Run-scoped Dispatch rows; the selected worker's actual worktree comes from worker-show. */
   workerRows: WorkerRowView[];
+  onRefresh: () => void;
   onClose: () => void;
 }
 
@@ -118,10 +121,33 @@ export function NodePanel({
   failedStart = false,
   hasWorkerHistory = false,
   workerRows,
+  onRefresh,
   onClose,
 }: NodePanelProps) {
   // Status copy is translated; STATUS_META keeps owning only the palette.
   const t = useT();
+  const dialog = useDecisionDialog();
+  const withControl = useCoordinatorControl();
+  const [gateBusy, setGateBusy] = useState(false);
+  const [gateResult, setGateResult] = useState<string | null>(null);
+  async function addGate() {
+    const question = await dialog.prompt({
+      title: t("node.createGateTitle"), message: t("node.createGateMessage"),
+      fieldLabel: t("node.createGateQuestion"), required: true, confirmLabel: t("node.createGate"),
+    });
+    if (!question?.trim()) return;
+    setGateBusy(true);
+    setGateResult(null);
+    try {
+      const receipt = await withControl(runId, (control) => createGate(runId, node.id, question.trim(), control));
+      setGateResult(JSON.stringify(receipt));
+      onRefresh();
+    } catch (error) {
+      setGateResult(String((error as Error).message ?? error));
+    } finally {
+      setGateBusy(false);
+    }
+  }
   const headingRef = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     headingRef.current?.focus();
@@ -332,10 +358,18 @@ export function NodePanel({
           ✕
         </button>
       </div>
-      <h3 className="node-panel__title" id="node-panel-title" ref={headingRef} tabIndex={-1}>{node.label}</h3>
+      <h1 className="node-panel__title" id="node-panel-title" ref={headingRef} tabIndex={-1}>{node.label}</h1>
       <div className="node-panel__id">
         <code>{node.id}</code>
       </div>
+      {(node.status === "pending" || node.status === "ready") && !node.dispatchId && !permanentlyLocked && !hasWorkerHistory && (
+        <div className="node-panel__actions">
+          <button type="button" className="node-panel__action" disabled={gateBusy || historyLocked || coordinatorStarting} onClick={() => void addGate()}>
+            {t("node.createGate")}
+          </button>
+          {gateResult && <div role="status" className="inbox__body">{gateResult}</div>}
+        </div>
+      )}
 
       {onOpenOperations && (readiness?.pendingGateIds.length || failedStart || hasWorkerHistory) ? (
         <nav className="node-panel__actions" aria-label={t("node.operationsAria")}>

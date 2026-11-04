@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { releaseWorker, replyToMessage, retainWorker } from "../api";
+import { acknowledgeStopEvent, releaseWorker, replyToMessage, retainWorker } from "../api";
+import { useCoordinatorControl } from "./useCoordinatorControl";
+import { useDecisionDialog } from "./DecisionDialog";
 import { timeAgo } from "../format";
 import { useT, type TranslationKey } from "../i18n";
 import type { CleanupDebtItem, PendingInboxItem } from "../types";
@@ -11,10 +13,8 @@ import type { CleanupDebtItem, PendingInboxItem } from "../types";
  * literally waits for the reply, so the panel renders whenever anything is
  * pending, regardless of canvas selection.
  *
- * Replies go to POST /api/messages/:id/reply; the server routes them through
- * the live coordinator when it is running (so the Delivery is acknowledged
- * exactly once, after the reply lands) or borrows a throwaway terminal when
- * the loop is down.
+ * Replies go to POST /api/messages/:id/reply; the server checks coordinator
+ * authority and may refuse when control cannot be established safely.
  */
 
 /**
@@ -52,9 +52,12 @@ export function InboxPanel({
   // so the panel subscribes through useT() and re-renders its rows on a
   // language switch.
   const t = useT();
+  const withControl = useCoordinatorControl();
+  const dialog = useDecisionDialog();
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [operatorReceipt, setOperatorReceipt] = useState<{ runId: string; value: string } | null>(null);
 
   const busy = useCallback((id: string) => busyId === id, [busyId]);
 
@@ -65,11 +68,32 @@ export function InboxPanel({
     setBusyId(item.messageId);
     setErr(null);
     try {
-      await replyToMessage(item.messageId, body, runId);
+      const receipt = await withControl(runId, (control) => replyToMessage(item.messageId, body, runId, control));
+      setOperatorReceipt({ runId, value: JSON.stringify(receipt) });
       setDrafts(({ [item.messageId]: _drop, ...rest }) => rest);
       onResolved();
     } catch (e) {
       setErr(String((e as Error).message ?? e));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function acknowledge(item: PendingInboxItem) {
+    if (!item.dispatchId || disabled || busy(item.messageId)) return;
+    const confirmed = await dialog.confirm({
+      title: t("inbox.ackStopTitle"),
+      message: t("inbox.ackStopMessage", { dispatch: item.dispatchId, reason: item.stopReason ?? t("worker.unknown") }),
+      confirmLabel: t("inbox.ackStop"),
+    });
+    if (!confirmed) return;
+    setBusyId(item.messageId);
+    setErr(null);
+    try {
+      await acknowledgeStopEvent(runId, item.messageId, item.dispatchId);
+      onResolved();
+    } catch (error) {
+      setErr(String((error as Error).message ?? error));
     } finally {
       setBusyId(null);
     }
@@ -80,8 +104,8 @@ export function InboxPanel({
     setBusyId(item.key);
     setErr(null);
     try {
-      if (action === "release") await releaseWorker(item.dispatchId);
-      else await retainWorker(item.dispatchId);
+      if (action === "release") await releaseWorker(runId, item.dispatchId);
+      else await retainWorker(runId, item.dispatchId);
       onResolved();
     } catch (e) {
       setErr(String((e as Error).message ?? e));
@@ -90,10 +114,11 @@ export function InboxPanel({
     }
   }
 
-  if (!runId || (pending.length === 0 && cleanupDebt.length === 0)) return null;
+  if (!runId || (pending.length === 0 && cleanupDebt.length === 0 && operatorReceipt?.runId !== runId)) return null;
 
   return (
     <div className="gates inbox" data-testid="inbox-panel">
+      {operatorReceipt?.runId === runId && <div role="status" className="inbox__body"><strong>{t("chat.message.operatorReceipt")}</strong><pre>{operatorReceipt.value}</pre></div>}
       {pending.map((item) => (
         <div key={item.messageId} className={`gate inbox__item inbox__item--${item.kind}`}>
           <div className="gate__badge">
@@ -105,9 +130,15 @@ export function InboxPanel({
           </div>
           <div className="gate__question">{item.subject || t("inbox.noSubject")}</div>
           {item.body && <div className="inbox__body">{item.body}</div>}
-          <div className="gate__actions inbox__reply">
+          {item.kind === "stop_event" ? (
+            <div className="inbox__meta">
+              {t("inbox.stopEvent", { reason: item.stopReason ?? t("worker.unknown") })}
+              {item.dispatchId && <div><code>{item.dispatchId}</code>{" "}<button type="button" className="btn btn--gate" disabled={disabled || busy(item.messageId)} onClick={() => void acknowledge(item)}>{t("inbox.ackStop")}</button></div>}
+            </div>
+          ) : <div className="gate__actions inbox__reply">
             <input
               className="inbox__input"
+              aria-label={t("inbox.replyPlaceholder")}
               placeholder={disabled ? t("inbox.executionUnavailable") : t("inbox.replyPlaceholder")}
               value={drafts[item.messageId] ?? ""}
               disabled={disabled || busy(item.messageId)}
@@ -126,7 +157,7 @@ export function InboxPanel({
             >
               {busy(item.messageId) ? "…" : t("inbox.reply")}
             </button>
-          </div>
+          </div>}
         </div>
       ))}
 

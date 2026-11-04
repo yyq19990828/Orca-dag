@@ -117,7 +117,8 @@ async function verifyLive(base: string): Promise<void> {
       const status = await api<VerificationStatus>("/api/run-status");
       assert.equal(status.runId, runId, "Viewer switched Runs; leave all workers untouched");
       const tasks = await listTasks(runId);
-      const workers = await listWorkers(runId, { includeRemote: true });
+      const inventory = await listWorkers(runId, { includeRemote: true });
+      const workers = inventory.workers;
       // Passive witness only. Sampling or startup uncertainty never blocks a
       // worker from completing and never becomes a synthetic Task dependency.
       if (!parallelWitness) {
@@ -126,14 +127,17 @@ async function verifyLive(base: string): Promise<void> {
           worker.projection?.liveness?.verdict === "live");
         if (roots.length === 2) parallelWitness = { at: new Date().toISOString(), workers: roots };
       }
-      const progress = liveVerificationProgress(status, tasks);
+      // A readable durable inventory is not proof that every execution host
+      // answered. Preserve that uncertainty instead of certifying a clean Run.
+      const progress = inventory.partialHostErrors.length > 0
+        ? "waiting" : liveVerificationProgress(status, tasks);
       const summary = JSON.stringify({ phase: status.phase, progress, tasks: tasks.map(task => ({ id: task.id, status: task.status })), attempts: status.attempts });
       if (summary !== previous) {
         previous = summary;
         console.log(summary);
         await appendFile(join(output, "observations.jsonl"), JSON.stringify({ at: new Date().toISOString(), ...JSON.parse(summary) }) + "\n");
       }
-      Object.assign(report, { status, tasks, workers, parallelWitness });
+      Object.assign(report, { status, tasks, workers, partialHostErrors: inventory.partialHostErrors, parallelWitness });
       if (progress === "failed") { report.outcome = "failed"; break; }
       if (progress === "passed") {
         assert.equal(workers.length, 3, "No duplicate or helper Dispatches");
@@ -150,7 +154,12 @@ async function verifyLive(base: string): Promise<void> {
           const completedAt = Date.parse(/^\d{4}-\d\d-\d\d /.test(time) ? time.replace(" ", "T") + "Z" : time);
           assert.ok(Number.isFinite(completedAt) && joinAttempt.startedAt >= completedAt, "C must follow accepted A/B completion");
         }
-        const reclaimable = await listWorkers(runId, { includeRemote: true, terminalState: "reclaimable" });
+        const cleanup = await listWorkers(runId, { includeRemote: true, terminalState: "reclaimable" });
+        if (cleanup.partialHostErrors.length > 0) {
+          report.cleanupObservationErrors = cleanup.partialHostErrors;
+          break;
+        }
+        const reclaimable = cleanup.workers;
         assert.equal(reclaimable.length, 0, "Every settled worker needs a cleanup/ownership decision");
         const outputs = [];
         for (const worker of workers) outputs.push(await readWorkerOutput(worker.dispatchId, { limit: 8 }));
