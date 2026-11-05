@@ -66,6 +66,8 @@ export function RunPicker({
   const [exactId, setExactId] = useState("");
   const [exactBusy, setExactBusy] = useState(false);
   const combined = dedupeById([...pinned, ...firstPage, ...older]);
+  const combinedRef = useRef(combined);
+  combinedRef.current = combined;
 
   useEffect(() => {
     onReadStateChange?.(listRead);
@@ -107,10 +109,24 @@ export function RunPicker({
       setPinned((previous) => dedupeById([run, ...previous]));
       setOwnership((previous) => ({ ...previous, [run.id]: workspace }));
     }).catch((error) => {
-      if (alive) setErr(String((error as Error).message ?? error));
+      if (!alive) return;
+      const msg = String((error as Error).message ?? error);
+      setErr(msg);
+      const code = (error as { code?: string })?.code;
+      const status = (error as { status?: number })?.status;
+      const isMissing = code === "run_not_found" || status === 404 || status === 409 || /not_found|not found/i.test(msg);
+      if (isMissing) {
+        const available = combinedRef.current;
+        if (available.length > 0) {
+          const fallback = available.find((r) => r.id !== runId);
+          onPick(fallback ? fallback.id : "");
+        } else {
+          onPick("");
+        }
+      }
     });
     return () => { alive = false; };
-  }, [autoPick, runId]);
+  }, [autoPick, runId, onPick]);
 
   // Interval paused while the tab is hidden (Orca never throttles
   // background timers, so the 10s list poll would run forever unseen). The
@@ -140,7 +156,7 @@ export function RunPicker({
     }
   }
 
-  async function openExact() {
+  async function openExact(close: () => void) {
     const id = exactId.trim();
     if (!id || exactBusy) return;
     setExactBusy(true);
@@ -151,6 +167,7 @@ export function RunPicker({
       setPinned((prev) => dedupeById([run, ...prev]));
       setExactId("");
       onPick(run.id);
+      close();
     } catch (e) {
       setErr(String((e as Error).message ?? e));
     } finally {
@@ -171,10 +188,29 @@ export function RunPicker({
         size="sm"
         value={runId}
         onChange={onPick}
-        disabled={disabled || combined.length === 0}
+        disabled={disabled}
         placeholder={placeholder}
         loading={!listRead.loaded && !listRead.error}
         emptyText={placeholder}
+        ariaLabel={runId ? `${t("picker.pickRun")}: ${current?.objective?.trim() || runId}` : t("picker.pickRun")}
+        panelActions={(close) => (
+          <div className="runpick__actions" role="group" aria-label={t("picker.actionsAria")}>
+            {nextCursor && (
+              <button type="button" className="btn btn--ghost runpick__more" onClick={loadOlder} disabled={disabled || loadingMore} title={t("picker.loadOlderTitle")}>
+                {loadingMore ? t("picker.loading") : t("picker.loadOlder")}
+              </button>
+            )}
+            <label className="runpick__exact-label" htmlFor="runpick-exact-id">{t("picker.exactLabel")}</label>
+            <span className="runpick__exact">
+              <input id="runpick-exact-id" className="runpick__exact-input" value={exactId} placeholder="run_…" spellCheck={false}
+                onChange={(event) => setExactId(event.target.value)}
+                onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void openExact(close); } }} />
+              <button type="button" className="btn btn--ghost" onClick={() => void openExact(close)} disabled={disabled || exactBusy || !exactId.trim()} title={t("picker.exactTitle")}>
+                {exactBusy ? "…" : t("picker.go")}
+              </button>
+            </span>
+          </div>
+        )}
         title={
           current
             ? `${current.id}\n${current.objective || t("picker.noObjective")}`
@@ -194,57 +230,6 @@ export function RunPicker({
       {current && ownership[current.id] && !ownership[current.id].owned && (
         <span className="runpick__error" role="status">{t("picker.unprovenOwnership")}: {ownership[current.id].evidence}</span>
       )}
-      <details className="runpick__menu">
-        <summary aria-label={t("picker.moreAria")} title={t("picker.moreTitle")}>
-          <span aria-hidden="true">⋯</span>
-        </summary>
-        <div className="runpick__menu-panel" role="group" aria-label={t("picker.actionsAria")}>
-          <button className="btn btn--ghost menu-close" type="button" onClick={(event) => {
-            const menu = event.currentTarget.closest("details");
-            if (menu) {
-              menu.open = false;
-              menu.querySelector<HTMLElement>("summary")?.focus();
-            }
-          }}>{t("dialog.close")}</button>
-          {nextCursor && (
-            <button
-              type="button"
-              className="btn btn--ghost runpick__more"
-              onClick={loadOlder}
-              disabled={disabled || loadingMore}
-              title={t("picker.loadOlderTitle")}
-            >
-              {loadingMore ? t("picker.loading") : t("picker.loadOlder")}
-            </button>
-          )}
-          <label className="runpick__exact-label" htmlFor="runpick-exact-id">
-            {t("picker.exactLabel")}
-          </label>
-          <span className="runpick__exact">
-            <input
-              id="runpick-exact-id"
-              className="runpick__exact-input"
-              value={exactId}
-              placeholder="run_…"
-              spellCheck={false}
-              aria-label={t("picker.exactLabel")}
-              onChange={(e) => setExactId(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void openExact();
-              }}
-            />
-            <button
-              type="button"
-              className="btn btn--ghost"
-              onClick={openExact}
-              disabled={disabled || exactBusy || !exactId.trim()}
-              title={t("picker.exactTitle")}
-            >
-              {exactBusy ? "…" : t("picker.go")}
-            </button>
-          </span>
-        </div>
-      </details>
       {displayedError && (
         <span className="runpick__error" role="status" title={displayedError}>
           {err ? `⚠ ${err}` : t("picker.readFailed")}

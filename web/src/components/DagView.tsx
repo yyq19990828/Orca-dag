@@ -300,6 +300,9 @@ function TaskNode({ data }: NodeProps<Node<TaskNodeData>>) {
         } as CSSProperties
       }
     >
+      <div className="task-node__accent-bar" aria-hidden="true">
+        {data.executing && data.active && <div className="task-node__scanner" />}
+      </div>
       {data.lead && (
         <span className="task-node__lead-badge" title={t("dag.node.leadBadgeTitle")}>
           {t("dag.node.lead")}
@@ -311,8 +314,9 @@ function TaskNode({ data }: NodeProps<Node<TaskNodeData>>) {
         <div className="task-node__status">
           <span ref={marker} className="task-node__marker" aria-hidden="true">
             <span className={data.executing && data.active ? "task-node__marker-dot task-node__marker-dot--executing" : "task-node__marker-dot"} />
+            {data.executing && data.active && <span className="task-node__marker-radar" aria-hidden="true" />}
           </span>
-          {statusLabel}
+          <span className="task-node__status-label">{statusLabel}</span>
         </div>
         <span
           className="task-node__harness"
@@ -812,7 +816,7 @@ function Flow({
         onNodeClick={(_, n) => onSelect(n.id === selectedId ? null : n.id)}
         onPaneClick={() => onSelect(null)}
       >
-        <Background variant={BackgroundVariant.Lines} gap={30} color="rgba(96,132,178,0.085)" />
+        <Background variant={BackgroundVariant.Dots} gap={22} size={1.25} color="rgba(71,85,105,0.22)" />
         <Controls showInteractive={false} />
       </ReactFlow>
     </>

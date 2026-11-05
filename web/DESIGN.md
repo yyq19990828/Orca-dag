@@ -1,26 +1,26 @@
 ---
 name: Orca DAG Viewer
-description: Precise, resource-efficient modern sectional orchestration workbench for multi-agent execution supervision
+description: Light Apple-Inspired Workbench · Crisp dual-pane orchestration workbench pairing a persistent React Flow DAG canvas with an app-style operations workspace and integrated chat sidebar
 colors:
   paper: "#ffffff"
-  paper-subtle: "#f5f7fa"
-  paper-muted: "#e9eef5"
-  workbench-bg: "#f3f5f8"
-  ink: "#18283e"
-  ink-soft: "#465b73"
-  ink-faint: "#53677d"
-  nav-bg: "#14263d"
-  nav-hover: "#203b59"
-  nav-active: "#284b72"
-  nav-text: "#cbd7e5"
-  nav-badge-bg: "#eacb84"
-  nav-badge-text: "#342700"
-  line: "#d8e1eb"
-  line-strong: "#b5c3d2"
-  line-header: "#dbe2ea"
-  sky: "#2865c7"
-  sky-ink: "#2054a5"
-  sky-wash: "#eaf2ff"
+  paper-subtle: "#f5f5f7"
+  paper-muted: "#eaecef"
+  workbench-bg: "#f5f5f7"
+  ink: "#1d1d1f"
+  ink-soft: "#565b65"
+  ink-faint: "#626771"
+  nav-bg: "#ffffff"
+  nav-hover: "#eaf3ff"
+  nav-active: "#eaf3ff"
+  nav-text: "#1d1d1f"
+  nav-badge-bg: "#fff1d5"
+  nav-badge-text: "#8a4d00"
+  line: "#dcdce1"
+  line-strong: "#c9cbd1"
+  line-header: "#dcdce1"
+  sky: "#0066cc"
+  sky-ink: "#0066cc"
+  sky-wash: "#eaf3ff"
   status-pending: "#64748b"
   status-ready: "#2563a8"
   status-dispatched: "#a9650a"
@@ -28,13 +28,39 @@ colors:
   status-failed: "#be3e3e"
   status-blocked: "#a15c1b"
   liveness-exited: "#52647a"
-  blush: "#d45a65"
-  blush-ink: "#a22d3b"
-  blush-wash: "#fff0f1"
-  edge-idle: "#aab8c8"
-  edge-run: "#b27825"
-  edge-done: "#43896b"
-  edge-hierarchy: "#8999ac"
+  blush: "#b83232"
+  blush-ink: "#a52c2c"
+  blush-wash: "#fceeee"
+  edge-idle: "#a3aab4"
+  edge-run: "#a9650a"
+  edge-done: "#23805a"
+  edge-hierarchy: "#818b99"
+  slate-900: "#1d1d1f"
+  slate-800: "#30333a"
+  slate-700: "#44464d"
+  slate-600: "#565b65"
+  slate-500: "#626771"
+  slate-400: "#818b99"
+  slate-300: "#a3aab4"
+  slate-200: "#c9cbd1"
+  slate-100: "#dcdce1"
+  slate-50: "#f5f5f7"
+  amber-dark: "#8a4d00"
+  amber-light: "#fff1d5"
+  emerald-vibrant: "#23805a"
+  cyan-glow: "#0066cc"
+  rose-neon: "#be3e3e"
+  connection-ok: "#247041"
+  connection-ok-bg: "#eaf6ee"
+  connection-warning: "#865b0b"
+  connection-warning-bg: "#fff5df"
+  warning-hover: "#ffedc5"
+  warning-border: "#e8cf9f"
+  stale-ink: "#79510d"
+  action-hover: "#0055aa"
+  app-blue: "#1471c9"
+  app-chat: "#18854a"
+  app-execution: "#6157a5"
 typography:
   display:
     fontFamily: 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif'
@@ -61,234 +87,150 @@ typography:
     fontSize: "14px"
     fontWeight: 600
     lineHeight: 1.4
+  caption:
+    fontFamily: 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif'
+    fontSize: "12px"
+    fontWeight: 500
+    lineHeight: 1.4
+  dialog:
+    fontFamily: 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif'
+    fontSize: "22px"
+    fontWeight: 700
+    lineHeight: 1.2
+  code:
+    fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace'
+    fontSize: "13px"
+    fontWeight: 500
+    lineHeight: 1.4
+  micro:
+    fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace'
+    fontSize: "11px"
+    fontWeight: 700
+    lineHeight: 1.2
 rounded:
-  sm: "4px"
+  none: "0px"
+  xs: "4px"
+  sm: "5px"
   md: "6px"
+  base: "7px"
   lg: "8px"
-  xl: "12px"
+  xl: "10px"
+  "2xl": "12px"
+  full: "9999px"
 spacing:
   xs: "4px"
   sm: "8px"
-  md: "16px"
-  lg: "24px"
-  xl: "32px"
+  md: "12px"
+  lg: "16px"
+  xl: "24px"
+  "2xl": "32px"
 components:
-  button-primary:
-    backgroundColor: "{colors.sky}"
-    textColor: "{colors.paper}"
-    rounded: "{rounded.md}"
-    padding: "8px 16px"
-  button-primary-hover:
+  button-icon:
+    backgroundColor: "{colors.paper-subtle}"
+    textColor: "{colors.ink-soft}"
+    borderColor: "{colors.line-strong}"
+    rounded: "{rounded.lg}"
+    padding: "0px"
+    width: "40px"
+    height: "40px"
+  button-launch:
     backgroundColor: "{colors.sky-ink}"
-    textColor: "{colors.paper}"
-    rounded: "{rounded.md}"
-    padding: "8px 16px"
+    textColor: "#ffffff"
+    rounded: "{rounded.lg}"
+    padding: "0px"
+    width: "40px"
+    height: "40px"
   button-ghost:
     backgroundColor: "transparent"
+    textColor: "{colors.ink-soft}"
+    rounded: "{rounded.md}"
+    padding: "7px 14px"
+  tooltip-bubble:
+    backgroundColor: "{colors.paper}"
     textColor: "{colors.ink}"
     rounded: "{rounded.md}"
-    padding: "8px 14px"
+    padding: "4px 8px"
   nav-item:
     backgroundColor: "transparent"
     textColor: "{colors.nav-text}"
-    rounded: "{rounded.md}"
-    padding: "11px 12px"
+    rounded: "{rounded.lg}"
+    padding: "8px 12px"
+    height: "48px"
   nav-item-active:
     backgroundColor: "{colors.nav-active}"
-    textColor: "{colors.paper}"
-    rounded: "{rounded.md}"
-    padding: "11px 12px"
+    textColor: "{colors.sky-ink}"
+    rounded: "{rounded.lg}"
+    padding: "8px 12px"
+    height: "48px"
   card-container:
     backgroundColor: "{colors.paper}"
     textColor: "{colors.ink}"
+    borderColor: "{colors.line}"
     rounded: "{rounded.lg}"
     padding: "16px 20px"
-  chat-bubble-incoming:
-    backgroundColor: "{colors.paper-subtle}"
-    textColor: "{colors.ink}"
-    rounded: "{rounded.xl}"
-    padding: "14px"
-  chat-bubble-outgoing:
-    backgroundColor: "{colors.sky-wash}"
-    textColor: "{colors.ink}"
-    rounded: "{rounded.xl}"
-    padding: "14px"
 ---
 
-# Design System: Orca DAG Viewer
+# Design System: Light Apple-Inspired Workbench
 
 ## Overview
 
-**Creative North Star: "The Precision Orchestration Workbench"**
+**Creative North Star: "Light Apple-Inspired Workbench · 浅色苹果风格双区工作台"**
 
-The Orca DAG Viewer design system provides an uncluttered, resource-efficient environment tailored for software engineers supervising parallel agent workflows. It completely replaces legacy paper-and-crayon sketches and SVG turbulence filters with a crisp, low-noise modern interface. High-contrast typography, restrained geometry, flat surfaces, and disciplined color hierarchies ensure operators can rapidly assess system state, verify execution evidence, and intervene safely without cognitive fatigue.
+The Orca DAG Viewer delivers a clean, high-clarity orchestration workbench inspired by modern Apple platform ergonomics and desktop productivity environments. Designed for developers supervising multi-agent software engineering workflows, it eliminates visual clutter and perpetual animation loops while maintaining total operational transparency.
 
-The visual atmosphere balances a crisp white and cool-neutral canvas with a deep navy command rail. Execution evidence is privileged over visual novelty: status markers, connection health pills, and progress indicators communicate verified facts directly. The dependency graph serves to clarify orchestration topology, while dedicated sections house detailed task lists, governance decisions, active fleet monitoring, live activity streams, workspace resource management, and run configuration.
+The workbench organizes multi-agent execution into a balanced **two-area workspace**:
+1. **Persistent DAG Canvas (Left):** An interactive, hardware-accelerated React Flow dependency graph mounted over a subtle dot grid canvas (`#f5f5f7`), keeping node positions, manual coordinates, and selected context stable while the operator navigates tools.
+2. **Operations Application Workspace (Right):** A resizable operations area (`.workbench-operations`) featuring an Apple-style **Home Launcher** (`.workbench-nav--home`) with vibrant app tiles, a compact bottom dock navigation (`.workbench-nav--dock`) when inside applications, an in-place inspector (`NodePanel`), and dedicated workbench modules (Overview, Tasks, Decisions, Executions, Activity, Resources, Settings).
+3. **Integrated Chat Application:** Features a dedicated conversation sidebar (`.chat__sidebar`) supporting instant switching between **Private** task threads (real agent/task conversations seeded from DAG events with urgent/unread flags and pending reply badges) and **Group** broadcast mode (grounded in Orca's Run-control audience selector, avoiding fictional persistent group chat rooms).
+4. **Adaptive Responsive Layout (<=900px):** On screens <=900px, a high-contrast mobile pane switch (`.workbench-mobile-switch`) provides single-tap toggling between full-screen Canvas and Operations views.
 
-**Key Characteristics:**
-- **Crisp Structural Clarity:** Flat surfaces bounded by single-pixel rules (`#dbe2ea`, `#d8e1eb`) without heavy drop shadows, neon glows, or pseudo-skeuomorphic textures.
-- **Deep Navy Navigation:** A focused command column (`#14263d`) providing predictable access across seven core workflow sections.
-- **Evidence-First Feedback:** Distinct, verified status colors for task states, coordinator health, and operation receipts.
-- **Resource Efficiency:** Zero external font downloads, no CPU-intensive SVG displacement loops, and lazy loading for heavy canvas components.
+**Key Invariants & Ergonomics:**
+- **Calm, High-Contrast Light Surfaces:** Pure crisp cards (`#ffffff`), foundation neutral canvas (`#f5f5f7`), hairline borders (`#dcdce1`, `#c9cbd1`), and Apple system blue interactive accents (`#0066cc`).
+- **Steady State Visuals (No Neon / No Flashing):** Elimination of continuous SVG `feTurbulence` filters, neon halos, and scanning lasers. Running states are clearly and reliably indicated via a steady amber border (`#bb842c`), top status bar, and dashed amber dependency edges (`#a9650a`, `stroke-dasharray: 6 5`).
+- **Strict Layout Invariant:** Preserves `NODE_W = 280`, `NODE_H = 120` to guarantee exact layout solver accuracy.
+- **Local Assets:** Authored SVG icons and system typography require no external font download.
+- **Action Placement:** Preview, Stop and language stay in the global header. Run/Run again are icon-only controls beside View in the dependency-graph toolbar, preserving accessible names, tooltips and preflight confirmation. Chat uses the same speech-bubble icon in the launcher and Dock.
+- **Operations Home:** Use a house icon without a visible label in the operations header. Keep a localized "Back to home" accessible name and hover title; this is separate from the narrow Dock's All apps entry.
+- **One Page Heading:** The operations header owns the visible `h1`; task inspection substitutes its own title. Section content begins directly with data, not a second page title.
+- **Spacing:** Section padding is 20px top / 24px horizontal / 28px bottom, with 20px between operational groups. Narrow operations containers use 16px horizontal padding.
+- **Interaction Primitives:** Use `radix-ui` Tooltip, Popover, Select and Dialog with the existing CSS tokens. Do not add a parallel positioning or focus-trap system. Searchable selectors retain explicit combobox/listbox semantics within Popover; simple enums use Select.
+- **Layering:** Page popovers clear the header; select popovers inside confirmation dialogs clear the modal layer. Escape dismisses the innermost popup first. Dialog cancellation remains a negative result and cannot authorize a launch.
 
-## Colors
+## Palette & Hierarchy
 
-The palette uses a calm, cool-neutral base grounded by deep navy navigation and purposeful semantic accents for task and execution statuses.
+### Backgrounds & Surfaces
+- **Foundation Ground Canvas** (`#f5f5f7`): Neutral workspace background for the DAG canvas and operations shell.
+- **Paper Surface** (`#ffffff`): Clean white surface for the cockpit header, canvas header, operations cards, and central reading panels.
+- **Subtle Surface** (`#eaecef`): Elevated contrast background for secondary controls, segmented switches, and inactive button states.
+- **Hairline Borders** (`#dcdce1` primary, `#c9cbd1` strong): 1px structural separation without heavy drop shadows or blurry glow.
+- **Soft Shadows** (`0 4px 14px rgba(29, 29, 31, 0.08)`): Subtle tactile elevation for task nodes and floating menus.
 
-### Primary
-- **Command Navy** (`#14263d`): The anchor for global vertical navigation, establishing visual structure and primary hierarchy.
-- **Sky Accent** (`#2865c7`): Primary interaction accent, active indicators, interactive links, and focused boundaries.
-- **Sky Deep** (`#2054a5`): Pressed, active, and focus-visible outlines for primary action controls.
+### Semantic Status Indicators
+Shared between the React Flow canvas, task list, and operator controls:
+- **Pending** (`#64748b` color, `#f1f5f9` bg, `#475569` ink): Planned or upstream-waiting stages.
+- **Ready** (`#2563a8` color, `#eaf2fb` bg, `#1d4f83` ink): Unblocked stages ready for dispatch.
+- **Dispatched / Running** (`#a9650a` color, `#fff5e5` bg, `#865008` ink): Active worker execution with steady amber accent and dashed running edge (`stroke-dasharray: 6 5`).
+- **Completed** (`#23805a` color, `#e9f6ef` bg, `#176444` ink): Verified task execution with solid green edge.
+- **Failed** (`#be3e3e` color, `#fceeee` bg, `#a32f2f` ink): Interrupted or errored task stages.
+- **Blocked** (`#a15c1b` color, `#fff3e7` bg, `#804817` ink): Tasks blocked by dependency or gate conditions.
+- **Exited Liveness** (`#52647a` neutral): Observed worker exit status without speculative success.
 
-### Secondary
-- **Sky Wash** (`#eaf2ff`): Light tinted background for outgoing user chat messages, active navigation toggles, and selection rows.
-- **Navy Muted** (`#284b72`): Active section indicator background within the primary navigation rail.
-- **Navy Hover** (`#203b59`): Hover state for navigation options.
+### Interactive Micro-Tools & Cockpit Actions
+Global and canvas actions use compact controls with descriptive tooltips:
+1. **Preview Plan (`<EyeIcon />`):** 40x40px icon button.
+2. **Run CTA (`<PlayIcon />`):** Blue 40×40px icon button in the canvas toolbar, 44×44px on narrow screens. Run again uses the same location with `<RefreshIcon />`; no visible text label.
+3. **Stop Run (`<StopIcon />`):** 40x40px soft crimson button (`#ae3234`, bg `#fff0ef`).
+4. **Language Toggle (`中 / EN`):** Compact language switch.
+5. **Connection Icon (`<LinkIcon />` / `<LinkOffIcon />`):** Icon-only focusable status with the detailed readiness/version text in its accessible name and hover title. Preserve green/amber/red evidence states; unknown or failed reads use the broken-link icon, and execution-disabled but readable runtime evidence stays distinct from a disconnected service.
 
-### Neutral
-- **Base Canvas** (`#f3f5f8`): Cool gray-blue backdrop for the workbench viewport.
-- **Surface Paper** (`#ffffff`): Pure white content background for cards, headers, inspectors, and modal dialogs.
-- **Surface Subtle** (`#f5f7fa`): Secondary neutral surface for incoming chat messages and table headers.
-- **Surface Muted** (`#e9eef5`): Border tint and subtle interactive hover states.
-- **Primary Ink** (`#18283e`): Core high-contrast text for headers, body copy, and primary controls.
-- **Soft Ink** (`#465b73`): Secondary text for metadata, subtitles, timestamps, and helper labels.
-- **Faint Ink** (`#53677d`): Disabled labels, hints, and placeholder text.
-- **Divider Line** (`#d8e1eb`): Standard 1px boundary between layout regions.
-- **Strong Line** (`#b5c3d2`): Boundary for input fields and selected card states.
-- **Header Line** (`#dbe2ea`): Structural 1px rule separating header and content sections.
+### App Launcher & Dock
+- **Home App Launcher (`.workbench-nav--home`):** Four columns, or three below 360px operations width, with 52×52px app icons, 12px corners, full category labels and action counters. The summary retains unknown/stale evidence rather than inventing a zero count.
+- **Dock Navigation (`.workbench-nav--dock`):** Eight columns at operations widths ≥640px. Below that, show Chat, Tasks, Decisions, Executions and All apps in five columns; secondary apps remain available from Home. Use short visible labels and full accessible names, never horizontal overflow.
+- **Routes:** Home (`#section=home`) and Chat (`#section=chat`) share the seven section routes and browser history. Refresh restores the chosen app. Navigation does not unmount the DAG or retarget chat drafts.
 
-### Semantic Status
-The semantic Task status palette is derived directly from runtime `STATUS_META` (`web/src/types.ts`), preserving distinct visual identities for task lifecycle states without confusing them with general UI theme accents:
-- **Pending** (`#64748b`, bg `#f1f5f9`, ink `#475569`): Tasks not yet reached or queued awaiting prerequisite resolution.
-- **Ready** (`#2563a8`, bg `#eaf2fb`, ink `#1d4f83`): Runnable tasks with satisfied dependencies and open gates.
-- **Dispatched** (`#a9650a`, bg `#fff5e5`, ink `#865008`): Active executing tasks assigned to a worker or agent execution.
-- **Completed** (`#23805a`, bg `#e9f6ef`, ink `#176444`): Successfully finished tasks with verified output evidence.
-- **Failed** (`#be3e3e`, bg `#fceeee`, ink `#a32f2f`): Tasks encountering fatal execution error, syntax failure, or execution abort.
-- **Blocked** (`#a15c1b`, bg `#fff3e7`, ink `#804817`): Tasks awaiting approval gates, manual recovery, or dependency resolution.
-- **Exited Liveness** (`#52647a`): Neutral worker process termination indicator; strictly an observation of process exit, not an inference of task success or failure.
-
-General UI theme accents remain distinct from task states:
-- **Sky Accent** (`#2865c7`), **Sky Deep** (`#2054a5`), **Sky Wash** (`#eaf2ff`): Primary buttons, focused outlines, active navigation states, and outgoing chat bubbles.
-- **Blush Wash** (`#fff0f1`), **Blush Ink** (`#a22d3b`): Error banners and failed chat message callouts.
-- **Nav Badge** (`#eacb84`, text `#342700`): Counter pill for actionable items in navigation.
-### Named Rules
-**The Single Source of Truth Rule.** Color communicates verified state, never anticipation or unverified optimism. Stale data, unread presence, or disconnected coordinators always display explicit warning or neutral indicators.
-
-**The No-Texture Rule.** No background textures, paper grains, canvas noise filters, or raster gradients may be applied to interactive surfaces.
-
-## Typography
-
-**Display & Body Font:** Local system sans stack: `ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif`  
-**Monospace / Identifier Font:** `ui-monospace, SFMono-Regular, Consolas, monospace` (matching `code, pre, kbd, samp` in `styles.css`)
-**Character:** Neutral, highly legible system typography prioritizing rapid scanning and daylight readability over decorative branding.
-
-### Hierarchy
-- **Display / H1** (Bold 700, 24px, line-height 1.2): Section titles (`Overview`, `Tasks`, `Decisions`, `Executions`, `Activity`, `Resources`, `Settings`) and central detail inspector title (`NodePanel` heading `h1.node-panel__title`).
-- **Headline / H2** (Semi-bold 650, 18px–20px, line-height 1.3): Panel headings, modal titles, and chat dock headers (`.workbench-chat-header h2`).
-- **Title / H3** (Semi-bold 650, 16px, line-height 1.25): Card headers, DAG node titles, and inspector section headers.
-- **Body** (Regular 400, 16px / 1rem, line-height 1.6): Chat messages, documentation prose, and form instructions. Capped at 65ch for comfortable reading.
-- **Label / Meta** (Medium 600, 14px / 0.875rem, line-height 1.4): Table headers, form field labels, status pills, and timestamps.
-- **Data / Micro** (Regular 400, 13px–14px, tabular numerals): Counter badges, execution statistics, and timestamp counters.
-
-### Named Rules
-**The System Font Rule.** Never load web fonts or remote stylesheets. Typography relies strictly on native system stacks to eliminate network layout shifts and minimize memory overhead.
-
-**The Identifiers in Mono Rule.** Any UUID, Run ID, Dispatch ID, task slug, shell command, or raw file path must render in an explicit monospace stack (`ui-monospace, SFMono-Regular, Consolas, monospace`).
-
-**The Detector Findings Boundary.** A prior design detector scan reported 10 warnings and 217 advisory items in the stylesheet codebase. These advisory findings reflect existing style rules and are non-material; design documentation grounds actual tokens without redefining visual identity, falsely claiming warning-free status, or artificially forcing every advisory rule into a token.
-## Layout
-
-The application operates as a three-zone sectional workbench:
-
-1. **Top Header Bar (Adaptive Deterministic CSS Grid):**
-   - On wide viewports (`@media (min-width: 1200px)`), the header lays out a single 10-slot grid row (`grid-template-columns: 140px minmax(180px, 270px) 92px minmax(0, 1fr) 128px 128px 156px 156px 44px 60px; grid-template-areas: "brand run progress . health connection preview launch lang chat";`) integrating brand, compact Run selector (with ellipsis and full tooltip; no in-page New Run button), progress, spacer, centered health and connection badges, preview, launch (`156×40px`, nowrap), language toggle, and chat toggle; notices and status span full rows below.
-   - On viewports `<1200px`, primary execution actions occupy the second header row (`.workbench-action-host`).
-   - Settled no-notice header height measures identically in English and Chinese:
-     - **69px** on wide desktop viewports (`1200px`, `1280px`, `1440px`),
-     - **117px** on intermediate desktop/tablet viewports (`901px`–`1199px`),
-     - **216px** on mobile/narrow viewports (`375px`, `390px`, `900px`).
-   - Diagnostic notices expand the header naturally when active, without rigid height capping.
-   - On mobile viewports (`<=900px`), adapts to a 4-column 4-row grid.
-2. **Left Navigation Rail (200px width on desktop):**
-   - Houses vertical navigation across the 7 application sections.
-   - On screens `<=900px`, structurally collapses into a horizontally scrollable top strip with touch-friendly padding.
-3. **Central Work Area (`.workbench-main`):**
-   - Full-width scrollable viewport rendering the active section or central task inspector (`NodePanel`).
-   - All operational cards and panels (`.gates`, `LanesPanel`, `CleanupPanel`, `WorkerPanel`, `SchedulerPanel`) and central detail inspector (`.workbench-detail .node-panel`) participate in normal document flow (`position: static; width: 100%`), eliminating absolute positioning bugs.
-   - Retains exact scroll position and active route across view toggles (`#section=<name>&task=<id>`).
-4. **Persistent Right Chat Dock (`.workbench-chat`):**
-   - 440px default width with a draggable split border. Clamped between `COMMUNICATION_MIN_WIDTH = 380` and `COMMUNICATION_MAX_WIDTH = 820` (reserving 200px navigation and 320px central workspace on desktop, fallback 280px minimum under constraint).
-   - On viewports `<=900px`, opening chat transforms it into a full-width focused single pane, hiding the central workbench to prevent column cramping.
-### Named Rules
-**The Retained Context Rule.** Selecting a task replaces the central section with the `NodePanel` detail view; closing the inspector restores the previous section, scroll offset, and selection without reloading data or re-triggering network queries.
-
-## Elevation & Depth
-
-Depth in this design system is created strictly through **tonal layering and crisp 1px borders**, not drop shadows.
-
-### Layer Vocabulary
-- **Base Layer (`#f3f5f8`):** The background workbench floor.
-- **Surface Layer (`#ffffff`):** Content cards, headers, inspector panels, and modal sheets with 1px border (`#dbe2ea`).
-- **Recessed Layer (`#f5f7fa`):** Secondary controls, incoming message bubbles, and table rows with subtle containment.
-- **Command Layer (`#14263d`):** The elevated left rail, visually framing the workspace with maximum contrast.
-
-### Named Rules
-**The Flat Elevation Rule.** Surfaces are flat at rest. Floating cards do not use blurred drop shadows (`box-shadow: none`). Focus rings use a solid 2px outline with a 2px offset (`outline: 2px solid #2054a5; outline-offset: 2px`).
-
-## Shapes
-
-- **Corners:**
-  - Small (`rounded.sm`, 4px): Status tags, micro badges, and inline code pills.
-  - Medium (`rounded.md`, 6px): Navigation buttons, primary buttons, input boxes, and toolbar toggles.
-  - Large (`rounded.lg`, 8px): Task node cards, container cards, and inspector panels.
-  - Extra Large (`rounded.xl`, 12px): Chat message bubbles.
-- **Borders:**
-  - Standard 1px solid rule (`#d8e1eb` or `#cbd5e1`).
-  - Active / Selected border: 2px solid `#2563a8`.
-
-## Components
-
-### Buttons
-- **Primary:** Solid blue (`#2865c7`), white text, 6px radius, padding `8px 16px`. Hover transitions to `#2054a5`.
-- **Ghost:** Transparent background, dark text (`#18283e`), 6px radius, 1px border `#cad5e1`. Hover fills with `#f5f7fa`.
-- **Toggle / Segmented:** Border 1px `#cad5e1`, 6px radius. Selected state uses `#e8f0ff` fill with `#8eafe5` border and `#174a92` text.
-
-### Navigation Rail Items
-- **Style:** Full-width button with fixed 56px height, 20px line-height, 8px 12px padding, 6px radius, neutral muted text (`#cbd7e5`).
-- **Hover:** Dark blue background `#203b59` with white text.
-- **Active (`aria-current="page"`):** Navy active fill `#284b72` with bold white text. Includes pill badge (`#eacb84`) for pending actionable count.
-
-### Task Node Card (DAG)
-- **Dimensions:** Exactly 280px width by 120px height (`NODE_W = 280`, `NODE_H = 120`).
-- **Typography:** Title 16px (line-height 20px, font-weight 650), data summary 14px (line-height 20px).
-- **Style:** White background, 1px border `#cbd5e1`, 7px radius. Selected state applies 2px outline `#2563a8` with 1px offset.
-- **Motion:** Discrete status dot pulsing (`@keyframes graph-executing`, opacity 1 to 0.4 over 1.6s) only for positively evidenced running tasks. Completely paused when `prefers-reduced-motion: reduce`, tab is hidden, or graph is inactive.
-
-### Chat Message Bubbles
-- **Incoming / System:** Soft gray (`#f5f7fa`), dark ink (`#18283e`), 12px radius, 14px padding.
-- **Outgoing:** Sky blue wash (`#eaf2ff`), dark ink (`#18283e`), 12px radius, 14px padding.
-- **Error:** Blush wash (`#fff0f1`), red accent text, 12px radius, 14px padding.
-- **Draft Scoping:** Input drafts are bound strictly to `[runId, conversationId, targetId/dispatchId]` via `useScopedChatState`; uncertainty flags are scoped by `runId`; busy and receipts are scoped by `[runId, conversationId]`. Switching Runs or recipients isolates drafts without clobbering.
-
-### Central Detail Inspector (`NodePanel`)
-- **Container:** Full-width central replacement view (`.workbench-detail`), scrollable independently.
-- **Header:** Sticky or top-anchored title with direct keyboard focus (`h1.node-panel__title`, `tabIndex={-1}`) upon opening.
-- **Dismissal:** Accessible Close button and `Escape` key handler returning focus to the originating list or graph item via `requestAnimationFrame`.
-
-## Do's and Don'ts
-
-### Do:
-- **Do** use flat CSS surfaces with single-pixel rules (`#dbe2ea`, `#d8e1eb`) and tonal fills for hierarchy.
-- **Do** preserve route context via URL hash (`#section=<name>&task=<id>`) so browser back/forward buttons work intuitively.
-- **Do** isolate chat drafts and receipts per Run and recipient using `useScopedChatState`.
-- **Do** lazy-load heavy graph views (`DagView`) and retain their instances once mounted.
-- **Do** respect user motion preferences by disabling continuous animations under `prefers-reduced-motion: reduce`.
-- **Do** clearly distinguish JavaScript heap memory from GPU or renderer compositor process memory in technical documentation.
-
-### Don't:
-- **Don't** reintroduce SVG `feTurbulence` filters, pencil displacement maps, or hand-drawn crayon borders.
-- **Don't** load external or third-party web fonts; always use native system font stacks.
-- **Don't** squeeze three full columns on narrow viewports; switch to a focused single-pane layout on screens `<=900px`.
-- **Don't** use drop shadows (`box-shadow`) to fake material elevation; depth must be established through tonal background shifts.
-- **Don't** silently switch chat recipients or clear message drafts when switching between Runs or tasks.
-- **Don't** run infinite canvas animation loops or unthrottled timer-based re-renders when the graph is hidden or offscreen.
+### Chat Sidebar & Scoped Communication
+- **Sidebar (`.chat__sidebar`):** 150px wide list with Private/Group toggle (`.chat__switch`).
+  - **Private:** Shows real task threads seeded from DAG events, actor harness/model tags, unread/urgent indicators, and pending question counters.
+  - **Group:** Exposes the Run-control audience selector for broadcast messages (@all, @idle, harness groups, @worktree:<id>).
+- **Scope & Safety Invariant:** Message drafts, busy states, and receipts are isolated per `[runId, conversationId, targetId/dispatchId]` via `useScopedChatState`. Switching views or tasks never leaks drafts or triggers implicit sends.
+- **Runtime Summary:** Center status, detail and check metadata in separate wrapping rows. Group the status dot with its label, use a single shrinkable column at every pane width, and preserve the underlying Run/worker evidence unchanged.

@@ -65,6 +65,18 @@
   font-size: 14px;
 }
 
+.dag-read-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 16px 0;
+}
+
+.dag-read-actions .btn {
+  margin: 0;
+}
+
 .dag-read-notice .dag-read-details {
   margin-top: 4px;
 }

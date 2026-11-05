@@ -368,6 +368,7 @@ export const ChatPanel = memo(function ChatPanel({
     // Orca's coordinator mailbox only retains worker-to-coordinator messages.
     // Seed each Task thread from the DAG so that this real outbound half of
     // the exchange remains visible without pretending it was a mailbox row.
+    grouped.set(COORDINATOR_THREAD, []);
     for (const task of tasks) grouped.set(task.id, []);
     for (const event of snapshot.events) {
       const id = event.taskId ?? COORDINATOR_THREAD;
@@ -417,11 +418,13 @@ export const ChatPanel = memo(function ChatPanel({
   }, [lang, leadTaskId, snapshot.events, snapshot.presence, tasks]);
 
   const [selectedId, setSelectedId] = useScopedChatState<string | null>(runId, null);
-  const selected = conversations.find((conversation) => conversation.id === selectedId) ?? null;
-  const conversationScope = JSON.stringify([runId, selectedId]);
+  const [chatView, setChatView] = useScopedChatState<"private" | "group">(runId, "private");
+  const selected = conversations.find((conversation) =>
+    conversation.id === (chatView === "group" ? COORDINATOR_THREAD : selectedId)) ?? null;
+  const conversationScope = JSON.stringify([runId, selected?.id ?? null]);
   // A new question or Dispatch is a new recipient. Retain the earlier draft
   // separately instead of silently forwarding it to the replacement worker.
-  const draftScope = JSON.stringify([runId, selectedId,
+  const draftScope = JSON.stringify([runId, selected?.id ?? null,
     selected?.pending.at(-1)?.actionable?.targetId ?? selected?.task?.dispatchId ?? null]);
   const [expandedChecks, setExpandedChecks] = useScopedChatState<Record<string, number>>(conversationScope, {});
   const [draft, setDraft] = useScopedChatState(draftScope, "");
@@ -461,7 +464,9 @@ export const ChatPanel = memo(function ChatPanel({
 
   useEffect(() => {
     if (selectedId && conversations.some((conversation) => conversation.id === selectedId)) return;
-    const next = conversations.find((conversation) => conversation.pending.length > 0) ?? conversations[0];
+    const next = conversations.find((conversation) => conversation.pending.length > 0)
+      ?? conversations.find((conversation) => conversation.taskId !== null)
+      ?? conversations[0];
     setSelectedId(next?.id ?? null);
   }, [conversations, selectedId, setSelectedId]);
 
@@ -473,7 +478,7 @@ export const ChatPanel = memo(function ChatPanel({
   // than inventing any.
   const isRunControl = selected?.taskId === null;
   useEffect(() => {
-    if (!runId || !isRunControl || !coordinatorActive) {
+    if (!runId || !isRunControl || chatView !== "group" || !coordinatorActive) {
       setPreview(null);
       setPreviewFailed(false);
       return;
@@ -497,7 +502,7 @@ export const ChatPanel = memo(function ChatPanel({
     return () => {
       cancelled = true;
     };
-  }, [runId, isRunControl, coordinatorActive, previewNonce]);
+  }, [runId, isRunControl, chatView, coordinatorActive, previewNonce]);
 
   const audienceOptions: DoodleOption[] = useMemo(
     () =>
@@ -845,39 +850,38 @@ export const ChatPanel = memo(function ChatPanel({
     return <div className="chat__empty">{t("chat.empty.pickRun")}</div>;
   }
 
-  if (conversations.length === 0) {
-    return (
-      <div className="chat__empty">
-        {historyWarning && (
-          <div className="chat-history-warning" role="status">
-            <strong>{t("chat.history.incomplete")}</strong>
-            <span>{historyWarning}</span>
-          </div>
-        )}
-        {t("chat.empty.noConversations")}
-      </div>
-    );
-  }
 
   return (
+    <div className="chat-container">
     <section className="chat" aria-label={t("chat.aria.section")}>
-      <div className="chat__recipient">
-        <label>
-          <span>{t("workbench.chat.recipient")}</span>
-          <select value={selectedId ?? ""} onChange={(event) => setSelectedId(event.target.value)}>
+      <aside className="chat__sidebar" aria-label={t("chat.aria.threadList")}>
+        <h2>{t("chat.sidebar.title")}</h2>
+        <div className="chat__switch" role="group" aria-label={t("chat.sidebar.view")}>
+          <button type="button" aria-pressed={chatView === "private"} onClick={() => setChatView("private")}>{t("chat.sidebar.private")}</button>
+          <button type="button" aria-pressed={chatView === "group"} onClick={() => setChatView("group")}>{t("chat.sidebar.group")}</button>
+        </div>
+        {chatView === "private" ? (
+          <div className="chat__thread-list">
             {conversations.map((conversation) => (
-              <option key={conversation.id} value={conversation.id}>
-                {conversation.label}
-                {conversation.taskId && conversation.taskId !== conversation.label ? ` · ${conversation.taskId}` : ""}
-                {conversation.urgent ? ` · ${t("chat.thread.urgentAria")}` : ""}
-                {conversation.unread ? ` · ${t("chat.thread.unreadAria")}` : ""}
-                {conversation.pending.length ? ` · ${t("chat.thread.repliesNeeded", { n: conversation.pending.length })}` : ""}
-              </option>
+              <button
+                type="button"
+                className="chat__thread"
+                key={conversation.id}
+                aria-pressed={selectedId === conversation.id}
+                onClick={() => setSelectedId(conversation.id)}
+              >
+                <strong>{conversation.label}</strong>
+                {conversation.taskId && conversation.taskId !== conversation.label && <span>{conversation.taskId}</span>}
+                {conversation.urgent && <span>{t("chat.thread.urgentAria")}</span>}
+                {conversation.unread && <span>{t("chat.thread.unreadAria")}</span>}
+                {conversation.pending.length > 0 && <span>{t("chat.thread.repliesNeeded", { n: conversation.pending.length })}</span>}
+              </button>
             ))}
-          </select>
-        </label>
-        <p>{t("workbench.chat.stableTarget")}</p>
-      </div>
+          </div>
+        ) : (
+          <p className="chat__sidebar-note">{t("chat.sidebar.groupNote")}</p>
+        )}
+      </aside>
 
       <div className="chat__conversation">
         {selected && (
@@ -885,9 +889,9 @@ export const ChatPanel = memo(function ChatPanel({
             <header className="chat__conversation-head">
               <div>
                 <div className="chat__conversation-title">
-                  <strong>{selected.label}</strong>
-                  {selected.isLead && <span>{t("chat.leadStage")}</span>}
-                  {!selected.taskId && <span className="chat__conversation-system">{t("chat.thread.system")}</span>}
+                  <strong>{chatView === "group" ? t("chat.sidebar.groupTitle") : selected.label}</strong>
+                  {chatView === "private" && selected.isLead && <span>{t("chat.leadStage")}</span>}
+                  {chatView === "private" && !selected.taskId && <span className="chat__conversation-system">{t("chat.thread.system")}</span>}
                 </div>
                 {selected.subtitle && selected.subtitle !== selected.label && selected.subtitle !== selected.taskId
                   ? <p>{selected.subtitle}</p>
@@ -1039,8 +1043,10 @@ export const ChatPanel = memo(function ChatPanel({
                 data-state={summaryState}
                 aria-label={t("chat.summary.aria")}
               >
-                <span className="chat-runtime-summary__pulse" aria-hidden="true" />
-                <strong title={summaryLabel}>{summaryLabel}</strong>
+                <div className="chat-runtime-summary__status">
+                  <span className="chat-runtime-summary__pulse" aria-hidden="true" />
+                  <strong title={summaryLabel}>{summaryLabel}</strong>
+                </div>
                 <span className="chat-runtime-summary__detail">
                   {selected.task
                     ? presenceSummary
@@ -1080,8 +1086,8 @@ export const ChatPanel = memo(function ChatPanel({
                   )}
                 </div>
               )}
-              {groupError && <div className="chat__error" role="status">⚠ {groupError}</div>}
-              {isRunControl && coordinatorActive && !disabled && (
+              {chatView === "group" && groupError && <div className="chat__error" role="status">⚠ {groupError}</div>}
+              {chatView === "group" && isRunControl && coordinatorActive && !disabled && (
                 <div className="chat__group-composer">
                   <div className="chat__group-controls">
                     <label className="chat__group-field">
@@ -1100,6 +1106,7 @@ export const ChatPanel = memo(function ChatPanel({
                     <label className="chat__group-field">
                       <span>{t("chat.group.type")}</span>
                       <DoodleSelect
+                        searchable={false}
                         value={groupType}
                         onChange={(value) => setGroupType(value === "question" ? "question" : "status")}
                         options={[
@@ -1113,6 +1120,7 @@ export const ChatPanel = memo(function ChatPanel({
                     <label className="chat__group-field">
                       <span>{t("chat.group.priority")}</span>
                       <DoodleSelect
+                        searchable={false}
                         value={groupPriority}
                         onChange={(value) =>
                           setGroupPriority(
@@ -1178,7 +1186,9 @@ export const ChatPanel = memo(function ChatPanel({
                   <p className="chat__group-note">{t("chat.group.note")}</p>
                 </div>
               )}
-              {replyTarget || activeDispatch ? (
+              {chatView === "group" ? (
+                (!coordinatorActive || disabled) && <p className="chat__composer-idle">{disabled ? disabledReason ?? t("chat.compose.executionIsUnavailable") : t("chat.sidebar.groupUnavailable")}</p>
+              ) : replyTarget || activeDispatch ? (
                 <div className="chat__compose-row">
                   <textarea
                     rows={2}
@@ -1228,5 +1238,6 @@ export const ChatPanel = memo(function ChatPanel({
         )}
       </div>
     </section>
+    </div>
   );
 });

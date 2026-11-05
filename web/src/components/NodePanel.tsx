@@ -501,6 +501,7 @@ export function NodePanel({
         <div className="node-panel__field">
           <span className="node-panel__key">{t("node.harnessKey")}</span>
           <DoodleSelect
+            searchable={false}
             value={sel}
             onChange={pick}
             disabled={launchLocked}
@@ -641,6 +642,7 @@ export function NodePanel({
           <div className="node-panel__field">
             <span className="node-panel__key">{t("node.effortKey", { harness: effHarness })}</span>
             <DoodleSelect
+              searchable={false}
               value={getNodeEffort(node.id) ?? ""}
               onChange={(v) => {
                 if (!launchLocked) setNodeEffort(node.id, v || null);
@@ -658,7 +660,7 @@ export function NodePanel({
         {effHarness === "opencode" && (
           <div className="node-panel__field">
             <span className="node-panel__key">{t("openCode.uiLabel")}</span>
-            <DoodleSelect value={config.openCodeUiByTask[node.id] ?? INHERIT} disabled={launchLocked}
+            <DoodleSelect searchable={false} value={config.openCodeUiByTask[node.id] ?? INHERIT} disabled={launchLocked}
               ariaLabel={t("openCode.uiLabel")}
               onChange={value => { if (!launchLocked) setNodeOpenCodeUi(node.id, isOpenCodeUi(value) ? value : null); }}
               options={[

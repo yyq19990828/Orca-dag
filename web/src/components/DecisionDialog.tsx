@@ -1,15 +1,13 @@
 import {
   createContext,
   type FormEvent,
-  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   useCallback,
   useContext,
-  useEffect,
   useRef,
   useState,
 } from "react";
-import { createPortal } from "react-dom";
+import { Dialog } from "radix-ui";
 import { useT } from "../i18n";
 
 type DialogTone = "default" | "danger";
@@ -62,7 +60,8 @@ export function DecisionDialogProvider({ children }: { children: ReactNode }) {
   const queue = useRef<DialogRequest[]>([]);
   const activeRef = useRef<DialogRequest | null>(null);
   const returnFocus = useRef<HTMLElement | null>(null);
-  const cardRef = useRef<HTMLElement | null>(null);
+  const focusCycle = useRef(false);
+  const dialogGeneration = useRef(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const safeButtonRef = useRef<HTMLButtonElement | null>(null);
 
@@ -73,6 +72,12 @@ export function DecisionDialogProvider({ children }: { children: ReactNode }) {
       queue.current.push(request);
       return;
     }
+    if (!focusCycle.current) {
+      returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      focusCycle.current = true;
+    }
+    setInput(request.kind === "prompt" ? request.initialValue ?? "" : "");
+    dialogGeneration.current += 1;
     activeRef.current = request;
     setActive(request);
   }, []);
@@ -92,32 +97,18 @@ export function DecisionDialogProvider({ children }: { children: ReactNode }) {
     ),
   };
 
-  useEffect(() => {
-    if (!active) return;
-    returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    setInput(active.kind === "prompt" ? active.initialValue ?? "" : "");
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    const frame = window.requestAnimationFrame(() => {
-      if (active.kind === "prompt") inputRef.current?.focus();
-      else safeButtonRef.current?.focus();
-    });
-    return () => {
-      window.cancelAnimationFrame(frame);
-      document.body.style.overflow = previousOverflow;
-    };
-  }, [active]);
 
   const settle = useCallback((value: boolean | string | null | void) => {
     const current = activeRef.current;
     if (!current) return;
     const next = queue.current.shift() ?? null;
     activeRef.current = next;
+    if (next) setInput(next.kind === "prompt" ? next.initialValue ?? "" : "");
+    if (next) dialogGeneration.current += 1;
     setActive(next);
     if (current.kind === "alert") current.resolve();
     else if (current.kind === "confirm") current.resolve(Boolean(value));
     else current.resolve(typeof value === "string" ? value : null);
-    window.requestAnimationFrame(() => returnFocus.current?.focus());
   }, []);
 
   function cancel() {
@@ -136,61 +127,42 @@ export function DecisionDialogProvider({ children }: { children: ReactNode }) {
     settle(true);
   }
 
-  function trapKeys(event: ReactKeyboardEvent<HTMLElement>) {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      cancel();
-      return;
-    }
-    if (event.key !== "Tab" || !cardRef.current) return;
-    const focusable = [...cardRef.current.querySelectorAll<HTMLElement>(
-      'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), [href], details > summary, [tabindex]:not([tabindex="-1"])',
-    )].filter((element) => {
-      const closedDetails = element.closest("details:not([open])");
-      if (!closedDetails) return true;
-      const summary = closedDetails.querySelector(":scope > summary");
-      return element === summary || Boolean(summary?.contains(element));
-    });
-    if (focusable.length === 0) return;
-    const first = focusable[0];
-    const last = focusable.at(-1)!;
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  }
 
   return (
     <DecisionDialogContext.Provider value={api}>
       {children}
-      {active && createPortal(
-        <div
-          className="decision-dialog__backdrop"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) cancel();
-          }}
-        >
-          <section
-            ref={cardRef}
-            className={`decision-dialog decision-dialog--${active.tone ?? "default"}`}
-            role={active.kind === "alert" ? "alertdialog" : "dialog"}
-            aria-modal="true"
-            aria-labelledby="decision-dialog-title"
-            aria-describedby="decision-dialog-message"
-            onKeyDown={trapKeys}
-          >
+      <Dialog.Root open={Boolean(active)} onOpenChange={(open) => { if (!open) cancel(); }}>
+        {active && (
+          <Dialog.Portal>
+            <Dialog.Overlay className="decision-dialog__backdrop">
+            <Dialog.Content
+              key={dialogGeneration.current}
+              className={`decision-dialog decision-dialog--${active.tone ?? "default"}`}
+              role={active.kind === "alert" ? "alertdialog" : "dialog"}
+              onOpenAutoFocus={(event) => {
+                event.preventDefault();
+                if (active.kind === "prompt") inputRef.current?.focus();
+                else safeButtonRef.current?.focus();
+              }}
+              onCloseAutoFocus={(event) => {
+                event.preventDefault();
+                window.requestAnimationFrame(() => {
+                  if (activeRef.current) return;
+                  focusCycle.current = false;
+                  if (returnFocus.current?.isConnected) returnFocus.current.focus();
+                  returnFocus.current = null;
+                });
+              }}
+            >
             <span className="decision-dialog__tape" aria-hidden="true" />
             <form onSubmit={submit}>
               <header className="decision-dialog__header">
                 <span className="decision-dialog__mark" aria-hidden="true">
                   {active.tone === "danger" ? "!" : active.kind === "prompt" ? "+" : "?"}
                 </span>
-                <h2 id="decision-dialog-title">{active.title}</h2>
+                <Dialog.Title asChild><h2>{active.title}</h2></Dialog.Title>
               </header>
-              <p id="decision-dialog-message" className="decision-dialog__message" tabIndex={0}>{active.message}</p>
+              <Dialog.Description asChild><p className="decision-dialog__message" tabIndex={0}>{active.message}</p></Dialog.Description>
               {active.content && <div className="decision-dialog__content">{active.content}</div>}
               {active.kind === "prompt" && (
                 <label className="decision-dialog__field">
@@ -225,10 +197,11 @@ export function DecisionDialogProvider({ children }: { children: ReactNode }) {
                 </button>
               </footer>
             </form>
-          </section>
-        </div>,
-        document.body,
-      )}
+            </Dialog.Content>
+            </Dialog.Overlay>
+          </Dialog.Portal>
+        )}
+      </Dialog.Root>
     </DecisionDialogContext.Provider>
   );
 }

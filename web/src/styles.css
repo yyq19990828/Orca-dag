@@ -2,33 +2,32 @@
 
 :root {
   --paper: #ffffff;
-  --paper-2: #f5f7fa;
-  --paper-3: #e9eef5;
-  --ink: #18283e;
-  --ink-soft: #465b73;
-  --ink-faint: #53677d;
-  --line: #d8e1eb;
-  --line-strong: #b5c3d2;
+  --paper-2: #f5f5f7;
+  --paper-3: #eaecef;
+  --ink: #1d1d1f;
+  --ink-soft: #565b65;
+  --ink-faint: #626771;
+  --line: #dcdce1;
+  --line-strong: #c9cbd1;
 
-  --sky: #2865c7;
-  --sky-ink: #2054a5;
-  --sky-wash: #eaf2ff;
-  --blush: #d45a65;
-  --blush-ink: #a22d3b;
-  --blush-wash: #fff0f1;
-  --meadow: #237a51;
-  --butter: #9a6200;
-  --coral: #b53632;
-  --coral-ink: #9d2c29;
-  --flame: #a65413;
-  --lilac: #6654aa;
-  --lilac-ink: #514187;
+  --sky: #0066cc;
+  --sky-ink: #0066cc;
+  --sky-wash: #eaf3ff;
+  --blush: #b83232;
+  --blush-ink: #a52c2c;
+  --blush-wash: #fceeee;
+  --meadow: #257344;
+  --butter: #92600d;
+  --coral: #b83232;
+  --coral-ink: #a52c2c;
+  --flame: #a45110;
+  --lilac: #6554a4;
+  --lilac-ink: #55438f;
 
-  --shadow-sticker: none;
-  --shadow-soft: none;
+  --shadow-sticker: 0 4px 20px rgba(29, 29, 31, 0.10);
+  --shadow-soft: 0 2px 10px rgba(29, 29, 31, 0.08);
 
   --font-display: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-  
   --font-body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
 
   font-family: var(--font-body);
@@ -384,7 +383,7 @@ body {
   font-size: 14px;
   color: var(--ink-soft);
   font-weight: 500;
-  opacity: 0.6;
+  opacity: 1;
   transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
 }
 /* a status only earns full contrast once something is actually in it */
@@ -842,7 +841,7 @@ body {
 .decision-dialog__header h2 {
   margin: 0;
   font-family: var(--font-display);
-  font-size: clamp(20px, 3vw, 25px);
+  font-size: 22px;
   line-height: 1.16;
   color: var(--ink);
 }
@@ -2207,11 +2206,10 @@ body {
   display: grid;
   width: 100%;
   align-self: stretch;
-  /* minmax(0, auto) lets the label column SHRINK: a long status label
-     ("Agent working · terminal live · supervised liveness unavailable") used
-     to size the track to its nowrap content and blow the pill past the
-     panel edge. */
-  grid-template-columns: 7px minmax(0, auto) minmax(0, 1fr) auto;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: center;
+  text-align: center;
   align-items: center;
   gap: 7px;
   margin-top: 2px;
@@ -2486,15 +2484,6 @@ body {
   }
   .chat__conversation-head p {
     margin: 0;
-  }
-  .chat-runtime-summary {
-    grid-template-columns: 7px minmax(0, 1fr);
-  }
-  .chat-runtime-summary__detail,
-  .chat-runtime-summary__meta {
-    grid-column: 2;
-    white-space: normal;
-    overflow-wrap: anywhere;
   }
   .chat__compose-row {
     grid-template-columns: minmax(0, 1fr);
@@ -3264,255 +3253,6 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 
 
-.doodle-select {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  font-family: var(--font-body);
-  font-size: 14px;
-  color: var(--ink);
-  text-align: left;
-  padding: 8px 11px;
-  border-radius: 6px;
-  border: 1px solid var(--line-strong);
-  background: var(--paper);
-  cursor: pointer;
-  
-  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
-}
-.doodle-select:hover:not(:disabled) {
-  border-color: var(--ink-soft);
-  
-}
-.doodle-select:focus {
-  outline: none;
-  border-color: var(--sky);
-  
-}
-.doodle-select--open {
-  border-color: var(--sky);
-  
-  transform: none;
-}
-.doodle-select:disabled {
-  color: var(--ink-soft);
-  opacity: 1;
-  cursor: not-allowed;
-}
-/* compact variant for the toolbars, sized like the old inline controls */
-.doodle-select--sm {
-  width: auto;
-  font-size: 14px;
-  padding: 5px 9px;
-  border-radius: 6px;
-}
-.doodle-select__value {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.doodle-select__value--dim {
-  color: var(--ink-soft);
-}
-
-.doodle-select__chev {
-  flex: none;
-  width: 13px;
-  height: 9px;
-  overflow: visible;
-  
-  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
-}
-.doodle-select__chev path {
-  fill: none;
-  stroke: var(--ink-soft);
-  stroke-width: 2.4;
-  stroke-linecap: round;
-}
-.doodle-select:hover:not(:disabled) .doodle-select__chev path {
-  stroke: var(--ink);
-}
-.doodle-select--open .doodle-select__chev {
-  transform: rotate(180deg);
-}
-
-
-.doodle-select__panel {
-  position: fixed;
-  z-index: 60;
-  display: flex;
-  flex-direction: column;
-  padding: 10px;
-  background: var(--paper);
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-  
-  
-  transform-origin: 18px top;
-  
-}
-.doodle-select__panel--up {
-  transform-origin: 18px bottom;
-}
-
-
-.doodle-select__panel::before {
-  content: "";
-  position: absolute;
-  inset: -2px;
-  border-radius: inherit;
-  border: 1px solid var(--line-strong);
-  
-  pointer-events: none;
-}
-
-.doodle-select__panel::after {
-  content: "";
-  position: absolute;
-  top: -10px;
-  left: 24px;
-  width: 52px;
-  height: 18px;
-  
-  background: var(--paper-2);
-  border-left: 1px solid rgba(179, 127, 22, 0.35);
-  border-right: 1px solid rgba(179, 127, 22, 0.35);
-  pointer-events: none;
-}
-.doodle-select__panel--up::after {
-  top: auto;
-  bottom: -10px;
-  
-}
-
-
-.doodle-select__search {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin-bottom: 8px;
-  padding: 6px 9px;
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-  background: var(--paper);
-  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
-}
-.doodle-select__search:focus-within {
-  border-color: var(--sky);
-  
-}
-.doodle-select__mag {
-  flex: none;
-  width: 13px;
-  height: 13px;
-  overflow: visible;
-  
-}
-.doodle-select__mag circle,
-.doodle-select__mag path {
-  fill: none;
-  stroke: var(--ink-soft);
-  stroke-width: 2.2;
-  stroke-linecap: round;
-}
-.doodle-select__search input {
-  flex: 1;
-  min-width: 0;
-  border: none;
-  background: transparent;
-  outline: none;
-  font-family: var(--font-body);
-  font-size: 14px;
-  color: var(--ink);
-}
-.doodle-select__search input::placeholder {
-  color: var(--ink-soft);
-  opacity: 0.7;
-}
-
-.doodle-select__options {
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  scrollbar-width: thin;
-  scrollbar-color: var(--line-strong) transparent;
-}
-.doodle-select__options::-webkit-scrollbar {
-  width: 8px;
-}
-.doodle-select__options::-webkit-scrollbar-thumb {
-  background: var(--line-strong);
-  border-radius: 4px;
-}
-.doodle-select__opt {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 10px;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
-}
-.doodle-select__opt--active {
-  background: var(--paper-2);
-  transform: translateX(2px);
-}
-.doodle-select__opt--selected {
-  background: var(--sky-wash);
-}
-.doodle-select__opt--disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.doodle-select__opt-text {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-.doodle-select__opt-label {
-  font-size: 14px;
-  color: var(--ink);
-  word-break: break-word;
-}
-.doodle-select__opt-hint {
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 14px;
-  color: var(--ink-soft);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.doodle-select__check {
-  flex: none;
-  width: 15px;
-  height: 13px;
-  overflow: visible;
-  
-}
-.doodle-select__check path {
-  fill: none;
-  stroke: #4d9e62;
-  stroke-width: 3.2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-dasharray: 100;
-  stroke-dashoffset: 100;
-  
-}
-.doodle-select__empty {
-  padding: 12px 10px;
-  font-size: 14px;
-  color: var(--ink-soft);
-  text-align: center;
-}
 
 /* Retry counter next to the running indicator: Orca circuit-breaks a task after
    3 consecutive failed attempts, so a non-zero count is worth surfacing early. */
@@ -3911,9 +3651,6 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   border: 1px solid currentColor;
 }
 .runhealth__panel {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
   z-index: 60;
   width: 340px;
   padding: 12px 14px;
@@ -3937,6 +3674,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   letter-spacing: 0.04em;
   color: var(--ink-faint);
   min-width: 74px;
+  flex-shrink: 0;
 }
 .runhealth__val {
   font-size: 14px;
@@ -4014,23 +3752,6 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   overflow-wrap: anywhere;
   border-bottom: 1px solid var(--line);
   padding-bottom: 4px;
-}
-/* Phone widths: the chip no longer sits at the viewport's right edge (the
-   status row wraps), so the chip-anchored panel would hang off one side of
-   the screen at 375px. Pin it to the viewport gutters instead; `top` stays
-   auto, which for a fixed box means "just below where it sits in flow" —
-   right under the chip — and the app body itself never scrolls. */
-@media (max-width: 620px) {
-  .runhealth__panel {
-    position: fixed;
-    /* top: auto is the point of this override — the base `calc(100% + 8px)`
-       would resolve 100% against the VIEWPORT once fixed (i.e. off-screen) */
-    top: auto;
-    bottom: auto;
-    left: 10px;
-    right: 10px;
-    width: auto;
-  }
 }
 
 /* ---------- Capability matrix (operations epic Phase 1) ----------
@@ -4780,11 +4501,43 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 
 /* Shared browser and control states */
 html { font-size: 16px; }
-body { line-height: 1.5; caret-color: var(--sky-ink); }
-::selection { background: #cddfff; color: #10243f; }
-:focus-visible { outline: 2px solid #2054a5 !important; outline-offset: 2px; }
-input::placeholder, textarea::placeholder { color: #53677d; opacity: 1; }
-button:disabled, input:disabled, select:disabled, textarea:disabled, [aria-disabled="true"] { color: #53677d; cursor: not-allowed; }
+body { line-height: 1.5; caret-color: var(--sky); color-scheme: light; }
+::selection { background: #cce3ff; color: var(--ink); }
+:focus-visible { outline: 2px solid var(--sky) !important; outline-offset: 2px; }
+input::placeholder, textarea::placeholder { color: var(--ink-faint); opacity: 1; }
+button:disabled, input:disabled, select:disabled, textarea:disabled, [aria-disabled="true"] { color: var(--ink-faint); cursor: not-allowed; }
 code, pre, kbd, samp { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .btn { border: 1px solid var(--line-strong); border-radius: 6px; font-weight: 600; }
-.btn:hover:not(:disabled) { background: var(--paper-2); border-color: var(--sky-ink); }
+.btn:hover:not(:disabled) { background: var(--paper-2); border-color: var(--sky); }
+.btn--ok:hover:not(:disabled), .btn--run:hover:not(:disabled) {
+  color: #fff;
+  background: #1e6038;
+  border-color: #1e6038;
+}
+.btn--danger:hover:not(:disabled), .btn--stop-run:hover:not(:disabled) {
+  color: #fff;
+  background: #982929;
+  border-color: #982929;
+}
+
+/* Custom precision scrollbars */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #b5bac3;
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #858c97;
+}
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #b5bac3 transparent;
+}

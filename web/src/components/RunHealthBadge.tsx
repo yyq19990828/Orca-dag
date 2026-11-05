@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { Popover } from "radix-ui";
+import "./run-health-popover.css";
 import { fetchRemovedWork, fetchRunHealth } from "../api";
 import { t, useT, type TranslationKey } from "../i18n";
 import type { RemovedWorkEntryView, RemovedWorkPageView, RunHealthView, RunOwnershipState } from "../types";
@@ -77,7 +79,6 @@ export function RunHealthBadge({ runId }: { runId: string }) {
   const t = useT();
   const [health, setHealth] = useState<RunHealthView | null>(null);
   const [open, setOpen] = useState(false);
-  const wrapRef = useRef<HTMLDivElement | null>(null);
   const [showRemoved, setShowRemoved] = useState(false);
   const [removedPages, setRemovedPages] = useState<RemovedWorkEntryView[]>([]);
   const [removedCursor, setRemovedCursor] = useState<string | null>(null);
@@ -168,15 +169,6 @@ export function RunHealthBadge({ runId }: { runId: string }) {
     }
   };
 
-  // Close the popover when clicking anywhere else — the badge is a peek panel.
-  useEffect(() => {
-    if (!open) return;
-    const onDocClick = (event: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", onDocClick);
-    return () => document.removeEventListener("mousedown", onDocClick);
-  }, [open]);
 
   if (!runId || !health) return null;
 
@@ -185,20 +177,21 @@ export function RunHealthBadge({ runId }: { runId: string }) {
   const infoCount = health.warnings.length - warningCount;
 
   return (
-    <div className="runhealth" ref={wrapRef}>
-      <button
-        type="button"
-        className={`runhealth__chip runhealth__chip--${meta.tone}`}
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        title={`${t(meta.brief)}\n${health.ownershipDetail}`}
-      >
-        {t(meta.label)}
-        {warningCount > 0 && <b className="runhealth__flag">{warningCount}</b>}
-        {warningCount === 0 && infoCount > 0 && <span className="runhealth__info-dot">i</span>}
-      </button>
-      {open && (
-        <div className="runhealth__panel" role="region" aria-label={t("health.panelAria")}>
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <div className="runhealth">
+      <Popover.Trigger asChild>
+        <button
+          type="button"
+          className={`runhealth__chip runhealth__chip--${meta.tone}`}
+          title={`${t(meta.brief)}\n${health.ownershipDetail}`}
+        >
+          {t(meta.label)}
+          {warningCount > 0 && <b className="runhealth__flag">{warningCount}</b>}
+          {warningCount === 0 && infoCount > 0 && <span className="runhealth__info-dot">i</span>}
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content className="runhealth__panel runhealth__panel--popover" role="region" aria-label={t("health.panelAria")} sideOffset={8} align="end" collisionPadding={12}>
           <div className="runhealth__row">
             <span className="runhealth__key">{t("health.ownershipKey")}</span>
             <span className="runhealth__val">
@@ -272,8 +265,9 @@ export function RunHealthBadge({ runId }: { runId: string }) {
               {health.evidenceComplete ? t("health.clean") : t("health.cleanPartial")}
             </p>
           )}
-        </div>
-      )}
-    </div>
+        </Popover.Content>
+      </Popover.Portal>
+      </div>
+    </Popover.Root>
   );
 }

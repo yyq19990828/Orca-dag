@@ -195,6 +195,7 @@ export function PlacementEditor({
         />
       ) : (
         <DoodleSelect
+          searchable={false}
           value={mode}
           onChange={pickMode}
           disabled={disabled}
@@ -261,6 +262,7 @@ export function PlacementEditor({
             <label className="placement__field">
               <span>{t("placement.field.setupHooks")}</span>
               <DoodleSelect
+                searchable={false}
                 value={creation.setup}
                 onChange={(v) => patchCreation({ setup: v as SetupPolicy })}
                 disabled={disabled}

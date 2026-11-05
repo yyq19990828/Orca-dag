@@ -1,0 +1,58 @@
+/* Tooltip surface */
+.tooltip-trigger {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tooltip-bubble {
+  position: relative;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: #fff;
+  border: 1px solid var(--line-strong);
+  box-shadow: 0 8px 24px rgba(29, 29, 31, 0.14);
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.4;
+  max-width: min(320px, calc(100vw - 16px));
+  white-space: normal;
+  animation: tooltip-enter 0.15s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes tooltip-enter {
+  from {
+    opacity: 0;
+    transform: translateY(2px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+
+.tooltip-kbd {
+  display: inline-block;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--paper-2);
+  border: 1px solid var(--line);
+  color: var(--ink-soft);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tooltip-bubble {
+    animation: none;
+  }
+}

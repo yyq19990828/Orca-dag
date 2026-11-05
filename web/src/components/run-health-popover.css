@@ -1,0 +1,5 @@
+.runhealth__panel.runhealth__panel--popover {
+  width: min(340px, var(--radix-popover-content-available-width));
+  max-height: var(--radix-popover-content-available-height);
+  overflow: auto;
+}

@@ -1,0 +1,61 @@
+.doodle-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+  font: 14px var(--font-body);
+  text-align: left;
+  cursor: pointer;
+}
+.doodle-select--sm { width: auto; padding: 5px 9px; }
+.doodle-select:hover:not(:disabled) { border-color: var(--ink-soft); }
+.doodle-select:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
+.doodle-select--open { border-color: var(--sky); }
+.doodle-select:disabled { color: var(--ink-soft); cursor: not-allowed; }
+.doodle-select__value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.doodle-select__value--dim { color: var(--ink-soft); }
+.doodle-select__chev { flex: none; width: 13px; height: 9px; }
+.doodle-select__chev path { fill: none; stroke: var(--ink-soft); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.doodle-select--open .doodle-select__chev { transform: rotate(180deg); }
+.doodle-select__panel {
+  z-index: 1100;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  width: min(max(var(--radix-popover-trigger-width, var(--radix-select-trigger-width, 0px)), 210px), calc(100vw - 16px));
+  max-height: var(--radix-popover-content-available-height, var(--radix-select-content-available-height, 90vh));
+  padding: 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--paper);
+  box-shadow: 0 8px 24px rgba(29, 29, 31, 0.14);
+  color: var(--ink);
+  font: 14px var(--font-body);
+}
+.doodle-select__panel--actions { width: min(max(var(--radix-popover-trigger-width), 300px), calc(100vw - 16px)); overflow-y: auto; }
+.doodle-select__search { display: flex; flex: none; align-items: center; gap: 7px; margin-bottom: 8px; padding: 6px 9px; border: 1px solid var(--line-strong); border-radius: 6px; }
+.doodle-select__search:focus-within { border-color: var(--sky); }
+.doodle-select__mag { flex: none; width: 13px; height: 13px; }
+.doodle-select__mag circle, .doodle-select__mag path { fill: none; stroke: var(--ink-soft); stroke-width: 2; stroke-linecap: round; }
+.doodle-select__search input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--ink); font: inherit; }
+.doodle-select__search input::placeholder { color: var(--ink-soft); }
+.doodle-select__options { min-height: 0; max-height: 264px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+.doodle-select__opt { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 6px; outline: none; cursor: pointer; }
+.doodle-select__opt--active, .doodle-select__opt[data-highlighted] { background: var(--paper-2); }
+.doodle-select__opt--selected, .doodle-select__opt[data-state="checked"] { background: var(--sky-wash); }
+.doodle-select__opt--disabled, .doodle-select__opt[data-disabled] { color: var(--ink-faint); background: var(--paper-2); cursor: not-allowed; }
+.doodle-select__opt-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.doodle-select__opt-label { color: var(--ink); overflow-wrap: anywhere; }
+.doodle-select__opt-hint { color: var(--ink-soft); font-size: 12px; overflow-wrap: anywhere; }
+.doodle-select__indicator { margin-left: auto; color: var(--sky); }
+.doodle-select__indicator svg { display: block; width: 15px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.doodle-select__empty { padding: 12px 10px; color: var(--ink-soft); text-align: center; }
+@media (max-width: 900px) {
+  .doodle-select, .doodle-select__opt, .doodle-select__search { min-height: 44px; }
+}

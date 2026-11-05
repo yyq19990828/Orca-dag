@@ -25,6 +25,8 @@ import { HARNESSES, UNVERIFIED_HARNESSES, OPEN_CODE_UIS, isOpenCodeUi, type DagE
 import { lanePlanProblems } from "../placement";
 import { useState, useRef, useEffect, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { EyeIcon, PlayIcon, RefreshIcon, StopIcon } from "./Icons";
+import { Tooltip } from "./Tooltip";
  
 
 const CUSTOM = "__custom__";
@@ -84,6 +86,7 @@ export function ExecControls({
   onRunStartFinished,
   onRunStopped,
   actionHost,
+  launchHost,
 }: {
   /** Run to execute. Mutations are Run-scoped since Orca 1.4.160. */
   runId: string;
@@ -115,6 +118,8 @@ export function ExecControls({
    */
   onRunStopped?: () => void | Promise<void>;
   actionHost?: HTMLElement | null;
+  /** Keep Run on the canvas without mounting a second execution controller. */
+  launchHost?: HTMLElement | null;
 }) {
   const dialog = useDecisionDialog();
   // Every user-visible string in this panel is translated — the settings
@@ -389,7 +394,7 @@ export function ExecControls({
           {(config.defaultHarness === "opencode" || taskIds.some(id => (config.harnessByTask[id] ?? config.defaultHarness) === "opencode")) && (
             <div className="exec__field">
               <span className="exec__label">{t("openCode.uiLabel")}</span>
-              <DoodleSelect size="sm" value={config.defaultOpenCodeUi} disabled={launchLocked}
+              <DoodleSelect searchable={false} size="sm" value={config.defaultOpenCodeUi} disabled={launchLocked}
                 onChange={value => { if (!launchLocked && isOpenCodeUi(value)) setDefaultOpenCodeUi(value); }}
                 options={OPEN_CODE_UIS.map(value => ({ value, label: t(`openCode.ui.${value}`),
                   disabled: value !== "auto" && Boolean(platform && platform !== "linux"), hint: value === "auto" ? undefined : t("openCode.uiRequirements") }))} />
@@ -400,6 +405,7 @@ export function ExecControls({
           <div className="exec__field">
             <span className="exec__label">{t("exec.defaultHarness")}</span>
             <DoodleSelect
+              searchable={false}
               size="sm"
               value={defHarness}
               onChange={pickDefault}
@@ -465,22 +471,32 @@ export function ExecControls({
       <ActionMount host={actionHost}>
       {/* Hard-disabling a busy trigger blurs it before the dialog can remember
           it. Handlers reject repeat clicks; policy locks stay native-disabled. */}
-      <button
-        type="button"
-        className="btn"
-        onClick={inspectPlan}
-        disabled={!runId || taskIds.length === 0}
-        aria-disabled={busy}
-        aria-busy={busy}
-      >
-        {t("exec.previewButton")}
-      </button>
+      <Tooltip className="workbench-exec-preview" content={t("exec.previewButton")}>
+        <button
+          type="button"
+          className="btn btn--icon"
+          onClick={inspectPlan}
+          disabled={!runId || taskIds.length === 0}
+          aria-disabled={busy}
+          aria-busy={busy}
+          aria-label={t("exec.previewButton")}
+        >
+          <EyeIcon size={16} />
+        </button>
+      </Tooltip>
 
       {running ? (
         <div className="exec__live">
-          <button className="btn btn--stop-run" onClick={stop} disabled={busy}>
-            {t("exec.stop")}
-          </button>
+          <Tooltip className="workbench-exec-stop" content={t("exec.stop")}>
+            <button
+              className="btn btn--stop-run btn--icon"
+              onClick={stop}
+              disabled={busy}
+              aria-label={t("exec.stop")}
+            >
+              <StopIcon size={14} />
+            </button>
+          </Tooltip>
           <span className="exec__running">
             <span className="exec__pulse" /> {phaseKey ? t(phaseKey) : phase} ·{" "}
             {(ownStatus?.busy ?? 0) === 1
@@ -502,28 +518,35 @@ export function ExecControls({
         </div>
       ) : starting ? (
         <div className="exec__live">
-          <button
-            type="button"
-            className="btn btn--stop-run"
-            disabled
-            title={t("exec.stopPendingTitle")}
-          >
-            {t("exec.stop")}
-          </button>
+          <Tooltip className="workbench-exec-stop" content={t("exec.stop")}>
+            <button
+              type="button"
+              className="btn btn--stop-run btn--icon"
+              disabled
+              title={t("exec.stopPendingTitle")}
+              aria-label={t("exec.stop")}
+            >
+              <StopIcon size={14} />
+            </button>
+          </Tooltip>
           <span className="exec__running">
             <span className="exec__pulse" /> {t("exec.bindingRecovering")}
           </span>
         </div>
       ) : phase === "completed" ? (
         <div className="exec__live">
-          <button
-            className="btn btn--run"
-            onClick={run}
-            disabled={busy || launchLocked || anotherRunStarting || Boolean(otherRunStatus) || !runId || execOff}
-            title={t("exec.runAgainTitle")}
-          >
-            {t("exec.runAgain")}
-          </button>
+          <ActionMount host={launchHost}>
+          <Tooltip className="workbench-exec-launch" content={t("exec.runAgain")}>
+            <button
+              className="btn btn--run btn--icon"
+              onClick={run}
+              disabled={busy || launchLocked || anotherRunStarting || Boolean(otherRunStatus) || !runId || execOff}
+              aria-label={t("exec.runAgain")}
+            >
+              <RefreshIcon size={18} aria-hidden="true" />
+            </button>
+          </Tooltip>
+          </ActionMount>
           <span
             className="exec__running exec__done"
             title={ownStatus?.completedAt ? t("exec.completedAt", { time: new Date(ownStatus.completedAt).toLocaleTimeString() }) : undefined}
@@ -537,15 +560,10 @@ export function ExecControls({
           </span>
         </div>
       ) : (
-        <button
-          className={`btn btn--run${readyCount > 0 && !busy && !execOff ? " btn--attract" : ""}`}
-          onClick={run}
-          aria-disabled={busy}
-          aria-busy={busy}
-          disabled={
-            launchLocked || anotherRunStarting || Boolean(otherRunStatus) || taskIds.length === 0 || !runId || execOff
-          }
-          title={
+        <ActionMount host={launchHost}>
+        <Tooltip
+          className="workbench-exec-launch"
+          content={
             execOff
               ? readiness?.reason ?? t("exec.execUnavailableTitle")
               : runId
@@ -553,8 +571,20 @@ export function ExecControls({
                 : t("err.pickRunFirst")
           }
         >
-          {execOff ? t("topbar.viewOnly") : t("exec.runWithOrca")}
-        </button>
+          <button
+            className={`btn btn--run btn--icon${readyCount > 0 && !busy && !execOff ? " btn--attract" : ""}`}
+            onClick={run}
+            aria-disabled={busy}
+            aria-busy={busy}
+            disabled={
+              launchLocked || anotherRunStarting || Boolean(otherRunStatus) || taskIds.length === 0 || !runId || execOff
+            }
+            aria-label={t("exec.runWithOrca")}
+          >
+            <PlayIcon size={18} aria-hidden="true" />
+          </button>
+        </Tooltip>
+        </ActionMount>
       )}
 
       {/* explicit Stop must report every uncertain teardown, never swallow it */}

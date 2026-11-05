@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type PointerEvent as ReactPointerEvent } from "react";
+import { Popover } from "radix-ui";
 import { ExecControls } from "./components/ExecControls";
 import { ActivityPanel } from "./components/ActivityPanel";
 import { ChatPanel } from "./components/ChatPanel";
@@ -23,6 +24,23 @@ import { focusOperation, type OperationFocus } from "./operation-navigation";
 import "./operations-nav.css";
 import "./workbench.css";
 import "./read-state.css";
+import "./tooltip.css";
+import {
+  ActivityIcon,
+  CpuIcon,
+  GitForkIcon,
+  GridIcon,
+  LayersIcon,
+  NetworkIcon,
+  RefreshIcon,
+  ServerIcon,
+  ShieldIcon,
+  SlidersIcon,
+  ChatBubbleIcon,
+  HomeIcon,
+  LinkIcon,
+  LinkOffIcon,
+} from "./components/Icons";
 import { TaskList } from "./components/TaskList";
 import {
   LAYOUTS,
@@ -67,17 +85,35 @@ const EMPTY_ATTEMPTS: RunAttempt[] = [];
 const POLL_MS = 2000;
 const SECTIONS = ["overview", "tasks", "decisions", "executions", "activity", "resources", "settings"] as const;
 type Section = typeof SECTIONS[number];
+type WorkbenchPage = Section | "home" | "chat";
+const DOCK_PRIMARY: Partial<Record<WorkbenchPage, true>> = { chat: true, tasks: true, decisions: true, executions: true };
 
-function readRoute(): { section: Section; task: string | null } {
+const SECTION_ICONS: Record<Section, ReactNode> = {
+  overview: <GridIcon size={16} />,
+  tasks: <LayersIcon size={16} />,
+  decisions: <ShieldIcon size={16} />,
+  executions: <CpuIcon size={16} />,
+  activity: <ActivityIcon size={16} />,
+  resources: <ServerIcon size={16} />,
+  settings: <SlidersIcon size={16} />,
+};
+
+function readRoute(): { section: WorkbenchPage; task: string | null } {
   const params = new URLSearchParams(window.location.hash.slice(1));
   const requested = params.get("section");
-  return { section: SECTIONS.find((section) => section === requested) ?? "overview", task: params.get("task") };
+  const section = requested === "home" || requested === "chat"
+    ? requested
+    : SECTIONS.find((item) => item === requested) ?? (params.has("task") ? "tasks" : "home");
+  return { section, task: params.get("task") };
 }
 
-function writeRoute(section: Section, task: string | null) {
+function writeRoute(section: WorkbenchPage, task: string | null) {
   const params = new URLSearchParams({ section });
   if (task) params.set("task", task);
-  window.history.pushState(null, "", `${window.location.pathname}${window.location.search}#${params}`);
+  const hash = `#${params}`;
+  if (window.location.hash !== hash) {
+    window.history.pushState(null, "", `${window.location.pathname}${window.location.search}${hash}`);
+  }
 }
 const COMMUNICATION_MIN_WIDTH = 380;
 const COMMUNICATION_MAX_WIDTH = 820;
@@ -93,19 +129,21 @@ function sameJson(a: unknown, b: unknown): boolean {
 export default function App() {
   const [dag, setDag] = useState<DagResponse>(EMPTY);
   const [route, setRoute] = useState(readRoute);
-  const [selectedId, setSelectedId] = useState<string | null>(() => readRoute().task);
-  const [stageOpen, setStageOpen] = useState(() => Boolean(readRoute().task));
-  const [communicationOpen, setCommunicationOpen] = useState(false);
+  // One route owns the visible application and inspector. Home and chat are
+  // real destinations too, so refresh/back cannot silently reveal an old app.
+  const selectedId = route.task;
+  const stageOpen = Boolean(route.task);
+  const communicationOpen = route.section === "chat" && !stageOpen;
+  const operationHome = route.section === "home" && !stageOpen;
+  const [mobilePane, setMobilePane] = useState<"canvas" | "operations">(() => window.location.hash ? "operations" : "canvas");
   const [communicationWidth, setCommunicationWidth] = useState<number | null>(null);
   const [communicationResizing, setCommunicationResizing] = useState(false);
+  const [operationsSize, setOperationsSize] = useState({ width: 0, max: COMMUNICATION_MAX_WIDTH });
   const [operationFocus, setOperationFocus] = useState<OperationFocus | null>(null);
   const [actionHost, setActionHost] = useState<HTMLElement | null>(null);
+  const [launchHost, setLaunchHost] = useState<HTMLElement | null>(null);
   const operationRef = useRef<HTMLElement | null>(null);
   const scrollByView = useRef<Record<string, number>>({});
-  const viewKey = stageOpen ? `task:${selectedId}` : route.section;
-  useLayoutEffect(() => {
-    if (operationRef.current) operationRef.current.scrollTop = scrollByView.current[viewKey] ?? 0;
-  }, [viewKey]);
   // Parent/child ownership links (Phase 4) are hideable: on dense graphs they
   // can reduce readability, and they carry no scheduling semantics to lose.
   const [showHierarchy, setShowHierarchy] = useState(true);
@@ -118,6 +156,10 @@ export default function App() {
   // translated surface; the palette itself stays in STATUS_META.
   const t = useT();
   const runId = config.runId;
+  const viewKey = `${runId}:${stageOpen ? `task:${selectedId}` : route.section}`;
+  useLayoutEffect(() => {
+    if (operationRef.current) operationRef.current.scrollTop = scrollByView.current[viewKey] ?? 0;
+  }, [viewKey]);
   const connError = dagFailure?.runId === runId ? dagFailure.message : null;
   // Execution gate (Phase 2): when the server's readiness probe says this
   // Orca runtime can't execute (missing, or 1.4.160–1.4.204 view-only), the
@@ -128,15 +170,12 @@ export default function App() {
   // bump to force a fresh auto-layout (discarding manual drags)
   const [reorgNonce, setReorgNonce] = useState(0);
   const canvasFitNonce = 0;
-  const [mobileTaskView, setMobileTaskView] = useState<"tasks" | "graph">("tasks");
   const [graphMountedRun, setGraphMountedRun] = useState<string | null>(null);
   const markGraphMounted = useCallback(() => setGraphMountedRun(runId), [runId]);
-  const graphActive = !stageOpen && route.section === "tasks" && mobileTaskView === "graph" &&
-    !(communicationOpen && window.matchMedia("(max-width: 900px)").matches);
+  const graphActive = mobilePane === "canvas" || !window.matchMedia("(max-width: 900px)").matches;
   const [retryingRead, setRetryingRead] = useState(false);
   const stageReturnFocus = useRef<HTMLElement | null>(null);
-  const communicationRef = useRef<HTMLElement | null>(null);
-  const communicationReturnFocus = useRef<HTMLElement | null>(null);
+  const communicationRef = useRef<HTMLDivElement | null>(null);
   const communicationResize = useRef<{
     pointerId: number;
     startX: number;
@@ -198,38 +237,25 @@ export default function App() {
     const restore = () => {
       const next = readRoute();
       setRoute(next);
-      setSelectedId(next.task);
-      setStageOpen(Boolean(next.task));
-      if (window.matchMedia("(max-width: 900px)").matches) setCommunicationOpen(false);
+      setOperationFocus(null);
+      setMobilePane(window.location.hash ? "operations" : "canvas");
     };
     window.addEventListener("popstate", restore);
-    return () => window.removeEventListener("popstate", restore);
+    window.addEventListener("hashchange", restore);
+    return () => {
+      window.removeEventListener("popstate", restore);
+      window.removeEventListener("hashchange", restore);
+    };
   }, []);
 
-  function navigate(section: Section) {
+  function navigate(section: WorkbenchPage, focusHeading = true) {
     writeRoute(section, null);
     setRoute({ section, task: null });
-    setStageOpen(false);
     setOperationFocus(null);
-    // On narrow screens chat is a focused pane, not an overlay. Navigation
-    // must reveal its destination without changing the selected recipient.
-    if (window.matchMedia("(max-width: 900px)").matches) setCommunicationOpen(false);
+    setMobilePane("operations");
+    if (focusHeading) window.requestAnimationFrame(() => document.getElementById("workbench-page-title")?.focus());
   }
 
-  // Nested selectors and modal dialogs own their first dismissal. In
-  // particular, a Run dialog must return to its still-visible menu trigger.
-  useEffect(() => {
-    const dismiss = (event: PointerEvent) => {
-      if (!(event.target instanceof Element) || event.target.closest(".doodle-select__panel, .decision-dialog__backdrop")) return;
-      for (const menu of document.querySelectorAll<HTMLDetailsElement>(
-        ".runpick__menu[open], .view-menu[open], .exec__settings[open]",
-      )) {
-        if (!menu.contains(event.target)) menu.open = false;
-      }
-    };
-    document.addEventListener("pointerdown", dismiss);
-    return () => document.removeEventListener("pointerdown", dismiss);
-  }, []);
 
   function pickLayout(kind: LayoutKind) {
     setLayout(kind);
@@ -237,33 +263,34 @@ export default function App() {
 
 
   function openCommunication() {
-    if (!communicationOpen) {
-      const active = document.activeElement;
-      communicationReturnFocus.current = active instanceof HTMLElement &&
-        active !== document.body && !active.closest(".workbench-chat")
-        ? active : document.querySelector<HTMLElement>(".workbench-chat-toggle");
-      if (communicationWidth === null) setCommunicationWidth(clampCommunicationWidth(440));
-    }
-    setCommunicationOpen(true);
+    navigate("chat");
   }
 
-  function closeCommunication() {
-    setCommunicationOpen(false);
-    const target = communicationReturnFocus.current;
-    window.requestAnimationFrame(() => {
-      if (target?.isConnected) target.focus();
-    });
-  }
 
   function clampCommunicationWidth(width: number): number {
     const workspaceWidth = communicationRef.current?.parentElement?.getBoundingClientRect().width ?? window.innerWidth;
     const narrow = window.matchMedia("(max-width: 900px)").matches;
-    const navWidth = narrow ? 0 : document.querySelector(".workbench-nav")?.getBoundingClientRect().width ?? 0;
-    const reserve = narrow ? 0 : CANVAS_MIN_WIDTH + navWidth;
-    const upper = Math.max(280, Math.min(COMMUNICATION_MAX_WIDTH, workspaceWidth - reserve));
+    const reserve = narrow ? 0 : CANVAS_MIN_WIDTH;
+    const upper = Math.max(COMMUNICATION_MIN_WIDTH, Math.min(COMMUNICATION_MAX_WIDTH, workspaceWidth - reserve));
     const lower = Math.min(COMMUNICATION_MIN_WIDTH, upper);
     return Math.round(Math.min(Math.max(width, lower), upper));
   }
+
+  useLayoutEffect(() => {
+    const panel = communicationRef.current;
+    const workspace = panel?.parentElement;
+    if (!panel || !workspace) return;
+    // Measure rendered geometry, not the last requested drag width: viewport
+    // constraints and the default percentage also change the separator value.
+    const observer = new ResizeObserver(() => {
+      const width = Math.round(panel.getBoundingClientRect().width);
+      const max = Math.max(COMMUNICATION_MIN_WIDTH, Math.min(COMMUNICATION_MAX_WIDTH, Math.floor(workspace.getBoundingClientRect().width - CANVAS_MIN_WIDTH)));
+      setOperationsSize((previous) => previous.width === width && previous.max === max ? previous : { width, max });
+    });
+    observer.observe(panel);
+    observer.observe(workspace);
+    return () => observer.disconnect();
+  }, []);
 
   function beginCommunicationResize(event: ReactPointerEvent<HTMLDivElement>) {
     if (!communicationRef.current) return;
@@ -318,7 +345,14 @@ export default function App() {
       setDagFailure(null);
     } catch (e) {
       if (selectedRunRef.current === requestedRun && seq >= dagAppliedSeq.current) {
-        setDagFailure({ runId: requestedRun, message: String((e as Error).message ?? e) });
+        const msg = String((e as Error).message ?? e);
+        setDagFailure({ runId: requestedRun, message: msg });
+        const code = (e as { code?: string })?.code;
+        const status = (e as { status?: number })?.status;
+        const isMissing = code === "run_not_found" || status === 404 || status === 409 || /not_found|not found/i.test(msg);
+        if (isMissing && hydrated) {
+          pickRun("");
+        }
       }
     }
   }, [runId]);
@@ -407,8 +441,6 @@ export default function App() {
   const pickRun = useCallback((id: string) => {
     setRunId(id);
     setGraphMountedRun(null);
-    setSelectedId(null);
-    setStageOpen(false);
     setOperationFocus(null);
     setActivityPending(0);
     setActivitySnapshot({ ...EMPTY_ACTIVITY, runId: id });
@@ -423,7 +455,7 @@ export default function App() {
   const closeStage = useCallback(() => {
     writeRoute(route.section, null);
     setRoute({ section: route.section, task: null });
-    setStageOpen(false);
+    if (stageReturnFocus.current?.closest(".workbench-canvas")) setMobilePane("canvas");
     window.requestAnimationFrame(() => {
       if (stageReturnFocus.current?.isConnected) stageReturnFocus.current.focus();
     });
@@ -438,9 +470,7 @@ export default function App() {
     stageReturnFocus.current = active instanceof HTMLElement && active !== document.body ? active : null;
     writeRoute(route.section, id);
     setRoute({ section: route.section, task: id });
-    setSelectedId(id);
-    setStageOpen(true);
-    if (window.matchMedia("(max-width: 900px)").matches) setCommunicationOpen(false);
+    setMobilePane("operations");
   }, [closeStage, route.section]);
 
   const onRunStarting = useCallback((id: string) => {
@@ -522,9 +552,8 @@ export default function App() {
 
   function openOperation(target: OperationFocus) {
     const section = target.kind === "worker" ? "executions" : "decisions";
-    navigate(section);
+    navigate(section, false);
     setOperationFocus(target);
-    if (window.matchMedia("(max-width: 900px)").matches) setCommunicationOpen(false);
   }
 
   useEffect(() => {
@@ -570,21 +599,14 @@ export default function App() {
   const progressGroupAria =
     failedCount > 0 ? progressAria + t("topbar.progressFailedAria", { n: failedCount }) : progressAria;
 
-  // The top bar deliberately offers no way to wipe tasks: `orca orchestration
-  // reset` has no --run flag and deletes every local Run's tasks at once, so
-  // the viewer never exposes it. Redrawing a graph means creating a fresh Run
-  // (New Run).
+  // Planning owns Run creation; the viewer exposes neither task reset nor a
+  // second creation entry point. Navigation never grants mutation authority.
+  const pageTitle = stageOpen ? t("workbench.section.tasks") : route.section === "home"
+    ? t("workbench.home") : route.section === "chat" ? t("toolbar.chat")
+    : t(`workbench.section.${route.section}`);
 
   return (
-    <div className="workbench" onKeyDown={(event) => {
-      if (event.key !== "Escape" || event.defaultPrevented || !(event.target instanceof Element)) return;
-      const menu = event.target.closest<HTMLDetailsElement>(".runpick__menu[open], .view-menu[open], .exec__settings[open]");
-      if (!menu) return;
-      event.preventDefault();
-      event.stopPropagation();
-      menu.open = false;
-      menu.querySelector<HTMLElement>("summary")?.focus();
-    }}>
+    <div className="workbench">
       <header className="workbench-header">
         <div className="workbench-brand">
           <strong>{t("topbar.title")}</strong>
@@ -594,102 +616,153 @@ export default function App() {
         <div className="workbench-progress">{hasDagSnapshot && <span aria-label={progressGroupAria}>{stageCount ? t("topbar.doneOf", { done: completedCount, total: stageCount }) : t("topbar.noStages")}</span>}</div>
         <div className="workbench-health"><RunHealthBadge runId={runId} /></div>
         <div className="workbench-connection"><div className={`conn ${connectionError ? "conn--bad" : execOff || !readiness ? "conn--warn" : "conn--ok"}`} role="status" tabIndex={0} title={connDetail} aria-label={connDetail}>
-          {connectionError ? t("topbar.fetchFailed") : !readiness ? t("topbar.connectionUnknown") : execOff ? t("topbar.viewOnly") : t("topbar.orcaConnected")}
+          {!connectionError && readiness ? <LinkIcon size={20} /> : <LinkOffIcon size={20} />}
         </div></div>
         <div className="workbench-action-host" ref={setActionHost} />
         <LangToggle />
-        <button type="button" className="workbench-chat-toggle" aria-pressed={communicationOpen} onClick={communicationOpen ? closeCommunication : openCommunication}>{t("toolbar.chat")}{activityPending > 0 && <span className="activity-badge">{activityPending}</span>}</button>
       </header>
-      <div className={`workbench-body${communicationOpen ? " workbench-body--chat-open" : ""}`}>
-        <nav className="workbench-nav" aria-label={t("workbench.navigation")}>
-          {SECTIONS.map((section) => <button key={section} type="button" aria-current={route.section === section && !stageOpen ? "page" : undefined} onClick={() => navigate(section)}>
-            {t(`workbench.section.${section}`)}
-            {section === "decisions" && knownActionableCount > 0 && <span className="workbench-nav-count">{actionableCount === null ? `${knownActionableCount}+` : actionableCount}</span>}
-          </button>)}
-        </nav>
-        <main className="workbench-main" ref={operationRef} onScroll={(event) => { scrollByView.current[viewKey] = event.currentTarget.scrollTop; }}>
+      <div className="workbench-mobile-switch" role="group" aria-label={t("workbench.panes")}>
+        <button type="button" aria-pressed={mobilePane === "canvas"} onClick={() => setMobilePane("canvas")}><NetworkIcon size={16} />{t("taskView.graph")}</button>
+        <button type="button" aria-pressed={mobilePane === "operations"} onClick={() => setMobilePane("operations")}><GridIcon size={16} />{t("workbench.home")}</button>
+      </div>
+      <div className={`workbench-body${mobilePane === "operations" ? " workbench-body--mobile-operations" : ""}`}>
+        <section className="workbench-canvas" aria-label={t("taskView.graph")}>
+          <header className="workbench-canvas-header">
+            <div><strong>{t("taskView.graph")}</strong>{hasDagSnapshot && <small>{t("toolbar.taskDepCount", { tasks: visibleDag.nodes.length, deps: visibleDag.edges.length })}</small>}</div>
+            <div className="workbench-canvas-actions">
+            <div className="workbench-launch-host" ref={setLaunchHost} />
+            <Popover.Root>
+              <Popover.Trigger asChild><button type="button" className="btn btn--ghost view-menu">{t("toolbar.view")}</button></Popover.Trigger>
+              <Popover.Portal><Popover.Content className="view-menu__panel" aria-label={t("toolbar.view")} align="end" sideOffset={8} collisionPadding={12}>
+              <div className="legend" role="group" aria-label={t("toolbar.statusLegendAria")}>{(Object.keys(STATUS_META) as TaskStatus[]).map((s) => <span className="legend__item" key={s}><span className="legend__dot" style={{ background: STATUS_META[s].color }} />{t(`status.${s}`)} {counts[s] ?? 0}</span>)}</div>
+              <div className="legend" role="group" aria-label={t("toolbar.relationLegendAria")}>
+                <span title={t("toolbar.dependencyTitle")}>{t("toolbar.dependency")}</span>
+                <span title={t("toolbar.parentTitle")}>{t("toolbar.parent")}</span>
+                <button type="button" className="btn btn--ghost btn--icon-text" aria-pressed={showHierarchy} onClick={() => setShowHierarchy((v) => !v)}><GitForkIcon size={14} />{showHierarchy ? t("toolbar.hideParentLinks") : t("toolbar.showParentLinks")}</button>
+              </div>
+              <div className="layout-ctl"><span className="exec__label">{t("toolbar.layout")}</span>
+                <div className="seg" role="group" aria-label={t("toolbar.layoutAria")}>{LAYOUTS.map((l) => <button key={l.kind} className={layout === l.kind ? "active" : ""} aria-pressed={layout === l.kind} title={t(`layout.title.${l.kind}`)} onClick={() => pickLayout(l.kind)}>{t(`layout.label.${l.kind}`)}</button>)}</div>
+                <button className="btn btn--ghost btn--icon-text" onClick={() => setReorgNonce((n) => n + 1)}><RefreshIcon size={14} />{t("toolbar.relayout")}</button>
+              </div>
+              </Popover.Content></Popover.Portal>
+            </Popover.Root>
+            </div>
+          </header>
+          {hasDagSnapshot && connError && <div className="workbench-canvas-notice" role="status"><span>{t("read.staleTitle")} · {t("read.staleBody")}</span><button type="button" className="btn btn--ghost" disabled={retryingRead} onClick={() => void retryRead()}>{t(retryingRead ? "read.retrying" : "read.retry")}</button></div>}
+          {hasDagSnapshot && (graphMountedRun === runId || graphActive) ? <div className="workbench-graph">
+            <Suspense fallback={<p role="status">{t("workbench.loadingGraph")}</p>}><GraphMounted onMount={markGraphMounted}>
+              <DagView dag={visibleDag} leadTaskId={leadTaskId} selectedId={stageOpen ? selectedId : null} onSelect={selectStage} layout={layout} reorgNonce={reorgNonce} fitNonce={canvasFitNonce} showHierarchy={showHierarchy} workerRows={workerRows} attempts={runStatus?.runId === runId ? runStatus.attempts : EMPTY_ATTEMPTS} active={graphActive} fleetFresh={fleetFresh} pendingDispatchIds={pendingDispatchIds} />
+            </GraphMounted></Suspense>
+          </div> : <div className="workbench-canvas-empty" role="status">{t(readError ? (runId ? "read.tasksFailed" : "read.runsFailed") : runId ? "workbench.loadingGraph" : "empty.pickRunTitle")}</div>}
+        </section>
+        <div id="workbench-operations" ref={communicationRef} className={`workbench-operations${communicationResizing ? " workbench-chat--resizing" : ""}`} style={{ width: communicationWidth === null ? undefined : `${communicationWidth}px` }}>
+          <div className="workbench-chat-resize" role="separator" aria-label={t("toolbar.resizeCommunicationAria")} aria-controls="workbench-operations" aria-orientation="vertical" aria-valuemin={COMMUNICATION_MIN_WIDTH} aria-valuemax={operationsSize.max} aria-valuenow={operationsSize.width || undefined} tabIndex={0} title={t("toolbar.resizeCommunicationTitle")} onPointerDown={beginCommunicationResize} onPointerMove={moveCommunicationResize} onPointerUp={endCommunicationResize} onPointerCancel={endCommunicationResize} onKeyDown={(event) => {
+            if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+            const current = communicationRef.current?.getBoundingClientRect().width ?? COMMUNICATION_MIN_WIDTH;
+            const requested = event.key === "Home" ? COMMUNICATION_MIN_WIDTH : event.key === "End" ? operationsSize.max
+              : current + (event.key === "ArrowLeft" ? 32 : -32);
+            setCommunicationWidth(clampCommunicationWidth(requested));
+            event.preventDefault();
+          }} />
+          <header className="workbench-operations-header">
+            {stageOpen ? <strong>{pageTitle}</strong> : <h1 id="workbench-page-title" tabIndex={-1}>{pageTitle}</h1>}
+            {!operationHome && <button type="button" className="btn btn--ghost workbench-home-button" aria-label={t("workbench.backHomeAria")} title={t("workbench.backHomeAria")} onClick={() => navigate("home")}><HomeIcon size={18} /></button>}
+          </header>
+          {operationHome && <div className="workbench-home-summary">
+            {hasDagSnapshot ? <>
+              <span aria-label={progressGroupAria}>{stageCount ? t("topbar.doneOf", { done: completedCount, total: stageCount }) : t("topbar.noStages")}</span>
+              {knownActionableCount > 0 && <button type="button" onClick={() => navigate("decisions")}>{t("workbench.attentionCount", { n: actionableCount === null ? `${knownActionableCount}+` : actionableCount })}</button>}
+              {connError && <span role="status">{t("overview.stale")}</span>}
+            </> : <p role="status">{t(readError ? (runId ? "read.tasksFailed" : "read.runsFailed") : waitingForData ? "read.loadingBody" : "empty.pickRunTitle")}</p>}
+          </div>}
+          <nav className={`workbench-nav${operationHome ? " workbench-nav--home" : " workbench-nav--dock"}`} aria-label={t("workbench.navigation")}>
+            <button type="button" className="workbench-nav-btn" data-app="chat" data-primary="true" aria-current={communicationOpen ? "page" : undefined} onClick={openCommunication}><span className="workbench-nav-icon"><ChatBubbleIcon size={18} /></span><span className="workbench-nav-label">{t("toolbar.chat")}</span>{activityPending > 0 && <span className="workbench-nav-count">{activityPending}</span>}</button>
+            {SECTIONS.map((section) => (
+              <button
+                key={section}
+                type="button"
+                className="workbench-nav-btn"
+                data-app={section}
+                data-primary={DOCK_PRIMARY[section] ? "true" : undefined}
+                aria-label={t(`workbench.section.${section}`)}
+                aria-description={section === "decisions" && knownActionableCount > 0 ? t("workbench.attentionCount", { n: actionableCount === null ? `${knownActionableCount}+` : actionableCount }) : undefined}
+                aria-current={!operationHome && !communicationOpen && route.section === section && !stageOpen ? "page" : undefined}
+                onClick={() => navigate(section)}
+              >
+                <span className="workbench-nav-icon">{SECTION_ICONS[section]}</span>
+                <span className="workbench-nav-label">{t(operationHome ? `workbench.section.${section}` : `workbench.dock.${section}`)}</span>
+                {section === "decisions" && knownActionableCount > 0 && (
+                  <span className="workbench-nav-count">
+                    {actionableCount === null ? `${knownActionableCount}+` : actionableCount}
+                  </span>
+                )}
+              </button>
+            ))}
+            {!operationHome && <button type="button" className="workbench-nav-btn workbench-nav-all" aria-current={!stageOpen && !DOCK_PRIMARY[route.section] ? "true" : undefined} onClick={() => navigate("home")}><span className="workbench-nav-icon"><GridIcon size={18} /></span><span className="workbench-nav-label">{t("workbench.backHome")}</span></button>}
+          </nav>
+        <main className="workbench-main" hidden={operationHome || communicationOpen} ref={operationRef} onScroll={(event) => { scrollByView.current[viewKey] = event.currentTarget.scrollTop; }}>
           {!hasDagSnapshot && (waitingForData || readError) && <section className="dag-read-state" aria-labelledby="dag-read-title">
             <h2 id="dag-read-title">{readError ? t(runId ? "read.tasksFailed" : "read.runsFailed") : t(runId ? "read.loadingTasks" : "read.loadingRuns")}</h2>
             <p role="status">{t(readError ? "read.failedBody" : "read.loadingBody")}</p>
-            {readError && <><button className="btn" type="button" onClick={() => window.location.reload()}>{t("read.reload")}</button><details className="dag-read-details"><summary>{t("read.technicalDetails")}</summary><pre>{readError}</pre></details></>}
+            {readError && (
+              <>
+                <div className="dag-read-actions">
+                  <button className="btn" type="button" onClick={() => window.location.reload()}>{t("read.reload")}</button>
+                  {runId && (
+                    <button
+                      className="btn btn--ghost"
+                      type="button"
+                      onClick={() => {
+                        pickRun("");
+                        setDagFailure(null);
+                      }}
+                    >
+                      {t("read.switchRun")}
+                    </button>
+                  )}
+                </div>
+                <details className="dag-read-details"><summary>{t("read.technicalDetails")}</summary><pre>{readError}</pre></details>
+              </>
+            )}
           </section>}
           {hasDagSnapshot && connError && <section className="dag-read-notice" aria-label={t("read.staleTitle")}><div><strong>{t("read.staleTitle")}</strong><p role="status">{t("read.staleBody")}</p><details className="dag-read-details"><summary>{t("read.technicalDetails")}</summary><pre>{connError}</pre></details></div><button className="btn btn--ghost" type="button" disabled={retryingRead} onClick={() => void retryRead()}>{t(retryingRead ? "read.retrying" : "read.retry")}</button></section>}
           {!runId && hydrated && runListRead.loaded && !runListRead.error && <div className="empty-run"><p className="empty-run__title">{t("empty.pickRunTitle")}</p><p className="empty-run__body">{t("empty.pickRunBody")} <code>orca orchestration run-create</code> {t("empty.pickRunBodyTail")}</p></div>}
           <section className="workbench-section" hidden={stageOpen || route.section !== "overview"} aria-label={t("workbench.section.overview")}>
-            <h1>{t("workbench.section.overview")}</h1>
             {hasDagSnapshot && <div className="workbench-statuses" role="group" aria-label={t("overview.title")}>{(Object.keys(STATUS_META) as TaskStatus[]).map((status) => <span key={status}><span className="legend__dot" style={{ background: STATUS_META[status].color }} />{t(`status.${status}`)} <b>{counts[status] ?? 0}</b></span>)}{connError && <span role="status">{t("overview.stale")}</span>}</div>}
             <OperationsAttention {...operationSnapshots} onFocus={openOperation} variant="summary" onOpenDecisions={() => navigate("decisions")} />
             {hasDagSnapshot && visibleDag.nodes.length > 0 && <SchedulerPanel dag={visibleDag} runStatus={runStatus} runId={runId} onSelectTask={selectStage} />}
           </section>
           <section className="workbench-section workbench-tasks" hidden={stageOpen || route.section !== "tasks"} aria-label={t("workbench.section.tasks")}>
-            <h1>{t("workbench.section.tasks")}</h1>
-            <div className="workbench-task-toolbar">
-              <div className="workbench-switch" role="group" aria-label={t("taskView.label")}><button type="button" aria-pressed={mobileTaskView === "tasks"} onClick={() => setMobileTaskView("tasks")}>{t("taskView.tasks")}</button><button type="button" aria-pressed={mobileTaskView === "graph"} onClick={() => setMobileTaskView("graph")}>{t("taskView.graph")}</button></div>
-              {hasDagSnapshot && <span>{t("toolbar.taskDepCount", { tasks: visibleDag.nodes.length, deps: visibleDag.edges.length })}</span>}
-              <details className="view-menu"><summary>{t("toolbar.view")}</summary><div className="view-menu__panel">
-                <div className="legend" role="group" aria-label={t("toolbar.statusLegendAria")}>{(Object.keys(STATUS_META) as TaskStatus[]).map((s) => <span className="legend__item" key={s}><span className="legend__dot" style={{ background: STATUS_META[s].color }} />{t(`status.${s}`)} {counts[s] ?? 0}</span>)}</div>
-                <div className="legend" role="group" aria-label={t("toolbar.relationLegendAria")}><span title={t("toolbar.dependencyTitle")}>{t("toolbar.dependency")}</span><span title={t("toolbar.parentTitle")}>{t("toolbar.parent")}</span><button type="button" className="btn btn--ghost" aria-pressed={showHierarchy} title={t("toolbar.hierarchyToggleTitle")} onClick={() => setShowHierarchy((v) => !v)}>{showHierarchy ? t("toolbar.hideParentLinks") : t("toolbar.showParentLinks")}</button></div>
-                <div className="layout-ctl"><span className="exec__label">{t("toolbar.layout")}</span><div className="seg" role="group" aria-label={t("toolbar.layoutAria")}>{LAYOUTS.map((l) => <button key={l.kind} className={layout === l.kind ? "active" : ""} aria-pressed={layout === l.kind} title={t(`layout.title.${l.kind}`)} onClick={() => pickLayout(l.kind)}>{t(`layout.label.${l.kind}`)}</button>)}</div><button className="btn btn--ghost" title={t("toolbar.relayoutTitle")} onClick={() => setReorgNonce((n) => n + 1)}>{t("toolbar.relayout")}</button></div>
-              </div></details>
-            </div>
-            {hasDagSnapshot && <div hidden={mobileTaskView !== "tasks"}><TaskList dag={visibleDag} selectedId={stageOpen ? selectedId : null} onSelect={selectStage} /></div>}
-            {hasDagSnapshot && (graphMountedRun === runId || graphActive) && (
-              <div className="workbench-graph" hidden={mobileTaskView !== "graph"}>
-                <Suspense fallback={<p role="status">{t("workbench.loadingGraph")}</p>}>
-                  <GraphMounted onMount={markGraphMounted}>
-                    <DagView
-                      dag={visibleDag} leadTaskId={leadTaskId}
-                      selectedId={stageOpen ? selectedId : null} onSelect={selectStage}
-                      layout={layout} reorgNonce={reorgNonce} fitNonce={canvasFitNonce}
-                      showHierarchy={showHierarchy} workerRows={workerRows}
-                      attempts={runStatus?.runId === runId ? runStatus.attempts : EMPTY_ATTEMPTS}
-                      active={graphActive} fleetFresh={fleetFresh}
-                      pendingDispatchIds={pendingDispatchIds}
-                    />
-                  </GraphMounted>
-                </Suspense>
-              </div>
-            )}
+            {hasDagSnapshot && <TaskList dag={visibleDag} selectedId={stageOpen ? selectedId : null} onSelect={selectStage} />}
           </section>
           <section className="workbench-section" hidden={stageOpen || route.section !== "decisions"} aria-label={t("workbench.section.decisions")}>
-            <h1>{t("workbench.section.decisions")}</h1>
             <OperationsAttention {...operationSnapshots} onFocus={openOperation} />
             <GatePanel gates={visibleDag.gates} runId={runId} onResolved={refresh} disabled={execOff} disabledReason={readiness?.reason} />
             <RecoveryPanel runId={runId} status={runStatus} taskIds={visibleDag.nodes.map((node) => node.id)} blockedTaskIds={visibleDag.nodes.filter((node) => node.status === "blocked").map((node) => node.id)} onRunStarting={onRunStarting} onRunStartFinished={onRunStartFinished} onRetried={() => { void refresh(); void refreshExecutionState(); }} disabled={execOff} disabledReason={readiness?.reason} />
           </section>
           <section className="workbench-section" hidden={stageOpen || route.section !== "executions"} aria-label={t("workbench.section.executions")}>
-            <h1>{t("workbench.section.executions")}</h1>
             {!workerHistoryLoading && !workerHistoryError && workerRows.length === 0 && <p>{t("operations.noWorkers")}</p>}
             <WorkerPanel key={runId} labelsById={labelsById} focusId={operationFocus?.kind === "worker" ? operationFocus.id : null} runId={runId} rows={workerRows} rowsError={workerHistoryError} status={runStatus} disabled={execOff} disabledReason={readiness?.reason} />
           </section>
           <section className="workbench-section" hidden={stageOpen || (route.section !== "activity" && route.section !== "decisions")} aria-label={t("workbench.section.activity")}>
-            {route.section === "activity" && <h1>{t("workbench.section.activity")}</h1>}
             <ActivityPanel actionableOnly={route.section === "decisions"} runId={runId} onSelectTask={selectStage} onResolved={refresh} onPendingCount={setActivityPending} onSnapshot={setActivitySnapshot} disabled={execOff} disabledReason={readiness?.reason} />
             <div hidden={route.section !== "activity"}><RequestAuditPanel labelsById={labelsById} runId={runId} active={!stageOpen && route.section === "activity"} /></div>
           </section>
           <section className="workbench-section" hidden={stageOpen || route.section !== "resources"} aria-label={t("workbench.section.resources")}>
-            <h1>{t("workbench.section.resources")}</h1>
             <LanesPanel runId={runId} active={!stageOpen && route.section === "resources"} disabled={execOff} disabledReason={readiness?.reason} />
             <CleanupPanel runId={runId} disabled={execOff} />
           </section>
           <section className="workbench-section" hidden={stageOpen || route.section !== "settings"} aria-label={t("workbench.section.settings")}>
-            <h1>{t("workbench.section.settings")}</h1>
-            <ExecControls actionHost={actionHost} runId={runId} labelsById={labelsById} taskIds={visibleDag.nodes.map((n) => n.id)} edges={visibleDag.edges} readyCount={counts.ready ?? 0} startingRunId={startingRunId} status={runStatus} workerHistoryLoading={workerHistoryLoading} workerHistoryError={workerHistoryError} onRunStarting={onRunStarting} onRunStartFinished={onRunStartFinished} onRunStopped={onRunStopped} />
+            <ExecControls actionHost={actionHost} launchHost={launchHost} runId={runId} labelsById={labelsById} taskIds={visibleDag.nodes.map((n) => n.id)} edges={visibleDag.edges} readyCount={counts.ready ?? 0} startingRunId={startingRunId} status={runStatus} workerHistoryLoading={workerHistoryLoading} workerHistoryError={workerHistoryError} onRunStarting={onRunStarting} onRunStartFinished={onRunStartFinished} onRunStopped={onRunStopped} />
             <CapabilityPanel />
           </section>
           {stageOpen && !selected && hasDagSnapshot && <section className="workbench-detail"><p>{t("workbench.taskUnavailable")} <code>{selectedId}</code></p><button type="button" className="btn" onClick={closeStage}>{t("dialog.close")}</button></section>}
           {selected && stageOpen && <div className="workbench-detail"><NodePanel key={`${runId}:${selected.id}`} node={selected} runId={runId} isLead={selected.id === leadTaskId} parentLabel={selectedParentLabel} childLabels={selectedChildLabels} readiness={selectedReadiness} edges={visibleDag.edges} labelsById={labelsById} onLeadChange={(taskId) => setLeadTask(runId, taskId)} permanentlyLocked={startedTaskIds.has(selected.id)} temporarilyLocked={selectedRunExecuting} coordinatorStarting={selectedRunStarting} workerHistoryLoading={workerHistoryLoading} workerHistoryError={workerHistoryError} failedStart={Boolean(runStatus?.runId === runId && runStatus.attempts.some((attempt) => attempt.taskId === selected.id && attempt.settledVia === "start_failed" && attempt.startReceipt?.ok === false))} hasWorkerHistory={workerRows.some((row) => row.taskId === selected.id)} workerRows={workerRows} onRefresh={refresh} onOpenOperations={openOperation} onClose={closeStage} /></div>}
         </main>
-        <aside ref={communicationRef} className={`workbench-chat${communicationOpen ? "" : " workbench-chat--closed"}${communicationResizing ? " workbench-chat--resizing" : ""}`} aria-label={t("toolbar.chat")} aria-hidden={!communicationOpen} style={{ width: communicationWidth === null ? undefined : `${communicationWidth}px` }}>
-          <div className="workbench-chat-resize" role="separator" aria-label={t("toolbar.resizeCommunicationAria")} aria-orientation="vertical" aria-valuemin={280} aria-valuemax={COMMUNICATION_MAX_WIDTH} aria-valuenow={communicationWidth ?? undefined} tabIndex={communicationOpen ? 0 : -1} title={t("toolbar.resizeCommunicationTitle")} onPointerDown={beginCommunicationResize} onPointerMove={moveCommunicationResize} onPointerUp={endCommunicationResize} onPointerCancel={endCommunicationResize} onKeyDown={(event) => {
-            if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-            const current = communicationWidth ?? communicationRef.current?.getBoundingClientRect().width ?? 440;
-            setCommunicationWidth(clampCommunicationWidth(current + (event.key === "ArrowLeft" ? 32 : -32)));
-            event.preventDefault();
-          }} />
-          <header className="workbench-chat-header"><h2>{t("toolbar.chat")}</h2><button type="button" onClick={closeCommunication} aria-label={t("toolbar.closeCommunicationAria")}>×</button></header>
+        <aside className={`workbench-chat${communicationOpen ? "" : " workbench-chat--closed"}`} aria-label={t("toolbar.chat")} aria-hidden={!communicationOpen}>
           <ChatPanel active={communicationOpen} runId={runId} snapshot={activitySnapshot} tasks={visibleDag.nodes} leadTaskId={leadTaskId} onSelectTask={selectStage} onSelectWorker={(id) => openOperation({ kind: "worker", id })} onResolved={refresh} coordinatorActive={selectedRunExecuting} disabled={execOff} disabledReason={readiness?.reason} />
         </aside>
+        </div>
       </div>
     </div>
   );

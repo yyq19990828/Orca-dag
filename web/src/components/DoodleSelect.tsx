@@ -1,314 +1,118 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { Popover, Select } from "radix-ui";
 import { useT } from "../i18n";
+import "./doodle-select.css";
 
 export interface DoodleOption {
   value: string;
   label: string;
-  /** Small secondary line under the label (e.g. a Run id under its objective). */
   hint?: string;
   disabled?: boolean;
 }
 
-interface PanelPos {
-  /** Fixed-position anchor. When `up`, `bottom` is set instead of `top`. */
-  up: boolean;
-  top: number;
-  bottom: number;
-  left: number;
-  width: number;
-  /** Max height for the option list, clamped to the free space on the chosen side. */
-  listMaxH: number;
-}
-
-/**
- * Hand-drawn replacement for the native <select>. The trigger is a crayon
- * sticker in the same vocabulary as the rest of the page (wonky radii,
- * sticker shadow, a chevron scribbled through the fine-grain filter); the
- * dropdown is a portal — .node-panel scrolls (overflow-y: auto) and would
- * clip an absolutely-positioned child, and the toolbar is no safer, so the
- * panel lives on document.body with fixed coordinates measured from the
- * trigger. Flips upward when there isn't room below, and re-measures on
- * scroll/resize while open.
- */
-export function DoodleSelect({
-  value,
-  onChange,
-  options,
-  placeholder,
-  disabled = false,
-  loading = false,
-  emptyText,
-  size = "md",
-  className,
-  title,
-  ariaLabel,
-}: {
+type Props = {
   value: string;
   onChange: (value: string) => void;
   options: DoodleOption[];
-  /** Trigger text while nothing is selected; defaults to doodle.placeholder. */
   placeholder?: string;
   disabled?: boolean;
-  /** Async list not here yet — shows the loading key instead of the empty state. */
   loading?: boolean;
-  /** Empty-list text; defaults to doodle.empty (no options to offer at all). */
   emptyText?: string;
-  /** sm for the toolbars, md (full width) for panels. */
   size?: "sm" | "md";
   className?: string;
   title?: string;
   ariaLabel?: string;
-}) {
+  searchable?: boolean;
+  panelActions?: (close: () => void) => ReactNode;
+};
+
+function Chevron() {
+  return <svg className="doodle-select__chev" viewBox="0 0 14 9" aria-hidden="true"><path d="M1.5 1.5 L7 7 L12.5 1.5" /></svg>;
+}
+
+function OptionText({ option }: { option: DoodleOption }) {
+  return <span className="doodle-select__opt-text"><span className="doodle-select__opt-label">{option.label}</span>{option.hint && <span className="doodle-select__opt-hint">{option.hint}</span>}</span>;
+}
+
+// Radix reserves the empty string for clearing a Select; encode every value so
+// an actual empty/default option remains selectable and round-trips unchanged.
+const encode = (value: string) => `value:${value}`;
+
+export function DoodleSelect({ value, onChange, options, placeholder, disabled = false, loading = false, emptyText, size = "md", className, title, ariaLabel, searchable = true, panelActions }: Props) {
   const t = useT();
-  // The caller's own wording wins (a Run picker says "(no Runs)", not "No
-  // options"); these defaults are the control's fallback chrome.
   const placeholderText = placeholder ?? t("doodle.placeholder");
   const emptyLabel = emptyText ?? t("doodle.empty");
+  const current = options.find((option) => option.value === value);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [active, setActive] = useState(0);
-  const [pos, setPos] = useState<PanelPos | null>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const panelRef = useRef<HTMLDivElement>(null);
+  const [activeValue, setActiveValue] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-
-  const current = options.find((o) => o.value === value) ?? null;
-
+  const listId = useId();
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return options;
-    return options.filter(
-      (o) =>
-        o.label.toLowerCase().includes(q) ||
-        o.value.toLowerCase().includes(q) ||
-        (o.hint ?? "").toLowerCase().includes(q),
-    );
+    return q ? options.filter((option) => [option.label, option.value, option.hint ?? ""].some((text) => text.toLowerCase().includes(q))) : options;
   }, [options, query]);
+  const enabled = filtered.filter((option) => !option.disabled);
+  const active = enabled.find((option) => option.value === activeValue) ?? enabled[0];
+  const activeIndex = active ? filtered.indexOf(active) : -1;
+  const triggerClass = `doodle-select doodle-select--${size}${open ? " doodle-select--open" : ""}${className ? ` ${className}` : ""}`;
+  const label = ariaLabel ?? title ?? placeholderText;
 
-  // A fresh search always starts at the top of the list.
-  useEffect(() => setActive(0), [query]);
-  // Options can shrink under us (the Run list is polled) — keep the highlight
-  // on an option that still exists.
+  function changeOpen(next: boolean) {
+    setOpen(next);
+    if (!next) { setQuery(""); setActiveValue(null); }
+  }
+
   useEffect(() => {
-    if (active > filtered.length - 1) setActive(Math.max(0, filtered.length - 1));
-  }, [filtered.length, active]);
+    if (open && activeIndex >= 0) listRef.current?.querySelector<HTMLElement>(`[data-idx="${activeIndex}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [open, activeIndex]);
 
-  const measure = useCallback(() => {
-    const el = triggerRef.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    const gap = 8;
-    const listCap = 264;
-    const listMin = 120;
-    const spaceBelow = window.innerHeight - r.bottom - gap - 12;
-    const spaceAbove = r.top - gap - 12;
-    const up = spaceBelow < listMin && spaceAbove > spaceBelow;
-    const listMaxH = Math.max(listMin, Math.min(listCap, up ? spaceAbove : spaceBelow));
-    const width = Math.min(Math.max(r.width, 210), window.innerWidth - 24);
-    const left = Math.max(8, Math.min(r.left, window.innerWidth - width - 8));
-    setPos({
-      up,
-      top: r.bottom + gap,
-      bottom: window.innerHeight - r.top + gap,
-      left,
-      width,
-      listMaxH,
-    });
-  }, []);
+  function keyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault(); event.stopPropagation(); changeOpen(false);
+    } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const index = enabled.findIndex((option) => option.value === active?.value);
+      const next = event.key === "ArrowDown" ? Math.min(index + 1, enabled.length - 1) : Math.max(index - 1, 0);
+      setActiveValue(enabled[next]?.value ?? null);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      if (active && !loading) { onChange(active.value); changeOpen(false); }
+    }
+  }
 
-  useLayoutEffect(() => {
-    if (open) measure();
-  }, [open, measure]);
+  const triggerContents = <><span className={`doodle-select__value${current ? "" : " doodle-select__value--dim"}`}>{current?.label ?? (value || placeholderText)}</span><Chevron /></>;
+  const stopEscape = (event: KeyboardEvent) => { event.stopPropagation(); };
 
-  // Global listeners while open: click-away, Escape, and re-anchoring. The
-  // scroll listener must be capture-phase — the panel is fixed, but any
-  // scrolling ancestor (.node-panel, the page) moves the trigger.
-  useEffect(() => {
-    if (!open) return;
-    const raf = () => requestAnimationFrame(() => inputRef.current?.focus());
-    const id = raf();
-    const onPointerDown = (e: PointerEvent) => {
-      const t = e.target as Node;
-      if (triggerRef.current?.contains(t) || panelRef.current?.contains(t)) return;
-      setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setOpen(false);
-        triggerRef.current?.focus();
+  if (!searchable && !panelActions) {
+    return <Select.Root value={encode(value)} onValueChange={(next) => onChange(next.slice(6))} open={open} onOpenChange={changeOpen} disabled={disabled}>
+      <Select.Trigger className={triggerClass} title={title} aria-label={ariaLabel}>{triggerContents}</Select.Trigger>
+      <Select.Portal><Select.Content className="doodle-select__panel doodle-select__panel--select" aria-label={label} position="popper" sideOffset={8} collisionPadding={8} onEscapeKeyDown={stopEscape}>
+        <Select.Viewport className="doodle-select__options">
+          {loading ? <div className="doodle-select__empty">{t("doodle.loading")}</div> : options.length === 0 ? <div className="doodle-select__empty">{emptyLabel}</div> : options.map((option) => <Select.Item key={option.value} value={encode(option.value)} disabled={option.disabled} textValue={option.label} className="doodle-select__opt"><Select.ItemText><OptionText option={option} /></Select.ItemText><Select.ItemIndicator className="doodle-select__indicator"><svg viewBox="0 0 16 14" aria-hidden="true"><path d="M2 7 L6 11 L14 2" /></svg></Select.ItemIndicator></Select.Item>)}
+        </Select.Viewport>
+      </Select.Content></Select.Portal>
+    </Select.Root>;
+  }
+
+  return <Popover.Root open={open} onOpenChange={changeOpen}>
+    <Popover.Trigger asChild><button type="button" className={triggerClass} disabled={disabled} title={title} aria-label={ariaLabel} onKeyDown={(event) => {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        changeOpen(true);
       }
-    };
-    const onMove = () => measure();
-    document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onKey);
-    window.addEventListener("scroll", onMove, true);
-    window.addEventListener("resize", onMove);
-    return () => {
-      cancelAnimationFrame(id);
-      document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onKey);
-      window.removeEventListener("scroll", onMove, true);
-      window.removeEventListener("resize", onMove);
-    };
-  }, [open, measure]);
-
-  // Keep the keyboard highlight visible without stealing scroll momentum.
-  useEffect(() => {
-    if (!open) return;
-    listRef.current
-      ?.querySelector<HTMLElement>(`[data-idx="${active}"]`)
-      ?.scrollIntoView({ block: "nearest" });
-  }, [open, active]);
-
-  function pick(o: DoodleOption) {
-    if (o.disabled) return;
-    onChange(o.value);
-    setOpen(false);
-    triggerRef.current?.focus();
-  }
-
-  function onTriggerKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Escape" && open) {
-      e.preventDefault();
-      e.stopPropagation();
-      setOpen(false);
-      triggerRef.current?.focus();
-      return;
-    }
-    if (e.key === "Enter" || e.key === " " || e.key === "ArrowDown") {
-      e.preventDefault();
-      setOpen(true);
-    }
-  }
-
-  function onInputKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
-    if (e.key === "Escape") {
-      // A selector portalled out of an inspector still bubbles through its
-      // React parent. Consume the first Escape here, not at the outer panel.
-      e.preventDefault();
-      e.stopPropagation();
-      setOpen(false);
-      triggerRef.current?.focus();
-      return;
-    }
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setActive((i) => Math.min(i + 1, filtered.length - 1));
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setActive((i) => Math.max(i - 1, 0));
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      const o = filtered[active];
-      if (o) pick(o);
-    } else if (e.key === "Tab") {
-      setOpen(false);
-    }
-  }
-
-  return (
-    <>
-      <button
-        type="button"
-        ref={triggerRef}
-        className={
-          `doodle-select doodle-select--${size}` +
-          (open ? " doodle-select--open" : "") +
-          (className ? ` ${className}` : "")
-        }
-        disabled={disabled}
-        title={title}
-        aria-label={ariaLabel}
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        onClick={() => setOpen((o) => !o)}
-        onKeyDown={onTriggerKeyDown}
-      >
-        <span className={`doodle-select__value${current ? "" : " doodle-select__value--dim"}`}>
-          {current ? current.label : placeholderText}
-        </span>
-        {/* hand-scribbled chevron — the fine grain keeps a small glyph legible */}
-        <svg className="doodle-select__chev" viewBox="0 0 14 9" aria-hidden="true" focusable="false">
-          <path d="M1.5 1.5 C3.5 4 5 5.8 7 7.2 C9 5.8 10.5 4 12.5 1.5" />
-        </svg>
-      </button>
-
-      {open &&
-        pos &&
-        createPortal(
-          <div
-            ref={panelRef}
-            className={`doodle-select__panel${pos.up ? " doodle-select__panel--up" : ""}`}
-            style={
-              pos.up
-                ? { bottom: pos.bottom, left: pos.left, width: pos.width }
-                : { top: pos.top, left: pos.left, width: pos.width }
-            }
-            role="listbox"
-          >
-            <div className="doodle-select__search">
-              <svg className="doodle-select__mag" viewBox="0 0 14 14" aria-hidden="true" focusable="false">
-                <circle cx="6" cy="6" r="4.3" />
-                <path d="M9.6 9.6 L12.8 12.8" />
-              </svg>
-              <input
-                ref={inputRef}
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={onInputKeyDown}
-                placeholder={t("doodle.searchPlaceholder")}
-                aria-label={t("doodle.searchAria")}
-                spellCheck={false}
-              />
-            </div>
-            <div className="doodle-select__options" ref={listRef} style={{ maxHeight: pos.listMaxH }}>
-              {loading ? (
-                <div className="doodle-select__empty">{t("doodle.loading")}</div>
-              ) : filtered.length === 0 ? (
-                <div className="doodle-select__empty">
-                  {query ? t("doodle.noMatches") : emptyLabel}
-                </div>
-              ) : (
-                filtered.map((o, i) => (
-                  <div
-                    key={o.value}
-                    data-idx={i}
-                    role="option"
-                    aria-selected={o.value === value}
-                    aria-disabled={o.disabled || undefined}
-                    className={
-                      "doodle-select__opt" +
-                      (i === active ? " doodle-select__opt--active" : "") +
-                      (o.value === value ? " doodle-select__opt--selected" : "") +
-                      (o.disabled ? " doodle-select__opt--disabled" : "")
-                    }
-                    onMouseEnter={() => setActive(i)}
-                    onClick={() => pick(o)}
-                  >
-                    <span className="doodle-select__opt-text">
-                      <span className="doodle-select__opt-label">{o.label}</span>
-                      {o.hint && <span className="doodle-select__opt-hint">{o.hint}</span>}
-                    </span>
-                    {/* the chosen one gets signed off with a crayon tick */}
-                    {o.value === value && (
-                      <svg
-                        className="doodle-select__check"
-                        viewBox="0 0 16 14"
-                        aria-hidden="true"
-                        focusable="false"
-                      >
-                        <path d="M2 7.5 L6 11.5 L14 2.5" pathLength={100} />
-                      </svg>
-                    )}
-                  </div>
-                ))
-              )}
-            </div>
-          </div>,
-          document.body,
-        )}
-    </>
-  );
+    }}>{triggerContents}</button></Popover.Trigger>
+    <Popover.Portal><Popover.Content className={`doodle-select__panel${panelActions ? " doodle-select__panel--actions" : ""}`} sideOffset={8} collisionPadding={8} aria-label={label} onOpenAutoFocus={(event) => { event.preventDefault(); inputRef.current?.focus(); }} onEscapeKeyDown={stopEscape}>
+      <div className="doodle-select__search">
+        <svg className="doodle-select__mag" viewBox="0 0 14 14" aria-hidden="true"><circle cx="6" cy="6" r="4.3" /><path d="M9.6 9.6 L12.8 12.8" /></svg>
+        <input ref={inputRef} value={query} onChange={(event) => { setQuery(event.target.value); setActiveValue(null); }} onKeyDown={keyDown} placeholder={t("doodle.searchPlaceholder")} aria-label={t("doodle.searchAria")} role="combobox" aria-expanded="true" aria-autocomplete="list" aria-controls={listId} aria-activedescendant={activeIndex >= 0 && !loading ? `${listId}-option-${activeIndex}` : undefined} spellCheck={false} />
+      </div>
+      {(loading || filtered.length === 0) && <div className="doodle-select__empty" role="status">{loading ? t("doodle.loading") : query ? t("doodle.noMatches") : emptyLabel}</div>}
+      <div className="doodle-select__options" ref={listRef} id={listId} role="listbox" aria-label={label} aria-busy={loading || undefined}>
+        {!loading && filtered.map((option, index) => <div key={option.value} id={`${listId}-option-${index}`} data-idx={index} role="option" aria-selected={option.value === value} aria-disabled={option.disabled || undefined} className={`doodle-select__opt${index === activeIndex ? " doodle-select__opt--active" : ""}${option.value === value ? " doodle-select__opt--selected" : ""}${option.disabled ? " doodle-select__opt--disabled" : ""}`} onMouseEnter={() => { if (!option.disabled) setActiveValue(option.value); }} onMouseDown={(event) => event.preventDefault()} onClick={() => { if (!option.disabled) { onChange(option.value); changeOpen(false); } }}><OptionText option={option} />{option.value === value && <span className="doodle-select__indicator"><svg viewBox="0 0 16 14" aria-hidden="true"><path d="M2 7 L6 11 L14 2" /></svg></span>}</div>)}
+      </div>
+      {panelActions?.(() => changeOpen(false))}
+    </Popover.Content></Popover.Portal>
+  </Popover.Root>;
 }
