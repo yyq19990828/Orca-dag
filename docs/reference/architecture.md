@@ -36,7 +36,7 @@ flowchart TD
 ### End-to-End Execution Flow
 
 1. **Decomposition:** In your agent, prompt for a task decomposition. The agent creates a Run (`orca orchestration run-create`) and writes tasks and dependencies (`orca orchestration task-create --deps ...`).
-2. **Polling and Layout:** The viewer polls `orca orchestration task-list --run <id> --json` every 2 seconds, calculates layout using Dagre or force-directed algorithms, and renders live status colors.
+2. **Polling and Layout:** The viewer polls `orca orchestration task-list --run <id> --json` every 2 seconds, calculates horizontal or vertical Dagre layered layouts, and renders live status colors.
 3. **Configuration:** Operators configure Default harness or per-node overrides (harness, model, effort, placement, lanes) and set Max parallel.
 4. **Coordinator Loop:** Clicking **"▶ Run with Orca"** binds a dedicated coordinator terminal to the Run (`run-use --from <handle>`). On each tick, the coordinator queries ready tasks and calls `orca orchestration worker-start` in parallel up to the concurrency limit. Orca creates worker terminals, waits for readiness, injects dispatches, and returns Dispatch IDs (`ctx_*`).
 5. **Settlement and Accounting:** Workers finish by sending `worker_done` (`orca orchestration send --type worker_done --outcome ...`). Orca marks the Task and Dispatch settled. The viewer archives worker output and executes an explicit terminal accounting decision: default **release**, immediate compatible **reuse** (`worker-start --terminal`), or **retain** on request. Dependents advance to `ready` until the graph is complete.
@@ -159,23 +159,24 @@ web/src/
   App.tsx                  Main workbench shell, section navigation, URL hash routing, 2s polling loop, execution state guards.
   components/
     DagView.tsx            Lazy-loaded React Flow DAG canvas, 280x120 node rendering, scoped status dot animation, static edges.
-    TaskList.tsx           Accessible vertical task list view with readiness/blocked reasons and status badges.
     ExecControls.tsx       Portaled execution action group (header) and execution settings panel (Settings section).
-    NodePanel.tsx          Central detail inspector: spec preview, lead-stage toggle, locked preferences, placement, gate creation.
+    NodePanel.tsx          Task configuration and detail panel: spec preview, lead-stage toggle, locked preferences, placement, gate creation (rendered in Chat Task tab).
     PlacementEditor.tsx    Placement editor: 4 local modes, 2 remote modes, creation metadata.
     LanesPanel.tsx         Workspace lanes management: runtime state, diffs, and worktree removal.
     ActivityPanel.tsx      Real-time event timeline (single shared SSE), filters, technical evidence inspection.
-    ChatPanel.tsx          Persistent communication dock: thread list, message bubbles, live check receipts, audience preview.
-    useScopedChatState.ts  Scoped chat state hook isolating drafts, receipts, and busy status per Run/thread.
+    ChatPanel.tsx          Shared Run group / Task-private messages, explicit @Task sends, mobile list/detail navigation.
+    MailboxChecks.tsx      Separate bounded check evidence, delivery/replay groups, and raw receipt details.
+    HarnessAvatar.tsx      Local official harness marks, source/license notices, and neutral unknown fallback.
+    useScopedChatState.ts  Scoped drafts and receipts; shared per-Task busy/unknown guards across chat views.
     GatePanel.tsx          Approval gate buttons and cross-lane integration gates.
     RunPicker.tsx          Workspace-scoped Run selector, pagination cursor, and exact Run lookup.
     WorkerPanel.tsx        Fleet view: liveness, output reader, search, download, stop/abandon/focus.
     RequestAuditPanel.tsx  Mutation request audit table with live request-show receipts.
   harness.ts               Reactive state store for preferences, hydrating from /api/config.
   placement.ts             Client-side placement grammar and lane preflight validation.
-  layout.ts                Layout engines: Dagre layered (LR/TB, 280x120 nodes) and Fruchterman–Reingold force-directed.
+  layout.ts                Dagre layered layouts (LR/TB, 280x120 nodes).
   types.ts / api.ts        Frontend data contracts and API client.
-  workbench.css            Sectional workbench layout, 200px nav rail, header, central detail, and responsive breakpoints.
+  workbench.css            Sectional workbench layout, 7-app dock navigation, header, operational sections, and responsive breakpoints.
   chat-dock.css            Persistent right chat dock, message bubbles, thread navigation, and composer layout.
   graph-motion.css         Task node styling (280x120), static edges, and scoped executing dot motion guards.
 

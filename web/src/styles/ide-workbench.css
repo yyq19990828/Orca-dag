@@ -1,0 +1,2168 @@
+@layer legacy, base, tokens, primitives, layout, components, utilities;
+@import "../styles.css" layer(legacy);
+@import "../chat-dock.css" layer(legacy);
+
+@layer tokens {
+  :root {
+    color-scheme: light dark;
+
+    /* 1. Curated Monochrome Zinc Light & Obsidian Dark Palettes + Semantic Statuses */
+    --odag-bg-light: #f4f4f5;
+    --odag-bg-dark: #09090b;
+
+    --odag-panel-light: #fafafa;
+    --odag-panel-dark: #0f0f12;
+
+    --odag-card-light: #ffffff;
+    --odag-card-dark: #141418;
+
+    --odag-elevated-light: #ffffff;
+    --odag-elevated-dark: #1b1b20;
+
+    --odag-muted-bg-light: #ebebef;
+    --odag-muted-bg-dark: #1f1f26;
+
+    --odag-fg-light: #09090b;
+    --odag-fg-dark: #fafafa;
+
+    --odag-fg-muted-light: #52525b;
+    --odag-fg-muted-dark: #a1a1aa;
+
+    --odag-fg-subtle-light: #71717a;
+    --odag-fg-subtle-dark: #71717a;
+
+    --odag-border-light: #e4e4e7;
+    --odag-border-dark: #26262c;
+
+    --odag-border-strong-light: #d4d4d8;
+    --odag-border-strong-dark: #3f3f46;
+
+    /* Pure Black (Light) & Pure White (Dark) Primary Accents */
+    --odag-accent-light: #09090b;
+    --odag-accent-dark: #fafafa;
+    --odag-accent-fg-light: #ffffff;
+    --odag-accent-fg-dark: #09090b;
+
+    --st-pending-light: #71717a;
+    --st-pending-dark: #a1a1aa;
+    --st-pending-bg-light: #f4f4f5;
+    --st-pending-bg-dark: #222228;
+
+    --st-ready-light: #18181b;
+    --st-ready-dark: #f4f4f5;
+    --st-ready-bg-light: #ededf0;
+    --st-ready-bg-dark: #27272f;
+
+    --st-dispatched-light: #9a5700;
+    --st-dispatched-dark: #f2b452;
+    --st-dispatched-bg-light: #fff3de;
+    --st-dispatched-bg-dark: #2c2010;
+
+    --st-completed-light: #146c43;
+    --st-completed-dark: #4fd190;
+    --st-completed-bg-light: #e5f6ed;
+    --st-completed-bg-dark: #10291e;
+
+    --st-failed-light: #b4232c;
+    --st-failed-dark: #ff7b82;
+    --st-failed-bg-light: #fdebec;
+    --st-failed-bg-dark: #2f1418;
+
+    --st-blocked-light: #6e3ab8;
+    --st-blocked-dark: #c59bff;
+    --st-blocked-bg-light: #f2ebff;
+    --st-blocked-bg-dark: #231836;
+
+    --odag-scroll-thumb-light: #a1a1aa;
+    --odag-scroll-thumb-dark: #52525b;
+    --odag-scroll-track-light: #f4f4f5;
+    --odag-scroll-track-dark: #0f0f12;
+
+    /* 2. Progressive Fallbacks + Orca Plugin Host Variable Bridge (`--orca-*`) */
+    --bg-canvas: var(--orca-background, var(--odag-bg-light));
+    --bg-panel: var(--orca-muted, var(--odag-panel-light));
+    --bg-card: var(--orca-card, var(--odag-card-light));
+    --bg-elevated: var(--orca-popover, var(--odag-elevated-light));
+    --bg-subtle: var(--odag-muted-bg-light);
+
+    --fg-primary: var(--orca-foreground, var(--odag-fg-light));
+    --fg-secondary: var(--orca-muted-foreground, var(--odag-fg-muted-light));
+    --fg-tertiary: var(--odag-fg-subtle-light);
+
+    --border-hairline: var(--orca-border, var(--odag-border-light));
+    --border-control: var(--orca-input, var(--odag-border-strong-light));
+
+    --accent: var(--orca-primary, var(--odag-accent-light));
+    --accent-fg: var(--orca-primary-foreground, var(--odag-accent-fg-light));
+    --focus-ring: var(--orca-ring, var(--odag-accent-light));
+
+    --st-pending: var(--st-pending-light);
+    --st-pending-bg: var(--st-pending-bg-light);
+    --st-ready: var(--st-ready-light);
+    --st-ready-bg: var(--st-ready-bg-light);
+    --st-dispatched: var(--st-dispatched-light);
+    --st-dispatched-bg: var(--st-dispatched-bg-light);
+    --st-completed: var(--st-completed-light);
+    --st-completed-bg: var(--st-completed-bg-light);
+    --st-failed: var(--st-failed-light);
+    --st-failed-bg: var(--st-failed-bg-light);
+    --st-blocked: var(--st-blocked-light);
+    --st-blocked-bg: var(--st-blocked-bg-light);
+
+    --scrollbar-thumb: var(--odag-scroll-thumb-light);
+    --scrollbar-track: var(--odag-scroll-track-light);
+
+    --shadow-card: 0 1px 2px rgb(15 20 30 / 0.05), 0 6px 16px -6px rgb(15 20 30 / 0.07);
+    --shadow-float: 0 10px 30px -8px rgb(15 20 30 / 0.16), 0 2px 6px rgb(15 20 30 / 0.06);
+    --bevel-top: inset 0 1px 0 rgb(255 255 255 / 0.7);
+    --canvas-dot: rgb(15 23 42 / 0.13);
+
+    --font-sans: var(
+      --orca-font-sans,
+      "Inter",
+      ui-sans-serif,
+      system-ui,
+      -apple-system,
+      "PingFang SC",
+      "Noto Sans CJK SC",
+      "Microsoft YaHei",
+      sans-serif
+    );
+    --font-mono: var(
+      --orca-font-mono,
+      "JetBrains Mono",
+      "SFMono-Regular",
+      ui-monospace,
+      "DejaVu Sans Mono",
+      monospace
+    );
+    --radius-sm: 6px;
+    --radius-md: var(--orca-radius, 8px);
+    --radius-lg: 12px;
+
+    /* Strict 4-Step Global Typography Scale (rem) & Control Height */
+    --text-xs: 0.6875rem;   /* 11px: micro metadata, counts, kbd, table headers */
+    --text-sm: 0.75rem;     /* 12px: ALL topbar/sidebar/subbar/tab/console chrome */
+    --text-base: 0.8125rem; /* 13px: body default, card titles, inspector prose */
+    --text-lg: 0.9375rem;   /* 15px: primary panel & dialog headings */
+    --text-xl: 1.25rem;     /* 20px: numeric KPI stat figures only */
+    --ctrl-h: 1.875rem;     /* 30px: uniform topbar control & status height */
+
+    @media (prefers-color-scheme: dark) {
+      --bg-canvas: var(--orca-background, var(--odag-bg-dark));
+      --bg-panel: var(--orca-muted, var(--odag-panel-dark));
+      --bg-card: var(--orca-card, var(--odag-card-dark));
+      --bg-elevated: var(--orca-popover, var(--odag-elevated-dark));
+      --bg-subtle: var(--odag-muted-bg-dark);
+      --fg-primary: var(--orca-foreground, var(--odag-fg-dark));
+      --fg-secondary: var(--orca-muted-foreground, var(--odag-fg-muted-dark));
+      --fg-tertiary: var(--odag-fg-subtle-dark);
+      --border-hairline: var(--orca-border, var(--odag-border-dark));
+      --border-control: var(--orca-input, var(--odag-border-strong-dark));
+      --accent: var(--orca-primary, var(--odag-accent-dark));
+      --accent-fg: var(--orca-primary-foreground, var(--odag-accent-fg-dark));
+      --focus-ring: var(--orca-ring, var(--odag-accent-dark));
+      --st-pending: var(--st-pending-dark);
+      --st-pending-bg: var(--st-pending-bg-dark);
+      --st-ready: var(--st-ready-dark);
+      --st-ready-bg: var(--st-ready-bg-dark);
+      --st-dispatched: var(--st-dispatched-dark);
+      --st-dispatched-bg: var(--st-dispatched-bg-dark);
+      --st-completed: var(--st-completed-dark);
+      --st-completed-bg: var(--st-completed-bg-dark);
+      --st-failed: var(--st-failed-dark);
+      --st-failed-bg: var(--st-failed-bg-dark);
+      --st-blocked: var(--st-blocked-dark);
+      --st-blocked-bg: var(--st-blocked-bg-dark);
+      --scrollbar-thumb: var(--odag-scroll-thumb-dark);
+      --scrollbar-track: var(--odag-scroll-track-dark);
+      --shadow-card: 0 1px 0 rgb(255 255 255 / 0.04) inset, 0 12px 28px -12px rgb(0 0 0 / 0.65);
+      --shadow-float: 0 1px 0 rgb(255 255 255 / 0.06) inset, 0 20px 44px -12px rgb(0 0 0 / 0.78);
+      --bevel-top: inset 0 1px 0 rgb(255 255 255 / 0.045);
+      --canvas-dot: rgb(226 232 240 / 0.11);
+    }
+
+    &:is(:has(> head > meta[name="color-scheme"][content="dark"]), .dark) {
+      color-scheme: dark;
+      --shadow-card: 0 1px 0 rgb(255 255 255 / 0.04) inset, 0 12px 28px -12px rgb(0 0 0 / 0.65);
+      --shadow-float: 0 1px 0 rgb(255 255 255 / 0.06) inset, 0 20px 44px -12px rgb(0 0 0 / 0.78);
+      --bevel-top: inset 0 1px 0 rgb(255 255 255 / 0.045);
+      --canvas-dot: rgb(226 232 240 / 0.11);
+    }
+
+    &:is(:has(> head > meta[name="color-scheme"][content="light"]), .light) {
+      color-scheme: light;
+      --shadow-card: 0 1px 2px rgb(15 20 30 / 0.05), 0 6px 16px -6px rgb(15 20 30 / 0.07);
+      --shadow-float: 0 10px 30px -8px rgb(15 20 30 / 0.16), 0 2px 6px rgb(15 20 30 / 0.06);
+      --bevel-top: inset 0 1px 0 rgb(255 255 255 / 0.7);
+      --canvas-dot: rgb(15 23 42 / 0.13);
+    }
+
+    @supports (color: light-dark(white, black)) {
+      --bg-canvas: var(--orca-background, light-dark(var(--odag-bg-light), var(--odag-bg-dark)));
+      --bg-panel: var(--orca-muted, light-dark(var(--odag-panel-light), var(--odag-panel-dark)));
+      --bg-card: var(--orca-card, light-dark(var(--odag-card-light), var(--odag-card-dark)));
+      --bg-elevated: var(--orca-popover, light-dark(var(--odag-elevated-light), var(--odag-elevated-dark)));
+      --bg-subtle: light-dark(var(--odag-muted-bg-light), var(--odag-muted-bg-dark));
+
+      --fg-primary: var(--orca-foreground, light-dark(var(--odag-fg-light), var(--odag-fg-dark)));
+      --fg-secondary: var(--orca-muted-foreground, light-dark(var(--odag-fg-muted-light), var(--odag-fg-muted-dark)));
+      --fg-tertiary: light-dark(var(--odag-fg-subtle-light), var(--odag-fg-subtle-dark));
+
+      --border-hairline: var(--orca-border, light-dark(var(--odag-border-light), var(--odag-border-dark)));
+      --border-control: var(--orca-input, light-dark(var(--odag-border-strong-light), var(--odag-border-strong-dark)));
+
+      --accent: var(--orca-primary, light-dark(var(--odag-accent-light), var(--odag-accent-dark)));
+      --accent-fg: var(--orca-primary-foreground, light-dark(var(--odag-accent-fg-light), var(--odag-accent-fg-dark)));
+      --focus-ring: var(--orca-ring, light-dark(var(--odag-accent-light), var(--odag-accent-dark)));
+
+      --st-pending: light-dark(var(--st-pending-light), var(--st-pending-dark));
+      --st-pending-bg: light-dark(var(--st-pending-bg-light), var(--st-pending-bg-dark));
+      --st-ready: light-dark(var(--st-ready-light), var(--st-ready-dark));
+      --st-ready-bg: light-dark(var(--st-ready-bg-light), var(--st-ready-bg-dark));
+      --st-dispatched: light-dark(var(--st-dispatched-light), var(--st-dispatched-dark));
+      --st-dispatched-bg: light-dark(var(--st-dispatched-bg-light), var(--st-dispatched-bg-dark));
+      --st-completed: light-dark(var(--st-completed-light), var(--st-completed-dark));
+      --st-completed-bg: light-dark(var(--st-completed-bg-light), var(--st-completed-bg-dark));
+      --st-failed: light-dark(var(--st-failed-light), var(--st-failed-dark));
+      --st-failed-bg: light-dark(var(--st-failed-bg-light), var(--st-failed-bg-dark));
+      --st-blocked: light-dark(var(--st-blocked-light), var(--st-blocked-dark));
+      --st-blocked-bg: light-dark(var(--st-blocked-bg-light), var(--st-blocked-bg-dark));
+
+      --scrollbar-thumb: light-dark(var(--odag-scroll-thumb-light), var(--odag-scroll-thumb-dark));
+      --scrollbar-track: light-dark(var(--odag-scroll-track-light), var(--odag-scroll-track-dark));
+    }
+
+    /* 3. Bridge Legacy Component Variables (`NodePanel`, `ChatPanel`, `WorkerPanel`, `LanesPanel`, etc.) */
+    --paper: var(--bg-card);
+    --paper-2: var(--bg-panel);
+    --paper-3: var(--bg-subtle);
+    --paper-edge: var(--border-hairline);
+    --ink: var(--fg-primary);
+    --ink-soft: var(--fg-secondary);
+    --ink-faint: var(--fg-tertiary);
+    --line: var(--border-hairline);
+    --line-strong: var(--border-control);
+    --sky: var(--accent);
+    --sky-ink: var(--accent);
+    --sky-wash: color-mix(in oklab, var(--accent), transparent 92%);
+    --action-hover: color-mix(in oklab, var(--accent), var(--bg-canvas) 18%);
+    --blush: var(--st-failed);
+    --blush-ink: var(--st-failed);
+    --blush-wash: var(--st-failed-bg);
+    --meadow: var(--st-completed);
+    --butter: var(--st-dispatched);
+    --mustard: var(--st-dispatched);
+    --coral: var(--st-failed);
+    --coral-ink: var(--st-failed);
+    --flame: var(--st-dispatched);
+    --lilac: var(--st-blocked);
+    --lilac-ink: var(--st-blocked);
+    --shadow-sticker: var(--shadow-float);
+    --shadow-soft: var(--shadow-card);
+    --font-display: var(--font-sans);
+    --font-body: var(--font-sans);
+
+    accent-color: var(--accent);
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+
+    @media (forced-colors: active) {
+      --border-hairline: CanvasText;
+      --border-control: ButtonText;
+      --accent: Highlight;
+      --accent-fg: HighlightText;
+    }
+  }
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    block-size: 100%;
+    margin: 0;
+  }
+
+  html,
+  body,
+  div,
+  header,
+  nav,
+  aside,
+  main,
+  section,
+  article,
+  footer,
+  button,
+  input,
+  select,
+  textarea,
+  dialog,
+  details,
+  summary,
+  h1,
+  h2,
+  h3,
+  h4,
+  p,
+  ul,
+  ol,
+  li,
+  dl,
+  dt,
+  dd,
+  table,
+  th,
+  td,
+  span,
+  a,
+  label,
+  small,
+  strong,
+  b,
+  i,
+  code,
+  time,
+  kbd {
+    box-sizing: border-box;
+  }
+
+  body {
+    background: var(--bg-canvas);
+    color: var(--fg-primary);
+    font-family: var(--font-sans);
+    font-size: var(--text-base);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+    color: inherit;
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+    opacity: 0.48;
+  }
+
+  code,
+  pre,
+  kbd,
+  .mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+
+  [tabindex="-1"]:focus {
+    outline: none !important;
+  }
+
+  @supports not (scrollbar-color: auto) {
+    .odag-scroll {
+      scrollbar-width: auto;
+    }
+    .odag-scroll::-webkit-scrollbar {
+      inline-size: 8px;
+      block-size: 8px;
+    }
+    .odag-scroll::-webkit-scrollbar-thumb {
+      background: var(--scrollbar-thumb);
+      border-radius: 99px;
+    }
+    .odag-scroll::-webkit-scrollbar-track {
+      background: var(--scrollbar-track);
+    }
+  }
+}
+
+@layer primitives {
+  dialog.odag-dialog {
+    padding: 0;
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius-lg);
+    background: var(--bg-elevated);
+    color: var(--fg-primary);
+    box-shadow: var(--shadow-float);
+    max-inline-size: min(560px, 92dvw);
+    inline-size: 100%;
+  }
+
+  dialog.odag-dialog[open] {
+    display: flex;
+    flex-direction: column;
+  }
+
+  dialog.odag-dialog:modal {
+    overscroll-behavior: contain;
+  }
+
+  dialog.odag-dialog::backdrop {
+    background: rgb(5 8 15 / 0.52);
+    backdrop-filter: blur(3px);
+    overflow: hidden;
+    overscroll-behavior: contain;
+  }
+
+  .odag-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-block-size: var(--ctrl-h);
+    padding-block: 3px;
+    padding-inline: 10px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-control);
+    background: var(--bg-card);
+    color: var(--fg-primary);
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    line-height: 1.25;
+    white-space: nowrap;
+    box-shadow: var(--bevel-top);
+    transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+
+    &:hover:not(:disabled) {
+      background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 6%);
+    }
+
+    &[aria-pressed="true"]:not(.odag-btn--primary) {
+      border-color: var(--border-control);
+      background: color-mix(in oklab, var(--accent), transparent 90%);
+      color: var(--fg-primary);
+    }
+  }
+
+  .odag-btn--ghost {
+    border-color: transparent;
+    background: transparent;
+    box-shadow: none;
+    color: var(--fg-secondary);
+
+    &:hover:not(:disabled) {
+      background: color-mix(in oklab, var(--bg-panel), var(--fg-primary) 7%);
+      color: var(--fg-primary);
+    }
+  }
+
+  .odag-btn--primary {
+    background: var(--accent);
+    border-color: transparent;
+    color: var(--accent-fg);
+    font-weight: 600;
+
+    &:hover:not(:disabled) {
+      background: color-mix(in oklab, var(--accent), var(--bg-canvas) 18%);
+    }
+  }
+
+  .odag-btn--danger {
+    background: var(--st-failed-bg);
+    border-color: color-mix(in oklab, var(--st-failed), transparent 55%);
+    color: var(--st-failed);
+
+    &:hover:not(:disabled) {
+      background: color-mix(in oklab, var(--st-failed-bg), var(--st-failed) 14%);
+    }
+  }
+
+  .odag-btn--icon {
+    inline-size: var(--ctrl-h);
+    min-inline-size: var(--ctrl-h);
+    padding-inline: 0;
+    color: var(--fg-secondary);
+
+    &:hover:not(:disabled) {
+      color: var(--fg-primary);
+    }
+  }
+
+  .odag-kbd {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-inline-size: 1.125rem;
+    min-block-size: 1.125rem;
+    padding-inline: 4px;
+    border-radius: 4px;
+    border: 1px solid var(--border-hairline);
+    background: var(--bg-subtle);
+    color: var(--fg-secondary);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    line-height: 1;
+  }
+
+  .odag-tablist {
+    display: flex;
+    align-items: stretch;
+    overflow-x: auto;
+    scrollbar-width: none;
+    gap: 2px;
+
+    &::-webkit-scrollbar {
+      display: none;
+    }
+  }
+
+  .odag-tab {
+    position: relative;
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding-inline: 11px;
+    min-block-size: 2.125rem;
+    border: 0;
+    background: transparent;
+    color: var(--fg-secondary);
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    white-space: nowrap;
+
+    &:hover:not(:disabled) {
+      color: var(--fg-primary);
+    }
+
+    &[aria-selected="true"] {
+      color: var(--fg-primary);
+
+      &::after {
+        content: "";
+        position: absolute;
+        inset: auto 8px 0;
+        border-block-end: 2px solid var(--accent);
+      }
+    }
+  }
+
+  .odag-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-block-size: 1.3125rem;
+    padding-block: 1px;
+    padding-inline: 7px;
+    border-radius: 999px;
+    font-family: var(--font-sans);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    line-height: 1.2;
+    font-variant-numeric: tabular-nums;
+    border: 1px solid color-mix(in oklab, var(--pill-fg, var(--fg-secondary)), transparent 68%);
+    background: var(--pill-bg, var(--bg-subtle));
+    color: var(--pill-fg, var(--fg-secondary));
+  }
+
+  .odag-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-inline-size: 1.125rem;
+    min-block-size: 1.0625rem;
+    padding-inline: 5px;
+    border-radius: 99px;
+    background: var(--bg-subtle);
+    color: var(--fg-secondary);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    line-height: 1.1;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer layout {
+  .odag-workbench {
+    container-type: inline-size;
+    container-name: workbench;
+    block-size: 100dvh;
+    inline-size: 100%;
+    min-inline-size: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-canvas);
+    color: var(--fg-primary);
+    overflow: hidden;
+  }
+
+  /* 1. Topbar — Strict Uniform Geometry (--ctrl-h = 30px, --radius-sm = 6px, --text-sm = 12px) */
+  .odag-topbar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-block-size: 46px;
+    padding-inline: 10px;
+    padding-block: 6px;
+    background: var(--bg-panel);
+    border-block-end: 1px solid var(--border-hairline);
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    flex-wrap: wrap;
+    z-index: 20;
+  }
+
+  .odag-brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-block-size: var(--ctrl-h);
+    padding-inline: 2px 4px;
+  }
+
+  .odag-brand__mark {
+    inline-size: 26px;
+    block-size: 26px;
+    border-radius: var(--radius-sm);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--accent);
+    color: var(--accent-fg);
+    border: 1px solid transparent;
+    flex: none;
+  }
+
+  .odag-brand__text {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+    min-inline-size: 0;
+  }
+
+  .odag-brand__text strong {
+    font-size: var(--text-base);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+  }
+
+  .odag-brand__text span {
+    font-size: var(--text-xs);
+    color: var(--fg-tertiary);
+    font-family: var(--font-mono);
+    max-inline-size: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .odag-topbar__sep {
+    inline-size: 1px;
+    block-size: 16px;
+    background: var(--border-hairline);
+    margin-inline: 2px;
+    flex: none;
+  }
+
+  .odag-topbar__run {
+    flex: 0 1 280px;
+    min-inline-size: 160px;
+  }
+
+  .odag-topbar__run .runpick .doodle-select {
+    min-block-size: var(--ctrl-h);
+    block-size: auto;
+    padding: 3px 10px;
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    line-height: 1.25;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-control);
+    background: var(--bg-card);
+    box-shadow: var(--bevel-top);
+  }
+
+  .odag-topbar-chip,
+  .odag-topbar .runhealth__chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-block-size: var(--ctrl-h);
+    padding-block: 3px;
+    padding-inline: 10px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-control);
+    background: var(--bg-card);
+    color: var(--fg-secondary);
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    line-height: 1.25;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .odag-topbar .conn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    inline-size: var(--ctrl-h);
+    min-inline-size: var(--ctrl-h);
+    min-block-size: var(--ctrl-h);
+    padding: 0;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-control);
+    font-size: var(--text-sm);
+  }
+
+  /* Portaled ExecControls inside Topbar */
+  .odag-exec-portal,
+  .odag-exec-portal .workbench-exec-actions,
+  .odag-exec-portal .exec__live {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .odag-exec-portal .btn--icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    inline-size: var(--ctrl-h);
+    min-inline-size: var(--ctrl-h);
+    min-block-size: var(--ctrl-h);
+    padding: 0;
+    border-radius: var(--radius-sm);
+    background: var(--bg-card);
+    border: 1px solid var(--border-control);
+    color: var(--fg-secondary);
+    font-size: var(--text-sm);
+    box-shadow: var(--bevel-top);
+
+    &:hover:not(:disabled) {
+      background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 6%);
+      color: var(--fg-primary);
+    }
+  }
+
+  .odag-exec-portal .btn--run {
+    background: var(--accent);
+    border-color: transparent;
+    color: var(--accent-fg);
+
+    &:hover:not(:disabled) {
+      background: color-mix(in oklab, var(--accent), var(--bg-canvas) 18%);
+      color: var(--accent-fg);
+    }
+  }
+
+  .odag-exec-portal .btn--stop-run {
+    background: var(--st-failed-bg);
+    border-color: color-mix(in oklab, var(--st-failed), transparent 55%);
+    color: var(--st-failed);
+
+    &:hover:not(:disabled) {
+      background: color-mix(in oklab, var(--st-failed-bg), var(--st-failed) 14%);
+      color: var(--st-failed);
+    }
+  }
+
+  .odag-exec-portal .exec__running,
+  .odag-exec-portal .exec__done-short,
+  .odag-exec-portal .exec__hint {
+    display: none;
+  }
+
+  .odag-exec-portal .exec__notices:not(:has(.exec__err)) {
+    display: none;
+  }
+
+  /* 1b. Attention Strip */
+  .odag-attention-strip {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    background: color-mix(in oklab, var(--bg-panel), var(--st-dispatched) 7%);
+    border-block-end: 1px solid var(--border-hairline);
+    overflow-x: auto;
+  }
+
+  .odag-attention-card {
+    flex: 1 1 240px;
+    min-inline-size: 220px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 8px 5px 10px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-card);
+    border: 1px solid var(--border-control);
+    box-shadow: var(--shadow-card);
+    font-size: var(--text-sm);
+  }
+
+  .odag-attention-card__text {
+    flex: 1;
+    min-inline-size: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* 2. Four-Zone Body */
+  .odag-body {
+    position: relative;
+    flex: 1;
+    min-block-size: 0;
+    display: flex;
+    overflow: hidden;
+  }
+
+  .odag-sidebar {
+    flex: 0 0 240px;
+    inline-size: 240px;
+    min-inline-size: 0;
+    display: flex;
+    flex-direction: column;
+    min-block-size: 0;
+    background: var(--bg-panel);
+    border-inline-end: 1px solid var(--border-hairline);
+    overflow: hidden;
+  }
+
+  .odag-sidebar--collapsed {
+    display: none;
+  }
+
+  .odag-center {
+    flex: 1;
+    min-inline-size: 0;
+    min-block-size: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-canvas);
+  }
+
+  .odag-inspector {
+    position: relative;
+    flex: 0 0 416px;
+    inline-size: 416px;
+    min-inline-size: 320px;
+    max-inline-size: 760px;
+    display: flex;
+    flex-direction: column;
+    min-block-size: 0;
+    background: var(--bg-panel);
+    border-inline-start: 1px solid var(--border-hairline);
+  }
+
+  .odag-inspector--closed {
+    display: none;
+  }
+
+  .odag-inspector__resize {
+    position: absolute;
+    inset-block: 0;
+    inset-inline-start: -3px;
+    inline-size: 6px;
+    cursor: col-resize;
+    z-index: 15;
+
+    &:hover,
+    &:focus-visible {
+      background: color-mix(in oklab, var(--accent), transparent 55%);
+    }
+  }
+
+  @container workbench (max-width: 1120px) {
+    .odag-inspector {
+      position: absolute;
+      inset-block: 0;
+      inset-inline-end: 0;
+      z-index: 30;
+      inline-size: min(420px, 92cqi) !important;
+      box-shadow: var(--shadow-float);
+    }
+    .odag-inspector__resize {
+      display: none;
+    }
+  }
+
+  @container workbench (max-width: 720px) {
+    .odag-sidebar {
+      position: absolute;
+      inset-block: 0;
+      inset-inline-start: 0;
+      z-index: 32;
+      inline-size: min(260px, 86cqi);
+      box-shadow: var(--shadow-float);
+    }
+
+    .odag-topbar .odag-hide-narrow {
+      display: none;
+    }
+
+    .odag-inspector {
+      inline-size: 100cqi !important;
+    }
+  }
+}
+
+@layer components {
+  .odag-nav {
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    border-block-end: 1px solid var(--border-hairline);
+  }
+
+  .odag-nav-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-block-size: 30px;
+    padding-block: 3px;
+    padding-inline: 9px;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--fg-secondary);
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    text-align: start;
+
+    &:hover:not(:disabled) {
+      background: color-mix(in oklab, var(--bg-panel), var(--fg-primary) 5%);
+      color: var(--fg-primary);
+    }
+
+    &[aria-current="page"] {
+      background: color-mix(in oklab, var(--accent), transparent 90%);
+      color: var(--fg-primary);
+      font-weight: 600;
+    }
+  }
+
+  .odag-coord-box {
+    margin: 8px;
+    padding: 8px 10px;
+    border-radius: var(--radius-md);
+    background: var(--bg-card);
+    border: 1px solid var(--border-hairline);
+    box-shadow: var(--shadow-card);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    text-align: start;
+  }
+
+  .odag-fleet-list {
+    flex: 1;
+    min-block-size: 0;
+    overflow-y: auto;
+    padding: 4px 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .odag-fleet-row {
+    inline-size: 100%;
+    min-inline-size: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+    background: transparent;
+    text-align: start;
+
+    &:hover:not(:disabled) {
+      background: color-mix(in oklab, var(--bg-panel), var(--fg-primary) 5%);
+    }
+
+    &.is-selected {
+      background: var(--bg-card);
+      border-color: var(--border-control);
+      box-shadow: var(--shadow-card);
+    }
+  }
+
+  .odag-subbar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 12px;
+    background: var(--bg-card);
+    border-block-end: 1px solid var(--border-hairline);
+    flex-wrap: wrap;
+  }
+
+  .odag-filter-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-block-size: 26px;
+    padding-block: 2px;
+    padding-inline: 8px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--fg-secondary);
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    font-weight: 500;
+
+    &:hover:not(:disabled) {
+      background: var(--bg-subtle);
+      color: var(--fg-primary);
+    }
+
+    &[aria-pressed="true"] {
+      background: var(--bg-subtle);
+      border-color: var(--border-control);
+      color: var(--fg-primary);
+    }
+  }
+
+  .odag-search-box {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-block-size: 28px;
+    padding-inline: 8px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-control);
+    background: var(--bg-panel);
+    margin-inline-start: auto;
+
+    & input {
+      border: 0;
+      background: transparent;
+      outline: none;
+      inline-size: 156px;
+      font-family: var(--font-sans);
+      font-size: var(--text-sm);
+      color: var(--fg-primary);
+    }
+  }
+
+  /* React Flow Canvas & Custom TaskNode / GateNode */
+  .odag-canvas-wrap {
+    position: relative;
+    flex: 1;
+    min-block-size: 0;
+    background: var(--bg-canvas);
+  }
+
+  .odag-canvas-wrap .react-flow__attribution {
+    display: none;
+  }
+
+  .odag-canvas-wrap .react-flow__minimap {
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border-hairline);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-card);
+    overflow: hidden;
+  }
+
+  .hierarchy-edge__link {
+    stroke: var(--fg-tertiary);
+    stroke-width: 1.2;
+    stroke-dasharray: 3 4;
+  }
+
+  .hierarchy-edge__ring {
+    fill: var(--bg-card);
+    stroke: var(--fg-tertiary);
+    stroke-width: 1.5;
+  }
+
+  .dag-read-state {
+    inline-size: min(100%, 64ch);
+    margin: auto;
+    padding: 32px 24px;
+    color: var(--fg-primary);
+    font-family: var(--font-sans);
+    overflow-wrap: anywhere;
+  }
+
+  .dag-read-state h2 {
+    margin: 0 0 10px;
+    font-size: var(--text-lg);
+    font-weight: 600;
+    line-height: 1.35;
+  }
+
+  .dag-read-state > p {
+    margin: 0 0 14px;
+    color: var(--fg-secondary);
+    font-size: var(--text-base);
+    line-height: 1.55;
+  }
+
+  .dag-read-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin: 14px 0;
+  }
+
+  .dag-read-details {
+    margin-block-start: 12px;
+    font-size: var(--text-sm);
+  }
+
+  .dag-read-details summary {
+    display: list-item;
+    inline-size: fit-content;
+    padding-block: 4px;
+    color: var(--fg-primary);
+    cursor: pointer;
+  }
+
+  .dag-read-details pre {
+    max-block-size: 14rem;
+    overflow: auto;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-card);
+    border: 1px solid var(--border-hairline);
+    color: var(--fg-primary);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .odag-node {
+    position: relative;
+    inline-size: 280px;
+    block-size: 120px;
+    padding: 10px 12px;
+    border-radius: 11px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-hairline);
+    box-shadow: var(--shadow-card);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    transition: opacity 160ms ease, border-color 140ms ease;
+
+    &::before {
+      content: "";
+      position: absolute;
+      inset-inline: 10px;
+      inset-block-start: 0;
+      block-size: 2.5px;
+      border-radius: 0 0 3px 3px;
+      background: var(--node-color, var(--st-pending));
+    }
+
+    &:hover {
+      border-color: var(--border-control);
+    }
+
+    &.is-selected {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent), transparent 72%), var(--shadow-card);
+    }
+
+    &.is-dimmed {
+      opacity: 0.24;
+    }
+  }
+
+  .odag-node--gate {
+    inline-size: 256px;
+    block-size: 114px;
+    border-style: dashed;
+    border-color: color-mix(in oklab, var(--st-blocked), var(--border-control) 40%);
+    background: color-mix(in oklab, var(--bg-card), var(--st-blocked-bg) 32%);
+
+    &::before {
+      background: var(--st-blocked);
+    }
+
+    &.is-resolved {
+      border-style: solid;
+      border-color: color-mix(in oklab, var(--st-completed), var(--border-hairline) 50%);
+      background: var(--bg-card);
+
+      &::before {
+        background: var(--st-completed);
+      }
+    }
+  }
+
+  .odag-node__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+
+  .odag-node__title {
+    font-family: var(--font-sans);
+    font-size: var(--text-base);
+    font-weight: 600;
+    line-height: 1.3;
+    letter-spacing: -0.01em;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .odag-node__summary {
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    color: var(--fg-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .odag-node__foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding-block-start: 4px;
+    border-block-start: 1px solid var(--border-hairline);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--fg-tertiary);
+  }
+
+  .odag-glass-bar {
+    position: absolute;
+    z-index: 10;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 6px;
+    border-radius: var(--radius-md);
+    background: color-mix(in oklab, var(--bg-elevated), transparent 14%);
+    backdrop-filter: blur(12px);
+    border: 1px solid var(--border-hairline);
+    box-shadow: var(--shadow-card);
+  }
+
+  /* Bottom ActivityDock — VS Code Output / Debug Console / Network Ledger aesthetic */
+  .odag-dock {
+    container-type: inline-size;
+    container-name: dock;
+    position: relative;
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-panel);
+    border-block-start: 1px solid var(--border-hairline);
+  }
+
+  .odag-dock__bar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    block-size: 32px;
+    padding-inline: 10px;
+    background: var(--bg-panel);
+    border-block-end: 1px solid var(--border-hairline);
+  }
+
+  .odag-dock__bar .odag-tab {
+    block-size: 31px;
+    font-size: var(--text-sm);
+  }
+
+  .odag-dock__content {
+    flex: 1;
+    min-block-size: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .odag-dock-pane {
+    flex: 1;
+    min-block-size: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .odag-dock-pane[hidden] {
+    display: none !important;
+  }
+
+  .odag-dock-toolbar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-block-size: 28px;
+    padding: 3px 10px;
+    background: var(--bg-card);
+    border-block-end: 1px solid var(--border-hairline);
+    font-size: var(--text-xs);
+    flex-wrap: wrap;
+  }
+
+  .odag-dock-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    block-size: 20px;
+    padding-inline: 7px;
+    border-radius: 4px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--fg-secondary);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    white-space: nowrap;
+
+    &:hover:not(:disabled) {
+      background: var(--bg-subtle);
+      color: var(--fg-primary);
+    }
+
+    &[aria-pressed="true"] {
+      background: color-mix(in oklab, var(--accent), transparent 89%);
+      border-color: color-mix(in oklab, var(--accent), transparent 68%);
+      color: var(--fg-primary);
+      font-weight: 600;
+    }
+  }
+
+  .odag-dock-search {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    block-size: 21px;
+    padding-inline: 7px;
+    border-radius: 4px;
+    border: 1px solid var(--border-hairline);
+    background: var(--bg-panel);
+    color: var(--fg-primary);
+
+    & input {
+      border: 0;
+      background: transparent;
+      outline: none;
+      inline-size: 152px;
+      font-family: var(--font-mono);
+      font-size: var(--text-xs);
+      color: var(--fg-primary);
+    }
+  }
+
+  .odag-dock-viewport {
+    flex: 1;
+    min-block-size: 0;
+    overflow-y: auto;
+    background: color-mix(in oklab, var(--bg-canvas), var(--bg-card) 45%);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    line-height: 1.45;
+  }
+
+  .odag-console-notice {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px;
+    border-block-end: 1px solid var(--border-hairline);
+    background: color-mix(in oklab, var(--bg-panel), var(--fg-primary) 4%);
+    color: var(--fg-secondary);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+  }
+
+  .odag-console-notice--error {
+    background: var(--st-failed-bg);
+    color: var(--st-failed);
+  }
+
+  .odag-console-empty {
+    padding: 14px 12px;
+    color: var(--fg-tertiary);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+  }
+
+  .odag-console-head {
+    position: sticky;
+    inset-block-start: 0;
+    z-index: 2;
+    display: grid;
+    align-items: center;
+    gap: 8px;
+    min-block-size: 23px;
+    padding: 2px 10px;
+    background: var(--bg-panel);
+    border-block-end: 1px solid var(--border-hairline);
+    color: var(--fg-tertiary);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    user-select: none;
+  }
+
+  .odag-console-row {
+    display: grid;
+    align-items: center;
+    gap: 8px;
+    inline-size: 100%;
+    min-block-size: 25px;
+    padding: 2px 10px;
+    border: 0;
+    border-block-end: 1px solid color-mix(in oklab, var(--border-hairline), transparent 52%);
+    background: transparent;
+    color: var(--fg-primary);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    text-align: start;
+    outline-offset: -2px;
+
+    &:hover:not(:disabled) {
+      background: color-mix(in oklab, var(--fg-primary), transparent 95%);
+    }
+
+    &[aria-expanded="true"] {
+      background: color-mix(in oklab, var(--accent), transparent 91%);
+    }
+
+    &.is-actionable {
+      box-shadow: inset 2px 0 0 var(--st-dispatched);
+    }
+
+    &.is-error {
+      box-shadow: inset 2px 0 0 var(--st-failed);
+    }
+  }
+
+  .odag-console-row--activity {
+    display: flex;
+    padding: 0;
+    gap: 0;
+  }
+
+  .odag-console-row__main {
+    flex: 1;
+    min-inline-size: 0;
+    display: grid;
+    grid-template-columns: 14px 98px 14px minmax(88px, 132px) minmax(0, 1fr);
+    align-items: center;
+    gap: 8px;
+    min-block-size: 25px;
+    padding: 2px 8px 2px 10px;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: start;
+    outline-offset: -2px;
+  }
+
+  .odag-console-row__tail {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding-inline-end: 10px;
+  }
+
+  .odag-console-row--audit {
+    grid-template-columns: 14px 98px minmax(96px, 128px) minmax(100px, 176px) minmax(90px, 1fr) 76px 108px;
+  }
+
+  .odag-console-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    block-size: 17px;
+    padding-inline: 5px;
+    border-radius: 3px;
+    border: 1px solid var(--border-hairline);
+    background: var(--bg-panel);
+    color: var(--fg-secondary);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    line-height: 1;
+    white-space: nowrap;
+  }
+
+  @container dock (max-width: 720px) {
+    .odag-console-row__main {
+      grid-template-columns: 12px 62px 14px minmax(68px, 96px) minmax(0, 1fr);
+    }
+    .odag-console-row--audit {
+      grid-template-columns: 12px 62px minmax(82px, 108px) minmax(80px, 1fr) 88px;
+    }
+    .odag-console-hide-compact {
+      display: none;
+    }
+  }
+
+  .odag-console-drawer {
+    padding: 8px 14px 10px 36px;
+    background: var(--bg-panel);
+    border-block-end: 1px solid var(--border-hairline);
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+
+    & pre {
+      margin: 0;
+      padding: 8px 10px;
+      border-radius: 5px;
+      background: var(--bg-canvas);
+      border: 1px solid var(--border-hairline);
+      font-family: var(--font-mono);
+      font-size: var(--text-xs);
+      line-height: 1.45;
+      overflow-x: auto;
+    }
+  }
+
+  /* Kanban Status Board */
+  .odag-board {
+    flex: 1;
+    min-block-size: 0;
+    overflow: auto;
+    padding: 12px;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(248px, 1fr));
+    gap: 12px;
+  }
+
+  .odag-board-col {
+    display: flex;
+    flex-direction: column;
+    min-block-size: 0;
+    border-radius: var(--radius-md);
+    background: var(--bg-panel);
+    border: 1px solid var(--border-hairline);
+  }
+
+  .odag-board-col__head {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 9px 11px;
+    border-block-end: 1px solid var(--border-hairline);
+    font-size: var(--text-sm);
+    font-weight: 600;
+  }
+
+  .odag-board-col__body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .odag-card {
+    padding: 10px 12px;
+    border-radius: var(--radius-md);
+    background: var(--bg-card);
+    border: 1px solid var(--border-hairline);
+    box-shadow: var(--shadow-card);
+  }
+
+  .odag-pulse-dot {
+    display: inline-block;
+    inline-size: 7px;
+    block-size: 7px;
+    border-radius: 99px;
+    background: var(--st-dispatched);
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .odag-pulse-dot--live {
+      animation: odag-pulse 2s ease-in-out infinite;
+    }
+  }
+
+  @keyframes odag-pulse {
+    0%,
+    100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+    50% {
+      opacity: 0.42;
+      transform: scale(0.86);
+    }
+  }
+
+  /* Harmonize existing operational panels inside ContextualInspector & Stage Views */
+  .odag-inspector--compact-chat .chat .chat__sidebar {
+    display: none !important;
+  }
+
+  .odag-inspector--compact-chat .chat[data-mobile-view="list"] .chat__conversation {
+    display: flex !important;
+  }
+
+  .odag-inspector--compact-chat .chat {
+    font-size: var(--text-base);
+    line-height: 1.5;
+    background: var(--bg-panel);
+  }
+
+  .odag-inspector--compact-chat .chat .chat__conversation-head {
+    display: flex !important;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: var(--bg-panel);
+  }
+
+  .odag-inspector--compact-chat .chat .chat__conversation-title h2 {
+    font-size: var(--text-base);
+  }
+
+  .odag-inspector--compact-chat .chat .chat__view-tabs {
+    gap: 12px;
+    padding-inline: 12px;
+    background: var(--bg-panel);
+    overflow-x: auto;
+  }
+
+  .odag-inspector--compact-chat .chat .chat__view-tabs button {
+    min-block-size: 36px;
+    font-size: var(--text-sm);
+    white-space: nowrap;
+  }
+
+  .odag-inspector--compact-chat .chat .chat__messages {
+    padding: 12px;
+  }
+
+  .odag-inspector--compact-chat .chat .chat-message p {
+    font-size: var(--text-base);
+    line-height: 1.55;
+  }
+
+  .odag-inspector--compact-chat .chat .chat-message h3 {
+    font-size: var(--text-base);
+  }
+
+  .odag-inspector--compact-chat .chat .chat__composer {
+    padding: 10px 12px;
+    background: var(--bg-card);
+  }
+
+  .odag-inspector--compact-chat .chat .chat__compose-row textarea {
+    min-block-size: 68px;
+    font-size: var(--text-base);
+    background: var(--bg-panel);
+  }
+
+  /* Monochrome dual-theme overrides for legacy Chat & Action surfaces */
+  .chat .chat-message,
+  .chat-message--incoming {
+    background: var(--bg-card);
+    border: 1px solid var(--border-hairline);
+    color: var(--fg-primary);
+  }
+
+  .chat .chat-message--outgoing,
+  .chat-message--outgoing {
+    background: var(--bg-subtle);
+    border: 1px solid var(--border-control);
+    color: var(--fg-primary);
+  }
+
+  .chat .chat-message--group,
+  .chat-message--group {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-control);
+  }
+
+  .chat-message--worker_done.chat-message--success {
+    background: var(--st-completed-bg);
+    border-color: color-mix(in oklab, var(--st-completed), transparent 55%);
+  }
+
+  .chat-message__audience,
+  .chat-checkpoint__older {
+    color: var(--fg-primary);
+    background: var(--bg-subtle);
+    border: 1px solid var(--border-hairline);
+  }
+
+  .chat-message__reply-context {
+    color: var(--fg-secondary);
+    background: var(--bg-subtle);
+    border-inline-start: 2px solid var(--border-control);
+  }
+
+  .chat-checkpoint__receipt {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-hairline);
+    border-radius: var(--radius-sm);
+  }
+
+  .chat-checkpoint__agent {
+    border-inline-start-color: var(--border-control);
+  }
+
+  .chat .chat__compose-toolbar .btn--run {
+    background: var(--accent);
+    border-color: transparent;
+    color: var(--accent-fg);
+  }
+
+  .chat .chat__compose-toolbar .btn--run:hover:not(:disabled) {
+    background: color-mix(in oklab, var(--accent), var(--bg-canvas) 18%);
+    color: var(--accent-fg);
+  }
+
+  /* Dual-theme surface overrides for legacy sub-panel selectors */
+  .conn--ok,
+  .runhealth__chip--ok {
+    color: var(--st-completed) !important;
+    background: var(--st-completed-bg) !important;
+    border-color: color-mix(in oklab, var(--st-completed), transparent 60%) !important;
+  }
+
+  .conn--warn,
+  .runhealth__chip--warn {
+    color: var(--st-dispatched) !important;
+    background: var(--st-dispatched-bg) !important;
+    border-color: color-mix(in oklab, var(--st-dispatched), transparent 60%) !important;
+  }
+
+  .conn--bad,
+  .runhealth__chip--bad {
+    color: var(--st-failed) !important;
+    background: var(--st-failed-bg) !important;
+    border-color: color-mix(in oklab, var(--st-failed), transparent 60%) !important;
+  }
+
+  .workers__output,
+  .workers__rawpre,
+  .workers__source,
+  .inbox__input {
+    background: var(--bg-panel) !important;
+    color: var(--fg-primary) !important;
+    border-color: var(--border-control) !important;
+  }
+
+  .exec__settled {
+    color: var(--st-completed) !important;
+    background: var(--st-completed-bg) !important;
+    border-color: color-mix(in oklab, var(--st-completed), transparent 55%) !important;
+  }
+
+  .exec__stop-report--warn {
+    color: var(--st-failed) !important;
+    background: var(--st-failed-bg) !important;
+    border-color: color-mix(in oklab, var(--st-failed), transparent 55%) !important;
+  }
+
+  /* Shared sub-panel layouts & Strict Global Typography Normalization */
+  .odag-topbar .conn::before {
+    display: none;
+  }
+
+  .odag-topbar .btn--lang {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    inline-size: var(--ctrl-h);
+    min-inline-size: var(--ctrl-h);
+    min-block-size: var(--ctrl-h);
+    padding: 0;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-control);
+    background: var(--bg-card);
+    color: var(--fg-secondary);
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    box-shadow: var(--bevel-top);
+
+    &:hover:not(:disabled) {
+      background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 6%);
+      color: var(--fg-primary);
+    }
+  }
+
+  /* SchedulerDockView — VS Code Problems, Queue & Durable Fleet Rows */
+  .odag-console-row--problem {
+    grid-template-columns: 14px minmax(72px, 112px) minmax(120px, 232px) minmax(0, 1fr) auto;
+  }
+
+  @container dock (max-width: 720px) {
+    .odag-console-row--problem {
+      grid-template-columns: 14px minmax(64px, 92px) minmax(96px, 168px) minmax(0, 1fr);
+    }
+  }
+
+  .odag-dock-workers .gates.inbox.workers,
+  .odag-dock-workers .gate.inbox__item {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .odag-dock-workers .gate__badge {
+    display: none;
+  }
+
+  .odag-dock-workers .workers__filters {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-block-end: 1px solid var(--border-hairline);
+    background: var(--bg-panel);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+  }
+
+  .odag-dock-workers .workers__filters select {
+    min-block-size: 22px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--border-hairline);
+    background: var(--bg-card);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+  }
+
+  .odag-dock-workers .workers__row {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-block-end: 1px solid color-mix(in oklab, var(--border-hairline), transparent 52%);
+  }
+
+  .odag-dock-workers .workers__toggle {
+    display: flex;
+    align-items: center;
+    min-block-size: 26px;
+    padding: 2px 10px;
+    gap: 8px;
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+
+    &:hover:not(:disabled) {
+      background: color-mix(in oklab, var(--fg-primary), transparent 95%);
+    }
+  }
+
+  .odag-dock-workers .workers__summary {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 10px;
+    overflow: hidden;
+  }
+
+  .odag-dock-workers .workers__summary strong {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-inline-size: 240px;
+  }
+
+  .odag-dock-workers .workers__dispatch,
+  .odag-dock-workers .workers__context,
+  .odag-dock-workers .workers__attention {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    white-space: nowrap;
+  }
+
+  .odag-dock-workers .workers__liveness {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    padding: 1px 6px;
+    min-block-size: 18px;
+  }
+
+  .odag-dock-workers .workers__detail {
+    padding: 8px 14px 10px 28px;
+    background: var(--bg-panel);
+    border-block-start: 1px solid var(--border-hairline);
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+  }
+
+  /* Global font-family & font-size unification across legacy panels */
+  .chat,
+  .node-panel,
+  .gates,
+  .inbox,
+  .lanes,
+  .cleanup,
+  .cap,
+  .exec,
+  .ops-attention,
+  .runhealth__panel,
+  .doodle-select {
+    font-family: var(--font-sans) !important;
+    font-size: var(--text-base);
+    line-height: 1.5;
+  }
+
+  .odag-topbar .doodle-select {
+    font-family: var(--font-mono) !important;
+    font-size: var(--text-sm);
+    line-height: 1.25;
+  }
+
+  .node-panel h3,
+  .cap h3,
+  .lanes h3,
+  .cleanup h3,
+  .chat .chat__conversation-title h2 {
+    font-size: var(--text-base) !important;
+    font-weight: 600;
+  }
+
+  .inbox__meta,
+  .inbox__body,
+  .gate__question,
+  .runhealth__panel {
+    font-size: var(--text-sm) !important;
+  }
+
+  .gate__badge,
+  .workers__liveness {
+    font-size: var(--text-xs) !important;
+  }
+
+  .runpick {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .runpick .doodle-select {
+    inline-size: 100%;
+    max-inline-size: none;
+  }
+
+  .runpick__actions {
+    display: grid;
+    gap: 8px;
+    padding: 10px 2px 2px;
+    border-block-start: 1px solid var(--border-hairline);
+  }
+
+  .runpick__exact-label {
+    color: var(--fg-secondary);
+    font-size: var(--text-sm);
+  }
+
+  .runpick__exact {
+    display: flex;
+    gap: 6px;
+    min-inline-size: 0;
+  }
+
+  .runpick__exact-input {
+    flex: 1;
+    min-inline-size: 0;
+    inline-size: 100%;
+    min-block-size: 30px;
+    padding: 4px 8px;
+    color: var(--fg-primary);
+    background: var(--bg-panel);
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius-sm);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+  }
+
+  .exec__settings > summary {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    min-block-size: 34px;
+    inline-size: fit-content;
+    max-inline-size: 100%;
+    padding: 6px 12px;
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius-sm);
+    background: var(--bg-card);
+    color: var(--fg-primary);
+    cursor: pointer;
+    list-style: none;
+    font-size: var(--text-base);
+    font-weight: 600;
+  }
+
+  .exec__settings > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .exec__settings-summary {
+    color: var(--fg-secondary);
+    font-size: var(--text-sm);
+    font-weight: 400;
+  }
+
+  .exec__settings-panel {
+    display: grid;
+    gap: 14px;
+    margin-block-start: 10px;
+    padding: 14px;
+    border: 1px solid var(--border-hairline);
+    border-radius: var(--radius-md);
+    background: var(--bg-card);
+  }
+
+  .exec__settings-panel .exec__field {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+    align-items: start;
+    min-inline-size: 0;
+  }
+
+  .exec__settings-panel .exec__label {
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--fg-primary);
+  }
+
+  .exec__settings-panel .exec__hint {
+    color: var(--fg-secondary);
+    font-size: var(--text-sm);
+    overflow-wrap: anywhere;
+  }
+
+  .workers__toggle {
+    align-items: flex-start;
+    min-block-size: 40px;
+    padding: 6px 0;
+    gap: 10px;
+  }
+
+  .workers__summary {
+    display: grid;
+    flex: 1;
+    min-inline-size: 0;
+    gap: 3px;
+    overflow-wrap: anywhere;
+  }
+
+  .workers__summary strong {
+    font-size: var(--text-base);
+    line-height: 1.45;
+  }
+
+  .workers__context {
+    color: var(--fg-secondary);
+    font-size: var(--text-sm);
+    line-height: 1.5;
+  }
+
+  .workers__attention {
+    color: var(--st-failed);
+    font-size: var(--text-sm);
+  }
+
+  .record-facts {
+    display: grid;
+    grid-template-columns: minmax(80px, 28%) minmax(0, 1fr);
+    gap: 5px 12px;
+    margin: 8px 0;
+    font-size: var(--text-sm);
+    line-height: 1.5;
+  }
+
+  .record-facts dt {
+    color: var(--fg-secondary);
+    overflow-wrap: anywhere;
+  }
+
+  .record-facts dd {
+    margin: 0;
+    min-inline-size: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .structured-data__field {
+    display: contents;
+  }
+
+  .structured-data__list {
+    padding-inline-start: 18px;
+    margin: 4px 0;
+  }
+
+  .structured-data .record-facts,
+  .node-result > .structured-data {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+
+  .structured-data summary,
+  .node-result summary {
+    cursor: pointer;
+    padding: 5px 0;
+  }
+
+  .structured-data__text,
+  .node-result__body,
+  .node-result__details pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .node-result,
+  .workers__detail {
+    min-inline-size: 0;
+    overflow-wrap: anywhere;
+  }
+}
+
+@layer utilities {
+  .truncate {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}

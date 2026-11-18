@@ -1,11 +1,17 @@
 {
   "version": 1,
   "skills": {
-    "impeccable": {
-      "source": "pbakaus/impeccable",
+    "chrome-extensions": {
+      "source": "GoogleChrome/modern-web-guidance",
       "sourceType": "github",
-      "skillPath": ".agents/skills/impeccable/SKILL.md",
-      "computedHash": "0e56cc00ab154fe34524e218232a21afbd5400a3096a1a3b4b37de75fd6861a5"
+      "skillPath": "skills/chrome-extensions/SKILL.md",
+      "computedHash": "1e8525bb49647008dcd3a6b7e5d3c3207345f086e7a64d7e6d5bcc67dbba7a71"
+    },
+    "modern-web-guidance": {
+      "source": "GoogleChrome/modern-web-guidance",
+      "sourceType": "github",
+      "skillPath": "skills/modern-web-guidance/SKILL.md",
+      "computedHash": "40c0b08c2e3103aa83002cff019fe94926cc5e64ad94adbab808736b8947d8f8"
     }
   }
 }

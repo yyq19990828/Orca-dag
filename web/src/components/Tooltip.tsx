@@ -1,7 +1,7 @@
 import { isValidElement, type ReactElement, type ReactNode, type HTMLAttributes } from "react";
 import { Tooltip as RadixTooltip } from "radix-ui";
 
-export interface TooltipProps extends Omit<HTMLAttributes<HTMLDivElement>, "content"> {
+interface TooltipProps extends Omit<HTMLAttributes<HTMLDivElement>, "content"> {
   content: ReactNode;
   shortcut?: string;
   position?: "top" | "bottom" | "left" | "right";

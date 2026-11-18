@@ -207,8 +207,6 @@ export function isUnverifiedHarness(harness: string): boolean {
   return UNVERIFIED_HARNESSES[harness] === true;
 }
 
-const KNOWN_HARNESS_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
-
 /**
  * The same `provider/model` grammar `listModels()` in orca.ts enumerates,
  * extended with ONE optional bounded `#variant` suffix (Orca 1.4.206 epic A4:

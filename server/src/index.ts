@@ -14,7 +14,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // Raw env value, used ONLY by `uninstall` to locate this workspace's files
 // — uninstall must work even when the directory is gone. The serve path
 // below resolves the real workspace via initOrcaRuntime().
-const RAW_WORKSPACE_DIR = process.env.WORKSPACE_DIR ?? process.cwd();
+const RAW_WORKSPACE_DIR =
+  process.env.WORKSPACE_DIR ??
+  (process.env.INIT_CWD && !process.env.npm_lifecycle_event?.startsWith("test") ? process.env.INIT_CWD : process.cwd());
 
 // --- Subcommands ----------------------------------------------------------
 // Handled before anything else so `uninstall` and `--help` never bind a port,

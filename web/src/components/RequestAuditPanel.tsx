@@ -1,27 +1,12 @@
-import { StructuredData } from "./StructuredData";
-import { memo, useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { ChevronDown, ChevronRight, Loader2, Search, X } from "lucide-react";
 import { fetchRequestDetail, fetchRequests } from "../api";
-import { formatTimestamp, operationLabel } from "../format";
+import { formatConsoleTime, formatTimestamp, operationLabel } from "../format";
 import { t, useT } from "../i18n";
-import { usePageVisible } from "../visibility";
 import type { RequestLedgerRowView, RequestReceiptView } from "../types";
+import { usePageVisible } from "../visibility";
+import { StructuredData } from "./StructuredData";
 
-/**
- * Mutation-request audit (Phase 5): the durable ledger of viewer-originated
- * mutation requests (worker-start / worker-release / worker-retain /
- * worker-stop), each carrying the `--retry-request` id needed to ask Orca
- * `request-show` what happened — including after a response loss or a viewer
- * restart, when the coordinator's in-memory projection is long gone.
- *
- * Strictly read-only: the only thing "Inspect" does is run a fresh
- * `request-show` probe, and the receipt renders Orca's own state and
- * interpretation verbatim. `absent` never proves a mutation did not happen,
- * a failed probe renders as "unknown", and the local ledger hint
- * (`settledLocally`) is labeled as exactly that — a hint, never authority.
- * Loading, empty and failed reads remain visible in the diagnostics category.
- */
-
-/** The presentation bucket for a receipt state; unknown states stay verbatim. */
 function stateBucket(state: string): "completed" | "pending" | "absent" | "unknown" | "other" {
   if (state === "completed" || state === "pending" || state === "absent") return state;
   if (state === "unknown") return "unknown";
@@ -43,7 +28,33 @@ function stateCaption(receipt: RequestReceiptView): string {
   }
 }
 
-export const RequestAuditPanel = memo(function RequestAuditPanel({ runId, labelsById, active = true }: { runId: string; labelsById: Record<string, string>; active?: boolean }) {
+function receiptTone(bucket: ReturnType<typeof stateBucket> | null): string {
+  switch (bucket) {
+    case "completed":
+      return "var(--st-completed)";
+    case "pending":
+      return "var(--st-dispatched)";
+    case "unknown":
+      return "var(--st-failed)";
+    default:
+      return "var(--fg-tertiary)";
+  }
+}
+
+/**
+ * VS Code Network / Request Trace style read-only mutation ledger.
+ * Each `--retry-request` row stays on a compact 25px monospace line; clicking a row
+ * runs a fresh read-only `request-show` probe and opens its receipt drawer inline.
+ */
+export const RequestAuditPanel = memo(function RequestAuditPanel({
+  runId,
+  labelsById,
+  active = true,
+}: {
+  runId: string;
+  labelsById: Record<string, string>;
+  active?: boolean;
+}) {
   const t = useT();
   const [rows, setRows] = useState<RequestLedgerRowView[]>([]);
   const [otherRunCount, setOtherRunCount] = useState(0);
@@ -52,11 +63,10 @@ export const RequestAuditPanel = memo(function RequestAuditPanel({ runId, labels
   const [probing, setProbing] = useState<string | null>(null);
   const [receipts, setReceipts] = useState<Map<string, RequestReceiptView>>(new Map());
   const [open, setOpen] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
 
   const visible = usePageVisible();
   useEffect(() => {
-    // Pause both for a backgrounded page and an inactive Operations tab.
-    // Returning to either performs one immediate refresh before re-arming.
     if (!active || !visible) return;
     let alive = true;
     const load = async () => {
@@ -72,15 +82,13 @@ export const RequestAuditPanel = memo(function RequestAuditPanel({ runId, labels
       }
     };
     void load();
-    const t = window.setInterval(load, 4000);
+    const timer = window.setInterval(load, 4000);
     return () => {
       alive = false;
-      window.clearInterval(t);
+      window.clearInterval(timer);
     };
   }, [active, runId, visible]);
 
-  // Probes are keyed by request id AND kept per Run switch — a stale probe
-  // from another Run must never dress up this Run's rows.
   useEffect(() => {
     setReceipts(new Map());
     setOpen(null);
@@ -107,98 +115,291 @@ export const RequestAuditPanel = memo(function RequestAuditPanel({ runId, labels
     [open, probing, runId],
   );
 
-  if (loadedFor !== runId) return <p className="operations-empty" role="status">{err || t("audit.loading")}</p>;
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredRows = useMemo(() => {
+    if (!normalizedQuery) return rows;
+    return rows.filter((row) => {
+      const targetLabel = row.taskId ? labelsById[row.taskId] || row.taskId : "";
+      return (
+        row.operation.toLowerCase().includes(normalizedQuery) ||
+        operationLabel(row.operation).toLowerCase().includes(normalizedQuery) ||
+        row.requestId.toLowerCase().includes(normalizedQuery) ||
+        targetLabel.toLowerCase().includes(normalizedQuery) ||
+        (row.dispatchId ?? "").toLowerCase().includes(normalizedQuery)
+      );
+    });
+  }, [labelsById, normalizedQuery, rows]);
+
+  if (loadedFor !== runId) {
+    return (
+      <div className="odag-console-empty" role="status">
+        {err || t("audit.loading")}
+      </div>
+    );
+  }
 
   return (
-    <div className="gates inbox audit" data-testid="request-audit-panel">
-      <div className="gate inbox__item">
-        <div className="gate__badge">{t("audit.badge")}</div>
-        <div className="inbox__meta audit__caption">
-          {t("audit.captionBefore")}<code>request-show</code>{t("audit.captionAfter")}
-        </div>
-        {rows.map((row) => {
-          const receipt = receipts.get(row.requestId);
-          const isOpen = open === row.requestId;
-          const bucket = receipt ? stateBucket(receipt.state) : null;
-          return (
-            <div key={row.requestId} className="audit__row">
+    <div
+      data-testid="request-audit-panel"
+      style={{ display: "flex", flexDirection: "column", blockSize: "100%", minBlockSize: 0 }}
+    >
+      {/* Compact VS Code Trace Sub-Toolbar */}
+      <div className="odag-dock-toolbar">
+        <search style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <div className="odag-dock-search">
+            <Search size={11} style={{ color: "var(--fg-tertiary)" }} aria-hidden="true" />
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={t("ide.dock.filterRequests")}
+              aria-label={t("ide.dock.filterRequests")}
+            />
+            {query && (
               <button
                 type="button"
-                className="audit__toggle"
-                onClick={() => void inspect(row)}
-                disabled={probing === row.requestId}
-                aria-expanded={isOpen}
-                title={`${t("audit.inspectTitle")}\n${row.requestId}`}
+                aria-label={t("ide.subbar.clearSearch")}
+                onClick={() => setQuery("")}
+                style={{ border: 0, background: "transparent", padding: 0, color: "var(--fg-tertiary)" }}
               >
-                <span className="audit__summary">
-                  <strong>{operationLabel(row.operation)}</strong>
-                  <span>{row.taskId ? labelsById[row.taskId] || row.taskId : t("audit.runOperation")}</span>
-                  <time dateTime={row.updatedAt}>{formatTimestamp(row.updatedAt)}</time>
-                </span>
-                {receipt && (
-                  <span className="audit__state" data-state={bucket}>
-                    {bucket && bucket !== "other" ? t(`audit.state.${bucket}`) : receipt.state}
-                    {receipt.probe === "failed" ? t("audit.probeFailed") : ""}
-                  </span>
-                )}
-                <span className="audit__hint">{isOpen ? "▲" : t("audit.inspect")}</span>
+                <X size={11} />
               </button>
-              {row.note && <div className="inbox__body audit__note">{row.note}</div>}
-              {isOpen && receipt && (
-                <div className="audit__detail">
-                  <dl className="record-facts">
-                    <dt>{t("record.request")}</dt><dd><code>{row.requestId}</code></dd>
-                    <dt>{t("record.operation")}</dt><dd><code>{row.operation}</code></dd>
-                    <dt>{t("record.run")}</dt><dd><code>{row.runId ?? t("audit.scopeUnknown")}</code></dd>
-                    {row.taskId && <><dt>{t("record.task")}</dt><dd><code>{row.taskId}</code></dd></>}
-                    {row.dispatchId && <><dt>{t("record.dispatch")}</dt><dd><code>{row.dispatchId}</code></dd></>}
-                  </dl>
-                  <div className={`audit__receipt audit__receipt--${bucket}`}>
-                    <b>{receipt.state}</b> — {stateCaption(receipt)}
-                  </div>
-                  {receipt.interpretation && (
-                    <div className="inbox__body">
-                      {t("audit.orcaSays")} <i>{receipt.interpretation}</i>
-                    </div>
-                  )}
-                  <div className="inbox__meta">
-                    {t("audit.probedAt", { time: formatTimestamp(receipt.probedAt) })}
-                    {row.settledLocally === true
-                      ? t("audit.settledDefinitive")
-                      : row.settledLocally === false
-                        ? t("audit.settledUnlearned")
-                        : t("audit.settledNone")}
-                    {t("audit.settledTail")}
-                  </div>
-                  {receipt.outcome != null && (
-                    <div className="audit__outcome">
-                      <h4>{t("record.outcome")}</h4>
-                      <StructuredData value={receipt.outcome} />
-                      <details>
-                        <summary>{t("report.raw")}</summary>
-                        <pre className="workers__rawpre">{JSON.stringify(receipt.outcome, null, 2)}</pre>
-                      </details>
+            )}
+          </div>
+        </search>
+
+        <span className="mono truncate odag-console-hide-compact" style={{ color: "var(--fg-tertiary)", fontSize: "var(--text-xs)" }}>
+          <code>--retry-request</code> · {t("ide.dock.probeHint")}
+        </span>
+
+        <div
+          className="mono"
+          style={{
+            marginInlineStart: "auto",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 8,
+            fontSize: "var(--text-xs)",
+            color: "var(--fg-tertiary)",
+          }}
+        >
+          {otherRunCount > 0 && (
+            <span className="odag-console-hide-compact">
+              {otherRunCount === 1
+                ? t("audit.otherRunsOne", { n: otherRunCount })
+                : t("audit.otherRunsMany", { n: otherRunCount })}
+            </span>
+          )}
+          <span>{t("ide.dock.rowsCount", { n: filteredRows.length })}</span>
+        </div>
+      </div>
+
+      {/* Scrollable Monospace Request Trace Viewport */}
+      <div className="odag-dock-viewport odag-scroll">
+        {err && (
+          <div className="odag-console-notice odag-console-notice--error" role="alert">
+            ⚠ {err}
+          </div>
+        )}
+
+        {filteredRows.length === 0 ? (
+          <div className="odag-console-empty">{t("audit.empty")}</div>
+        ) : (
+          <>
+            <div className="odag-console-head odag-console-row--audit" aria-hidden="true">
+              <span />
+              <span>{t("ide.dock.colTime")}</span>
+              <span>{t("ide.dock.colOp")}</span>
+              <span>{t("ide.dock.colTarget")}</span>
+              <span className="odag-console-hide-compact">{t("ide.dock.colRequestId")}</span>
+              <span className="odag-console-hide-compact">{t("ide.dock.colLocal")}</span>
+              <span>{t("ide.dock.colReceipt")}</span>
+            </div>
+
+            {filteredRows.map((row) => {
+              const receipt = receipts.get(row.requestId);
+              const isOpen = open === row.requestId;
+              const isProbing = probing === row.requestId;
+              const bucket = receipt ? stateBucket(receipt.state) : null;
+              const targetText = row.taskId
+                ? labelsById[row.taskId] || row.taskId
+                : t("audit.runOperation");
+
+              return (
+                <div key={row.requestId}>
+                  <button
+                    type="button"
+                    className={`odag-console-row odag-console-row--audit${
+                      bucket === "unknown" ? " is-error" : ""
+                    }`}
+                    onClick={() => void inspect(row)}
+                    disabled={isProbing}
+                    aria-expanded={isOpen}
+                    title={`${t("audit.inspectTitle")} · ${row.requestId}`}
+                  >
+                    <span style={{ color: "var(--fg-tertiary)", display: "inline-flex" }} aria-hidden="true">
+                      {isProbing ? (
+                        <Loader2 size={12} />
+                      ) : isOpen ? (
+                        <ChevronDown size={12} />
+                      ) : (
+                        <ChevronRight size={12} />
+                      )}
+                    </span>
+
+                    <time
+                      dateTime={row.updatedAt}
+                      title={formatTimestamp(row.updatedAt)}
+                      style={{ color: "var(--fg-tertiary)", fontSize: "var(--text-xs)" }}
+                    >
+                      {formatConsoleTime(row.updatedAt)}
+                    </time>
+
+                    <span className="truncate" style={{ fontWeight: 600, color: "var(--accent)" }}>
+                      {operationLabel(row.operation)}
+                    </span>
+
+                    <span className="truncate" style={{ color: "var(--fg-primary)" }}>
+                      {targetText}
+                    </span>
+
+                    <span
+                      className="truncate odag-console-hide-compact"
+                      style={{ color: "var(--fg-tertiary)" }}
+                    >
+                      {row.requestId}
+                    </span>
+
+                    <span
+                      className="truncate odag-console-hide-compact"
+                      style={{
+                        color:
+                          row.settledLocally === true
+                            ? "var(--st-completed)"
+                            : row.settledLocally === false
+                              ? "var(--st-dispatched)"
+                              : "var(--fg-tertiary)",
+                        fontSize: "var(--text-xs)",
+                      }}
+                    >
+                      {row.settledLocally === true
+                        ? t("ide.dock.localSettled")
+                        : row.settledLocally === false
+                          ? t("ide.dock.localUnsettled")
+                          : "—"}
+                    </span>
+
+                    <span className="truncate" style={{ display: "inline-flex", justifyContent: "flex-start" }}>
+                      {receipt ? (
+                        <span
+                          className="odag-console-tag"
+                          style={{
+                            color: receiptTone(bucket),
+                            borderColor: `color-mix(in oklab, ${receiptTone(bucket)}, transparent 60%)`,
+                          }}
+                        >
+                          {bucket && bucket !== "other" ? t(`audit.state.${bucket}`) : receipt.state}
+                          {receipt.probe === "failed" ? ` ${t("audit.probeFailed")}` : ""}
+                        </span>
+                      ) : (
+                        <span className="odag-console-tag" style={{ color: "var(--fg-tertiary)" }}>
+                          {isProbing ? t("audit.probing") : t("audit.inspect")}
+                        </span>
+                      )}
+                    </span>
+                  </button>
+
+                  {isOpen && receipt && (
+                    <div className="odag-console-drawer">
+                      {row.note && (
+                        <div style={{ color: "var(--fg-secondary)" }}>{row.note}</div>
+                      )}
+
+                      <dl className="record-facts" style={{ margin: 0 }}>
+                        <dt>{t("record.request")}</dt>
+                        <dd>
+                          <code>{row.requestId}</code>
+                        </dd>
+                        <dt>{t("record.operation")}</dt>
+                        <dd>
+                          <code>{row.operation}</code>
+                        </dd>
+                        <dt>{t("record.run")}</dt>
+                        <dd>
+                          <code>{row.runId ?? t("audit.scopeUnknown")}</code>
+                        </dd>
+                        {row.taskId && (
+                          <>
+                            <dt>{t("record.task")}</dt>
+                            <dd>
+                              <code>{row.taskId}</code>
+                            </dd>
+                          </>
+                        )}
+                        {row.dispatchId && (
+                          <>
+                            <dt>{t("record.dispatch")}</dt>
+                            <dd>
+                              <code>{row.dispatchId}</code>
+                            </dd>
+                          </>
+                        )}
+                      </dl>
+
+                      <div
+                        className="mono"
+                        style={{
+                          padding: "6px 10px",
+                          borderRadius: 5,
+                          background: "var(--bg-canvas)",
+                          border: "1px solid var(--border-hairline)",
+                          color: receiptTone(bucket),
+                          fontSize: "var(--text-sm)",
+                        }}
+                      >
+                        <b>{receipt.state}</b> — {stateCaption(receipt)}
+                      </div>
+
+                      {receipt.interpretation && (
+                        <div>
+                          {t("audit.orcaSays")} <i>{receipt.interpretation}</i>
+                        </div>
+                      )}
+
+                      <div className="mono" style={{ fontSize: "var(--text-xs)", color: "var(--fg-tertiary)" }}>
+                        {t("audit.probedAt", { time: formatTimestamp(receipt.probedAt) })}
+                        {row.settledLocally === true
+                          ? t("audit.settledDefinitive")
+                          : row.settledLocally === false
+                            ? t("audit.settledUnlearned")
+                            : t("audit.settledNone")}
+                        {t("audit.settledTail")}
+                      </div>
+
+                      {receipt.outcome != null && (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          <strong style={{ fontSize: "var(--text-sm)" }}>{t("record.outcome")}</strong>
+                          <StructuredData value={receipt.outcome} />
+                          <details>
+                            <summary
+                              className="mono"
+                              style={{ cursor: "pointer", fontSize: "var(--text-xs)", color: "var(--fg-secondary)" }}
+                            >
+                              {t("report.raw")}
+                            </summary>
+                            <pre tabIndex={0} role="region" aria-label={t("report.raw")}>
+                              <code>{JSON.stringify(receipt.outcome, null, 2)}</code>
+                            </pre>
+                          </details>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
-              )}
-              {isOpen && probing === row.requestId && (
-                <div className="inbox__body">{t("audit.probing")}</div>
-              )}
-            </div>
-          );
-        })}
-        {rows.length === 0 && err === null && (
-          <div className="inbox__body">{t("audit.empty")}</div>
+              );
+            })}
+          </>
         )}
-        {otherRunCount > 0 && (
-          <div className="inbox__meta">
-            {otherRunCount === 1
-              ? t("audit.otherRunsOne", { n: otherRunCount })
-              : t("audit.otherRunsMany", { n: otherRunCount })}
-          </div>
-        )}
-        {err && <div className="exec__err inbox__err">⚠️ {err}</div>}
       </div>
     </div>
   );

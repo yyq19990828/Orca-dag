@@ -25,7 +25,7 @@ import { HARNESSES, UNVERIFIED_HARNESSES, OPEN_CODE_UIS, isOpenCodeUi, type DagE
 import { lanePlanProblems } from "../placement";
 import { useState, useRef, useEffect, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { EyeIcon, PlayIcon, RefreshIcon, StopIcon } from "./Icons";
+import { Eye, Play, RefreshCw, Square } from "lucide-react";
 import { Tooltip } from "./Tooltip";
  
 
@@ -379,18 +379,6 @@ export function ExecControls({
           </span>
         </summary>
         <div className="exec__settings-panel" role="group" aria-label={t("exec.groupAria")}>
-          <button
-            type="button"
-            className="menu-close"
-            onClick={(event) => {
-              const details = event.currentTarget.closest("details");
-              if (!details) return;
-              details.open = false;
-              details.querySelector<HTMLElement>(":scope > summary")?.focus();
-            }}
-          >
-            {t("dialog.close")}
-          </button>
           {(config.defaultHarness === "opencode" || taskIds.some(id => (config.harnessByTask[id] ?? config.defaultHarness) === "opencode")) && (
             <div className="exec__field">
               <span className="exec__label">{t("openCode.uiLabel")}</span>
@@ -481,7 +469,7 @@ export function ExecControls({
           aria-busy={busy}
           aria-label={t("exec.previewButton")}
         >
-          <EyeIcon size={16} />
+          <Eye size={15} />
         </button>
       </Tooltip>
 
@@ -494,7 +482,7 @@ export function ExecControls({
               disabled={busy}
               aria-label={t("exec.stop")}
             >
-              <StopIcon size={14} />
+              <Square size={12} fill="currentColor" />
             </button>
           </Tooltip>
           <span className="exec__running">
@@ -526,7 +514,7 @@ export function ExecControls({
               title={t("exec.stopPendingTitle")}
               aria-label={t("exec.stop")}
             >
-              <StopIcon size={14} />
+              <Square size={12} fill="currentColor" />
             </button>
           </Tooltip>
           <span className="exec__running">
@@ -543,7 +531,7 @@ export function ExecControls({
               disabled={busy || launchLocked || anotherRunStarting || Boolean(otherRunStatus) || !runId || execOff}
               aria-label={t("exec.runAgain")}
             >
-              <RefreshIcon size={18} aria-hidden="true" />
+              <RefreshCw size={14} aria-hidden="true" />
             </button>
           </Tooltip>
           </ActionMount>
@@ -581,7 +569,7 @@ export function ExecControls({
             }
             aria-label={t("exec.runWithOrca")}
           >
-            <PlayIcon size={18} aria-hidden="true" />
+            <Play size={14} fill="currentColor" aria-hidden="true" />
           </button>
         </Tooltip>
         </ActionMount>

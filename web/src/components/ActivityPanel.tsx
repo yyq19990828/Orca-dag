@@ -1,23 +1,34 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ApiError,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  CircleX,
+  ExternalLink,
+  Search,
+  Terminal,
+  TriangleAlert,
+  X,
+} from "lucide-react";
+import {
   acknowledgeStopEvent,
+  ApiError,
   fetchActivity,
   releaseWorker,
   replyToMessage,
   retainWorker,
   retryWorker,
 } from "../api";
-import type { ActivityEvent, ActivitySnapshot } from "../types";
-import { formatTimestamp, isUrgent, priorityLabel } from "../format";
+import { openActivityStream } from "../bridge/orcaBridge";
+import { formatConsoleTime, formatTimestamp, isUrgent, priorityLabel } from "../format";
 import { t, useT, type TranslationKey } from "../i18n";
-import { useCoordinatorControl } from "./useCoordinatorControl";
+import type { ActivityEvent, ActivitySnapshot } from "../types";
 import { useDecisionDialog } from "./DecisionDialog";
+import { useCoordinatorControl } from "./useCoordinatorControl";
 
 type ActivityFilter = "all" | "coordinator" | "agents" | "needs_reply";
 type ActivityTransport = "connecting" | "live" | "polling";
 
-/** Filter tab -> dictionary key, so the tab list stays data. */
 const FILTER_KEY: Record<ActivityFilter, TranslationKey> = {
   all: "activity.filter.all",
   coordinator: "activity.filter.coordinator",
@@ -25,7 +36,6 @@ const FILTER_KEY: Record<ActivityFilter, TranslationKey> = {
   needs_reply: "activity.filter.needsReply",
 };
 
-/** Transport state -> dictionary key (SSE live vs. the polling fallback). */
 const TRANSPORT_KEY: Record<ActivityTransport, TranslationKey> = {
   connecting: "activity.transport.connecting",
   live: "activity.transport.live",
@@ -51,8 +61,6 @@ function technicalJson(event: ActivityEvent): string {
       dispatchId: event.dispatchId,
       threadId: event.threadId,
       priority: event.priority,
-      // Tri-state: null survives JSON round-trip so "unknown" stays distinct
-      // from an explicit false in the diagnostic dump.
       read: event.read === null ? null : event.read,
       terminalHandle: event.technical.terminalHandle,
       provenance: event.technical.provenance,
@@ -77,16 +85,27 @@ function provenanceLabel(event: ActivityEvent): { text: string; title: string } 
         title: t("activity.provenance.coordinatorTitle"),
       };
     default:
-      // `orca_message` is the authoritative default and needs no label;
-      // `fleet` rows are presence data, not chat history.
       return null;
   }
 }
 
+function SeverityIcon({ event }: { event: ActivityEvent }) {
+  if (event.severity === "error") {
+    return <CircleX size={13} style={{ color: "var(--st-failed)" }} aria-hidden="true" />;
+  }
+  if (event.severity === "warning" || event.actionable) {
+    return <TriangleAlert size={13} style={{ color: "var(--st-dispatched)" }} aria-hidden="true" />;
+  }
+  if (event.severity === "success" || event.kind === "worker_done") {
+    return <CheckCircle2 size={13} style={{ color: "var(--st-completed)" }} aria-hidden="true" />;
+  }
+  return <Terminal size={12} style={{ color: "var(--fg-tertiary)" }} aria-hidden="true" />;
+}
+
 /**
- * A Run-scoped work log, not a synthetic chat transcript. Orca lifecycle
- * messages remain authoritative; this component only presents the server's
- * normalized projection and exposes actions when the event is still pending.
+ * VS Code Output / Debug Console style Run-scoped work log.
+ * Keeps single-line monospace density for rapid scanning while opening
+ * full untruncated details, replies, and technical receipts inline on click.
  */
 export const ActivityPanel = memo(function ActivityPanel({
   runId,
@@ -96,7 +115,6 @@ export const ActivityPanel = memo(function ActivityPanel({
   onSnapshot,
   disabled = false,
   disabledReason,
-  actionableOnly = false,
 }: {
   runId: string;
   onSelectTask: (taskId: string) => void;
@@ -104,27 +122,23 @@ export const ActivityPanel = memo(function ActivityPanel({
   onPendingCount: (count: number) => void;
   onSnapshot?: (snapshot: ActivitySnapshot) => void;
   disabled?: boolean;
-  actionableOnly?: boolean;
   disabledReason?: string | null;
 }) {
-  // Timestamps and priority chips come from format.ts, whose language access
-  // is intentionally non-reactive — this subscription is what re-renders the
-  // memo()'d panel when the UI language changes.
   const t = useT();
   const withControl = useCoordinatorControl();
   const dialog = useDecisionDialog();
   const [snapshot, setSnapshot] = useState<ActivitySnapshot>(EMPTY);
   const [filter, setFilter] = useState<ActivityFilter>("all");
+  const [query, setQuery] = useState("");
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
   const [transport, setTransport] = useState<ActivityTransport>("connecting");
   const [error, setError] = useState<string | null>(null);
-  const [operatorReceipt, setOperatorReceipt] = useState<{ runId: string; value: string } | null>(null);
+  const [operatorReceipt, setOperatorReceipt] = useState<{ runId: string; value: string } | null>(
+    null,
+  );
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
   const requestSeq = useRef(0);
-  // Identical snapshots must not reach App state: every apply re-renders the
-  // Chat panel and re-runs its timeline memoization. Compare by JSON — the
-  // projection only produces a new object when something actually changed,
-  // but SSE re-pushes the current snapshot on its own cadence too.
   const lastSnapshotJson = useRef<string>("");
 
   const applySnapshot = useCallback(
@@ -160,20 +174,19 @@ export const ActivityPanel = memo(function ActivityPanel({
   useEffect(() => {
     setSnapshot({ ...EMPTY, runId });
     onSnapshot?.({ ...EMPTY, runId });
-    // the fingerprint must not outlive the Run switch, or a quiet Run whose
-    // fresh snapshot matches the pre-switch bytes would be skipped as a no-op
     lastSnapshotJson.current = "";
     setDrafts({});
+    setExpandedIds(new Set());
     setTransport("connecting");
     onPendingCount(0);
     if (!runId) return;
 
     let alive = true;
     let pollTimer: number | null = null;
-    let source: EventSource | null = null;
+    let closeStream: (() => void) | null = null;
     const stop = () => {
-      source?.close();
-      source = null;
+      closeStream?.();
+      closeStream = null;
       if (pollTimer !== null) window.clearInterval(pollTimer);
       pollTimer = null;
       requestSeq.current++;
@@ -182,27 +195,33 @@ export const ActivityPanel = memo(function ActivityPanel({
       if (!alive || document.visibilityState !== "visible") return;
       setTransport("connecting");
       void refresh();
-      const current = new EventSource(`/api/activity/stream?run=${encodeURIComponent(runId)}`);
-      source = current;
-      current.onopen = () => {
-        if (alive && source === current) setTransport("live");
-      };
-      current.onmessage = (message) => {
-        if (!alive || source !== current) return;
-        try {
-          applySnapshot(JSON.parse(message.data) as ActivitySnapshot);
-          setTransport("live");
-        } catch {
-          setError(t("activity.streamError"));
-        }
-      };
-      current.onerror = () => {
-        if (!alive || source !== current) return;
-        current.close();
-        source = null;
-        setTransport("polling");
-        void refresh();
-        pollTimer = window.setInterval(() => void refresh(), 2_000);
+      let activeToken = true;
+      const currentClose = openActivityStream(runId, {
+        onOpen: () => {
+          if (alive && activeToken) setTransport("live");
+        },
+        onSnapshot: (raw) => {
+          if (!alive || !activeToken) return;
+          if (raw && typeof raw === "object") {
+            applySnapshot(raw as ActivitySnapshot);
+            setTransport("live");
+          } else {
+            setError(t("activity.streamError"));
+          }
+        },
+        onError: () => {
+          if (!alive || !activeToken) return;
+          activeToken = false;
+          currentClose();
+          if (closeStream === currentClose) closeStream = null;
+          setTransport("polling");
+          void refresh();
+          pollTimer = window.setInterval(() => void refresh(), 2_000);
+        },
+      });
+      closeStream = () => {
+        activeToken = false;
+        currentClose();
       };
     };
     const onHide = () => {
@@ -216,25 +235,48 @@ export const ActivityPanel = memo(function ActivityPanel({
       document.removeEventListener("visibilitychange", onHide);
       stop();
     };
-  }, [applySnapshot, onPendingCount, onSnapshot, refresh, runId]);
+  }, [applySnapshot, onPendingCount, onSnapshot, refresh, runId, t]);
+
+  const normalizedQuery = query.trim().toLowerCase();
 
   const visible = useMemo(
     () =>
       snapshot.events.filter((event) => {
-        if (actionableOnly) return event.actionable !== null && event.actionable !== undefined;
-        if (filter === "coordinator") return event.direction !== "agent_to_coordinator";
-        if (filter === "agents") return event.direction === "agent_to_coordinator";
-        if (filter === "needs_reply") return event.actionable?.kind === "reply";
-        return true;
+        if (filter === "coordinator" && event.direction === "agent_to_coordinator") return false;
+        if (filter === "agents" && event.direction !== "agent_to_coordinator") return false;
+        if (filter === "needs_reply" && event.actionable?.kind !== "reply") return false;
+        if (!normalizedQuery) return true;
+        return (
+          event.actor.label.toLowerCase().includes(normalizedQuery) ||
+          event.title.toLowerCase().includes(normalizedQuery) ||
+          event.summary.toLowerCase().includes(normalizedQuery) ||
+          (event.taskId ?? "").toLowerCase().includes(normalizedQuery) ||
+          (event.dispatchId ?? "").toLowerCase().includes(normalizedQuery)
+        );
       }),
-    [actionableOnly, filter, snapshot.events],
+    [filter, normalizedQuery, snapshot.events],
   );
+
+  function toggleRow(id: string) {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
 
   async function acknowledge(event: ActivityEvent) {
     if (!event.dispatchId || disabled || busyId) return;
     const confirmed = await dialog.confirm({
       title: t("inbox.ackStopTitle"),
-      message: t("inbox.ackStopMessage", { dispatch: event.dispatchId, reason: String((event.technical.payload as { stopReason?: unknown } | undefined)?.stopReason ?? t("worker.unknown")) }),
+      message: t("inbox.ackStopMessage", {
+        dispatch: event.dispatchId,
+        reason: String(
+          (event.technical.payload as { stopReason?: unknown } | undefined)?.stopReason ??
+            t("worker.unknown"),
+        ),
+      }),
       confirmLabel: t("inbox.ackStop"),
     });
     if (!confirmed) return;
@@ -244,12 +286,17 @@ export const ActivityPanel = memo(function ActivityPanel({
       await acknowledgeStopEvent(runId, event.id, event.dispatchId);
       await refresh();
       onResolved();
-    } catch (error) {
-      setError(String((error as Error).message ?? error));
-    } finally { setBusyId(null); }
+    } catch (err) {
+      setError(String((err as Error).message ?? err));
+    } finally {
+      setBusyId(null);
+    }
   }
 
-  async function runAction(event: ActivityEvent, action: "reply" | "release" | "retain" | "retry") {
+  async function runAction(
+    event: ActivityEvent,
+    action: "reply" | "release" | "retain" | "retry",
+  ) {
     if (!event.actionable || disabled || busyId) return;
     const targetId = event.actionable.targetId;
     setBusyId(event.id);
@@ -258,7 +305,9 @@ export const ActivityPanel = memo(function ActivityPanel({
       if (action === "reply") {
         const body = (drafts[event.id] ?? "").trim();
         if (!body) return;
-        const receipt = await withControl(runId, (control) => replyToMessage(targetId, body, runId, control));
+        const receipt = await withControl(runId, (control) =>
+          replyToMessage(targetId, body, runId, control),
+        );
         setOperatorReceipt({ runId, value: JSON.stringify(receipt) });
         setDrafts(({ [event.id]: _drop, ...rest }) => rest);
       } else if (action === "release") {
@@ -288,169 +337,402 @@ export const ActivityPanel = memo(function ActivityPanel({
   }
 
   if (!runId) {
-    return <div className="activity__empty">{t("activity.empty.pickRun")}</div>;
+    return <div className="odag-console-empty">{t("activity.empty.pickRun")}</div>;
   }
 
+  const transportDotColor =
+    transport === "live"
+      ? "var(--st-completed)"
+      : transport === "polling"
+        ? "var(--st-dispatched)"
+        : "var(--fg-tertiary)";
+
   return (
-    <section className="activity" aria-label={t(actionableOnly ? "workbench.pendingActivity" : "activity.aria.section")}>
-      {operatorReceipt?.runId === runId && <div role="status" className="inbox__body"><strong>{t("chat.message.operatorReceipt")}</strong><pre>{operatorReceipt.value}</pre></div>}
-      {actionableOnly && <h2>{t("workbench.pendingActivity")}</h2>}
-      <div className="activity__tools">
-        {!actionableOnly && <div className="activity__filters" role="group" aria-label={t("activity.aria.filters")}>
-          {([
-            "all",
-            "coordinator",
-            "agents",
-            "needs_reply",
-          ] as const).map((value) => (
-            <button
-              key={value}
-              type="button"
-              className={filter === value ? "active" : ""}
-              aria-pressed={filter === value}
-              onClick={() => setFilter(value)}
-            >
-              {t(FILTER_KEY[value])}
-              {value === "needs_reply" && snapshot.pendingCount > 0 ? (
-                <span className="activity__count">{snapshot.pendingCount}</span>
-              ) : null}
-            </button>
-          ))}
-        </div>}
-        <span className={`activity__transport activity__transport--${transport}`}>
-          <span aria-hidden="true" /> {t(TRANSPORT_KEY[transport])}
-        </span>
+    <section
+      aria-label={t("activity.aria.section")}
+      style={{ display: "flex", flexDirection: "column", blockSize: "100%", minBlockSize: 0 }}
+    >
+      {/* Compact VS Code Output Channel Sub-Toolbar */}
+      <div className="odag-dock-toolbar">
+        <search
+          style={{ display: "inline-flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}
+        >
+          <div
+            role="group"
+            aria-label={t("activity.aria.filters")}
+            style={{ display: "inline-flex", alignItems: "center", gap: 2 }}
+          >
+            {(["all", "coordinator", "agents", "needs_reply"] as const).map((value) => (
+              <button
+                key={value}
+                type="button"
+                className="odag-dock-chip"
+                aria-pressed={filter === value}
+                onClick={() => setFilter(value)}
+              >
+                <span>{t(FILTER_KEY[value])}</span>
+                {value === "needs_reply" && snapshot.pendingCount > 0 && (
+                  <span className="odag-count" style={{ blockSize: 15, fontSize: "var(--text-xs)" }}>
+                    {snapshot.pendingCount}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+
+          <div className="odag-dock-search">
+            <Search size={11} style={{ color: "var(--fg-tertiary)" }} aria-hidden="true" />
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={t("ide.dock.filterEvents")}
+              aria-label={t("ide.dock.filterEvents")}
+            />
+            {query && (
+              <button
+                type="button"
+                aria-label={t("ide.subbar.clearSearch")}
+                onClick={() => setQuery("")}
+                style={{ border: 0, background: "transparent", padding: 0, color: "var(--fg-tertiary)" }}
+              >
+                <X size={11} />
+              </button>
+            )}
+          </div>
+        </search>
+
+        <div
+          className="mono"
+          style={{
+            marginInlineStart: "auto",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 10,
+            color: "var(--fg-tertiary)",
+            fontSize: "var(--text-xs)",
+          }}
+        >
+          <span>{t("ide.dock.rowsCount", { n: visible.length })}</span>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--fg-secondary)" }}>
+            <span
+              style={{
+                inlineSize: 6,
+                blockSize: 6,
+                borderRadius: 99,
+                background: transportDotColor,
+              }}
+              aria-hidden="true"
+            />
+            {t(TRANSPORT_KEY[transport])}
+          </span>
+        </div>
       </div>
 
-      {snapshot.truncated && (
-        <div className="activity__notice">{t("activity.truncated")}</div>
-      )}
-      {snapshot.inboxWindow?.saturated && (
-        // Saturation is global-window evidence, so the warning fires even when
-        // this Run shows only a handful of messages — few rows here do not
-        // mean the Run's history was always this short.
-        <div className="activity__notice activity__notice--warning" role="status">
-          {t("activity.historyWarning", {
-            observed: snapshot.inboxWindow.observed,
-            limit: snapshot.inboxWindow.limit,
-          })}
-        </div>
-      )}
-      {error && <div className="activity__error" role="status">⚠ {error}</div>}
+      {/* Scrollable Monospace Console Output Stream */}
+      <div className="odag-dock-viewport odag-scroll" aria-live="polite">
+        {operatorReceipt?.runId === runId && (
+          <div className="odag-console-notice" role="status">
+            <strong>{t("chat.message.operatorReceipt")}:</strong>
+            <span className="truncate">{operatorReceipt.value}</span>
+          </div>
+        )}
+        {snapshot.truncated && (
+          <div className="odag-console-notice">{t("activity.truncated")}</div>
+        )}
+        {snapshot.inboxWindow?.saturated && (
+          <div className="odag-console-notice" role="status">
+            {t("activity.historyWarning", {
+              observed: snapshot.inboxWindow.observed,
+              limit: snapshot.inboxWindow.limit,
+            })}
+          </div>
+        )}
+        {error && (
+          <div className="odag-console-notice odag-console-notice--error" role="status">
+            ⚠ {error}
+          </div>
+        )}
 
-      <div className="activity__timeline" aria-live="polite">
         {visible.length === 0 ? (
-          <div className="activity__empty">
-            {actionableOnly ? t("workbench.noPendingActivity") : filter === "needs_reply" ? t("activity.empty.needsReply") : t("activity.empty.none")}
+          <div className="odag-console-empty">
+            {filter === "needs_reply" ? t("activity.empty.needsReply") : t("activity.empty.none")}
           </div>
         ) : (
-          visible.map((event) => (
-            <article
-              key={event.id}
-              className={`activity-event activity-event--${event.severity} activity-event--${event.actor.role}`}
-            >
-              <div className="activity-event__rail" aria-hidden="true">
-                <span />
-              </div>
-              <div className="activity-event__content">
-                <div className="activity-event__meta">
-                  <span className="activity-event__actor">{event.actor.label}</span>
-                  {event.actor.role === "lead" && <span className="activity-event__lead">{t("activity.lead")}</span>}
-                  {(() => {
-                    const provenance = provenanceLabel(event);
-                    return provenance ? (
-                      <span className="activity-event__flag" title={provenance.title}>
-                        {provenance.text}
-                      </span>
-                    ) : null;
-                  })()}
-                  {isUrgent(event) && (
-                    <span className="activity-event__flag activity-event__flag--urgent" title={t("priority.orcaTitle", { priority: event.priority ?? "" })}>
-                      {priorityLabel(event)}
-                    </span>
-                  )}
-                  {event.read === false && (
-                    <span className="activity-event__flag activity-event__flag--unread" title={t("activity.unreadTitle")}>
-                      {t("activity.unread")}
-                    </span>
-                  )}
-                  {event.actor.harness && (
-                    <span>{event.actor.harness}{event.actor.model ? ` · ${event.actor.model}` : ""}</span>
-                  )}
-                  <time dateTime={event.createdAt}>{formatTimestamp(event.createdAt)}</time>
-                </div>
-                <h3>{event.title}</h3>
-                {event.threadId && (
-                  // Reply relationships render only from Orca's own thread_id;
-                  // without it no linkage is claimed.
-                  <p className="activity-event__thread">{t("activity.thread", { id: event.threadId })}</p>
-                )}
-                <p>{event.summary}</p>
-                {event.groupedCount > 1 && (
-                  <span className="activity-event__grouped">{t("activity.grouped", { n: event.groupedCount })}</span>
-                )}
-                {event.taskId && (
+          visible.map((event) => {
+            const expanded = expandedIds.has(event.id) || event.actionable?.kind === "reply";
+            const provenance = provenanceLabel(event);
+            const urgent = isUrgent(event);
+            const actorColor =
+              event.actor.role === "coordinator"
+                ? "var(--accent)"
+                : event.actor.role === "lead"
+                  ? "var(--st-ready)"
+                  : "var(--fg-secondary)";
+
+            return (
+              <div key={event.id}>
+                <div
+                  className={`odag-console-row odag-console-row--activity${
+                    event.actionable ? " is-actionable" : ""
+                  }${event.severity === "error" ? " is-error" : ""}`}
+                >
                   <button
                     type="button"
-                    className="activity-event__task"
-                    onClick={() => onSelectTask(event.taskId!)}
+                    className="odag-console-row__main"
+                    aria-expanded={expanded}
+                    onClick={() => toggleRow(event.id)}
                   >
-                    {t("activity.openStage", { id: event.taskId })}
+                    <span style={{ color: "var(--fg-tertiary)", display: "inline-flex" }} aria-hidden="true">
+                      {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                    </span>
+
+                    <time
+                      dateTime={event.createdAt}
+                      title={formatTimestamp(event.createdAt)}
+                      style={{ color: "var(--fg-tertiary)", fontSize: "var(--text-xs)" }}
+                    >
+                      {formatConsoleTime(event.createdAt)}
+                    </time>
+
+                    <span style={{ display: "inline-flex" }}>
+                      <SeverityIcon event={event} />
+                    </span>
+
+                    <span
+                      className="truncate"
+                      style={{ color: actorColor, fontWeight: 600 }}
+                      title={
+                        event.actor.harness
+                          ? `${event.actor.label} (${event.actor.harness}${
+                              event.actor.model ? ` · ${event.actor.model}` : ""
+                            })`
+                          : event.actor.label
+                      }
+                    >
+                      {event.actor.role === "lead" ? `[${t("activity.lead")}] ` : ""}
+                      {event.actor.label}
+                    </span>
+
+                    <span className="truncate" style={{ minInlineSize: 0 }}>
+                      <strong style={{ fontWeight: 600, color: "var(--fg-primary)" }}>
+                        {event.title}
+                      </strong>
+                      {event.summary && event.summary !== event.title && (
+                        <span style={{ color: "var(--fg-secondary)" }}> — {event.summary}</span>
+                      )}
+                    </span>
                   </button>
-                )}
-                {event.kind === "stop_event" && (
-                  <div className="inbox__meta">
-                    {t("inbox.stopEvent", { reason: String((event.technical.payload as { stopReason?: unknown } | undefined)?.stopReason ?? t("worker.unknown")) })}
-                    {event.actionable?.kind === "acknowledge_stop" && event.dispatchId && (
-                      <button type="button" className="btn btn--gate" disabled={disabled || Boolean(busyId)} onClick={() => void acknowledge(event)}>{t("inbox.ackStop")}</button>
+
+                  <div className="odag-console-row__tail">
+                    {event.groupedCount > 1 && (
+                      <span className="odag-console-tag">×{event.groupedCount}</span>
+                    )}
+                    {urgent && (
+                      <span
+                        className="odag-console-tag"
+                        style={{ color: "var(--st-failed)", borderColor: "var(--st-failed)" }}
+                        title={t("priority.orcaTitle", { priority: event.priority ?? "" })}
+                      >
+                        {priorityLabel(event)}
+                      </span>
+                    )}
+                    {event.read === false && (
+                      <span
+                        className="odag-console-tag"
+                        style={{ color: "var(--accent)" }}
+                        title={t("activity.unreadTitle")}
+                      >
+                        {t("activity.unread")}
+                      </span>
+                    )}
+                    {provenance && (
+                      <span
+                        className="odag-console-tag odag-console-hide-compact"
+                        title={provenance.title}
+                      >
+                        {provenance.text}
+                      </span>
+                    )}
+                    {event.taskId && (
+                      <button
+                        type="button"
+                        className="odag-console-tag"
+                        title={t("activity.openStage", { id: event.taskId })}
+                        onClick={() => onSelectTask(event.taskId!)}
+                        style={{ color: "var(--accent)" }}
+                      >
+                        <span>{event.taskId.slice(0, 14)}</span>
+                        <ExternalLink size={10} aria-hidden="true" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {expanded && (
+                  <div className="odag-console-drawer">
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+                      <strong>{event.title}</strong>
+                      {event.actor.harness && (
+                        <span className="mono" style={{ fontSize: "var(--text-xs)", color: "var(--fg-tertiary)" }}>
+                          {event.actor.harness}
+                          {event.actor.model ? ` · ${event.actor.model}` : ""}
+                        </span>
+                      )}
+                      {event.threadId && (
+                        <span className="mono" style={{ fontSize: "var(--text-xs)", color: "var(--fg-tertiary)" }}>
+                          {t("activity.thread", { id: event.threadId })}
+                        </span>
+                      )}
+                    </div>
+
+                    <div style={{ color: "var(--fg-primary)", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+                      {event.summary}
+                    </div>
+
+                    {event.detail && (
+                      <div style={{ color: "var(--fg-secondary)", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+                        {event.detail}
+                      </div>
+                    )}
+
+                    {event.kind === "stop_event" && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                        <span className="mono" style={{ fontSize: "var(--text-sm)", color: "var(--st-dispatched)" }}>
+                          {t("inbox.stopEvent", {
+                            reason: String(
+                              (event.technical.payload as { stopReason?: unknown } | undefined)
+                                ?.stopReason ?? t("worker.unknown"),
+                            ),
+                          })}
+                        </span>
+                        {event.actionable?.kind === "acknowledge_stop" && event.dispatchId && (
+                          <button
+                            type="button"
+                            className="odag-btn odag-btn--primary"
+                            style={{ blockSize: 25, fontSize: "var(--text-xs)" }}
+                            disabled={disabled || Boolean(busyId)}
+                            onClick={() => void acknowledge(event)}
+                          >
+                            {t("inbox.ackStop")}
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {event.actionable?.kind === "reply" && (
+                      <div style={{ display: "flex", gap: 8, alignItems: "flex-start", maxInlineSize: 680 }}>
+                        <textarea
+                          rows={2}
+                          placeholder={
+                            disabled ? t("activity.reply.unavailable") : t("activity.reply.placeholder")
+                          }
+                          value={drafts[event.id] ?? ""}
+                          disabled={disabled || busyId === event.id}
+                          onChange={(e) =>
+                            setDrafts((current) => ({ ...current, [event.id]: e.target.value }))
+                          }
+                          style={{
+                            flex: 1,
+                            padding: "6px 8px",
+                            borderRadius: 5,
+                            border: "1px solid var(--border-control)",
+                            background: "var(--bg-canvas)",
+                            fontSize: "var(--text-sm)",
+                          }}
+                        />
+                        <button
+                          type="button"
+                          className="odag-btn odag-btn--primary"
+                          disabled={
+                            disabled || busyId === event.id || !(drafts[event.id] ?? "").trim()
+                          }
+                          title={
+                            disabled
+                              ? disabledReason ?? t("activity.reply.unavailableTitle")
+                              : t("activity.reply.title")
+                          }
+                          onClick={() => void runAction(event, "reply")}
+                        >
+                          {busyId === event.id ? t("activity.sending") : t("activity.reply.button")}
+                        </button>
+                      </div>
+                    )}
+
+                    {event.actionable?.kind === "release" && (
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button
+                          type="button"
+                          className="odag-btn odag-btn--primary"
+                          style={{ blockSize: 26, fontSize: "var(--text-sm)" }}
+                          disabled={disabled || Boolean(busyId)}
+                          onClick={() => void runAction(event, "release")}
+                        >
+                          {t("activity.release")}
+                        </button>
+                        <button
+                          type="button"
+                          className="odag-btn"
+                          style={{ blockSize: 26, fontSize: "var(--text-sm)" }}
+                          disabled={disabled || Boolean(busyId)}
+                          onClick={() => void runAction(event, "retain")}
+                        >
+                          {t("activity.retain")}
+                        </button>
+                      </div>
+                    )}
+
+                    {event.actionable?.kind === "retain" && (
+                      <div>
+                        <button
+                          type="button"
+                          className="odag-btn"
+                          style={{ blockSize: 26, fontSize: "var(--text-sm)" }}
+                          disabled={disabled || Boolean(busyId)}
+                          onClick={() => void runAction(event, "retain")}
+                        >
+                          {t("activity.retain")}
+                        </button>
+                      </div>
+                    )}
+
+                    {event.actionable?.kind === "retry" && (
+                      <div>
+                        <button
+                          type="button"
+                          className="odag-btn odag-btn--primary"
+                          style={{ blockSize: 26, fontSize: "var(--text-sm)" }}
+                          disabled={disabled || Boolean(busyId)}
+                          onClick={() => void runAction(event, "retry")}
+                        >
+                          {t("activity.retry")}
+                        </button>
+                      </div>
+                    )}
+
+                    {Boolean(
+                      event.technical.messageId ||
+                        event.dispatchId ||
+                        event.technical.argv ||
+                        event.technical.payload,
+                    ) && (
+                      <details>
+                        <summary
+                          className="mono"
+                          style={{ cursor: "pointer", fontSize: "var(--text-xs)", color: "var(--fg-secondary)" }}
+                        >
+                          {t("activity.details")}
+                        </summary>
+                        <pre tabIndex={0} role="region" aria-label={t("activity.details")}>
+                          <code>{technicalJson(event)}</code>
+                        </pre>
+                      </details>
                     )}
                   </div>
                 )}
-
-                {event.actionable?.kind === "reply" && (
-                  <div className="activity-event__reply">
-                    <textarea
-                      rows={2}
-                      placeholder={disabled ? t("activity.reply.unavailable") : t("activity.reply.placeholder")}
-                      value={drafts[event.id] ?? ""}
-                      disabled={disabled || busyId === event.id}
-                      onChange={(e) => setDrafts((current) => ({ ...current, [event.id]: e.target.value }))}
-                    />
-                    <button
-                      type="button"
-                      className="btn btn--ok"
-                      disabled={disabled || busyId === event.id || !(drafts[event.id] ?? "").trim()}
-                      title={disabled ? disabledReason ?? t("activity.reply.unavailableTitle") : t("activity.reply.title")}
-                      onClick={() => void runAction(event, "reply")}
-                    >
-                      {busyId === event.id ? t("activity.sending") : t("activity.reply.button")}
-                    </button>
-                  </div>
-                )}
-
-                {event.actionable?.kind === "release" && (
-                  <div className="activity-event__actions">
-                    <button type="button" className="btn btn--ok" disabled={disabled || Boolean(busyId)} onClick={() => void runAction(event, "release")}>{t("activity.release")}</button>
-                    <button type="button" className="btn" disabled={disabled || Boolean(busyId)} onClick={() => void runAction(event, "retain")}>{t("activity.retain")}</button>
-                  </div>
-                )}
-                {event.actionable?.kind === "retain" && (
-                  <button type="button" className="btn" disabled={disabled || Boolean(busyId)} onClick={() => void runAction(event, "retain")}>{t("activity.retain")}</button>
-                )}
-                {event.actionable?.kind === "retry" && (
-                  <button type="button" className="btn" disabled={disabled || Boolean(busyId)} onClick={() => void runAction(event, "retry")}>{t("activity.retry")}</button>
-                )}
-
-                {Boolean(event.detail || event.technical.messageId || event.dispatchId || event.technical.argv || event.technical.payload) && (
-                  <details className="activity-event__details">
-                    <summary>{t("activity.details")}</summary>
-                    {event.detail && <p>{event.detail}</p>}
-                    <pre>{technicalJson(event)}</pre>
-                  </details>
-                )}
               </div>
-            </article>
-          ))
+            );
+          })
         )}
       </div>
     </section>

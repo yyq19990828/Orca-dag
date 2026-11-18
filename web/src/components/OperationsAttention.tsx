@@ -79,7 +79,7 @@ function workerNeedsDecision(row: WorkerRowView, attempt: RunAttempt | undefined
   );
 }
 
-type AttentionItem = {
+export type AttentionItem = {
   key: string;
   kind: OperationFocus["kind"];
   id: string;
@@ -91,7 +91,7 @@ type AttentionItem = {
   identity?: string;
 };
 
-function makeItems({ runId, dag, status, workers }: ActionableOperationSnapshots): AttentionItem[] {
+export function collectAttentionItems({ runId, dag, status, workers }: ActionableOperationSnapshots): AttentionItem[] {
   if (!runId) return [];
   const scopedDag = dagForRun(dag, runId);
   const scopedStatus = statusForRun(status, runId);
@@ -181,14 +181,14 @@ export function countActionableOperations(
   ) {
     return null;
   }
-  return makeItems(snapshots).length;
+  return collectAttentionItems(snapshots).length;
 }
 
 /** The number already proved by available snapshots, even while others load. */
 export function countKnownActionableOperations(
   snapshots: ActionableOperationSnapshots,
 ): number {
-  return makeItems(snapshots).length;
+  return collectAttentionItems(snapshots).length;
 }
 
 export const OperationsAttention = memo(function OperationsAttention({
@@ -201,13 +201,10 @@ export const OperationsAttention = memo(function OperationsAttention({
   onOpenDecisions,
 }: OperationsAttentionProps) {
   const t = useT();
-  // makeItems() builds translated labels with the non-reactive `t` (t's
-  // identity is stable by design), so `lang` is what has to invalidate this
-  // memo — a memo keyed only on data would keep the pre-switch wording.
   const lang = useLang();
   const [expanded, setExpanded] = useState(false);
   const snapshots = { runId, dag, status, workers };
-  const items = useMemo(() => makeItems(snapshots), [dag, lang, runId, status, workers]);
+  const items = useMemo(() => collectAttentionItems(snapshots), [dag, lang, runId, status, workers]);
   const count = countActionableOperations(snapshots);
   const visibleItems = expanded ? items : items.slice(0, 4);
   const hiddenCount = items.length - visibleItems.length;

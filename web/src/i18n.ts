@@ -5,15 +5,16 @@
 // on any missing or extra key — no separate check script needed.
 
 import { useSyncExternalStore } from "react";
+import { readOrcaHostLocale } from "./bridge/orcaBridge";
 import { en } from "./i18n/en";
 import { zh } from "./i18n/zh";
 
-export type Lang = "en" | "zh";
+type Lang = "en" | "zh";
 const LANG_KEY = "orca-dag:lang";
 
 export type TranslationKey = keyof typeof en;
 export type Dict = Record<TranslationKey, string>;
-export type Params = Record<string, string | number>;
+type Params = Record<string, string | number>;
 
 /**
  * The translator signature shared by `t` and `useT()`. Non-React modules
@@ -23,9 +24,7 @@ export type Params = Record<string, string | number>;
  */
 export type Translator = (key: TranslationKey, params?: Params) => string;
 
-// Readonly at both levels: nothing may add a language or rewrite a key at
-// runtime (tests included — the parity guarantee lives in the type system).
-export const TRANSLATIONS: Readonly<Record<Lang, Readonly<Dict>>> = { en, zh };
+const TRANSLATIONS: Readonly<Record<Lang, Readonly<Dict>>> = { en, zh };
 
 let lang: Lang = detectLang();
 const listeners = new Set<() => void>();
@@ -42,6 +41,10 @@ function detectLang(): Lang {
   // module is imported for its side-effect-free API — it must not throw on
   // import. Guarding here (not moving the return into the try above) keeps
   // zh detection alive when localStorage itself throws in private mode.
+  const hostLocale = readOrcaHostLocale();
+  if (hostLocale) {
+    return hostLocale.toLowerCase().startsWith("zh") ? "zh" : "en";
+  }
   const nav = typeof navigator === "undefined" ? "" : navigator.language;
   return nav.toLowerCase().startsWith("zh") ? "zh" : "en";
 }

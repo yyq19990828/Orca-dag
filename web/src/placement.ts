@@ -17,8 +17,8 @@
  * and selectors/names/repos are echoed exactly as discovered.
  */
 
-import { t, type TranslationKey } from "./i18n";
-import type { DagEdge, LaneSeedPlacement, PlacementSpec, WorktreeLaneSpec } from "./types";
+import { t } from "./i18n";
+import type { DagEdge, PlacementSpec, WorktreeLaneSpec } from "./types";
 
 /** Explicit worktree names (`--name`): a short single token, not a path. */
 export const PLACEMENT_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -31,7 +31,7 @@ export const DISPLAY_NAME_MAX = 120;
 export const COMMENT_MAX = 500;
 
 /** Narrowing guard: true for the two worktree-creating kinds. */
-export function isCreationKind(
+function isCreationKind(
   p: PlacementSpec,
 ): p is Extract<PlacementSpec, { kind: "new-child" | "new-top-level" }> {
   return p.kind === "new-child" || p.kind === "new-top-level";
@@ -56,19 +56,6 @@ export function placementLabel(p: PlacementSpec | null): string {
         ? t("placement.label.newTopLevelNamed", { repo: p.repo, name: p.name })
         : t("placement.label.newTopLevel", { repo: p.repo });
   }
-}
-
-/** kind -> key, explicit so a new kind fails tsc instead of falling through. */
-const PLACEMENT_KIND_KEY: Record<PlacementSpec["kind"], TranslationKey> = {
-  current: "placement.kind.current",
-  existing: "placement.kind.existing",
-  "new-child": "placement.kind.newChild",
-  "new-top-level": "placement.kind.newTopLevel",
-};
-
-/** Short mode label without the payload (mode pickers, badges). */
-export function placementKindLabel(kind: PlacementSpec["kind"]): string {
-  return t(PLACEMENT_KIND_KEY[kind]);
 }
 
 /**
@@ -209,7 +196,7 @@ export function laneProblemPrefix(laneId: string): string {
  * laneProblemPrefix, minus its punctuation, so a lane reads identically
  * whether it is quoted in a problem message or summarized on a node card.
  */
-export function lanePrefix(laneId: string): string {
+function lanePrefix(laneId: string): string {
   return t("lane.prefix", { lane: laneId });
 }
 
@@ -228,9 +215,4 @@ export function laneSummaryLabel(laneId: string, placement: string | null): stri
 /** The lane seed of `spec`, summarized for pickers and chips. */
 export function laneLabel(spec: WorktreeLaneSpec): string {
   return placementLabel(spec.placement as PlacementSpec);
-}
-
-/** True when a lane seed may legally be re-used for a task chain (never `current`). */
-export function isLaneSeed(p: LaneSeedPlacement | PlacementSpec): p is LaneSeedPlacement {
-  return p.kind !== "current";
 }

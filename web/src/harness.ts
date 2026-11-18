@@ -316,7 +316,9 @@ function asBooleanMap(v: unknown): Record<string, boolean> | null {
   return map;
 }
 function asLayout(v: unknown): LayoutKind | "" {
-  return v === "layered-lr" || v === "layered-tb" || v === "force" ? v : "";
+  // Migrate the retired force choice instead of reviving it from the mirror.
+  if (v === "force") return "layered-lr";
+  return v === "layered-lr" || v === "layered-tb" ? v : "";
 }
 
 /**
@@ -591,11 +593,6 @@ export function lanesSpecMap(): Record<string, WorktreeLaneSpec> {
   return { ...config.worktreeLanes };
 }
 
-/** Semantic lead stage for one Run; unrelated to live Orca coordinator authority. */
-export function getLeadTask(runId: string): string | null {
-  return config.leadTaskByRun[runId] ?? null;
-}
-
 /** Setting a lead replaces only this Run's prior choice; null clears it. */
 export function setLeadTask(runId: string, taskId: string | null): void {
   if (!runId) return;
@@ -621,17 +618,8 @@ export function setMaxConcurrency(n: number): void {
   update({ maxConcurrency: Math.max(1, Math.min(16, Math.round(n) || 1)) });
 }
 
-export function getLayout(): LayoutKind | "" {
-  return config.layout;
-}
-
 export function setLayout(layout: LayoutKind): void {
   update({ layout });
-}
-
-/** The Run whose DAG the viewer is showing. Empty until one is chosen. */
-export function getRunId(): string {
-  return config.runId;
 }
 
 export function setRunId(runId: string): void {

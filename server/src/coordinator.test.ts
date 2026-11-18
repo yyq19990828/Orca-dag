@@ -4623,7 +4623,7 @@ describe("worktree lanes: seeds, serialization, and identity", () => {
     // assertion makes the guarantee explicit.
     const namespaces = new Set(readLog().map((c) => c.argv[0]));
     assert.deepEqual(
-      [...namespaces].sort(),
+      [...namespaces].filter((ns) => !["--version", "status"].includes(ns)).sort(),
       ["orchestration", "terminal", "worktree"],
       "only Orca CLI namespaces were ever invoked",
     );

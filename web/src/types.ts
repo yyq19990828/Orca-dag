@@ -6,20 +6,8 @@ export type TaskStatus =
   | "failed"
   | "blocked";
 
-/** Canvas layout algorithms the viewer can arrange the DAG with. */
-export type LayoutKind = "layered-lr" | "layered-tb" | "force";
-
-/**
- * The layout buttons the View menu offers. Only the algorithm id and its glyph
- * live here: the button caption and tooltip are user-facing wording and belong
- * to i18n (`layout.label.<kind>` / `layout.title.<kind>`), so both languages
- * stay in one place.
- */
-export const LAYOUTS: { kind: LayoutKind; icon: string }[] = [
-  { kind: "layered-lr", icon: "⇄" },
-  { kind: "layered-tb", icon: "⇅" },
-  { kind: "force", icon: "❋" },
-];
+/** Supported layered DAG directions. Copy stays in the translation dictionaries. */
+export type LayoutKind = "layered-lr" | "layered-tb";
 
 export interface DagNode {
   id: string;
@@ -123,12 +111,12 @@ export interface StatusMeta {
 
 // Status wording belongs to i18n; this palette is shared by the canvas and panels.
 export const STATUS_META: Record<TaskStatus, StatusMeta> = {
-  pending: { color: "#64748b", bg: "#f1f5f9", ink: "#475569" },
-  ready: { color: "#2563a8", bg: "#eaf2fb", ink: "#1d4f83" },
+  pending: { color: "#71717a", bg: "#f4f4f5", ink: "#52525b" },
+  ready: { color: "#18181b", bg: "#f4f4f5", ink: "#18181b" },
   dispatched: { color: "#a9650a", bg: "#fff5e5", ink: "#865008" },
   completed: { color: "#23805a", bg: "#e9f6ef", ink: "#176444" },
   failed: { color: "#be3e3e", bg: "#fceeee", ink: "#a32f2f" },
-  blocked: { color: "#a15c1b", bg: "#fff3e7", ink: "#804817" },
+  blocked: { color: "#6e3ab8", bg: "#f2ebff", ink: "#582c96" },
 };
 
 /**
@@ -144,7 +132,6 @@ export const HARNESSES = [
   "omp",
   "antigravity",
 ] as const;
-export type Harness = (typeof HARNESSES)[number] | (string & {});
 
 /** Previously advertised agents without viewer execution verification. */
 export const UNVERIFIED_HARNESSES: Readonly<Partial<Record<string, true>>> = {
@@ -1180,37 +1167,6 @@ export interface OrcaReadiness {
   reason: string | null;
 }
 
-// --- Phase 6 (operations epic): safe group messaging -------------------------
-
-/** One estimated recipient behind a group audience (current Run worker facts). */
-export interface AudienceCandidate {
-  taskId: string;
-  dispatchId: string | null;
-  label: string | null;
-  harness: string | null;
-}
-
-/** One supported group audience with the Run's own estimate of its reach. */
-export interface AudienceOptionView {
-  /** The exact group address — the only string the composer ever sends back. */
-  address: string;
-  kind: "run" | "harness" | "worktree";
-  label: string;
-  estimatedRecipients: AudienceCandidate[];
-  /** Always false today: Orca exposes no group-membership read. */
-  exact: boolean;
-}
-
-/** GET /api/audiences — audience preview for the Run-control group composer. */
-export interface AudiencePreviewResponse {
-  runId: string;
-  /** True only when THIS viewer is the selected Run's live coordinator. */
-  coordinatorActive: boolean;
-  audiences: AudienceOptionView[];
-  /** Read failures are reported, never collapsed into "no audiences". */
-  workersError: string | null;
-  worktreesError: string | null;
-}
 
 // --- Phase 1 (operations epic): capability negotiation + Run health ----------
 

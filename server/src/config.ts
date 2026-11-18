@@ -434,7 +434,9 @@ function sanitize(raw: unknown, previous?: ViewerConfig): ViewerConfig {
     out.retainByTask = map;
   }
   if (typeof r.layout === "string" && r.layout.trim()) {
-    out.layout = r.layout.trim();
+    const layout = r.layout.trim();
+    // Retired force layouts migrate on read and persist with the next write.
+    out.layout = layout === "force" ? "layered-lr" : layout;
   }
   if (typeof r.runId === "string" && r.runId.trim()) {
     out.runId = r.runId.trim();

@@ -8,6 +8,7 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "types": ["node"],
+    "noUnusedLocals": true,
     "noEmit": true
   },
   "include": ["src"]

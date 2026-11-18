@@ -131,23 +131,24 @@ web/src/
   App.tsx                分节式工作台外壳、分节路由与 URL Hash 状态管理、2 秒轮询、执行防护
   components/
     DagView.tsx          懒加载 React Flow DAG 画布，280x120 节点渲染，受控脉冲动效，静态连线
-    TaskList.tsx         无障碍垂直任务列表视图，展示就绪/阻断原因与状态标识
     ExecControls.tsx     Header 顶栏传送动作组（Run/Stop）与 Settings 分节启动参数配置面板
-    NodePanel.tsx        中央详情阅读区：只读 spec 预览、主阶段标记、启动参数覆盖、放置编辑器与审批门创建
+    NodePanel.tsx        任务详情与配置面板：只读 spec 预览、主阶段标记、启动参数覆盖、放置编辑器与审批门创建（在 Chat 的 Task 页签中渲染）
     PlacementEditor.tsx  4 种本地放置模式与 2 种远程放置模式编辑器及校验
     LanesPanel.tsx       Workspace lanes 运行时状态、代码审阅入口与显式移除
     ActivityPanel.tsx    实时事件时间线（单条共享 SSE 连接）、技术证据展开与上下文操作
-    ChatPanel.tsx        常驻通信侧栏：会话列表、气泡消息、实时 check 回执与受众预览
-    useScopedChatState.ts 作用域状态容器：按 Run 和会话作用域隔离草稿、回执与繁忙状态
+    ChatPanel.tsx        Run 群聊与 Task 私聊共用消息，显式 @Task 发送，手机式列表/详情导航
+    MailboxChecks.tsx    独立有界的收件检查证据、投递/重放分组与原始回执详情
+    HarnessAvatar.tsx    本地官方 harness 图标、来源/许可说明与未知类型的中性图标
+    useScopedChatState.ts 作用域草稿和回执；同一 Task 在不同聊天视图共享繁忙/未知发送保护
     GatePanel.tsx        审批门与跨 lane 集成门决策卡片
     RunPicker.tsx        Run 切换器、游标分页加载与精确 ID 查找
     WorkerPanel.tsx      Fleet 状态视图、来源标记输出、搜索、日志下载与终端生命周期控制
     RequestAuditPanel.tsx 变更请求审计面板，集成 request-show 实时状态探测
   harness.ts             响应式配置 store（与 /api/config 同步）
   placement.ts           客户端放置与 lane 规则预检逻辑
-  layout.ts              DAG 布局算法：dagre 分层（横向/纵向，280x120 节点）与力导向排版
+  layout.ts              DAG 布局算法：dagre 分层（横向/纵向，280x120 节点）
   types.ts / api.ts      前端核心类型与 API 客户端请求封装
-  workbench.css          分节式工作台布局、200px 导航栏、顶栏、中央详情区及响应式断点
+  workbench.css          分节式工作台布局、7 个应用 Dock 导航栏、顶栏、运维分节与响应式断点
   chat-dock.css          常驻右侧通信面板、气泡消息、会话列表及输入框样式
   graph-motion.css       任务节点（280x120）、静态连线与受控执行中圆点脉冲动效
 scripts/

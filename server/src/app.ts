@@ -27,7 +27,6 @@ import {
   listRepos,
   listRunMessages,
   listRunMessagePage,
-  listRuns,
   listWorkspaceRuns,
   listTasks,
   listTerminals,
@@ -50,7 +49,6 @@ import {
   resolveGate,
   retainWorker,
   runOrca,
-  showRepo,
   showRun,
   listRemovedWork,
   showRequest,
@@ -62,6 +60,7 @@ import {
   MIN_NATIVE_OPENCODE_VERSION,
   MIN_NATIVE_OPENCODE_MODEL_VERSION,
   type OrcaWorktreeRow,
+  type OrcaWorkerRow,
   type WorkspaceChangedMode,
   type WorktreeRemovalReceipt,
   type WorkerObservation,
@@ -492,6 +491,63 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
     confirmed: boolean;
   }>();
 
+  /**
+   * Share the exact Dispatch's launch identity between fleet badges and Chat.
+   * Settled worker-list rows often omit both launch and provider. Recover only
+   * from scoped launch history/worker-show, never today's Task preferences;
+   * keep this separate from effective launch, liveness and custody evidence.
+   */
+  const enrichWorkerLaunchEvidence = async (runId: string, workers: OrcaWorkerRow[]): Promise<OrcaWorkerRow[]> => {
+    // A damaged/unreadable viewer history must not hide Orca's inventory.
+    const saved = await launchHistory.list(runId).catch(() => new Map());
+    const enriched = workers.map((row): OrcaWorkerRow => {
+      const fleetAgent = row.projection?.launch?.agent ?? row.projection?.provider?.id ?? null;
+      const recorded = saved.get(row.dispatchId);
+      const scopedRecord = recorded?.taskId === row.taskId ? recorded : null;
+      return {
+        ...row,
+        launchEvidence: fleetAgent
+          ? { agent: fleetAgent, source: "fleet" }
+          : scopedRecord
+            ? { agent: scopedRecord.harness, source: scopedRecord.source }
+            : null,
+      };
+    });
+    const needsDetail = enriched.filter((row) =>
+      row.dispatchId && workerSupervision(row) === "supervised" &&
+      row.launchEvidence?.source !== "fleet" &&
+      row.launchEvidence?.source !== "worker-show"
+    );
+    // Bound historical sweeps and share pending/confirmed lookups across
+    // HTTP/SSE polls. Unavailable detail leaves the identity unknown.
+    for (let i = 0; i < needsDetail.length; i += 6) {
+      await Promise.all(needsDetail.slice(i, i + 6).map(async (row) => {
+        const key = `${runId}:${row.taskId}:${row.dispatchId}`;
+        let cached = launchLookups.get(key);
+        if (!cached || (!cached.confirmed && Date.now() - cached.at > 60_000)) {
+          const value = showWorkerDetail(row.dispatchId)
+            .then((detail) =>
+              detail?.runId === runId && detail.taskId === row.taskId && detail.launch?.agent
+                ? { agent: detail.launch.agent }
+                : null,
+            )
+            .catch(() => null);
+          cached = { at: Date.now(), value, confirmed: false };
+          const entry = cached;
+          void value.then((observed) => {
+            if (observed) entry.confirmed = true;
+          });
+          launchLookups.set(key, cached);
+          if (launchLookups.size > 2_000) launchLookups.clear();
+        }
+        const observed = await cached.value;
+        if (!observed) return;
+        row.launchEvidence = { agent: observed.agent, source: "worker-show" };
+      }));
+    }
+    return enriched;
+  };
+
   // The status provider, resolved once: the live module singleton by default,
   // an injected snapshot under test (same pattern as `readiness` above).
   const coordinatorStatus = opts.coordinatorStatus ?? liveCoordinatorStatus;
@@ -515,7 +571,8 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       const [tasks, page, workers, config, history] = await Promise.all([
         presentationTasks(runId),
         listRunMessagePage(runId).catch(() => ({ messages: [], window: null })),
-        presentationWorkers(runId, { includeRemote: true }).then(result => result.workers).catch(() => []),
+        presentationWorkers(runId, { includeRemote: true })
+          .then(result => enrichWorkerLaunchEvidence(runId, result.workers)).catch(() => []),
         loadConfig(workspaceDir),
         activityJournal.listHistory(runId),
       ]);
@@ -1896,7 +1953,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       const mode: WorkspaceChangedMode = modeRaw === "diff" ? "diff" : "edit";
       const { runId, lane } = requireLiveLane(laneId);
       const selector = validateSelector(laneReviewSelector(lane), "selector");
-      const { requestId, receipt } = await viewerMutationWithLedger(
+      const { requestId } = await viewerMutationWithLedger(
         "file-open-changed",
         selector,
         () => openWorkspaceChangedFiles({ mode, worktree: selector }),
@@ -2150,57 +2207,8 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         return;
       }
       const inventory = await presentationWorkers(runId, { includeRemote: true });
-      const workers = inventory.workers;
-      // A damaged/unreadable viewer history file must not hide Orca's worker
-      // inventory. The API can still backfill supervised rows from Orca.
-      const saved = await launchHistory.list(runId).catch(() => new Map());
-      const enriched = workers.map((row) => {
-        const fleetAgent = row.projection?.launch?.agent ?? row.projection?.provider?.id ?? null;
-        const recorded = saved.get(row.dispatchId);
-        const scopedRecord = recorded?.taskId === row.taskId ? recorded : null;
-        return {
-          ...row,
-          launchEvidence: fleetAgent
-            ? { agent: fleetAgent, source: "fleet" as const }
-            : scopedRecord
-              ? { agent: scopedRecord.harness, source: scopedRecord.source }
-              : null,
-        };
-      });
-      const needsDetail = enriched.filter((row) =>
-        row.dispatchId && workerSupervision(row) === "supervised" &&
-        row.launchEvidence?.source !== "fleet" &&
-        row.launchEvidence?.source !== "worker-show"
-      );
-      // A historical Run may contain many workers. Bound concurrent Orca
-      // processes, and never turn one unavailable detail into a missing fleet
-      // inventory. The badge stays unknown until positive evidence arrives.
-      for (let i = 0; i < needsDetail.length; i += 6) {
-        await Promise.all(needsDetail.slice(i, i + 6).map(async (row) => {
-          const key = `${runId}:${row.dispatchId}`;
-          let cached = launchLookups.get(key);
-          if (!cached || (!cached.confirmed && Date.now() - cached.at > 60_000)) {
-            const value = showWorkerDetail(row.dispatchId)
-              .then((detail) =>
-                detail?.runId === runId && detail.taskId === row.taskId && detail.launch?.agent
-                  ? { agent: detail.launch.agent }
-                  : null,
-              )
-              .catch(() => null);
-            cached = { at: Date.now(), value, confirmed: false };
-            const entry = cached;
-            void value.then((observed) => {
-              if (observed) entry.confirmed = true;
-            });
-            launchLookups.set(key, cached);
-            if (launchLookups.size > 2_000) launchLookups.clear();
-          }
-          const observed = await cached.value;
-          if (!observed) return;
-          row.launchEvidence = { agent: observed.agent, source: "worker-show" };
-        }));
-      }
-      res.json({ workers: enriched, partialHostErrors: inventory.partialHostErrors });
+      const workers = await enrichWorkerLaunchEvidence(runId, inventory.workers);
+      res.json({ workers, partialHostErrors: inventory.partialHostErrors });
     }),
   );
 

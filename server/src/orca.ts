@@ -231,7 +231,10 @@ export function workspaceHash(dir: string): string {
  * is operator input, and a typo should stop startup, not misplace a coordinator.
  */
 export function resolveWorkspace(env: NodeJS.ProcessEnv = process.env, cwd: string = process.cwd()): OrcaWorkspace {
-  const raw = env.WORKSPACE_DIR?.trim() || cwd;
+  const raw =
+    env.WORKSPACE_DIR?.trim() ||
+    (env.INIT_CWD?.trim() && !env.npm_lifecycle_event?.startsWith("test") ? env.INIT_CWD.trim() : "") ||
+    cwd;
   let dir: string;
   try {
     dir = realpathSync(raw);
@@ -276,10 +279,16 @@ let runtime: OrcaRuntime | null = null;
  * at startup; `getRuntime()` lazily falls back to ambient process values so
  * tests and tooling that never call this still get a coherent spec.
  */
+export function resetReadinessCacheForTests(): void {
+  readinessCache = null;
+  readinessRuntime = null;
+}
+
 export function initOrcaRuntime(opts: {
   env?: NodeJS.ProcessEnv;
   cwd?: string;
 } = {}): OrcaRuntime {
+  resetReadinessCacheForTests();
   const env = opts.env ?? process.env;
   const workspace = resolveWorkspace(env, opts.cwd);
   runtime = {
@@ -2093,6 +2102,11 @@ export interface OrcaWorkerRow {
   dispatchStatus: string;
   agentTerminalHandle: string | null;
   terminalState: TerminalState | string;
+  /** Dispatch-scoped presentation identity; never lifecycle or custody authority. */
+  launchEvidence?: {
+    agent: string;
+    source: "fleet" | "worker-show" | "viewer-launch";
+  } | null;
   /** Terminal resource the row still holds; absent = unknown. */
   resource?: WorkerTerminalResource | null;
   projection: {

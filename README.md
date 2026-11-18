@@ -51,7 +51,7 @@ After installation:
 
 ## Key Features
 
-- **Live Visual DAG & Sectional Workbench:** Modern sectional workbench with deep navy navigation, crisp 1px borders, real-time status updates (every 2s), switchable task list and lazy-loaded DAG canvas (Dagre layered & force-directed layouts), central detail inspector, and pinned communication dock.
+- **Live Visual DAG & Sectional Workbench:** Modern sectional workbench with deep navy navigation, crisp 1px borders, real-time status updates (every 2s), lazy-loaded DAG canvas (horizontal/vertical Dagre layered layouts), integrated Chat and operational sections, with node clicks opening that Task's private chat at Messages and providing complete Task details as a sibling tab alongside Messages and Inbox checks.
 - **Agent controls:** Per-node harness selection, model/effort overrides on supported adapters, and OpenCode Auto / Mini TUI / Full TUI modes.
 - **Local & Remote Placement:** 4 local placement modes (current, existing, new-child, new-top-level) and 2 remote placement modes on connected environments.
 - **Workspace Lanes:** Serial execution chains across shared isolated worktrees with human-asserted integration gates.

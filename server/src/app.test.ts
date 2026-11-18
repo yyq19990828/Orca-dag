@@ -5,12 +5,13 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "node:http";
-import { createApp, listenLoopback, validateWorkspacePath, type CoordinatorStatusSnapshot } from "./app";
+import { createApp, listenLoopback, type CoordinatorStatusSnapshot } from "./app";
 import { createSecurityPolicy, type SecurityPolicy } from "./security";
 import { coordinatorStatus as liveCoordinatorStatus } from "./coordinator";
 import { initOrcaRuntime, type OrcaReadiness } from "./orca";
 import { WORKSPACE_STATE_FILES } from "./workspaceState";
 import { ProviderSessionStore } from "./providerSessions";
+import type { ActivitySnapshot } from "./activity";
 
 /**
  * Security/API coverage for the control plane (Phase 1 acceptance).
@@ -1064,6 +1065,71 @@ process.stdout.write(JSON.stringify(out));
     assert.ok(mismatchedDetail && typeof mismatchedDetail === "object" && "launchMode" in mismatchedDetail);
     assert.equal(mismatchedDetail.launchMode, null);
     assert.equal((await rpc("GET", "/api/workers/ctx_child?run=run_foreign")).status, 404);
+  });
+
+  it("recovers settled chat identities without borrowing another attempt, Task, Run or requested agent", async () => {
+    const runId = "run_chat_identity";
+    const identities = [
+      ["ctx_chat_settled", "task_chat_settled"],
+      ["ctx_chat_unknown", "task_chat_retry"],
+      ["ctx_chat_previous", "task_chat_retry"],
+      ["ctx_chat_wrong_task", "task_chat_wrong_task"],
+      ["ctx_chat_wrong_run", "task_chat_wrong_run"],
+    ];
+    const detail = (dispatchId: string, taskId: string, agent: string | null, observedRun = runId) => {
+      const receipt = workerShowReceipt({ dispatchId, taskId, runId: observedRun, terminal: null, observation: null });
+      receipt.worker = {
+        ...(receipt.worker as Record<string, unknown>),
+        startOptions: { launch: { requested: { agent: "opencode" }, effective: agent ? { agent } : null } },
+      };
+      return receipt;
+    };
+    writeScript({
+      workers: identities.map(([dispatchId, taskId]) => ({
+        dispatchId, taskId, runId, workerState: "succeeded", dispatchStatus: "completed",
+        agentTerminalHandle: null, terminalState: "released",
+        projection: {
+          launch: null, provider: null, outcome: "succeeded",
+          liveness: { verdict: "exited", reason: null },
+          stage: { worker: "succeeded", dispatch: "completed", detail: "settled", activity: "unknown" },
+        },
+      })),
+      workerShow: {
+        ctx_chat_settled: detail("ctx_chat_settled", "task_chat_settled", "codex"),
+        ctx_chat_unknown: detail("ctx_chat_unknown", "task_chat_retry", null),
+        ctx_chat_previous: detail("ctx_chat_previous", "task_chat_retry", "claude"),
+        ctx_chat_wrong_task: detail("ctx_chat_wrong_task", "task_foreign", "omp"),
+        ctx_chat_wrong_run: detail("ctx_chat_wrong_run", "task_chat_wrong_run", "antigravity", "run_foreign"),
+      },
+      inboxMessages: identities.map(([dispatchId, taskId], index) => ({
+        id: `msg_chat_${index}`, run_id: runId, type: "worker_done",
+        from_handle: `dispatch:${dispatchId}`, to_handle: `run:${runId}`,
+        subject: "Completed", body: "Historical completion", read: 1,
+        created_at: `2026-11-04T05:25:0${index}Z`,
+        payload: JSON.stringify({ dispatchId, taskId, outcome: "succeeded" }),
+      })),
+    });
+    clearLog();
+    const response = await rpc("GET", `/api/activity?run=${runId}`);
+    assert.equal(response.status, 200);
+    const snapshot = response.json as unknown as ActivitySnapshot;
+    assert.deepEqual(Object.fromEntries(snapshot.presence.map(row => [row.taskId, row.agent])), {
+      task_chat_settled: "codex",
+      task_chat_retry: null,
+      task_chat_wrong_task: null,
+      task_chat_wrong_run: null,
+    });
+    assert.deepEqual(Object.fromEntries(snapshot.events.map(event => [event.dispatchId, event.actor.harness])), {
+      ctx_chat_settled: "codex",
+      ctx_chat_unknown: null,
+      ctx_chat_previous: "claude",
+      ctx_chat_wrong_task: null,
+      ctx_chat_wrong_run: null,
+    });
+    assert.equal(snapshot.presence.find(row => row.taskId === "task_chat_settled")?.liveness, "exited");
+    assert.equal(snapshot.presence.find(row => row.taskId === "task_chat_settled")?.model, null);
+    assert.ok(readLog().every(call => ["worker-list", "worker-show", "task-list", "inbox"].includes(call.argv[1])),
+      "opening historical Chat must not launch, bind, acknowledge or otherwise mutate Orca");
   });
 
   it("rejects unsafe legacy merge preview while supporting V3 without execution effects", async () => {

@@ -33,6 +33,7 @@ import {
   readWorkerOutput,
   releaseWorker,
   replyToMessage,
+  resetReadinessCacheForTests,
   retainWorker,
   runNextAction,
   runOrca,
@@ -893,6 +894,7 @@ const state: State = {
 
 /** Reset every coordinator field. Test scaffolding only — never call while a loop is live. */
 export function resetCoordinatorForTests(): void {
+  resetReadinessCacheForTests();
   state.running = false;
   state.phase = "idle";
   state.runId = null;

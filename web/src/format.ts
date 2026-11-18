@@ -53,20 +53,12 @@ export function formatTimestamp(iso: string): string {
   });
 }
 
-/**
- * Coarse relative age for inbox/cleanup rows ("42s ago" / "42秒前"). Intl owns
- * the wording, so the buckets stay numeric and the unit list never drifts
- * between languages; `numeric: "always"` keeps every value a number instead of
- * prose ("yesterday"), which is what these short rows want.
- */
-export function timeAgo(iso: string): string {
+/** "MM-DD HH:mm:ss" — fixed-width 24h console timestamp for VS Code-style bottom dock rows. */
+export function formatConsoleTime(iso: string): string {
   const date = parse(iso);
   if (!date) return iso;
-  const s = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
-  const relative = new Intl.RelativeTimeFormat(langLocale(), { style: "narrow", numeric: "always" });
-  if (s < 60) return relative.format(-s, "second");
-  if (s < 3600) return relative.format(-Math.floor(s / 60), "minute");
-  return relative.format(-Math.floor(s / 3600), "hour");
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 /**

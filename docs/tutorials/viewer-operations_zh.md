@@ -53,25 +53,25 @@ CLI 自动选择顺序为：`ORCA_CLI_COMMAND` → 设置了 `ORCA_DEV_REPO_ROOT
 | --- | --- | --- |
 | 顶栏与 Run 选择器 | 当前工作区的 Run 历史；coordinator 状态（`viewer-owned`、`external`、`unbound`、`inconsistent`）、传送动作组（Run/Stop）、连接状态与中英切换。 | 选择既有 Run（规划/CLI 创建 Run，查看器仅读取既有 Run）、分页加载旧 Run、查看已移除工作历史，或按精确 Run ID 查找。 |
 | 概览与 Scheduler（Overview） | 阶段总计数、运维待办摘要（`OperationsAttention`）以及调度器就绪波次与阻断原因。 | 快速掌握 Run 进展、识别阻塞瓶颈并直接定位至关联任务或决策项。 |
-| 任务（Tasks：列表与图） | 无障碍垂直任务列表（`TaskList`）与懒加载 DAG 画布（`DagView`）；中央 `NodePanel` 详情区替换中央主内容，保留离开时的滚动位置与焦点。 | 切换列表与图视图、过滤任务、在锁定前配置节点启动参数，或查看报告与产物。 |
 | 决策（Decisions） | 待处理审批门（`GatePanel`）、跨 lane 集成门与中断启动恢复卡片（`RecoveryPanel`）。 | 审批或拒绝决策、核对并放行跨工作区代码集成，或安全重试/人工标记完成已阻塞任务。 |
 | 执行（Executions） | Worker 状态卡片（`WorkerPanel`）、存活与终端状态、归档输出日志、主机/模型详情与 coordinator 权限控制。 | 检查执行证据、搜索/下载日志、释放已落定终端或显式保留终端供调试排查。 |
 | 动态（Activity） | 单条共享 SSE 连接驱动的实时事件流（`ActivityPanel`）与变更请求账本（`RequestAuditPanel`）。 | 监控实时进展（后台页面自动暂停、前台刷新重连）、核对 coordinator check 回执与审计 API 记录。 |
 | 资源（Resources） | 工作区 Lane 管理（`LanesPanel`）与安全清理面板（`CleanupPanel`）。 | 管理串行隔离工作树链条、查看 lane 分支 diff，以及安全清理已合并分支。 |
 | 设置（Settings） | 全局执行默认偏好、最大并行容量与运行时预检能力诊断（`CapabilityPanel`）。 | 调整 Run 级别执行参数、启动前检查或审查各 agent 版本的就绪状态。 |
-| 常驻通信侧栏 | 右侧常驻通信面板（`.workbench-chat`），具备按 Run 隔离的作用域草稿、实时回执与紧凑受众选择器。 | 向活跃 worker 或 coordinator 发送指导，切换分节或 Run 时草稿独立保留。 |
-DAG 每两秒刷新一次。拖动节点只改变画布位置；布局可选横向/纵向分层或力导向。可选的 **Lead Stage** 只在图中标记语义上的主 agent 阶段，不授予 Orca coordinator 权限。界面支持英文和简体中文，语言选择按浏览器保存。
+| 聊天与 Task 详情 | Task 私聊（Messages、Task 详情配置页签、收件检查）与一个 Run 群聊共用消息，提供本地 harness 头像和独立收件检查。 | 点击 DAG 节点进入该 Task 的私聊 Messages 视图；切换至 Task 页签在锁定前配置节点启动参数或查看报告与产物；发送指导或回复；返回会话列表，作用域草稿独立保留。 |
+DAG 每两秒刷新一次。拖动节点只改变画布位置；布局可选横向或纵向分层。可选的 **Lead Stage** 只在图中标记语义上的主 agent 阶段，不授予 Orca coordinator 权限。界面支持英文和简体中文，语言选择按浏览器保存。
 
 界面区分正在读取、首读失败、确认为空与陈旧快照。尚未取得任务数据时，首次失败会显示
 技术详情与“重新加载页面”，而不是宣称项目为空；预检与执行需要已有任务数据。
 后续刷新失败则保留同一 Run 最近成功读取的任务与计数。“**重试读取**”只更新投影，
 不重放变更或刷新全页。Run 列表使用单飞读取，避免 10 秒轮询不断丢弃更慢的成功响应。
 
-使用 Tab 聚焦 DAG 节点，按 `Enter` 或 `Space` 打开详情；焦点移到标题，`Escape`
-关闭后返回触发元素。嵌套选择器先消费自身的 `Escape`，只关闭下拉菜单。
+使用 Tab 聚焦 DAG 节点，按 `Enter` 或 `Space` 打开该 Task 的私聊 Messages 视图（`#section=chat&task=<id>`）。
+在私聊会话中，可在同级的 **Messages**、**Task** 与**收件检查**页签间自由切换。完整的任务详情与启动配置（`NodePanel`）就地展示于 Task 页签内，无独立 `h1` 或关闭按钮，保留原生的页签键盘交互。
+嵌套选择器先消费自身的 `Escape`，只关闭下拉菜单。
 查看器中的任务定义和关系仍为只读。
 
-在窄屏（≤760px）下，viewer 默认呈现垂直无障碍**任务列表**（TaskList），列出任务名、状态圆点与就绪/阻塞原因，避免在移动端进行复杂的画布平移缩放；顶栏提供切换开关，可在任务列表与 DAG 画布间切换。在 ≤1024px 时，Run 选项、视图和执行设置等浮动菜单统一转换为视口有界 sheet，带有显式“关闭”按钮，且视图工具栏会提升层叠上下文确保关闭按钮可点击。需要注意，编排配置与调度控制保持**桌面端优先**；移动端重在清晰可读的巡检与状态核实，不承诺具备桌面端的全部操作对等能力。
+在窄屏（≤900px）下，顶部提供专属分栏切换器（`.workbench-mobile-switch`），支持在画布与应用操作区之间一键切换。在画布中点击节点自动切换至操作区并展示该 Task 的私聊会话。在 ≤1024px 时，Run 选项、视图和执行设置等浮动菜单统一转换为视口有界 sheet，带有显式“关闭”按钮，且视图工具栏会提升层叠上下文确保关闭按钮可点击。需要注意，编排配置与调度控制保持**桌面端优先**；移动端重在清晰可读的巡检与状态核实，不承诺具备桌面端的全部操作对等能力。
 
 ## 启动选择及其设计逻辑
 
@@ -122,7 +122,7 @@ viewer 创建与工作区对应的 Orca 终端，并绑定为 Run 的 coordinato
 
 ### 消息、会话与审计证据
 
-Chat 可向一个经 Orca 证实仍活跃的 `dispatch:<id>` 发送指导。检查与落定不是原子操作：Orca 可能返回后续 Task/Dispatch，而不是向旧尝试入队。检查实际回执，结果未知时不要用新身份重复发送。群发编辑器只提供 `@all` 或新发现的工作树受众，先预览接收者，再由此 Run 的活跃 viewer coordinator 确认发送。`worker_done` 和 `heartbeat` 等生命周期消息不能群发；Orca 对群发受众拒绝这些消息，viewer 也会直接以 `forbidden_group_type`（HTTP 400）拒绝。投递不表示 agent 已阅读或接受。
+Chat 可向一个经 Orca 证实仍活跃的 `dispatch:<id>` 发送指导。检查与落定不是原子操作：Orca 可能返回后续 Task/Dispatch，而不是向旧尝试入队。检查实际回执，结果未知时不要用新身份重复发送。「群聊」分类先列出一个「Run 群聊」，点击后展示与私聊相同的 Task 消息。Task 发言显示 `@协调器`；显式选择一个 `@Task` 后，复用私聊接口及权限检查发送指导或回复该 Task 的待处理问题。点击 Task 消息头像进入对应私聊。收件检查证据放在独立页签，不混入聊天时间线。群聊不是 `@all` 广播，投递也不表示 agent 已阅读或接受。独立的 HTTP 广播 API 仍保留既有生命周期消息限制。
 
 指导消息接口返回带类型的 `TaskMessageReceipt`（`ok: true, kind, runId, taskId, dispatchId, requestedTaskId, requestedDispatchId, followUpOf, requestId`），显式区分请求的 ID 与实际返回的 ID，并明确指导是向原 Dispatch 入队还是创建/路由了后续工作（见 [HTTP API 指导生命周期](../reference/http-api_zh.md#指导消息投递恢复与后续任务生命周期)）。同一目标的先前指导若未确认，只读恢复会进行调和；调和成功时抛出 `guidance_reconciled`，提示先前操作已完成，须重新提交新内容。未决指导占用并发配额并阻止盲目重发。
 

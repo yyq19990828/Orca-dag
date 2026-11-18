@@ -271,7 +271,7 @@ function normalizeMessage(
   // an unexplained null Dispatch.
   const dispatchId = resolvedDispatchId ?? worker?.dispatchId ?? null;
   const task = taskId ? taskMap.get(taskId) : undefined;
-  const harness = worker?.projection?.launch?.agent ?? worker?.projection?.provider?.id ?? null;
+  const harness = worker?.projection?.launch?.agent ?? worker?.projection?.provider?.id ?? worker?.launchEvidence?.agent ?? null;
   const model = worker?.projection?.launch?.model ?? worker?.projection?.provider?.model ?? null;
   const label = taskLabel(task, taskId);
   const rejected = Boolean(payload._orcaLifecycleRejection) || /^Rejected\s/i.test(subject);
@@ -616,6 +616,7 @@ function inferredAgentSummary(
     agent:
       worker?.projection?.launch?.agent ??
       worker?.projection?.provider?.id ??
+      worker?.launchEvidence?.agent ??
       "unknown agent",
     model:
       worker?.projection?.launch?.model ??
@@ -781,6 +782,7 @@ export function buildActivitySnapshot(input: {
     dispatchId: string,
     projection: OrcaWorkerRow["projection"] | null,
     attempt: (typeof attempts)[number] | undefined,
+    launchAgent: string | null = null,
   ): StagePresence => {
     // The durable fleet row is authoritative when it carries a field. During
     // a live coordinator session, its in-memory attempt also retains the most
@@ -811,6 +813,7 @@ export function buildActivitySnapshot(input: {
       agent:
         projection?.launch?.agent ??
         projection?.provider?.id ??
+        launchAgent ??
         attempt?.effective?.agent ??
         null,
       model:
@@ -828,7 +831,7 @@ export function buildActivitySnapshot(input: {
     const attempt = attempts.find(
       (candidate) => candidate.dispatchId === worker.dispatchId || candidate.taskId === worker.taskId,
     );
-    presence.push(presenceFrom(worker.taskId, worker.dispatchId, worker.projection, attempt));
+    presence.push(presenceFrom(worker.taskId, worker.dispatchId, worker.projection, attempt, worker.launchEvidence?.agent));
   }
   // Binding/recovery can briefly expose a coordinator attempt before the
   // paged fleet read includes its row. Keep that Task visible, but only with

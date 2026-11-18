@@ -14,9 +14,9 @@
   gap: 6px;
   padding: 4px 8px;
   border-radius: 6px;
-  background: #fff;
+  background: var(--bg-elevated, var(--paper));
   border: 1px solid var(--line-strong);
-  box-shadow: 0 8px 24px rgba(29, 29, 31, 0.14);
+  box-shadow: var(--shadow-float, 0 8px 24px rgba(29, 29, 31, 0.14));
   color: var(--ink);
   font-size: 14px;
   font-weight: 500;

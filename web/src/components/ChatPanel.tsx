@@ -1,22 +1,75 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef } from "react";
-import { acknowledgeStopEvent, ApiError, fetchAudiencePreview, replyToMessage, sendGroupMessage, sendTaskMessage } from "../api";
+import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { acknowledgeStopEvent, ApiError, replyToMessage, sendTaskMessage } from "../api";
 import { formatClock, formatDateTime, isUrgent, priorityLabel } from "../format";
 import { t, useLang, useT } from "../i18n";
 import { useDecisionDialog } from "./DecisionDialog";
 import { useCoordinatorControl } from "./useCoordinatorControl";
 import { DoodleSelect, type DoodleOption } from "./DoodleSelect";
 import { useScopedChatState } from "./useScopedChatState";
-import "../chat-dock.css";
 import type {
   ActivityEvent,
   ActivitySnapshot,
-  AudiencePreviewResponse,
-  CoordinatorCheckAgentSummary,
-  CoordinatorCheckReceipt,
   DagNode,
   StagePresence,
   TaskMessageReceipt,
 } from "../types";
+import { ToggleGroup, Popover, Tabs } from "radix-ui";
+import { HarnessAvatar } from "./HarnessAvatar";
+import { MailboxChecks } from "./MailboxChecks";
+
+/** Keep keyboard submission and its visible hint identical for both scopes. */
+function MessageComposer({
+  value, onChange, onSend, disabled, sendDisabled, busy, label, placeholder, sendLabel, sendTitle,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  onSend: () => Promise<void>;
+  disabled: boolean;
+  sendDisabled: boolean;
+  busy: boolean;
+  label: string;
+  placeholder: string;
+  sendLabel: string;
+  sendTitle: string;
+}) {
+  const t = useT();
+  const hintId = useId();
+  return (
+    <div className="chat__compose-row">
+      <textarea
+        rows={3}
+        value={value}
+        disabled={disabled}
+        placeholder={placeholder}
+        aria-label={label}
+        aria-describedby={hintId}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          // Enter used to confirm an IME candidate must never enqueue mail.
+          if (event.nativeEvent.isComposing || event.keyCode === 229 || event.repeat) return;
+          if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+            event.preventDefault();
+            if (!sendDisabled) void onSend();
+          }
+        }}
+      />
+      <div className="chat__compose-toolbar">
+        <span id={hintId}>{t("chat.compose.shortcut")}</span>
+        <button
+          type="button"
+          className="btn btn--run"
+          disabled={sendDisabled}
+          aria-busy={busy}
+          title={sendTitle}
+          onClick={() => void onSend()}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 19V5m-7 7 7-7 7 7" /></svg>
+          {busy ? t("chat.compose.sending") : sendLabel}
+        </button>
+      </div>
+    </div>
+  );
+}
 
 const COORDINATOR_THREAD = "__run_coordinator__";
 
@@ -25,6 +78,7 @@ interface Conversation {
   taskId: string | null;
   label: string;
   subtitle: string | null;
+  harness: string | null;
   isLead: boolean;
   task: DagNode | null;
   presence: StagePresence | null;
@@ -37,23 +91,11 @@ interface Conversation {
   urgent: boolean;
 }
 
-interface TimelineCheckGroup {
-  kind: "check";
-  receipts: CoordinatorCheckReceipt[];
-  at: number;
-}
-
-type TimelineItem =
-  | { kind: "event"; event: ActivityEvent; at: number }
-  | TimelineCheckGroup;
 
 function messageBody(event: ActivityEvent): string {
   return event.summary;
 }
 
-/** Orca priorities a group send may carry; "normal" renders no chip at all. */
-const GROUP_PRIORITIES = ["low", "normal", "high", "urgent"] as const;
-type GroupPriority = (typeof GROUP_PRIORITIES)[number];
 
 /**
  * A group bubble shows its requested priority whenever it is anything other
@@ -109,8 +151,11 @@ function eventHeading(event: ActivityEvent): string {
   }
 }
 
-function eventActor(event: ActivityEvent): string {
+function eventActor(event: ActivityEvent, task: DagNode | undefined): string {
   if (event.direction === "coordinator_to_agent") return t("chat.actor.coordinator");
+  // A harness identifies the tool, not which Task is speaking. Keep the
+  // message's exact Task identity even after its DAG row ages out of history.
+  if (event.taskId) return task?.label || event.actor.label || event.taskId;
   const runtime = [event.actor.harness, event.actor.model].filter(Boolean).join(" · ");
   if (runtime) return runtime;
   return event.actor.role === "lead" ? t("chat.actor.lead") : t("chat.actor.agent");
@@ -159,167 +204,6 @@ function briefSummary(spec: string): string {
   return sentence.length > 220 ? `${sentence.slice(0, 217).trimEnd()}...` : sentence;
 }
 
-function checkTitle(receipt: CoordinatorCheckReceipt): string {
-  if (receipt.error) return t("chat.check.failed");
-  if (receipt.messageCount > 0) {
-    const types = receipt.messageTypes.map((type) => compactSignal(type) ?? type).join(", ");
-    const action = receipt.source === "external_inferred"
-      ? t("chat.check.externalAction")
-      : t("chat.check.inboxAction");
-    const count = receipt.messageCount === 1
-      ? t("chat.check.countOne", { n: receipt.messageCount })
-      : t("chat.check.countMany", { n: receipt.messageCount });
-    return `${action} ${count}${types ? t("chat.check.typesSuffix", { types }) : ""}`;
-  }
-  return receipt.timedOut ? t("chat.check.noneTimedOut") : t("chat.check.inboxChecked");
-}
-
-function checkAgentLine(agent: CoordinatorCheckAgentSummary | null): string {
-  if (!agent) return t("chat.check.noAgents");
-  const activity = compactSignal(agent.detail) ?? compactSignal(agent.activity);
-  const signals = agent.attention.map((attention) => ({
-    input: t("chat.check.attentionInput"),
-    unverifiable: t("chat.check.attentionUnverifiable"),
-    root_completion: t("chat.check.attentionCompletion"),
-  })[attention] ?? compactSignal(attention) ?? attention);
-  const liveness = {
-    live: t("chat.check.livenessLive"),
-    unverifiable: t("chat.state.connectionUnknown"),
-    exited: t("chat.check.livenessExited"),
-  }[agent.liveness];
-  return [activity, ...signals, agent.outcome ? compactSignal(agent.outcome) : null, liveness]
-    .filter(Boolean)
-    .filter((value, index, values) => values.indexOf(value) === index)
-    .join(" · ");
-}
-
-function checkFleetLine(agents: CoordinatorCheckAgentSummary[]): string {
-  if (agents.length === 0) return t("chat.check.noAgents");
-  const live = agents.filter((agent) => agent.liveness === "live").length;
-  const waiting = agents.filter((agent) => agent.attention.includes("input")).length;
-  const unknown = agents.filter((agent) => agent.attention.includes("unverifiable")).length;
-  const completed = agents.filter((agent) => agent.attention.includes("root_completion")).length;
-  const otherAttention = agents.filter((agent) =>
-    agent.attention.some((attention) => !["input", "unverifiable", "root_completion"].includes(attention)),
-  ).length;
-  const activities = [...new Set(agents.map((agent) => compactSignal(agent.detail) ?? compactSignal(agent.activity)).filter(Boolean))];
-  return [
-    `${agents.length === 1
-      ? t("chat.check.fleetAgentOne", { n: agents.length })
-      : t("chat.check.fleetAgentMany", { n: agents.length })} · ${t("chat.check.fleetLive", { n: live })}`,
-    waiting > 0 ? t("chat.check.fleetWaiting", { n: waiting }) : null,
-    unknown > 0 ? t("chat.check.fleetUnknown", { n: unknown }) : null,
-    completed > 0 ? t("chat.check.fleetCompletion", { n: completed }) : null,
-    otherAttention > 0 ? t("chat.check.fleetReview", { n: otherAttention }) : null,
-    activities.length > 0 ? activities.slice(0, 2).join(", ") : null,
-  ].filter(Boolean).join(" · ");
-}
-
-function checkStateKey(receipt: CoordinatorCheckReceipt, taskId: string | null): string {
-  const agents = taskId
-    ? receipt.agents.filter((agent) => agent.taskId === taskId)
-    : receipt.agents;
-  return agents
-    .map((agent) => [
-      agent.taskId,
-      agent.liveness,
-      agent.activity,
-      agent.detail,
-      agent.attention.join(","),
-      agent.outcome,
-    ].join(":"))
-    .join("|");
-}
-
-/**
- * Empty inbox passes are useful evidence, but rendering every 2-3 second poll
- * as a separate row overwhelms the actual conversation. Collapse only
- * adjacent passes whose agent snapshot is identical; state changes and new
- * deliveries remain individual timeline moments.
- */
-function checkMergeKey(receipt: CoordinatorCheckReceipt, taskId: string | null): string | null {
-  if (receipt.error) return null;
-  const state = checkStateKey(receipt, taskId);
-  if (receipt.messageCount === 0) return `quiet:${state}`;
-  return receipt.deliveryId ? `delivery:${receipt.deliveryId}:${state}` : null;
-}
-
-function buildTimeline(
-  events: ActivityEvent[],
-  checks: CoordinatorCheckReceipt[],
-  taskId: string | null,
-): TimelineItem[] {
-  const raw: TimelineItem[] = [
-    ...events.map((event): TimelineItem => ({
-      kind: "event",
-      event,
-      at: Number.isNaN(Date.parse(event.createdAt)) ? 0 : Date.parse(event.createdAt),
-    })),
-    ...checks.map((receipt): TimelineItem => ({ kind: "check", receipts: [receipt], at: receipt.checkedAt })),
-  ].sort((a, b) => a.at - b.at || (a.kind === "event" ? -1 : 1));
-
-  const timeline: TimelineItem[] = [];
-  for (const item of raw) {
-    if (item.kind === "event") {
-      timeline.push(item);
-      continue;
-    }
-    const previous = timeline.at(-1);
-    const currentReceipt = item.receipts[0];
-    const previousReceipt = previous?.kind === "check" ? previous.receipts.at(-1) : null;
-    const currentKey = checkMergeKey(currentReceipt, taskId);
-    if (
-      previous?.kind === "check" &&
-      previousReceipt &&
-      currentKey &&
-      currentKey === checkMergeKey(previousReceipt, taskId)
-    ) {
-      previous.receipts.push(currentReceipt);
-      previous.at = currentReceipt.checkedAt;
-      continue;
-    }
-    timeline.push(item);
-  }
-  return timeline;
-}
-
-function checkGroupTitle(receipts: CoordinatorCheckReceipt[]): string {
-  const latest = receipts.at(-1)!;
-  if (receipts.length === 1) return checkTitle(latest);
-  if (latest.messageCount === 0) return t("chat.check.repeatQuiet", { n: receipts.length });
-  return t("chat.check.repeat", { title: checkTitle(latest), n: receipts.length });
-}
-
-function checkSourceLabel(receipt: CoordinatorCheckReceipt): string {
-  return receipt.source === "external_inferred"
-    ? t("chat.check.sourceExternal")
-    : t("chat.check.sourceViewer");
-}
-
-function checkInboxResult(receipt: CoordinatorCheckReceipt): string {
-  if (receipt.error) return t("chat.check.resultFailed", { error: receipt.error });
-  if (receipt.messageCount === 0) {
-    return receipt.timedOut ? t("chat.check.resultNoArrival") : t("chat.check.resultNoNew");
-  }
-  const types = receipt.messageTypes
-    .map((type) => compactSignal(type) ?? type)
-    .filter((type, index, values) => values.indexOf(type) === index);
-  const count = receipt.messageCount === 1
-    ? t("chat.check.countOne", { n: receipt.messageCount })
-    : t("chat.check.countMany", { n: receipt.messageCount });
-  return `${count}${types.length > 0 ? t("chat.check.resultTypes", { types: types.join(", ") }) : ""}`;
-}
-
-function checkDurationLabel(receipt: CoordinatorCheckReceipt): string {
-  if (receipt.source === "external_inferred") return t("chat.check.notExposed");
-  if (receipt.durationMs < 1_000) return `${receipt.durationMs} ms`;
-  return `${(receipt.durationMs / 1_000).toFixed(1)} s`;
-}
-
-function checkDeliveryLabel(receipt: CoordinatorCheckReceipt): string {
-  if (receipt.source === "external_inferred") return t("chat.check.notExposed");
-  return receipt.deliveryId ?? t("chat.check.noDelivery");
-}
 
 /**
  * Chat is a conversation projection of the same Run-scoped Activity stream.
@@ -331,6 +215,11 @@ export const ChatPanel = memo(function ChatPanel({
   runId,
   snapshot,
   tasks,
+  taskSelection,
+  groupSelection = null,
+  renderTask,
+  renderDispatch,
+  onCloseInspector,
   leadTaskId,
   onSelectTask,
   onSelectWorker,
@@ -343,8 +232,15 @@ export const ChatPanel = memo(function ChatPanel({
   runId: string;
   snapshot: ActivitySnapshot;
   tasks: DagNode[];
+  /** Each new object is an explicit navigation request, even for the same node. */
+  taskSelection: { taskId: string } | null;
+  /** Explicit navigation into the Run Group Chat thread from the IDE Inspector. */
+  groupSelection?: { nonce: number } | null;
+  renderTask: (task: DagNode) => ReactNode;
+  renderDispatch?: (task: DagNode) => ReactNode;
+  onCloseInspector?: () => void;
   leadTaskId: string | null;
-  onSelectTask: (taskId: string) => void;
+  onSelectTask: (taskId: string | null) => void;
   onSelectWorker: (dispatchId: string) => void;
   onResolved: () => void;
   coordinatorActive: boolean;
@@ -356,37 +252,52 @@ export const ChatPanel = memo(function ChatPanel({
   // format.ts, which read the language non-reactively (no hooks there by
   // design) — so this memo()'d panel subscribes itself and re-renders its
   // whole timeline when the UI language changes. `lang` also feeds the memos
-  // below: they build translated fallbacks (a thread's "Run control" label),
+  // below: they build translated fallbacks (including the Run group label),
   // and a memo keyed only on data would keep the pre-switch wording.
   const t = useT();
   const lang = useLang();
+  const taskMap = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
   const conversations = useMemo(() => {
     const grouped = new Map<string, ActivityEvent[]>();
-    const taskMap = new Map(tasks.map((task) => [task.id, task]));
     const presenceMap = new Map(snapshot.presence.map((presence) => [presence.taskId, presence]));
     // A worker-start sends the Task spec as the worker's initial brief, but
     // Orca's coordinator mailbox only retains worker-to-coordinator messages.
     // Seed each Task thread from the DAG so that this real outbound half of
     // the exchange remains visible without pretending it was a mailbox row.
-    grouped.set(COORDINATOR_THREAD, []);
+    // Group and private views project the very same retained events. No
+    // second transcript, synthetic delivery, or separate room transport.
+    grouped.set(COORDINATOR_THREAD, snapshot.events);
     for (const task of tasks) grouped.set(task.id, []);
     for (const event of snapshot.events) {
-      const id = event.taskId ?? COORDINATOR_THREAD;
+      if (!event.taskId) continue;
+      const id = event.taskId;
       const current = grouped.get(id) ?? [];
       current.push(event);
       grouped.set(id, current);
     }
+    // A missing/loading node must keep its requested identity instead of
+    // falling through to another conversation with a different recipient.
+    if (taskSelection && !grouped.has(taskSelection.taskId)) grouped.set(taskSelection.taskId, []);
 
     return [...grouped.entries()]
       .map(([id, events]): Conversation => {
         const sorted = [...events].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-        const workerEvent = [...sorted]
+        const workerEvent = id === COORDINATOR_THREAD ? undefined : [...sorted]
           .reverse()
           .find((event) => event.actor.role === "worker" || event.actor.role === "lead");
         const taskId = id === COORDINATOR_THREAD ? null : id;
         const task = taskId ? taskMap.get(taskId) ?? null : null;
         const presence = taskId ? presenceMap.get(taskId) ?? null : null;
-        const harness = presence?.agent ?? workerEvent?.actor.harness ?? null;
+        const dispatchId = presence?.dispatchId ?? task?.dispatchId ?? workerEvent?.dispatchId;
+        let harness = presence?.agent ?? null;
+        // Settlement rows can omit the brand. Recover it only from the same
+        // Dispatch's worker evidence, never a previous attempt or saved plan.
+        for (let index = sorted.length - 1; !harness && index >= 0; index--) {
+          const event = sorted[index];
+          if (event.dispatchId === dispatchId && (event.actor.role === "worker" || event.actor.role === "lead")) {
+            harness = event.actor.harness;
+          }
+        }
         const model = presence?.model ?? workerEvent?.actor.model ?? null;
         const effort = presence?.effort ?? null;
         return {
@@ -394,8 +305,9 @@ export const ChatPanel = memo(function ChatPanel({
           taskId,
           label: taskId
             ? workerEvent?.actor.label || task?.label || t("chat.thread.stageFallback", { id: taskId })
-            : t("chat.thread.runControl"),
+            : t("chat.group.conversation"),
           subtitle: [harness, model, effort].filter(Boolean).join(" · ") || null,
+          harness,
           isLead: Boolean(taskId && taskId === leadTaskId),
           task,
           presence,
@@ -406,163 +318,183 @@ export const ChatPanel = memo(function ChatPanel({
           urgent: sorted.some((event) => isUrgent(event)),
         };
       })
-      .sort((a, b) => {
-        // Run control is infrastructure, not another worker conversation. Keep
-        // it in a stable system slot so Agent traffic can reorder by recency
-        // without making the control plane look like a peer Agent.
-        const aIsSystem = a.id === COORDINATOR_THREAD;
-        const bIsSystem = b.id === COORDINATOR_THREAD;
-        if (aIsSystem !== bIsSystem) return aIsSystem ? -1 : 1;
-        return b.latestAt.localeCompare(a.latestAt);
-      });
-  }, [lang, leadTaskId, snapshot.events, snapshot.presence, tasks]);
+      .sort((a, b) => b.latestAt.localeCompare(a.latestAt));
+  }, [lang, leadTaskId, snapshot.events, snapshot.presence, taskMap, tasks, taskSelection?.taskId]);
 
-  const [selectedId, setSelectedId] = useScopedChatState<string | null>(runId, null);
   const [chatView, setChatView] = useScopedChatState<"private" | "group">(runId, "private");
-  const selected = conversations.find((conversation) =>
-    conversation.id === (chatView === "group" ? COORDINATOR_THREAD : selectedId)) ?? null;
+  const [privateSelectedId, setPrivateSelectedId] = useScopedChatState<string | null>(runId, null);
+  const [groupSelectedId, setGroupSelectedId] = useScopedChatState<string | null>(runId, null);
+  const selectedId = chatView === "private" ? privateSelectedId : groupSelectedId;
+  const setSelectedId = chatView === "private" ? setPrivateSelectedId : setGroupSelectedId;
+  const [groupTargetId, setGroupTargetId] = useScopedChatState(runId, "");
+  const [mobileConversationOpen, setMobileConversationOpen] = useScopedChatState(runId, false);
+  const [threadView, setThreadView] = useScopedChatState<"messages" | "task" | "dispatch" | "checks">(runId, "messages");
+  const chatContainerRef = useRef<HTMLDivElement>(null);
+  const sidebarRef = useRef<HTMLElement>(null);
+  const conversationHeadingRef = useRef<HTMLHeadingElement>(null);
+  const taskTabRef = useRef<HTMLButtonElement>(null);
+  const returnToListFocus = useRef(false);
+  const [compact, setCompact] = useState(false);
+  useLayoutEffect(() => {
+    const container = chatContainerRef.current;
+    if (!container) return;
+    const update = () => setCompact(container.clientWidth <= 640);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [Boolean(runId)]);
+  useLayoutEffect(() => {
+    if (!active || !taskSelection) return;
+    setPrivateSelectedId(taskSelection.taskId);
+    setChatView("private");
+    setThreadView("messages");
+    setMobileConversationOpen(true);
+    const frame = window.requestAnimationFrame(() => conversationHeadingRef.current?.focus({ preventScroll: true }));
+    return () => window.cancelAnimationFrame(frame);
+  }, [active, taskSelection, setPrivateSelectedId, setChatView, setThreadView, setMobileConversationOpen]);
+  useLayoutEffect(() => {
+    if (!active || !groupSelection) return;
+    setGroupSelectedId(COORDINATOR_THREAD);
+    setChatView("group");
+    setThreadView("messages");
+    setMobileConversationOpen(true);
+  }, [active, groupSelection, setGroupSelectedId, setChatView, setThreadView, setMobileConversationOpen]);
+  const timelineActive = active && (!compact || mobileConversationOpen) && threadView === "messages";
+  const [threadQuery, setThreadQuery] = useScopedChatState(runId, "");
+  const query = threadQuery.trim().toLocaleLowerCase();
+  const filteredConversations = conversations.filter((conversation) =>
+    chatView === "group" ? conversation.taskId === null
+      : conversation.taskId !== null && (!query || [conversation.label, conversation.taskId, conversation.subtitle]
+        .some((value) => value?.toLocaleLowerCase().includes(query))));
+  const selected = conversations.find((conversation) => conversation.id === selectedId) ?? null;
+  // Never infer an @recipient from the latest speaker or the last private
+  // conversation. Missing/stale selections remain unsendable, not redirected.
+  const composeTarget = chatView === "group"
+    ? conversations.find((conversation) => conversation.taskId === groupTargetId) ?? null
+    : selected;
+  const replyTarget = composeTarget?.pending.at(-1) ?? null;
+  const composeScope = JSON.stringify([runId, composeTarget?.id ?? null]);
+  const recipientOptions: DoodleOption[] = useMemo(() => conversations
+    .filter((conversation) => conversation.taskId !== null)
+    .map((conversation) => ({
+      value: conversation.id,
+      label: `@${conversation.label}`,
+      hint: `${conversation.id} · ${conversation.task
+        ? stageState(conversation.task, conversation.presence, conversation.pending.length > 0)
+        : t("chat.thread.stateUnavailable")}${!conversation.pending.length && !coordinatorActive && conversation.task?.status === "dispatched"
+        ? ` · ${t("chat.compose.idleStartCoordinator")}` : ""}`,
+      disabled: !conversation.pending.length &&
+        !(coordinatorActive && conversation.task?.status === "dispatched" && conversation.task.dispatchId),
+    })), [conversations, coordinatorActive, lang]);
   const conversationScope = JSON.stringify([runId, selected?.id ?? null]);
+  // Mount Task controls on first use, then retain their drafts, disclosures
+  // and in-flight receipts while switching sibling tabs in this conversation.
+  const [taskVisited, setTaskVisited] = useScopedChatState(conversationScope, false);
+  const [dispatchVisited, setDispatchVisited] = useScopedChatState(`${conversationScope}:dispatch`, false);
+  useLayoutEffect(() => {
+    if (!active || !compact) return;
+    if (mobileConversationOpen) conversationHeadingRef.current?.focus({ preventScroll: true });
+    else if (returnToListFocus.current) {
+      const sidebar = sidebarRef.current;
+      (sidebar?.querySelector<HTMLButtonElement>('.chat__thread[aria-pressed="true"]')
+        ?? sidebar?.querySelector<HTMLInputElement>("input"))?.focus({ preventScroll: true });
+      returnToListFocus.current = false;
+    }
+  }, [active, compact, mobileConversationOpen, conversationScope]);
+
+  function openConversation(id: string) {
+    if (chatView === "private") {
+      onSelectTask(id);
+      return;
+    }
+    setSelectedId(id);
+    setThreadView("messages");
+    setMobileConversationOpen(true);
+  }
+
+  function openTaskDetails() {
+    if (!selected?.taskId) return;
+    setTaskVisited(true);
+    setThreadView("task");
+  }
+
+  function backToConversations() {
+    returnToListFocus.current = true;
+    setMobileConversationOpen(false);
+    setThreadView("messages");
+  }
+
   // A new question or Dispatch is a new recipient. Retain the earlier draft
   // separately instead of silently forwarding it to the replacement worker.
-  const draftScope = JSON.stringify([runId, selected?.id ?? null,
-    selected?.pending.at(-1)?.actionable?.targetId ?? selected?.task?.dispatchId ?? null]);
-  const [expandedChecks, setExpandedChecks] = useScopedChatState<Record<string, number>>(conversationScope, {});
+  const draftScope = JSON.stringify([runId, chatView, composeTarget?.id ?? null,
+    replyTarget?.actionable?.targetId ?? composeTarget?.task?.dispatchId ?? null]);
   const [draft, setDraft] = useScopedChatState(draftScope, "");
-  const [busy, setBusy] = useScopedChatState(conversationScope, false);
-  const [error, setError] = useScopedChatState<string | null>(conversationScope, null);
-  const [messageReceipt, setMessageReceipt] = useScopedChatState<TaskMessageReceipt | null>(conversationScope, null);
-  const [operatorReceipt, setOperatorReceipt] = useScopedChatState<{ runId: string; value: string } | null>(conversationScope, null);
+  // Busy/uncertain delivery is shared across both views of the same Task;
+  // switching to private chat cannot bypass an in-flight or unknown send.
+  const [busy, setBusy] = useScopedChatState(composeScope, false);
+  const [error, setError] = useScopedChatState<string | null>(composeScope, null);
+  const [messageReceipt, setMessageReceipt] = useScopedChatState<TaskMessageReceipt | null>(composeScope, null);
+  const [operatorReceipt, setOperatorReceipt] = useScopedChatState<{ runId: string; value: string } | null>(composeScope, null);
+  const [actionBusy, setActionBusy] = useScopedChatState(conversationScope, false);
+  const [actionError, setActionError] = useScopedChatState<string | null>(conversationScope, null);
   const [uncertainMessages, setUncertainMessages] = useScopedChatState<Record<string, boolean>>(runId, {});
   const [timelineLimit, setTimelineLimit] = useScopedChatState(conversationScope, 100);
   const messagesRef = useRef<HTMLDivElement>(null);
-  const scrollByConversation = useRef(new Map<string, number>());
+  const messageContentRef = useRef<HTMLDivElement>(null);
+  const scrollByConversation = useRef(new Map<string, { top: number; follow: boolean }>());
+  const [awayFromLatest, setAwayFromLatest] = useState(false);
   useLayoutEffect(() => {
     const element = messagesRef.current;
-    if (!active || !element) return;
-    element.scrollTop = scrollByConversation.current.get(conversationScope) ?? element.scrollHeight;
-  }, [active, conversationScope]);
+    const content = messageContentRef.current;
+    if (!timelineActive || !element || !content) return;
+    const saved = scrollByConversation.current.get(conversationScope);
+    element.scrollTop = saved?.follow === false ? saved.top : element.scrollHeight;
+    const update = () => {
+      // Reading history is a local viewport choice, not an Orca read receipt.
+      // Only follow growth when the operator was already at the end.
+      if (scrollByConversation.current.get(conversationScope)?.follow !== false) {
+        element.scrollTop = element.scrollHeight;
+      }
+      setAwayFromLatest(element.scrollHeight - element.clientHeight - element.scrollTop > 48);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(content);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [timelineActive, conversationScope, Boolean(selected)]);
 
-  // --- Phase 6: Run-control group composer -----------------------------------
-  //
-  // The audience list comes from the server's preview endpoint, which only
-  // ever offers allowlisted addresses (@all, @idle, active harness groups,
-  // exact discovered @worktree:<id>). The composer never lets a recipient
-  // string be typed — choosing is the only way to address a group.
+  function jumpToLatest() {
+    const element = messagesRef.current;
+    if (!element) return;
+    scrollByConversation.current.set(conversationScope, { top: element.scrollHeight, follow: true });
+    element.scrollTop = element.scrollHeight;
+    setAwayFromLatest(false);
+    element.focus({ preventScroll: true });
+  }
+
   const dialog = useDecisionDialog();
   const withControl = useCoordinatorControl();
-  const [preview, setPreview] = useScopedChatState<AudiencePreviewResponse | null>(runId, null);
-  const [audience, setAudience] = useScopedChatState(runId, "");
-  const [groupSubject, setGroupSubject] = useScopedChatState(runId, "");
-  const [groupType, setGroupType] = useScopedChatState<"status" | "question">(runId, "status");
-  const [groupPriority, setGroupPriority] = useScopedChatState<GroupPriority>(runId, "normal");
-  const [groupDraft, setGroupDraft] = useScopedChatState(runId, "");
-  const [groupBusy, setGroupBusy] = useScopedChatState(runId, false);
-  const [groupError, setGroupError] = useScopedChatState<string | null>(runId, null);
-  const [previewNonce, setPreviewNonce] = useScopedChatState(runId, 0);
-  const [previewFailed, setPreviewFailed] = useScopedChatState(runId, false);
 
 
   useEffect(() => {
-    if (selectedId && conversations.some((conversation) => conversation.id === selectedId)) return;
-    const next = conversations.find((conversation) => conversation.pending.length > 0)
-      ?? conversations.find((conversation) => conversation.taskId !== null)
-      ?? conversations[0];
-    setSelectedId(next?.id ?? null);
-  }, [conversations, selectedId, setSelectedId]);
+    // The layout effect above owns explicit navigation. A passive fallback
+    // from the previous render must not overwrite it when its placeholder
+    // conversation disappears (missing Task A -> real Task B).
+    if (active && taskSelection) return;
+    const inView = conversations.filter((conversation) =>
+      (chatView === "group") === (conversation.taskId === null));
+    if (selectedId && inView.some((conversation) => conversation.id === selectedId)) return;
+    // Group is a list too: choosing the tab must not open or address a
+    // conversation. Keep its selection separate from the last private Task.
+    const next = chatView === "private"
+      ? inView.find((conversation) => conversation.pending.length > 0) ?? inView[0]
+      : null;
+    if (selectedId !== (next?.id ?? null)) setSelectedId(next?.id ?? null);
+  }, [active, taskSelection, chatView, conversations, selectedId, setSelectedId]);
 
 
-  // Refresh the audience preview when Run control opens, when coordination
-  // flips, and after every send (worker facts may have changed). Estimates
-  // are derived server-side from the same worker facts the rest of the
-  // viewer renders; a failed read leaves the composer without options rather
-  // than inventing any.
-  const isRunControl = selected?.taskId === null;
-  useEffect(() => {
-    if (!runId || !isRunControl || chatView !== "group" || !coordinatorActive) {
-      setPreview(null);
-      setPreviewFailed(false);
-      return;
-    }
-    let cancelled = false;
-    fetchAudiencePreview(runId)
-      .then((next) => {
-        if (!cancelled) {
-          setPreview(next);
-          setPreviewFailed(false);
-        }
-      })
-      .catch(() => {
-        // A failed discovery read must look failed, not eternally loading —
-        // the composer stays empty rather than pretending audiences exist.
-        if (!cancelled) {
-          setPreview(null);
-          setPreviewFailed(true);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [runId, isRunControl, chatView, coordinatorActive, previewNonce]);
-
-  const audienceOptions: DoodleOption[] = useMemo(
-    () =>
-      (preview?.audiences ?? []).map((option) => ({
-        value: option.address,
-        label: option.label,
-        hint: option.estimatedRecipients.length === 1
-          ? t("chat.group.recipientsOne", { n: option.estimatedRecipients.length })
-          : t("chat.group.recipientsMany", { n: option.estimatedRecipients.length }),
-      })),
-    [lang, preview],
-  );
-
-  // A disappearing audience is not permission to redirect a composed message
-  // to @all. Keep the explicit selection; sending stays disabled until the
-  // operator chooses an audience present in the fresh preview.
-  useEffect(() => {
-    if (!audience) setAudience(audienceOptions[0]?.value ?? "");
-  }, [audience, audienceOptions, setAudience]);
-
-  const selectedAudience = preview?.audiences.find((option) => option.address === audience) ?? null;
-
-  async function sendGroup() {
-    const body = groupDraft.trim();
-    if (!body || !runId || disabled || groupBusy || !selectedAudience) return;
-    const estimated = selectedAudience?.estimatedRecipients.length ?? 0;
-    // In-app confirmation for every multi-recipient send. Group addresses are
-    // multi-recipient by construction; the copy states the enqueue-only
-    // guarantee and the estimate caveat verbatim.
-    const confirmed = await dialog.confirm({
-      title: t("chat.confirm.title"),
-      message: estimated === 1
-        ? t("chat.confirm.messageOne", { n: estimated, audience })
-        : t("chat.confirm.messageMany", { n: estimated, audience }),
-      confirmLabel: t("chat.group.sendTo", { audience }),
-      cancelLabel: t("dialog.cancel"),
-    });
-    if (!confirmed) return;
-    setGroupBusy(true);
-    setGroupError(null);
-    try {
-      const receipt = await sendGroupMessage({
-        runId,
-        audience,
-        subject: groupSubject.trim() || undefined,
-        body,
-        type: groupType,
-        priority: groupPriority === "normal" ? null : groupPriority,
-      });
-      setOperatorReceipt({ runId, value: JSON.stringify(receipt) });
-      setGroupDraft("");
-      setGroupSubject("");
-      setPreviewNonce((nonce) => nonce + 1);
-      onResolved();
-    } catch (err) {
-      setGroupError(String((err as Error).message ?? err));
-    } finally {
-      setGroupBusy(false);
-    }
-  }
 
   // Phase 3 history completeness: a saturated global window means rows older
   // than the window may be missing for EVERY Run — including one with only a
@@ -575,29 +507,41 @@ export const ChatPanel = memo(function ChatPanel({
       })
     : null;
   const contextById = new Map((selected?.events ?? []).map((event) => [event.id, event]));
-  const replyTarget = selected?.pending.at(-1) ?? null;
   const progressEvent = selected
     ? [...selected.events].reverse().find(isAgentProgressSignal) ?? null
     : null;
   const outcomeEvent = selected
     ? [...selected.events].reverse().find((event) => event.kind === "worker_done") ?? null
     : null;
-  const visibleEvents = selected?.events.filter((event) => !isAgentProgressSignal(event)) ?? [];
+  // Real mailbox status messages are chat content. Synthetic progress and
+  // heartbeats remain in the runtime summary, not repeated chat bubbles.
+  const visibleEvents = selected?.events.filter((event) => !isAgentProgressSignal(event) ||
+    (event.kind === "status" && event.technical.provenance === "orca_message")) ?? [];
   const selectedChecks = selected
     ? snapshot.checks.filter(
         (receipt) => !selected.taskId || receipt.agents.some((agent) => agent.taskId === selected.taskId),
       )
     : [];
-  const timeline = buildTimeline(visibleEvents, selectedChecks, selected?.taskId ?? null);
   // Keep unresolved actions visible even when their message predates the
   // reading window. Older history remains available explicitly, not mounted
   // forever in every hidden conversation.
-  const timelineStart = Math.max(0, timeline.length - timelineLimit);
-  const visibleTimeline = timeline.filter((item, index) =>
-    index >= timelineStart || (item.kind === "event" && Boolean(item.event.actionable)));
-  const lastCheck = selectedChecks.at(-1) ?? null;
+  const timelineStart = Math.max(0, visibleEvents.length - timelineLimit);
+  const visibleTimeline = visibleEvents.filter((event, index) =>
+    index >= timelineStart || Boolean(event.actionable));
+  useLayoutEffect(() => {
+    const element = messagesRef.current;
+    if (!timelineActive || !element) return;
+    // A bounded timeline can replace its oldest row without changing height.
+    // Follow before browser scroll anchoring runs; ResizeObserver alone would
+    // miss that update and mistake the resulting offset for a user scroll.
+    if (scrollByConversation.current.get(conversationScope)?.follow !== false) {
+      element.scrollTop = element.scrollHeight;
+    }
+    setAwayFromLatest(element.scrollHeight - element.clientHeight - element.scrollTop > 48);
+  }, [timelineActive, conversationScope, selected?.events, timelineLimit]);
+
   const presenceSummary = selected?.task
-    ? replyTarget?.summary ??
+    ? selected.pending.at(-1)?.summary ??
       outcomeEvent?.summary ??
       progressEvent?.summary ??
       compactSignal(selected.presence?.detail) ??
@@ -605,10 +549,10 @@ export const ChatPanel = memo(function ChatPanel({
       t("chat.summary.noUpdate")
     : null;
   const activeDispatch =
-    coordinatorActive && selected?.task?.status === "dispatched" && selected.task.dispatchId
-      ? selected.task.dispatchId
+    coordinatorActive && composeTarget?.task?.status === "dispatched" && composeTarget.task.dispatchId
+      ? composeTarget.task.dispatchId
       : null;
-  const uncertainKey = selected?.taskId ? `${runId}:${selected.taskId}` : null;
+  const uncertainKey = composeTarget?.taskId ? `${runId}:${composeTarget.taskId}` : null;
   const messageUncertain = uncertainKey !== null && Boolean(uncertainMessages[uncertainKey]);
   // Shared by the runtime summary's data-state and its label; extracting keeps
   // the pill's title attribute (full text on hover) from drifting from what's
@@ -625,201 +569,30 @@ export const ChatPanel = memo(function ChatPanel({
     ),
   );
 
-  function renderTimelineCheck(group: TimelineCheckGroup) {
-    const receipt = group.receipts.at(-1)!;
-    const firstReceipt = group.receipts[0];
-    const checkKey = `check:${selected?.id ?? ""}:${firstReceipt.checkedAt}:${firstReceipt.sequence}`;
-    const visibleCount = expandedChecks[checkKey] ?? 0;
-    const firstVisible = Math.max(0, group.receipts.length - visibleCount);
-    const receiptDetail = (candidate: CoordinatorCheckReceipt) => {
-      if (candidate.evidence) return candidate.evidence;
-      const agent = selected?.taskId
-        ? candidate.agents.find((item) => item.taskId === selected.taskId) ?? null
-        : null;
-      return candidate.error ?? (selected?.taskId ? checkAgentLine(agent) : checkFleetLine(candidate.agents));
-    };
-    const agent = selected?.taskId
-      ? receipt.agents.find((candidate) => candidate.taskId === selected.taskId) ?? null
-      : null;
-    const detail = receiptDetail(receipt);
-    const important = Boolean(receipt.error || receipt.messageCount > 0 || agent?.attention.length);
-    const detailsLabel = group.receipts.length > 1
-      ? t("chat.check.detailsMany", { n: group.receipts.length })
-      : t("chat.check.detailsOne");
-    return (
-      <div className="chat-checkpoint-group" key={checkKey}>
-        <div
-          className={`chat-checkpoint chat-checkpoint--digest${important ? " chat-checkpoint--important" : ""}${receipt.error ? " chat-checkpoint--error" : ""}`}
-          aria-label={t("chat.check.listAria")}
-        >
-          <span className="chat-checkpoint__rail" aria-hidden="true">
-            {visibleCount === 0 && <span className="chat-checkpoint__dot" />}
-          </span>
-          <div className="chat-checkpoint__copy">
-            <div className="chat-checkpoint__head">
-              <strong>{checkGroupTitle(group.receipts)}</strong>
-              <time dateTime={new Date(receipt.checkedAt).toISOString()}>{formatClock(new Date(receipt.checkedAt).toISOString())}</time>
-            </div>
-            {important && detail && <span className="chat-checkpoint__summary">{detail}</span>}
-            <button
-              type="button"
-              className="chat-checkpoint__toggle"
-              aria-expanded={visibleCount > 0}
-              aria-controls={visibleCount > 0 ? `${checkKey}-entries` : undefined}
-              onClick={() => setExpandedChecks((current) => {
-                const next = { ...current };
-                if (current[checkKey]) delete next[checkKey];
-                else next[checkKey] = 5;
-                return next;
-              })}
-            >
-              <span className="chat-checkpoint__chevron" aria-hidden="true">›</span>
-              {visibleCount > 0 ? t("chat.check.hide", { label: detailsLabel }) : t("chat.check.expand", { label: detailsLabel })}
-            </button>
-          </div>
-        </div>
-        {visibleCount > 0 && <div className="chat-checkpoint__entries" id={`${checkKey}-entries`}>
-              {firstVisible > 0 && (
-                <button
-                  type="button"
-                  className="chat-checkpoint__older"
-                  onClick={() => setExpandedChecks((current) => ({
-                    ...current,
-                    [checkKey]: Math.min(group.receipts.length, (current[checkKey] ?? 5) + 5),
-                  }))}
-                >
-                  {t("chat.check.showOlder", { n: Math.min(5, firstVisible), remaining: firstVisible })}
-                </button>
-              )}
-              {group.receipts.slice(firstVisible).map((item, index) => {
-                const relevantAgents = selected?.taskId
-                  ? item.agents.filter((candidate) => candidate.taskId === selected.taskId)
-                  : item.agents;
-                const itemIso = new Date(item.checkedAt).toISOString();
-                const itemDetail = receiptDetail(item);
-                return (
-                  <article className={`chat-checkpoint chat-checkpoint--entry${item.error ? " chat-checkpoint--error" : ""}`} key={`${item.checkedAt}:${item.sequence}`} aria-label={t("chat.check.entryAria")}>
-                    <span className="chat-checkpoint__rail" aria-hidden="true">
-                      <span className="chat-checkpoint__dot" />
-                    </span>
-                    <div className="chat-checkpoint__copy chat-checkpoint__receipt">
-                      <header>
-                        <span>{group.receipts.length > 1
-                          ? t("chat.check.recordOf", { index: firstVisible + index + 1, total: group.receipts.length })
-                          : t("chat.check.record")}</span>
-                        <time dateTime={itemIso}>{formatDateTime(itemIso)}</time>
-                      </header>
-                      {itemDetail && <span className="chat-checkpoint__summary" title={itemDetail}>{itemDetail}</span>}
-                      <details className="chat-checkpoint__receipt-details">
-                        <summary>{t("chat.check.evidence")}</summary>
-                        <dl className="chat-checkpoint__facts">
-                          <div>
-                            <dt>{t("chat.check.fieldSource")}</dt>
-                            <dd>{checkSourceLabel(item)}</dd>
-                          </div>
-                          <div>
-                            <dt>{t("chat.check.fieldInboxResult")}</dt>
-                            <dd>{checkInboxResult(item)}</dd>
-                          </div>
-                          <div>
-                            <dt>{t("chat.check.fieldWait")}</dt>
-                            <dd>{checkDurationLabel(item)}</dd>
-                          </div>
-                          <div>
-                            <dt>{t("chat.check.fieldDelivery")}</dt>
-                            <dd title={checkDeliveryLabel(item)}>{checkDeliveryLabel(item)}</dd>
-                          </div>
-                          {item.replayed && (
-                            <div>
-                              <dt>{t("chat.check.fieldReplay")}</dt>
-                              <dd>{t("chat.check.replayValue")}</dd>
-                            </div>
-                          )}
-                        </dl>
-                        {/* A receipt's messages are evidence behind its digest.
-                            Older receipts may have no retained rows. */}
-                        {(item.messages?.length ?? 0) > 0 && (
-                          <details className="chat-checkpoint__messages">
-                            <summary>
-                              <span>{item.messages!.length === 1
-                                ? t("chat.check.countOne", { n: item.messages!.length })
-                                : t("chat.check.countMany", { n: item.messages!.length })}</span>
-                              <span className="chat-checkpoint__chevron" aria-hidden="true">›</span>
-                            </summary>
-                            <ul>
-                              {item.messages!.map((message) => {
-                                const iso = new Date(message.createdAt).toISOString();
-                                return (
-                                  <li key={message.id}>
-                                    <span className="chat-checkpoint__message-type">
-                                      {compactSignal(message.type) ?? message.type}
-                                    </span>
-                                    <span className="chat-checkpoint__message-subject" title={message.subject}>
-                                      {message.subject || t("chat.check.noSubject")}
-                                    </span>
-                                    <time dateTime={iso}>{formatClock(iso)}</time>
-                                  </li>
-                                );
-                              })}
-                            </ul>
-                          </details>
-                        )}
-                        {item.evidence && (
-                          <p className="chat-checkpoint__evidence">
-                            <strong>{t("chat.check.whyShown")}</strong>
-                            <span>{item.evidence}</span>
-                          </p>
-                        )}
-                        <div className="chat-checkpoint__agents">
-                          <strong>{t("chat.check.agents")}</strong>
-                          {relevantAgents.length > 0 ? relevantAgents.map((candidate) => {
-                            const stage = tasks.find((task) => task.id === candidate.taskId);
-                            const agentName = candidate.agent === "unknown agent" ? null : candidate.agent;
-                            const runtime = [agentName, candidate.model, candidate.effort].filter(Boolean).join(" · ");
-                            return (
-                              <div className="chat-checkpoint__agent" key={`${item.sequence}:${candidate.taskId}`}>
-                                <span>{stage?.label ?? candidate.taskId}</span>
-                                <small>{runtime || t("chat.check.runtimeNotRecorded")}</small>
-                                <p>{checkAgentLine(candidate)}</p>
-                              </div>
-                            );
-                          }) : (
-                            <p className="chat-checkpoint__empty">{t("chat.check.noAgentState")}</p>
-                          )}
-                        </div>
-                      </details>
-                    </div>
-                  </article>
-                );
-              })}
-        </div>}
-      </div>
-    );
-  }
 
   async function acknowledge(event: ActivityEvent) {
-    if (!event.dispatchId || disabled || busy) return;
+    if (!event.dispatchId || disabled || busy || actionBusy) return;
     const confirmed = await dialog.confirm({
       title: t("inbox.ackStopTitle"),
       message: t("inbox.ackStopMessage", { dispatch: event.dispatchId, reason: String((event.technical.payload as { stopReason?: unknown } | undefined)?.stopReason ?? t("worker.unknown")) }),
       confirmLabel: t("inbox.ackStop"),
     });
     if (!confirmed) return;
-    setBusy(true);
-    setError(null);
+    setActionBusy(true);
+    setActionError(null);
     try {
       await acknowledgeStopEvent(runId, event.id, event.dispatchId);
       onResolved();
     } catch (error) {
-      setError(String((error as Error).message ?? error));
-    } finally { setBusy(false); }
+      setActionError(String((error as Error).message ?? error));
+    } finally { setActionBusy(false); }
   }
 
   async function sendMessage() {
     const body = draft.trim();
     const targetId = replyTarget?.actionable?.targetId;
-    const taskId = selected?.taskId;
-    if (!body || !runId || disabled || busy || (!targetId && (!taskId || !activeDispatch || messageUncertain))) return;
+    const taskId = composeTarget?.taskId;
+    if (!body || !runId || disabled || busy || actionBusy || (!targetId && (!taskId || !activeDispatch || messageUncertain))) return;
     setBusy(true);
     setError(null);
     setMessageReceipt(null);
@@ -852,69 +625,154 @@ export const ChatPanel = memo(function ChatPanel({
 
 
   return (
-    <div className="chat-container">
-    <section className="chat" aria-label={t("chat.aria.section")}>
-      <aside className="chat__sidebar" aria-label={t("chat.aria.threadList")}>
+    <div className="chat-container" ref={chatContainerRef}>
+    <section className="chat" data-mobile-view={mobileConversationOpen ? "conversation" : "list"} aria-label={t("chat.aria.section")}>
+      <aside className="chat__sidebar" ref={sidebarRef} aria-label={t("chat.aria.threadList")}>
         <h2>{t("chat.sidebar.title")}</h2>
-        <div className="chat__switch" role="group" aria-label={t("chat.sidebar.view")}>
-          <button type="button" aria-pressed={chatView === "private"} onClick={() => setChatView("private")}>{t("chat.sidebar.private")}</button>
-          <button type="button" aria-pressed={chatView === "group"} onClick={() => setChatView("group")}>{t("chat.sidebar.group")}</button>
-        </div>
-        {chatView === "private" ? (
-          <div className="chat__thread-list">
-            {conversations.map((conversation) => (
-              <button
-                type="button"
-                className="chat__thread"
-                key={conversation.id}
-                aria-pressed={selectedId === conversation.id}
-                onClick={() => setSelectedId(conversation.id)}
-              >
-                <strong>{conversation.label}</strong>
-                {conversation.taskId && conversation.taskId !== conversation.label && <span>{conversation.taskId}</span>}
-                {conversation.urgent && <span>{t("chat.thread.urgentAria")}</span>}
-                {conversation.unread && <span>{t("chat.thread.unreadAria")}</span>}
-                {conversation.pending.length > 0 && <span>{t("chat.thread.repliesNeeded", { n: conversation.pending.length })}</span>}
-              </button>
-            ))}
-          </div>
-        ) : (
-          <p className="chat__sidebar-note">{t("chat.sidebar.groupNote")}</p>
-        )}
+        <ToggleGroup.Root
+          className="chat__switch"
+          role="radiogroup"
+          type="single"
+          value={chatView}
+          onValueChange={(value) => {
+            if (value !== "private" && value !== "group") return;
+            setChatView(value);
+            if (value === "group") onSelectTask(null);
+            setThreadView("messages");
+            setMobileConversationOpen(false);
+          }}
+          aria-label={t("chat.sidebar.view")}
+        >
+          <ToggleGroup.Item value="private">{t("chat.sidebar.private")}</ToggleGroup.Item>
+          <ToggleGroup.Item value="group">{t("chat.sidebar.group")}</ToggleGroup.Item>
+        </ToggleGroup.Root>
+            <div className="chat__thread-browser">
+              {chatView === "private" && <input type="search" className="chat__thread-search" value={threadQuery} onChange={(event) => setThreadQuery(event.target.value)} placeholder={t("chat.sidebar.search")} aria-label={t("chat.sidebar.search")} />}
+              <div className="chat__thread-list">
+                {filteredConversations.map((conversation) => (
+                  <button
+                    type="button"
+                    className="chat__thread"
+                    key={conversation.id}
+                    aria-pressed={selectedId === conversation.id}
+                    title={[conversation.label, conversation.taskId, conversation.subtitle].filter(Boolean).join("\n")}
+                    onClick={() => openConversation(conversation.id)}
+                  >
+                    <HarnessAvatar harness={conversation.harness} kind={conversation.taskId ? "agent" : "system"} size={36} />
+                    <span className="chat__thread-copy">
+                    <span className="chat__thread-name">
+                      <strong>{conversation.label}</strong>
+                      {conversation.events.length > 0 && <time dateTime={conversation.latestAt} title={formatDateTime(conversation.latestAt)}>{formatClock(conversation.latestAt)}</time>}
+                    </span>
+                    {conversation.taskId && <span className="chat__thread-status">{conversation.task
+                      ? stageState(conversation.task, conversation.presence, conversation.pending.length > 0)
+                      : t("chat.thread.stateUnavailable")}</span>}
+                    <span className="chat__thread-preview">{conversation.events.at(-1)?.summary ??
+                      t(conversation.taskId ? "chat.thread.previewAssigned" : "chat.sidebar.groupNote")}</span>
+                    {(conversation.urgent || conversation.unread || conversation.pending.length > 0) && (
+                      <span className="chat__thread-badges">
+                        {conversation.urgent && <span className="chat__thread-urgent">{t("chat.thread.urgentAria")}</span>}
+                        {conversation.unread && <span title={t("chat.message.unreadTitle")}>{t("chat.message.unread")}</span>}
+                        {conversation.pending.length > 0 && <span>{t("chat.thread.repliesNeeded", { n: conversation.pending.length })}</span>}
+                      </span>
+                    )}
+                    </span>
+                  </button>
+                ))}
+                {filteredConversations.length === 0 && <p className="chat__sidebar-note" role="status">{t(query ? "chat.sidebar.noMatches" : "chat.sidebar.emptyPrivate")}</p>}
+              </div>
+            </div>
       </aside>
 
-      <div className="chat__conversation">
+      <Tabs.Root className="chat__conversation" value={threadView} onValueChange={(value) => {
+        if (value === "task") openTaskDetails();
+        else if (value === "dispatch") {
+          if (!selected?.taskId) return;
+          setDispatchVisited(true);
+          setThreadView("dispatch");
+        }
+        else if (value === "messages" || value === "checks") setThreadView(value);
+      }}>
+        {!selected && <p className="chat__choose-conversation">{t("chat.chooseConversation")}</p>}
         {selected && (
           <>
             <header className="chat__conversation-head">
-              <div>
-                <div className="chat__conversation-title">
-                  <strong>{chatView === "group" ? t("chat.sidebar.groupTitle") : selected.label}</strong>
-                  {chatView === "private" && selected.isLead && <span>{t("chat.leadStage")}</span>}
-                  {chatView === "private" && !selected.taskId && <span className="chat__conversation-system">{t("chat.thread.system")}</span>}
-                </div>
-                {selected.subtitle && selected.subtitle !== selected.label && selected.subtitle !== selected.taskId
-                  ? <p>{selected.subtitle}</p>
-                  : !selected.taskId && !selected.subtitle ? <p>{t("chat.systemSubtitle")}</p> : null}
-                {selected.taskId && <div className="chat__recipient-identity">
-                  {selected.taskId !== selected.label && <span>{t("record.task")}: <code>{selected.taskId}</code></span>}
-                  {selected.task?.dispatchId && <span>{t("record.dispatch")}: <code>{selected.task.dispatchId}</code></span>}
-                  {replyTarget?.dispatchId && replyTarget.dispatchId !== selected.task?.dispatchId && <span>{t("record.dispatch")}: <code>{replyTarget.dispatchId}</code></span>}
-                </div>}
-              </div>
-              {selected.taskId && (
-                <button type="button" onClick={() => onSelectTask(selected.taskId!)}>
-                  {t("chat.openStage")}
+              {!onCloseInspector && (
+                <button type="button" className="chat__back" onClick={backToConversations} aria-label={t("chat.backToList")}>
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
                 </button>
               )}
+              <HarnessAvatar harness={selected.harness} kind={selected.taskId ? "agent" : "system"} size={30} />
+              <div className="chat__conversation-info">
+                <div className="chat__conversation-title">
+                  <h2 ref={conversationHeadingRef} tabIndex={-1}>{selected.label}</h2>
+                  {chatView === "private" && selected.isLead && <span>{t("chat.leadStage")}</span>}
+                </div>
+                {chatView === "group" ? <p>{t("chat.sidebar.groupNote")}</p>
+                  : selected.subtitle && selected.subtitle !== selected.label && selected.subtitle !== selected.taskId
+                    ? <p className="chat__conversation-model">{selected.subtitle}</p>
+                    : null}
+              </div>
+              <div className="chat__conversation-actions">
+                {selected.taskId && (
+                  <Popover.Root key={conversationScope}>
+                    <Popover.Trigger asChild>
+                      <button type="button" className="chat__identity-button" aria-label={t("chat.recipient.details")} title={t("chat.recipient.details")}>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 11v6m0-10v.01" /></svg>
+                      </button>
+                    </Popover.Trigger>
+                    <Popover.Portal>
+                      <Popover.Content className="chat-recipient-popover" sideOffset={8} collisionPadding={12} aria-label={t("chat.recipient.details")} onEscapeKeyDown={(event) => event.stopPropagation()}>
+                        <strong>{selected.label}</strong>
+                        {selected.subtitle && <p>{selected.subtitle}</p>}
+                        <dl>
+                          <dt>{t("record.task")}</dt><dd><code>{selected.taskId}</code></dd>
+                          {selected.task?.dispatchId && <><dt>{t("record.dispatch")}</dt><dd><code>{selected.task.dispatchId}</code></dd></>}
+                          {replyTarget?.dispatchId && replyTarget.dispatchId !== selected.task?.dispatchId && <><dt>{t("record.dispatch")}</dt><dd><code>{replyTarget.dispatchId}</code></dd></>}
+                        </dl>
+                        <Popover.Close asChild>
+                          <button type="button" className="btn btn--ghost" onClick={() => {
+                            openTaskDetails();
+                            window.requestAnimationFrame(() => taskTabRef.current?.focus());
+                          }}>{t("chat.openStage")}</button>
+                        </Popover.Close>
+                      </Popover.Content>
+                    </Popover.Portal>
+                  </Popover.Root>
+                )}
+                {onCloseInspector && (
+                  <button
+                    type="button"
+                    className="odag-btn odag-btn--ghost odag-btn--icon"
+                    onClick={onCloseInspector}
+                    aria-label={t("ide.inspector.close")}
+                    title={t("ide.inspector.close")}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
+                  </button>
+                )}
+              </div>
             </header>
+            <Tabs.List className="chat__view-tabs" aria-label={t("chat.view.label")}>
+              <Tabs.Trigger value="messages">{t("chat.view.messages")}</Tabs.Trigger>
+              {selected.taskId && <Tabs.Trigger value="task" ref={taskTabRef}>{t("chat.view.task")}</Tabs.Trigger>}
+              {selected.taskId && renderDispatch && <Tabs.Trigger value="dispatch">{t("ide.inspector.tabDispatch")}</Tabs.Trigger>}
+              <Tabs.Trigger value="checks">{t("chat.checks.title")}<span>{selectedChecks.length}</span></Tabs.Trigger>
+            </Tabs.List>
+            <Tabs.Content className="chat__view chat__view--messages" value="messages" forceMount hidden={threadView !== "messages"}>
 
-            <div className="chat__messages" aria-live="polite" ref={messagesRef} onScroll={(event) => {
-              if (active) scrollByConversation.current.set(conversationScope, event.currentTarget.scrollTop);
+            <div className="chat__timeline">
+            <div className="chat__messages" role="region" aria-label={t("chat.timeline.label")} aria-live="polite" tabIndex={0} ref={messagesRef} onScroll={(event) => {
+              if (!timelineActive) return;
+              const element = event.currentTarget;
+              const follow = element.scrollHeight - element.clientHeight - element.scrollTop <= 48;
+              scrollByConversation.current.set(conversationScope, { top: element.scrollTop, follow });
+              setAwayFromLatest(!follow);
             }}>
-              {visibleTimeline.length < timeline.length && (
+              <div className="chat__message-content" ref={messageContentRef}>
+              {visibleTimeline.length < visibleEvents.length && (
                 <div className="chat__history-window">
-                  <span>{t("workbench.chat.window", { shown: visibleTimeline.length, total: timeline.length })}</span>
+                  <span>{t("workbench.chat.window", { shown: visibleTimeline.length, total: visibleEvents.length })}</span>
                   <button type="button" onClick={() => setTimelineLimit((count) => count + 100)}>{t("workbench.chat.more")}</button>
                 </div>
               )}
@@ -927,6 +785,8 @@ export const ChatPanel = memo(function ChatPanel({
                 </div>
               )}
               {selected.task && !hasRecordedAssignment && (
+                <div className="chat-message-row chat-message-row--outgoing">
+                <HarnessAvatar kind="operator" size={28} />
                 <article className="chat-message chat-message--outgoing chat-message--brief">
                   <div className="chat-message__meta">
                     <strong>{t("chat.actor.coordinator")}</strong>
@@ -942,12 +802,14 @@ export const ChatPanel = memo(function ChatPanel({
                     </details>
                   )}
                 </article>
+                </div>
               )}
-              {visibleTimeline.map((item) => {
-                if (item.kind === "check") return renderTimelineCheck(item);
-                const event = item.event;
+              {visibleTimeline.map((event) => {
                 const system = event.direction === "system" || event.actor.role === "system";
                 const outgoing = event.direction === "coordinator_to_agent";
+                const actor = eventActor(event, event.taskId ? taskMap.get(event.taskId) : undefined);
+                const runtime = outgoing ? "" : [event.actor.harness, event.actor.model].filter(Boolean).join(" · ");
+                const senderTaskId = !outgoing && event.taskId !== actor ? event.taskId : null;
                 // Phase 6: an audience turns the bubble into a distinct group
                 // send — different border treatment, an audience chip, the
                 // requested priority, and the enqueue-only provenance note.
@@ -960,12 +822,25 @@ export const ChatPanel = memo(function ChatPanel({
                     <time dateTime={event.createdAt}>{formatDateTime(event.createdAt)}</time>
                   </div>
                 ) : (
-                  <article
-                    key={event.id}
-                    className={`chat-message ${outgoing ? "chat-message--outgoing" : "chat-message--incoming"} chat-message--${event.kind} chat-message--${event.severity}${isUrgent(event) ? " chat-message--urgent" : ""}${event.audience ? " chat-message--group" : ""}`}
-                  >
+                  <div className={`chat-message-row${outgoing ? " chat-message-row--outgoing" : ""}`} key={event.id}>
+                    {chatView === "group" && !outgoing && event.taskId
+                      ? <button type="button" className="chat-message-avatar" onClick={() => onSelectTask(event.taskId!)} aria-label={t("chat.avatar.openPrivate", { label: taskMap.get(event.taskId)?.label ?? event.taskId })}>
+                          <HarnessAvatar harness={event.actor.harness} size={36} />
+                        </button>
+                      : <HarnessAvatar harness={event.actor.harness} kind={outgoing ? "operator" : "agent"} size={28} />}
+                    <article
+                      className={`chat-message ${outgoing ? "chat-message--outgoing" : "chat-message--incoming"} chat-message--${event.kind} chat-message--${event.severity}${isUrgent(event) ? " chat-message--urgent" : ""}${event.audience ? " chat-message--group" : ""}`}
+                    >
                     <div className="chat-message__meta">
-                      <strong>{eventActor(event)}</strong>
+                      <div className="chat-message__sender">
+                        <strong>{actor}</strong>
+                        {(senderTaskId || (runtime && runtime !== actor)) && (
+                          <span className="chat-message__sender-details">
+                            {senderTaskId && <code title={t("record.task")}>{senderTaskId}</code>}
+                            {runtime && runtime !== actor && <span>{runtime}</span>}
+                          </span>
+                        )}
+                      </div>
                       {/* Provenance stays visible: a locally journaled row is
                           this viewer's own record, superseded by the
                           authoritative Orca message once it lands. */}
@@ -1000,6 +875,11 @@ export const ChatPanel = memo(function ChatPanel({
                       )}
                       <time dateTime={event.createdAt}>{formatDateTime(event.createdAt)}</time>
                     </div>
+                    {chatView === "group" && event.taskId && (
+                      <span className="chat-message__mention">
+                        {outgoing ? `@${taskMap.get(event.taskId)?.label ?? event.taskId}` : t("chat.mention.coordinator")}
+                      </span>
+                    )}
                     {(() => {
                       const parent = replyContextOf(event, contextById);
                       return parent ? (
@@ -1024,7 +904,7 @@ export const ChatPanel = memo(function ChatPanel({
                       <div className="inbox__meta">
                         {t("inbox.stopEvent", { reason: String((event.technical.payload as { stopReason?: unknown } | undefined)?.stopReason ?? t("worker.unknown")) })}
                         {event.actionable?.kind === "acknowledge_stop" && event.dispatchId && (
-                          <button type="button" className="btn btn--gate" disabled={disabled || busy} onClick={() => void acknowledge(event)}>{t("inbox.ackStop")}</button>
+                          <button type="button" className="btn btn--gate" disabled={disabled || busy || actionBusy} onClick={() => void acknowledge(event)}>{t("inbox.ackStop")}</button>
                         )}
                       </div>
                     )}
@@ -1035,6 +915,7 @@ export const ChatPanel = memo(function ChatPanel({
                       </details>
                     )}
                   </article>
+                  </div>
                 );
               })}
 
@@ -1052,22 +933,27 @@ export const ChatPanel = memo(function ChatPanel({
                     ? presenceSummary
                     : coordinatorActive ? t("chat.summary.scheduling") : t("chat.summary.runLevelOnly")}
                 </span>
-                <span className="chat-runtime-summary__meta">
-                  {lastCheck
-                    ? t("chat.summary.lastCheck", { time: formatClock(new Date(lastCheck.checkedAt).toISOString()) })
-                    : t("chat.summary.noChecks")}
-                  {selectedChecks.length > 0 && t("chat.summary.totalChecks", { n: selectedChecks.length })}
-                </span>
               </section>
+              </div>
+            </div>
+              {awayFromLatest && <button type="button" className="chat__jump-latest" onClick={jumpToLatest}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 5v14m-7-7 7 7 7-7" /></svg>
+                {t("chat.timeline.latest")}
+              </button>}
             </div>
 
             <footer className="chat__composer">
-              {error && <div className="chat__error" role="status">⚠ {error}</div>}
+              {error && <div className="chat__error" role="status">{error}</div>}
+              {actionError && <div className="chat__error" role="status">{actionError}</div>}
               {messageUncertain && <div className="inbox__meta" role="status">{t("chat.message.sendUncertain")}</div>}
-              {operatorReceipt?.runId === runId && <div role="status" className="inbox__body"><strong>{t("chat.message.operatorReceipt")}</strong><pre>{operatorReceipt.value}</pre></div>}
-              {messageReceipt && messageReceipt.runId === runId && messageReceipt.requestedTaskId === selected.taskId && (
-                <div className="inbox__body" role="status" data-testid="task-message-receipt">
+              {operatorReceipt?.runId === runId && <div role="status" className="chat__receipt">
+                <details key={operatorReceipt.value}><summary>{t("chat.message.operatorReceipt")}</summary><pre>{operatorReceipt.value}</pre></details>
+              </div>}
+              {messageReceipt && messageReceipt.runId === runId && messageReceipt.requestedTaskId === composeTarget?.taskId && (
+                <div className="chat__receipt" role="status" data-testid="task-message-receipt">
                   <strong>{t(messageReceipt.kind === "follow_up" ? "chat.message.followUp" : messageReceipt.kind === "recipient_run_bound_redirect" ? "chat.message.redirect" : "chat.message.taskEnqueued")}</strong>
+                  <details key={messageReceipt.requestId ?? messageReceipt.dispatchId}>
+                    <summary>{t("chat.message.receiptDetails")}</summary>
                   <dl className="record-facts">
                     <dt>{t("record.task")}</dt><dd><code>{messageReceipt.taskId}</code></dd>
                     <dt>{t("record.dispatch")}</dt><dd><code>{messageReceipt.dispatchId}</code></dd>
@@ -1077,6 +963,7 @@ export const ChatPanel = memo(function ChatPanel({
                     {messageReceipt.destinationRunId && <><dt>{t("chat.message.destinationRun")}</dt><dd><code>{messageReceipt.destinationRunId}</code></dd></>}
                     {messageReceipt.requestId && <><dt>{t("record.request")}</dt><dd><code>{messageReceipt.requestId}</code></dd></>}
                   </dl>
+                  </details>
                   <span className="inbox__meta">{t("chat.message.taskReceiptNote")}</span>
                   {messageReceipt.kind === "follow_up" && (
                     <div className="gate__actions">
@@ -1086,157 +973,71 @@ export const ChatPanel = memo(function ChatPanel({
                   )}
                 </div>
               )}
-              {chatView === "group" && groupError && <div className="chat__error" role="status">⚠ {groupError}</div>}
-              {chatView === "group" && isRunControl && coordinatorActive && !disabled && (
-                <div className="chat__group-composer">
-                  <div className="chat__group-controls">
-                    <label className="chat__group-field">
-                      <span>{t("chat.group.audience")}</span>
-                      <DoodleSelect
-                        value={audience}
-                        onChange={setAudience}
-                        options={audienceOptions}
-                        size="sm"
-                        placeholder={preview ? t("chat.group.selectAudience") : t("chat.group.audiencesUnavailable")}
-                        loading={!preview && !previewFailed}
-                        emptyText={previewFailed ? t("chat.group.discoveryFailed") : t("chat.group.noneDiscovered")}
-                        title={t("chat.group.audienceTitle")}
-                      />
-                    </label>
-                    <label className="chat__group-field">
-                      <span>{t("chat.group.type")}</span>
-                      <DoodleSelect
-                        searchable={false}
-                        value={groupType}
-                        onChange={(value) => setGroupType(value === "question" ? "question" : "status")}
-                        options={[
-                          { value: "status", label: t("chat.group.typeStatus") },
-                          { value: "question", label: t("chat.group.typeQuestion") },
-                        ]}
-                        size="sm"
-                        title={t("chat.group.typeTitle")}
-                      />
-                    </label>
-                    <label className="chat__group-field">
-                      <span>{t("chat.group.priority")}</span>
-                      <DoodleSelect
-                        searchable={false}
-                        value={groupPriority}
-                        onChange={(value) =>
-                          setGroupPriority(
-                            (GROUP_PRIORITIES as readonly string[]).includes(value)
-                              ? (value as GroupPriority)
-                              : "normal",
-                          )
-                        }
-                        options={GROUP_PRIORITIES.map((priority) => ({
-                          value: priority,
-                          // Same mapping the priority chips use, so the dropdown
-                          // and a sent bubble can never disagree about a level.
-                          label: priorityLabel({ priority }),
-                        }))}
-                        size="sm"
-                      />
-                    </label>
-                  </div>
-                  {selectedAudience && (
-                    <p className="chat__group-estimate">
-                      <strong>{t("chat.group.estimated", { n: selectedAudience.estimatedRecipients.length })}</strong>{" "}
-                      {selectedAudience.estimatedRecipients.length === 0
-                        ? t("chat.group.estimatedNone")
-                        : selectedAudience.estimatedRecipients
-                            .slice(0, 6)
-                            .map((candidate) => tasks.find((task) => task.id === candidate.taskId)?.label ?? candidate.taskId)
-                            .join(", ") + (selectedAudience.estimatedRecipients.length > 6
-                              ? t("chat.group.estimatedMore", { n: selectedAudience.estimatedRecipients.length - 6 })
-                              : "")}
-                      {t("chat.group.estimatedTail")}
-                    </p>
-                  )}
-                  <input
-                    className="chat__group-subject"
-                    value={groupSubject}
-                    disabled={groupBusy}
-                    placeholder={t("chat.group.subjectPlaceholder")}
-                    aria-label={t("chat.group.subjectAria")}
-                    onChange={(event) => setGroupSubject(event.target.value)}
+              {chatView === "group" && (
+                <label className="chat__mention-target">
+                  <span>{t("chat.group.recipient")}</span>
+                  <DoodleSelect
+                    value={groupTargetId}
+                    onChange={setGroupTargetId}
+                    options={recipientOptions}
+                    disabled={disabled || busy || actionBusy}
+                    ariaLabel={t("chat.group.recipient")}
+                    placeholder={t("chat.group.selectTask")}
+                    emptyText={t("chat.sidebar.emptyPrivate")}
+                    size="sm"
                   />
-                  <div className="chat__compose-row">
-                    <textarea
-                      rows={2}
-                      value={groupDraft}
-                      disabled={groupBusy}
-                      placeholder={t("chat.group.messagePlaceholder", { audience: audience || t("chat.group.theGroup") })}
-                      aria-label={t("chat.group.sendAria", { audience: audience || t("chat.group.selectedAudience") })}
-                      onChange={(event) => setGroupDraft(event.target.value)}
-                      onKeyDown={(event) => {
-                        if ((event.metaKey || event.ctrlKey) && event.key === "Enter") void sendGroup();
-                      }}
-                    />
-                    <button
-                      type="button"
-                      className="btn btn--ok"
-                      disabled={groupBusy || !groupDraft.trim() || !selectedAudience}
-                      title={t("chat.group.sendTitle", { audience: audience || t("chat.group.anAudience") })}
-                      onClick={() => void sendGroup()}
-                    >
-                      {groupBusy ? t("chat.compose.sending") : audience ? t("chat.group.sendTo", { audience }) : t("chat.compose.send")}
-                    </button>
-                  </div>
-                  <p className="chat__group-note">{t("chat.group.note")}</p>
-                </div>
+                  {groupTargetId && !composeTarget && <span role="status">{t("chat.group.targetUnavailable")}</span>}
+                </label>
               )}
-              {chatView === "group" ? (
-                (!coordinatorActive || disabled) && <p className="chat__composer-idle">{disabled ? disabledReason ?? t("chat.compose.executionIsUnavailable") : t("chat.sidebar.groupUnavailable")}</p>
-              ) : replyTarget || activeDispatch ? (
-                <div className="chat__compose-row">
-                  <textarea
-                    rows={2}
-                    value={draft}
-                    disabled={disabled || busy}
-                    placeholder={
-                      disabled
-                        ? t("chat.compose.executionUnavailable")
-                        : replyTarget
-                          ? t("chat.compose.replyTo", { label: selected.label })
-                          : t("chat.compose.guidanceTo", { label: selected.label })
-                    }
-                    aria-label={replyTarget
-                      ? t("chat.compose.replyTo", { label: selected.label })
-                      : t("chat.compose.guidanceTo", { label: selected.label })}
-                    onChange={(event) => setDraft(event.target.value)}
-                    onKeyDown={(event) => {
-                      if ((event.metaKey || event.ctrlKey) && event.key === "Enter") void sendMessage();
-                    }}
-                  />
-                  <button
-                    type="button"
-                    className="btn btn--ok"
-                    disabled={disabled || busy || !draft.trim() || (!replyTarget && messageUncertain)}
-                    title={
-                      disabled
-                        ? disabledReason ?? t("chat.compose.executionIsUnavailable")
-                        : !replyTarget && messageUncertain ? t("chat.message.sendUncertain")
-                        : replyTarget ? t("chat.compose.sendReplyTitle") : t("chat.compose.sendGuidanceTitle")
-                    }
-                    onClick={() => void sendMessage()}
-                  >
-                    {busy ? t("chat.compose.sending") : t("chat.compose.send")}
-                  </button>
-                </div>
+              {replyTarget || activeDispatch ? (
+                <MessageComposer
+                  value={draft}
+                  onChange={setDraft}
+                  onSend={sendMessage}
+                  disabled={disabled || busy || actionBusy}
+                  sendDisabled={disabled || busy || actionBusy || !draft.trim() || (!replyTarget && messageUncertain)}
+                  busy={busy}
+                  label={replyTarget ? t("chat.compose.replyTo", { label: composeTarget!.label }) : t("chat.compose.guidanceTo", { label: composeTarget!.label })}
+                  placeholder={disabled ? t("chat.compose.executionUnavailable") : replyTarget
+                    ? t("chat.compose.replyTo", { label: composeTarget!.label })
+                    : t("chat.compose.guidanceTo", { label: composeTarget!.label })}
+                  sendLabel={t("chat.compose.send")}
+                  sendTitle={disabled ? disabledReason ?? t("chat.compose.executionIsUnavailable")
+                    : !replyTarget && messageUncertain ? t("chat.message.sendUncertain")
+                    : replyTarget ? t("chat.compose.sendReplyTitle") : t("chat.compose.sendGuidanceTitle")}
+                />
               ) : (
                 <p className="chat__composer-idle">
-                  {selected.task
-                    ? selected.task.status === "dispatched" && !coordinatorActive
-                      ? t("chat.compose.idleStartCoordinator")
-                      : t("chat.compose.idleNoDispatch")
-                    : t("chat.compose.idlePickStage")}
+                  {disabled ? disabledReason ?? t("chat.compose.executionIsUnavailable")
+                    : composeTarget?.task
+                      ? composeTarget.task.status === "dispatched" && !coordinatorActive
+                        ? t("chat.compose.idleStartCoordinator")
+                        : t("chat.compose.idleNoDispatch")
+                      : chatView === "group" ? t("chat.group.selectTask") : t("chat.compose.idlePickStage")}
                 </p>
               )}
             </footer>
+            </Tabs.Content>
+            {selected.taskId && <Tabs.Content className="chat__view chat__view--task" value="task" forceMount hidden={threadView !== "task"}>
+              <div className="chat__task">
+                {selected.task
+                  ? taskVisited && renderTask(selected.task)
+                  : <p role="status">{t("workbench.taskUnavailable")} <code>{selected.taskId}</code></p>}
+              </div>
+            </Tabs.Content>}
+            {selected.taskId && renderDispatch && <Tabs.Content className="chat__view chat__view--task" value="dispatch" forceMount hidden={threadView !== "dispatch"}>
+              <div className="chat__task">
+                {selected.task
+                  ? dispatchVisited && renderDispatch(selected.task)
+                  : <p role="status">{t("workbench.taskUnavailable")} <code>{selected.taskId}</code></p>}
+              </div>
+            </Tabs.Content>}
+            <Tabs.Content className="chat__view" value="checks" forceMount hidden={threadView !== "checks"}>
+              <MailboxChecks checks={selectedChecks} tasks={tasks} taskId={selected.taskId} scope={conversationScope} />
+            </Tabs.Content>
           </>
         )}
-      </div>
+      </Tabs.Root>
     </section>
     </div>
   );

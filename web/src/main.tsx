@@ -3,7 +3,7 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import { DecisionDialogProvider } from "./components/DecisionDialog";
 import { initSession } from "./api";
-import "./styles.css";
+import "./styles/ide-workbench.css";
 
 // Fetch the per-process mutation token before the first render, so every
 // mutation control is live (or visibly explained) from the start. Failure is

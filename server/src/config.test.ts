@@ -1,6 +1,6 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CONFIG_FILE, loadConfig, saveConfig } from "./config";
@@ -21,6 +21,23 @@ before(() => {
 });
 after(() => {
   rmSync(dir, { recursive: true, force: true });
+});
+
+describe("config: retired layout migration", () => {
+  it("reads force as horizontal without rewriting, then preserves layout and unrelated preferences on save", async () => {
+    const path = join(dir, CONFIG_FILE);
+    const legacy = JSON.stringify({ layout: "force", runId: "run_layout", maxConcurrency: 3 });
+    writeFileSync(path, legacy);
+    assert.equal((await loadConfig(dir)).layout, "layered-lr");
+    assert.equal(readFileSync(path, "utf8"), legacy, "reading config must remain side-effect-free");
+    await saveConfig(dir, { retainByTask: { task_layout: true } });
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), {
+      layout: "layered-lr", runId: "run_layout", maxConcurrency: 3, retainByTask: { task_layout: true },
+    });
+    await saveConfig(dir, { layout: "layered-tb" });
+    await saveConfig(dir, { maxConcurrency: 4 });
+    assert.equal((await loadConfig(dir)).layout, "layered-tb", "sparse patches preserve an explicit supported direction");
+  });
 });
 
 describe("config: OpenCode interface preferences", () => {

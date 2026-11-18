@@ -1,6 +1,6 @@
+import { isOrcaPluginFrame, pluginApiRequest } from "./bridge/orcaBridge";
 import type {
   ActivitySnapshot,
-  AudiencePreviewResponse,
   DagResponse,
   LaneReviewReceiptView,
   OrcaEnvironmentView,
@@ -32,7 +32,7 @@ import type {
   RetryWorkerResult,
 } from "./types";
 
-export interface LaunchPreviewTask {
+interface LaunchPreviewTask {
   taskId: string;
   status: string;
   harness: string;
@@ -129,6 +129,19 @@ async function mutate<T = unknown>(
   url: string,
   body?: unknown,
 ): Promise<T> {
+  if (isOrcaPluginFrame()) {
+    const res = await pluginApiRequest(method, url, body);
+    const json = res.body ?? {};
+    if (!res.ok) {
+      throw new ApiError(
+        `${String(json.error ?? `HTTP ${res.status}`)}${typeof json.requestId === "string" ? ` (requestId: ${json.requestId})` : ""}`,
+        typeof json.code === "string" ? json.code : null,
+        res.status,
+      );
+    }
+    return json as T;
+  }
+
   const send = (token: string): Promise<T> =>
     fetch(url, {
       method,
@@ -167,6 +180,19 @@ const post = mutate.bind(null, "POST") as <T = unknown>(url: string, body?: unkn
 const put = mutate.bind(null, "PUT") as <T = unknown>(url: string, body?: unknown) => Promise<T>;
 
 async function get<T>(url: string): Promise<T> {
+  if (isOrcaPluginFrame()) {
+    const res = await pluginApiRequest("GET", url);
+    const json = res.body ?? {};
+    if (!res.ok) {
+      throw new ApiError(
+        String(json.error ?? `HTTP ${res.status}`),
+        typeof json.code === "string" ? json.code : null,
+        res.status,
+      );
+    }
+    return json as T;
+  }
+
   const res = await fetch(url);
   const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   if (!res.ok) {
@@ -177,12 +203,6 @@ async function get<T>(url: string): Promise<T> {
     );
   }
   return json as T;
-}
-
-/** Runs available to view. Tasks are Run-scoped since Orca 1.4.160. */
-export async function fetchRuns(): Promise<OrcaRun[]> {
-  const { runs } = await get<{ runs: OrcaRun[] }>("/api/runs");
-  return runs ?? [];
 }
 
 /**
@@ -423,34 +443,6 @@ export async function sendTaskMessage(taskId: string, body: string, runId: strin
   return value as TaskMessageReceipt;
 }
 
-// --- Phase 6: safe group messaging --------------------------------------------
-//
-// The composer only ever echoes an address the server's audience preview
-// offered (`@all`, `@idle`, a harness group, or an exact discovered
-// `@worktree:<id>`); subject/type/priority are optional metadata the server
-// validates against its own allowlists.
-
-/** Audience preview for the Run-control composer (read-only). */
-export async function fetchAudiencePreview(runId: string): Promise<AudiencePreviewResponse> {
-  return get<AudiencePreviewResponse>(`/api/audiences?run=${encodeURIComponent(runId)}`);
-}
-
-/**
- * Send one Run-level group message from the live coordinator. The server
- * re-checks the audience allowlist, worktree discovery, lifecycle-type
- * forbidden list, and live-coordinator authority; a success receipt means
- * Orca durably ENQUEUED the message — never that any worker read it.
- */
-export async function sendGroupMessage(payload: {
-  runId: string;
-  audience: string;
-  subject?: string;
-  body: string;
-  type?: "status" | "question";
-  priority?: "low" | "normal" | "high" | "urgent" | null;
-}): Promise<Record<string, unknown>> {
-  return post("/api/messages/group", payload);
-}
 
 /** Explicitly release a settled worker terminal (resolves cleanup debt). */
 export async function releaseWorker(runId: string, dispatchId: string): Promise<WorkerTerminalReceiptView> {

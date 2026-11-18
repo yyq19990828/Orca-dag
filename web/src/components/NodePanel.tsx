@@ -94,7 +94,6 @@ interface NodePanelProps {
   /** Run-scoped Dispatch rows; the selected worker's actual worktree comes from worker-show. */
   workerRows: WorkerRowView[];
   onRefresh: () => void;
-  onClose: () => void;
 }
 
 /**
@@ -122,7 +121,6 @@ export function NodePanel({
   hasWorkerHistory = false,
   workerRows,
   onRefresh,
-  onClose,
 }: NodePanelProps) {
   // Status copy is translated; STATUS_META keeps owning only the palette.
   const t = useT();
@@ -148,10 +146,6 @@ export function NodePanel({
       setGateBusy(false);
     }
   }
-  const headingRef = useRef<HTMLHeadingElement>(null);
-  useEffect(() => {
-    headingRef.current?.focus();
-  }, []);
   const meta = STATUS_META[node.status];
   const config = useConfig();
   const { customCommandsAllowed: customOk, platform } = useFlags();
@@ -343,22 +337,13 @@ export function NodePanel({
   const worktreeError = workerWorktree?.dispatchId === dispatchId && workerWorktree.error;
 
   return (
-    <aside className="node-panel" aria-labelledby="node-panel-title" onKeyDown={(event) => {
-      if (event.key !== "Escape" || event.defaultPrevented) return;
-      event.preventDefault();
-      event.stopPropagation();
-      onClose();
-    }}>
+    <section className="node-panel" aria-label={t("chat.view.task")}>
       <div className="node-panel__topline">
         <div className="node-panel__status">
           <span className="dot" style={{ background: meta.color }} />
           {t(`status.${node.status}`)}
         </div>
-        <button className="node-panel__close" onClick={onClose} aria-label={t("dialog.close")}>
-          ✕
-        </button>
       </div>
-      <h1 className="node-panel__title" id="node-panel-title" ref={headingRef} tabIndex={-1}>{node.label}</h1>
       <div className="node-panel__id">
         <code>{node.id}</code>
       </div>
@@ -497,7 +482,7 @@ export function NodePanel({
       )}
 
       <section className="node-panel__group node-panel__group--agent" aria-label={t("node.agentGroupAria")}>
-        <h4 className="node-panel__group-title">{t("node.agentGroup")}</h4>
+        <h3 className="node-panel__group-title">{t("node.agentGroup")}</h3>
         <div className="node-panel__field">
           <span className="node-panel__key">{t("node.harnessKey")}</span>
           <DoodleSelect
@@ -701,7 +686,7 @@ export function NodePanel({
       </section>
 
       <section className="node-panel__group" aria-label={t("node.workspaceGroupAria")}>
-        <h4 className="node-panel__group-title">{t("node.workspaceGroup")}</h4>
+        <h3 className="node-panel__group-title">{t("node.workspaceGroup")}</h3>
         {dispatchId && (
           <div className="node-panel__field node-panel__actual-worktree">
             <span className="node-panel__key">{t("node.actualWorktreeKey")}</span>
@@ -902,6 +887,6 @@ export function NodePanel({
         <span className="node-panel__hint">{t("node.specHint")}</span>
       </div>
 
-    </aside>
+    </section>
   );
 }
