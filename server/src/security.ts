@@ -166,6 +166,7 @@ export function isNativeFreshPreset(harness: string): boolean {
 }
 
 export interface NativePresetConstraints {
+  model?: string | null;
   effort?: string | null;
   environment?: string | null;
   lane?: string | null;
@@ -177,22 +178,31 @@ export interface NativePresetConstraints {
  * Native starts retain Orca's custody across current/exact-existing and
  * locally created Git worktrees. Lanes share a workspace, never an agent:
  * --terminal makes resources external and loses native Stop/custody.
- * Effort is unverified even when a model is supplied (model-id suffixes do not
- * advertise effort). Check raw presence before any generic model-gated drop.
+ * Antigravity effort remains unverified; OMP effort requires an explicit model
+ * plus runtime/CLI >= 1.4.263 (checked in assertNativePresetSupport).
  */
 export function assertNativePresetConstraints(
   harness: string, opts: NativePresetConstraints, platform = process.platform,
 ): void {
   if (!isNativeFreshPreset(harness)) return;
   if (opts.effort !== undefined && opts.effort !== null && opts.effort !== "") {
-    throw new ValidationError(`${harness} does not support a nonempty effort override in this viewer`, "unsupported_effort");
+    if (harness === "antigravity") {
+      throw new ValidationError(`${harness} does not support a nonempty effort override in this viewer`, "unsupported_effort");
+    }
+    if (typeof opts.model !== "string" || !opts.model.trim() || !EFFORT_PATTERN.test(opts.effort)) {
+      throw new ValidationError(`${harness} effort requires an explicit model and a valid effort level`, "unsupported_effort");
+    }
   }
   const placement: NonNullable<NativePresetConstraints["placement"]> = opts.placement ?? { kind: "current" };
   const exactExisting = placement.kind === "existing" && typeof placement.selector === "string" &&
     /^(?:path:\/|(?:id:)?[^:]+::\/)/.test(placement.selector);
   const creating = placement.kind === "new-child" || placement.kind === "new-top-level";
-  const exactRepo = placement.kind !== "new-top-level" || typeof placement.repo === "string" &&
-    /^(?:id:[A-Za-z0-9][A-Za-z0-9._:-]*$|path:\/)/.test(placement.repo);
+  const exactRepoPattern = /^(?:id:[A-Za-z0-9][A-Za-z0-9._:-]*$|path:\/)/;
+  const exactRepo = placement.kind === "new-top-level"
+    ? typeof placement.repo === "string" && exactRepoPattern.test(placement.repo)
+    : placement.kind === "new-child" && placement.repo !== undefined
+      ? typeof placement.repo === "string" && exactRepoPattern.test(placement.repo)
+      : true;
   if (platform !== "linux" || opts.environment || opts.terminal || !exactRepo ||
       (opts.lane && placement.kind === "current") ||
       (placement.kind !== "current" && !exactExisting && !creating)) {
@@ -557,8 +567,8 @@ export function validateCreationOptions(raw: unknown, field: string): CreationOp
  * spreads (no casts): `setup` is always present on `creation`, the optional
  * fields ride along only when the request carried them.
  */
-function childPlacement(creation: CreationOptions): PlacementSpec {
-  return { kind: "new-child", ...creation };
+function childPlacement(creation: CreationOptions, repo?: string): PlacementSpec {
+  return repo ? { kind: "new-child", repo, ...creation } : { kind: "new-child", ...creation };
 }
 
 function topLevelPlacement(repo: string, creation: CreationOptions): PlacementSpec {
@@ -628,22 +638,15 @@ export function validatePlacementSpec(
     return { kind: "existing", selector };
   }
   if (kind === "new-child") {
-    if (opts.remote) {
-      throw new ValidationError(
-        `${field}: remote placement "new-child" is invalid — a stacked child would anchor on ` +
-          `the wrong server. Use an exact existing workspace selector or new-top-level.`,
-        "invalid_placement",
-      );
-    }
-    if (creationFieldPresent(r, "repo")) {
-      throw new ValidationError(
-        `${field} (new-child) rejects "repo" — a stacked child anchors on the current ` +
-          `workspace's own repo; use new-top-level to select one`,
-        "invalid_placement",
-      );
-    }
+    const repo = creationFieldPresent(r, "repo") ? validateSelector(r.repo, `${field}.repo`) : undefined;
     const creation = validateCreationOptions(r, field);
-    return childPlacement(creation);
+    if (opts.remote && (!repo || !creation.name)) {
+      throw new ValidationError(
+        `${field}: remote placement "new-child" is invalid without an exact repo selector and explicit name.`,
+        "invalid_placement",
+      );
+    }
+    return childPlacement(creation, repo);
   }
   if (kind === "new-top-level") {
     const repo = validateSelector(r.repo, `${field}.repo`);

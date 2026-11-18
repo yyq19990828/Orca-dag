@@ -174,6 +174,33 @@ export function parseCliCommand(spec: string): OrcaCommand {
  * bare `orca` on PATH is GNOME's screen reader (`/usr/bin/orca`), not the IDE
  * CLI — see `resolveOrcaCommand`.
  */
+const ATTESTATION_ENV_KEYS = new Set([
+  "ORCA_TERMINAL_HANDLE",
+  "ORCA_PANE_KEY",
+  "ORCA_TAB_ID",
+  "ORCA_AGENT_PANE",
+  "ORCA_AGENT_LAUNCH",
+  "ORCA_AGENT_LAUNCH_TOKEN",
+  "ORCA_OPENCODE_AGENT",
+]);
+
+/**
+ * Strip pane/session attestation variables inherited from a parent Orca
+ * terminal while keeping runtime connection variables (ORCA_RUNTIME_SOURCE_*,
+ * ORCA_USER_DATA_PATH, ORCA_CLI_BIN_DIR, PATH, etc.). Orca 1.4.263 enforces
+ * pane attestation: if ORCA_TERMINAL_HANDLE leaks into a child `orca` call
+ * carrying `--from <coordinator_handle>`, Orca rejects the mutation with
+ * `consumer_fenced` ("attested as term_<parent> and cannot act as term_<coord>").
+ */
+export function sanitizedOrcaChildEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (ATTESTATION_ENV_KEYS.has(key) || key.startsWith("ORCA_AGENT_HOOK_")) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
 export function isInsideManagedOrcaTerminal(env: NodeJS.ProcessEnv): boolean {
   return Boolean(env.ORCA_TERMINAL_HANDLE?.trim());
 }
@@ -581,6 +608,7 @@ export async function runOrca<T = unknown>(
   try {
     const res = await pExecFile(command.executable, [...command.prefixArgs, ...fullArgs], {
       cwd: workspace.dir,
+      env: sanitizedOrcaChildEnv(),
       // The whole point of the resolved argv spec: nothing is ever re-parsed
       // or expanded by a shell. execFile defaults to this; spelled out so a
       // future "convenient" refactor doesn't flip it.
@@ -1328,14 +1356,28 @@ export interface TerminalFocusReceipt {
   raw: Record<string, unknown>;
 }
 
+/** True when a handle belongs to a non-PTY Native Chat session rather than a terminal. */
+export function isChatSessionHandle(handle: string | null | undefined): boolean {
+  if (typeof handle !== "string") return false;
+  const trimmed = handle.trim();
+  return trimmed.startsWith("orca_session_id:") || trimmed.startsWith("chat:");
+}
+
 export async function focusTerminal(handle: string): Promise<TerminalFocusReceipt> {
-  if (!handle.trim()) {
+  const trimmed = handle.trim();
+  if (!trimmed) {
     // An empty handle would let the CLI resolve some ambient target — exactly
     // the "focus whatever happens to be there" behavior the exact-selector
     // contract forbids. Fail here, before anything is spawned.
     throw new OrcaCliError(
       "terminal switch requires the exact runtime-issued terminal handle",
       "invalid_argument",
+    );
+  }
+  if (isChatSessionHandle(trimmed)) {
+    throw new OrcaCliError(
+      "Native chat workers have no PTY terminal to focus",
+      "chat_session_not_terminal",
     );
   }
   const result = await runOrca<Record<string, unknown>>(["terminal", "switch", "--terminal", handle]);
@@ -1364,6 +1406,8 @@ export const MIN_NATIVE_OPENCODE_MODEL_VERSION = "1.4.241";
 const MIN_NATIVE_FRESH_PRESET_VERSION = "1.4.245";
 /** New Git worktrees and workspace-only lanes have separate execution evidence. */
 const MIN_NATIVE_FRESH_PLACEMENT_VERSION = "1.4.246";
+/** First Orca release verified with OMP --effort and @role model selectors. */
+const MIN_OMP_EFFORT_VERSION = "1.4.263";
 /** Oldest Orca whose Run/Task/Dispatch model the viewer can still render. */
 export const MIN_VIEW_VERSION = "1.4.160";
 
@@ -1445,6 +1489,7 @@ async function runOrcaPlain(args: string[], timeoutMs: number): Promise<string> 
   const { command, workspace } = getOrcaRuntime();
   const res = await pExecFile(command.executable, [...command.prefixArgs, ...args], {
     cwd: workspace.dir,
+    env: sanitizedOrcaChildEnv(),
     shell: false,
     timeout: timeoutMs,
     maxBuffer: 1024 * 1024,
@@ -1548,6 +1593,19 @@ export async function assertNativePresetSupport(
   const creating = opts.placement?.kind === "new-child" || opts.placement?.kind === "new-top-level";
   const required = creating || opts.lane ? MIN_NATIVE_FRESH_PLACEMENT_VERSION : MIN_NATIVE_FRESH_PRESET_VERSION;
   const probe = readiness ?? await checkReadiness(true);
+  if (harness === "omp" && opts.effort) {
+    if (!probe.executionEnabled || probe.runtimeState !== "ready" ||
+        !probe.version || !/^\d+\.\d+\.\d+$/.test(probe.version) ||
+        !probe.cliVersion || !/^\d+\.\d+\.\d+$/.test(probe.cliVersion) ||
+        compareVersions(probe.version, MIN_OMP_EFFORT_VERSION) < 0 ||
+        compareVersions(probe.cliVersion, MIN_OMP_EFFORT_VERSION) < 0) {
+      throw new OrcaCliError(
+        `omp effort override requires the resolved CLI and ready running Orca runtime >= ${MIN_OMP_EFFORT_VERSION} ` +
+          `(CLI ${probe.cliVersion ?? "unknown"}, runtime ${probe.version ?? "unknown"}).`,
+        "unsupported_effort",
+      );
+    }
+  }
   if (!probe.executionEnabled || probe.runtimeState !== "ready" ||
       !probe.version || !/^\d+\.\d+\.\d+$/.test(probe.version) ||
       !probe.cliVersion || !/^\d+\.\d+\.\d+$/.test(probe.cliVersion) ||
@@ -1563,7 +1621,7 @@ export async function assertNativePresetSupport(
     let row: OrcaWorktreeRow | OrcaRepoRow | null;
     let repo: OrcaRepoRow | null = null;
     try {
-      row = opts.placement?.kind === "new-top-level"
+      row = (opts.placement?.kind === "new-top-level" || (opts.placement?.kind === "new-child" && opts.placement.repo))
         ? await showRepo(opts.placement.repo!)
         : await showWorktree(opts.placement?.kind === "existing"
           ? opts.placement.selector! : getOrcaRuntime().worktree);
@@ -1667,6 +1725,40 @@ export interface WorkerDonePayload {
   _orcaLifecycleRejection?: { code: string; reason: string };
 }
 
+/** Canonical Orca worker turn-stop escalation reasons (1.4.263 adds `lost`). */
+export const STOP_EVENT_REASONS: ReadonlySet<string> = new Set([
+  "finished",
+  "errored",
+  "needs-input",
+  "exited",
+  "lost",
+]);
+
+export function isStopEventReason(value: unknown): value is string {
+  return typeof value === "string" && STOP_EVENT_REASONS.has(value);
+}
+
+/** Extract an Orca 1.4.263 worker permission prompt descriptor from a message payload. */
+export interface WorkerPermissionPrompt {
+  id: string;
+  allowSupported?: boolean;
+}
+
+export function extractPermissionPrompt(payload: Record<string, unknown> | null | undefined): WorkerPermissionPrompt | null {
+  if (!payload) return null;
+  const rawId = payload.approvalId ?? payload.promptId ?? payload.prompt ?? payload.approval_id ?? payload.prompt_id;
+  if (typeof rawId !== "string" || !rawId.trim()) return null;
+  const allowSupported = typeof payload.allowSupported === "boolean"
+    ? payload.allowSupported
+    : typeof payload.canApprove === "boolean"
+      ? payload.canApprove
+      : undefined;
+  return {
+    id: rawId.trim(),
+    ...(allowSupported !== undefined ? { allowSupported } : {}),
+  };
+}
+
 export function parseWorkerDonePayload(message: OrcaMessage): WorkerDonePayload | null {
   if (!message.payload) return null;
   try {
@@ -1743,17 +1835,22 @@ export async function listRunMessagePage(
   opts?: { limit?: number },
 ): Promise<OrcaMessagePage> {
   const limit = opts?.limit ?? ORCHESTRATION_INBOX_LIMIT;
+  const { cliVersion } = await checkReadiness();
+  const runScoped = Boolean(cliVersion && compareVersions(cliVersion, "1.4.263") >= 0);
   const result = await runOrca<{ messages?: unknown[] }>([
     "orchestration",
     "inbox",
     "--limit",
     String(limit),
+    ...(runScoped ? ["--run", runId] : []),
   ]);
   if (!Array.isArray(result.messages)) {
     throw new OrcaCliError("inbox returned an invalid messages receipt", "invalid_message_history");
   }
-  // Counted before filtering: another Run's traffic filling the window hides
-  // THIS Run's older rows exactly as much as this Run's own traffic would.
+  // On < 1.4.263, counted before filtering: another Run's traffic filling the
+  // global window hides THIS Run's older rows. On 1.4.263+, `--run` scopes the
+  // window directly to this Run while the exact `run_id` filter remains a
+  // defense-in-depth boundary.
   const observed = result.messages.length;
   const messages = result.messages.filter(
     (row): row is OrcaMessage =>
@@ -2335,6 +2432,7 @@ export interface WorkerDetailView {
     completedAt: string | null;
     lastHeartbeatAt: string | null;
     retryOfDispatchId: string | null;
+    followUpOf?: string | null;
     depth: number | null;
     /** Immutable helper owner; absent on older hosts, null positively means a root Dispatch. */
     creatorDispatchId?: string | null;
@@ -2570,6 +2668,7 @@ export async function showWorkerDetail(
       completedAt: stringOrNull(dispatch.completedAt),
       lastHeartbeatAt: stringOrNull(dispatch.lastHeartbeatAt),
       retryOfDispatchId: stringOrNull(dispatch.retryOfDispatchId),
+      followUpOf: stringOrNull(dispatch.followUpOf) ?? stringOrNull(dispatch.follow_up_of),
       depth: numberOrNull(dispatch.depth),
       ...(dispatch.creatorDispatchId === null || typeof dispatch.creatorDispatchId === "string"
         ? { creatorDispatchId: dispatch.creatorDispatchId as string | null }
@@ -3190,12 +3289,20 @@ export async function readWorkerOutput(
 }
 
 /** Typed `worker-stop` receipt — Stop reports outcomes, never swallows them. */
+export interface WorkerStopHelperReceipt {
+  dispatchId: string;
+  state: string;
+  alreadySettled: boolean;
+}
+
 export interface WorkerStopReceipt {
   dispatchId: string;
   state: string;
   alreadySettled: boolean;
   processAction: string | null;
   warning: string | null;
+  /** Child helpers cascaded by Orca 1.4.263 `orchestration.worker-stop-helpers.v1`. */
+  helpers?: WorkerStopHelperReceipt[];
   /** Positive provider exit, not inferred from Orca fencing or pane closure. */
   providerExecutionExited?: true;
 }
@@ -3251,6 +3358,17 @@ export async function stopWorkerReceipt(
       throw new OrcaCliError("OpenCode provider was interrupted but Orca cancellation settlement is unknown; no cleanup attempted", "stop_unknown");
     }
   }
+  const rawHelpers = (result as { helpers?: unknown }).helpers;
+  const helpers = Array.isArray(rawHelpers)
+    ? rawHelpers
+        .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+        .map((item) => ({
+          dispatchId: String(item.dispatchId ?? ""),
+          state: String(item.state ?? "unknown"),
+          alreadySettled: Boolean(item.alreadySettled),
+        }))
+        .filter((item) => Boolean(item.dispatchId))
+    : undefined;
   return {
     dispatchId: String(result.dispatchId ?? dispatchId),
     state: String(result.state ?? "unknown"),
@@ -3259,7 +3377,52 @@ export async function stopWorkerReceipt(
     warning: result.warning ?? (providerExecutionExited
       ? "OpenCode provider exit confirmed; Orca accounting fenced through worker-abandon (no Orca process action)."
       : launch ? "Previously decided OpenCode session; Orca-only accounting inspected without provider interruption." : null),
+    ...(helpers ? { helpers } : {}),
     ...(providerExecutionExited ? { providerExecutionExited: true as const } : {}),
+  };
+}
+
+export interface WorkerPermissionDecisionReceipt {
+  dispatchId: string;
+  promptId: string;
+  decision: "approve" | "deny";
+  requestId: string;
+  raw: Record<string, unknown>;
+}
+
+/**
+ * Answer a pending worker permission prompt once (`orchestration approve` or
+ * `orchestration deny`, Orca 1.4.263+). Never writes persistent allow rules.
+ */
+export async function decideWorkerPermissionPrompt(opts: {
+  dispatchId: string;
+  promptId: string;
+  decision: "approve" | "deny";
+  reason: string;
+  from: string;
+  retryRequestId?: string;
+}): Promise<WorkerPermissionDecisionReceipt> {
+  const requestId = opts.retryRequestId ?? newRequestId();
+  const result = await runOrca<Record<string, unknown>>([
+    "orchestration",
+    opts.decision,
+    "--dispatch",
+    opts.dispatchId,
+    "--prompt",
+    opts.promptId,
+    "--reason",
+    opts.reason,
+    "--from",
+    opts.from,
+    "--retry-request",
+    requestId,
+  ]);
+  return {
+    dispatchId: opts.dispatchId,
+    promptId: opts.promptId,
+    decision: opts.decision,
+    requestId,
+    raw: asRecord(result),
   };
 }
 
@@ -3393,14 +3556,21 @@ export interface OrcaRequestReceipt {
  * response. Returns null when the probe itself fails (transport trouble while
  * probing is its own ambiguity; callers keep the mutation unresolved).
  */
-export async function showRequest(requestId: string): Promise<OrcaRequestReceipt | null> {
+export async function showRequest(
+  requestId: string,
+  opts?: { on?: string | null },
+): Promise<OrcaRequestReceipt | null> {
   let result: Record<string, unknown>;
   try {
+    const targetOn = typeof opts?.on === "string" && opts.on.trim() ? opts.on.trim() : null;
+    const { cliVersion } = targetOn ? await checkReadiness() : { cliVersion: null };
+    const passOn = Boolean(targetOn && cliVersion && compareVersions(cliVersion, "1.4.263") >= 0);
     result = await runOrca<Record<string, unknown>>([
       "orchestration",
       "request-show",
       "--request",
       requestId,
+      ...(passOn ? ["--on", targetOn!] : []),
     ]);
   } catch {
     return null;
@@ -3871,6 +4041,9 @@ export const CANONICAL_RUNTIME_CAPABILITIES: readonly RuntimeCapabilitySpec[] = 
   { canonicalId: "orchestration.retained-run-bindings.v1", label: "Retained Run bindings", scope: "runtime", explanation: "Advertises retained worker Run bindings.", aliases: [] },
   { canonicalId: "orchestration.worker-turn-stop-reports.v1", label: "Worker turn stop reports", scope: "runtime", explanation: "Advertises worker turn stop reporting.", aliases: [] },
   { canonicalId: "orchestration.ask-returns-at-once.v1", label: "Immediate ask receipt", scope: "runtime", explanation: "Advertises immediate question receipts.", aliases: [] },
+  { canonicalId: "orchestration.worker-stop-helpers.v1", label: "Cascading helper stop", scope: "runtime", explanation: "worker-stop automatically stops child helpers started by the target Dispatch and reports them under helpers.", aliases: [] },
+  { canonicalId: "orchestration.peer-mail.v1", label: "Direct peer mail", scope: "peer", explanation: "Supports orchestration send --on <server> across paired Orca servers.", aliases: [] },
+  { canonicalId: "orchestration.remote-owned-workers.v1", label: "Remote-owned workers", scope: "peer", explanation: "Stores remote worker receipts and paginated worker-list inventory on the paired execution server.", aliases: [] },
 ] as const;
 
 function normalizeCapabilityName(name: string): string {
@@ -5022,14 +5195,15 @@ export interface WorkerStartRequest {
 /** Placement identity only; creation metadata is validated separately and kept on the original request. */
 function nativePresetPlacement(opts: WorkerStartRequest): NonNullable<NativePresetConstraints["placement"]> {
   const kind = opts.worktree ?? "current";
-  if (kind === "current" || kind === "new-child") return { kind };
+  if (kind === "current") return { kind };
+  if (kind === "new-child") return opts.repo ? { kind, repo: opts.repo } : { kind };
   if (kind === "new-top-level") return { kind, repo: opts.repo };
   return { kind: "existing", selector: kind };
 }
 
 export function assertValidWorkerStart(opts: WorkerStartRequest): void {
   assertNativePresetConstraints(opts.agent ?? "", {
-    effort: opts.effort, environment: opts.on, terminal: opts.terminal,
+    model: opts.model, effort: opts.effort, environment: opts.on, terminal: opts.terminal,
     placement: nativePresetPlacement(opts),
   });
   if (opts.terminal && (opts.model || opts.effort)) {
@@ -5062,11 +5236,12 @@ export function assertValidWorkerStart(opts: WorkerStartRequest): void {
       );
     }
     if (worktree === "new-child") {
-      throw new OrcaCliError(
-        `worker-start: remote placement "new-child" is invalid — a stacked child would anchor on ` +
-          `the wrong server. Use an exact existing workspace selector or new-top-level.`,
-        "invalid_argument",
-      );
+      if (!opts.repo || !opts.name) {
+        throw new OrcaCliError(
+          `worker-start: remote placement "new-child" is invalid without an exact --repo selector and explicit --name.`,
+          "invalid_argument",
+        );
+      }
     }
     if (worktree === "new-top-level") {
       if (!opts.repo) {
@@ -5093,13 +5268,6 @@ export function assertValidWorkerStart(opts: WorkerStartRequest): void {
     throw new OrcaCliError(
       "worker-start: creation flags (--repo, --name, --base-branch, --display-name, --comment, --setup) " +
         "only apply to new-top-level (or new-child) worktrees.",
-      "invalid_argument",
-    );
-  }
-  if (creating && opts.repo && worktree !== "new-top-level") {
-    throw new OrcaCliError(
-      "worker-start: --repo only applies to new-top-level — a new-child anchors on the " +
-        "current workspace's own repo.",
       "invalid_argument",
     );
   }
@@ -5200,6 +5368,7 @@ export function buildWorkerStartArgv(
     from: string;
     terminal?: string;
     worktree?: string;
+    omitWorktreeOnTerminalReuse?: boolean;
     model?: string;
     effort?: string;
     retryOf?: string;
@@ -5214,6 +5383,7 @@ export function buildWorkerStartArgv(
   },
   requestId: string,
 ): string[] {
+  const omitWorktree = Boolean(opts.terminal && opts.worktree === undefined && opts.omitWorktreeOnTerminalReuse);
   const args = [
     "orchestration",
     "worker-start",
@@ -5222,8 +5392,7 @@ export function buildWorkerStartArgv(
     // Reuse passes the terminal handle instead of an agent id — the handle
     // IS the agent's terminal; Orca transfers it to the new Dispatch.
     ...(opts.terminal ? ["--terminal", opts.terminal] : ["--agent", opts.agent]),
-    "--worktree",
-    opts.worktree ?? "current",
+    ...(omitWorktree ? [] : ["--worktree", opts.worktree ?? "current"]),
     "--run",
     opts.runId,
     "--from",
@@ -5245,11 +5414,9 @@ export function buildWorkerStartArgv(
   // Creation flags ONLY on the two new-worktree modes — structurally, not
   // just via the validator: this builder also builds the REPLAYED argv after
   // a lost response, and a creation flag that leaked onto a current/existing
-  // start would make the replay a different (rejected) command. `--repo` is
-  // new-top-level-only even within the creation branch: a new-child anchors
-  // on the current workspace's own repo and cannot select another.
+  // start would make the replay a different (rejected) command.
   if (opts.worktree === "new-top-level" || opts.worktree === "new-child") {
-    if (opts.worktree === "new-top-level" && opts.repo) args.push("--repo", opts.repo);
+    if (opts.repo) args.push("--repo", opts.repo);
     if (opts.name) args.push("--name", opts.name);
     if (opts.baseBranch) args.push("--base-branch", opts.baseBranch);
     if (opts.displayName) args.push("--display-name", opts.displayName);
@@ -5333,11 +5500,15 @@ export async function startSupervisedWorker(opts: {
   // WITHOUT a spawn.
   assertValidWorkerStart(request);
   await assertNativePresetSupport(request.agent, {
-    effort: request.effort, environment: request.on, terminal: request.terminal,
+    model: request.model, effort: request.effort, environment: request.on, terminal: request.terminal,
     placement: nativePresetPlacement(request),
   });
+  const reuseProbe = request.terminal && request.worktree === undefined ? (readiness ?? await checkReadiness()) : null;
+  const omitWorktreeOnTerminalReuse = Boolean(
+    reuseProbe?.cliVersion && compareVersions(reuseProbe.cliVersion, "1.4.263") >= 0,
+  );
   const requestId = opts.retryRequestId ?? newRequestId();
-  const buildArgs = (): string[] => buildWorkerStartArgv(request, requestId);
+  const buildArgs = (): string[] => buildWorkerStartArgv({ ...request, omitWorktreeOnTerminalReuse }, requestId);
 
   let result: Record<string, unknown>;
   try {
@@ -5384,14 +5555,14 @@ export async function startSupervisedWorker(opts: {
  * Dispatch for the task instead of minting a second one.
  */
 async function resolveAmbiguousStart(
-  opts: { taskId: string; runId: string; keepOpen?: boolean },
+  opts: { taskId: string; runId: string; on?: string; keepOpen?: boolean },
   requestId: string,
   buildArgs: () => string[],
   original: OrcaCliError,
 ): Promise<StartedWorker> {
   let probe: OrcaRequestReceipt | null = null;
   try {
-    probe = await showRequest(requestId);
+    probe = await showRequest(requestId, { on: opts.on });
   } catch {
     probe = null;
   }
@@ -5477,11 +5648,55 @@ async function resolveAmbiguousStart(
 export interface ModelDiscoveryResult {
   status: "available" | "unavailable";
   models: string[];
+  effortsByModel?: Record<string, string[]>;
   diagnostic: string | null;
   scope: "local-workspace";
 }
 
 export async function listModels(harness: string): Promise<ModelDiscoveryResult> {
+  if (harness === "omp") {
+    try {
+      const { stdout } = await pExecFile("omp", ["models", "--json"], {
+        cwd: currentWorkspace().dir,
+        shell: false,
+        timeout: 20_000,
+        maxBuffer: 16 * 1024 * 1024,
+      });
+      const parsed = JSON.parse(stdout) as { models?: unknown[] };
+      const rows = Array.isArray(parsed.models) ? parsed.models : [];
+      const effortsByModel: Record<string, string[]> = {};
+      const seen = new Set<string>(["@default", "@smol", "@slow", "@plan"]);
+      for (const row of rows) {
+        if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+        const r = row as Record<string, unknown>;
+        const selector = typeof r.selector === "string" ? r.selector.trim() : "";
+        if (!selector || selector.length > 512 || /[\u0000-\u001f\u007f]/.test(selector)) continue;
+        seen.add(selector);
+        if (Array.isArray(r.thinking)) {
+          const levels = r.thinking
+            .filter((lvl): lvl is string => typeof lvl === "string" && /^[A-Za-z0-9._-]{1,32}$/.test(lvl));
+          if (levels.length > 0) effortsByModel[selector] = levels;
+        }
+      }
+      return {
+        status: "available",
+        models: [...seen],
+        effortsByModel,
+        diagnostic: null,
+        scope: "local-workspace",
+      };
+    } catch (error) {
+      const failure = error as NodeJS.ErrnoException & { killed?: boolean; signal?: string };
+      const diagnostic = failure.code === "ENOENT"
+        ? "OMP CLI was not found"
+        : failure.killed || failure.signal === "SIGTERM"
+          ? "OMP model discovery timed out after 20 seconds"
+          : typeof failure.code === "number"
+            ? `OMP model command failed (exit code ${failure.code})`
+            : "OMP model discovery failed";
+      return { status: "unavailable", models: [], diagnostic, scope: "local-workspace" };
+    }
+  }
   if (harness !== "opencode") {
     return { status: "available", models: [], diagnostic: null, scope: "local-workspace" };
   }
@@ -5510,6 +5725,48 @@ export async function listModels(harness: string): Promise<ModelDiscoveryResult>
       diagnostic,
       scope: "local-workspace",
     };
+  }
+}
+
+export interface AgentAccountQuotaSummary {
+  harness: string;
+  status: "ok" | "unavailable" | "unknown";
+  failureKind: string | null;
+  error: string | null;
+  sessionUsedPercent: number | null;
+  weeklyUsedPercent: number | null;
+}
+
+/**
+ * Read-only account & quota summary (`orca account list --json`, Orca 1.4.263+).
+ * Used by LaunchPreview to surface advisory missing-credentials or >=90% quota
+ * warnings before dispatching a Run. Never blocks or fails a launch on older CLIs.
+ */
+export async function listAgentAccounts(): Promise<AgentAccountQuotaSummary[]> {
+  try {
+    const result = await runOrca<Record<string, unknown>>(["account", "list"], { timeoutMs: 15_000 });
+    const rateLimits = asRecordOrNull(result.rateLimits);
+    if (!rateLimits) return [];
+    const out: AgentAccountQuotaSummary[] = [];
+    for (const harness of ["claude", "codex", "antigravity"]) {
+      const entry = asRecordOrNull(rateLimits[harness]);
+      if (!entry) continue;
+      const session = asRecordOrNull(entry.session);
+      const weekly = asRecordOrNull(entry.weekly);
+      const meta = asRecordOrNull(entry.usageMetadata);
+      const statusRaw = stringOrNull(entry.status);
+      out.push({
+        harness,
+        status: statusRaw === "ok" || statusRaw === "unavailable" ? statusRaw : "unknown",
+        failureKind: stringOrNull(meta?.failureKind),
+        error: stringOrNull(entry.error),
+        sessionUsedPercent: numberOrNull(session?.usedPercent),
+        weeklyUsedPercent: numberOrNull(weekly?.usedPercent),
+      });
+    }
+    return out;
+  } catch {
+    return [];
   }
 }
 

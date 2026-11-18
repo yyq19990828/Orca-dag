@@ -1,6 +1,7 @@
 import { isOrcaPluginFrame, pluginApiRequest } from "./bridge/orcaBridge";
 import type {
   ActivitySnapshot,
+  AgentAccountQuotaView,
   DagResponse,
   LaneReviewReceiptView,
   OrcaEnvironmentView,
@@ -537,6 +538,7 @@ export async function saveConfig(patch: Partial<ViewerConfig>): Promise<void> {
 export interface ModelDiscoveryResult {
   status: "available" | "unavailable";
   models: string[];
+  effortsByModel?: Record<string, string[]>;
   diagnostic: string | null;
   scope: "local-workspace";
 }
@@ -547,6 +549,30 @@ export async function fetchModels(harness: string): Promise<ModelDiscoveryResult
     `/api/models/${encodeURIComponent(harness)}`,
   );
   return result;
+}
+
+/** Read-only account & quota summary (`orca account list`, Orca 1.4.263+). */
+export async function fetchAgentAccounts(): Promise<AgentAccountQuotaView[]> {
+  const { accounts } = await get<{ accounts?: AgentAccountQuotaView[] }>("/api/accounts");
+  return accounts ?? [];
+}
+
+/** Answer a pending worker permission prompt once (`approve` or `deny`). */
+export async function decideWorkerPermission(
+  runId: string,
+  dispatchId: string,
+  promptId: string,
+  decision: "approve" | "deny",
+  reason: string,
+  coordinatorControl?: CoordinatorControl,
+): Promise<{ requestId: string; receipt: unknown }> {
+  return post(`/api/workers/${encodeURIComponent(dispatchId)}/permission`, {
+    runId,
+    promptId,
+    decision,
+    reason,
+    coordinatorControl,
+  });
 }
 
 // --- Phase 5: mutation-request audit (read-only) ------------------------------

@@ -88,6 +88,13 @@ export const WorkerPanel = memo(function WorkerPanel({
 }) {
   const t = useT();
   const [openDispatch, setOpenDispatch] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!openDispatch) return;
+    setNowMs(Date.now());
+    const id = window.setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(id);
+  }, [openDispatch]);
   const generation = useRef(0);
   const outputGeneration = useRef(0);
   const selectedRun = useRef(runId);
@@ -311,10 +318,17 @@ export const WorkerPanel = memo(function WorkerPanel({
     const wait = scoped?.observation?.agentWait;
     const waitPositive = wait != null;
     const notSettled = !attemptSettledFor(row);
+    const isChatNoPty = Boolean(
+      row.agentTerminalHandle &&
+        (row.agentTerminalHandle.startsWith("orca_session_id:") || row.agentTerminalHandle.startsWith("chat:")),
+    ) || Boolean(
+      scoped?.launchMode?.mode === "structured" &&
+        (!scoped?.terminal?.handle || !scoped.terminal.handle.startsWith("term_")),
+    );
     return {
       canStop: fleetLive && notSettled && (providerStop || (nativeLifecycle && nativeOwned)),
       canAbandon: fleetExited || hasPrescribed,
-      canFocus: Boolean(local && waitPositive && row.agentTerminalHandle),
+      canFocus: Boolean(local && waitPositive && row.agentTerminalHandle && !isChatNoPty),
       stopWhy: !notSettled
         ? t("worker.evidenceSettled")
         : !fleetLive
@@ -342,12 +356,14 @@ export const WorkerPanel = memo(function WorkerPanel({
           : t("worker.evidenceNoExit"),
       focusWhy: !local
         ? t("worker.evidenceRemote")
-        : !waitPositive
-          ? t("worker.evidenceNoWait")
-          : row.agentTerminalHandle
-            ? t("worker.evidenceWait", { kind: wait?.kind ?? t("worker.evidenceObserved") }) +
-              (wait?.detail ? t("worker.evidenceWaitDetail", { detail: wait.detail }) : "")
-            : t("worker.evidenceNoHandle"),
+        : isChatNoPty
+          ? t("worker.evidenceChatNoPty")
+          : !waitPositive
+            ? t("worker.evidenceNoWait")
+            : row.agentTerminalHandle
+              ? t("worker.evidenceWait", { kind: wait?.kind ?? t("worker.evidenceObserved") }) +
+                (wait?.detail ? t("worker.evidenceWaitDetail", { detail: wait.detail }) : "")
+              : t("worker.evidenceNoHandle"),
     };
   }
 
@@ -521,6 +537,16 @@ export const WorkerPanel = memo(function WorkerPanel({
           const scopedDetail = detail?.dispatchId === row.dispatchId && detail.runId === runId ? detail : null;
           const providerSession = scopedDetail?.providerSession;
           const oneShot = attempt?.openCodeUiLaunched === "oneshot";
+          const autoReleaseIso =
+            scopedDetail?.autoReleaseAt ??
+            scopedDetail?.terminalResource?.autoReleaseAt ??
+            row.resource?.autoReleaseAt ??
+            row.projection?.autoReleaseAt ??
+            null;
+          const autoReleaseRemainingSec =
+            autoReleaseIso && Number.isFinite(Date.parse(autoReleaseIso))
+              ? Math.ceil((Date.parse(autoReleaseIso) - nowMs) / 1000)
+              : null;
           return (
             <div
               key={row.dispatchId || row.taskId}
@@ -551,7 +577,34 @@ export const WorkerPanel = memo(function WorkerPanel({
                     <dt>{t("record.dispatch")}</dt><dd><code>{row.dispatchId || t("worker.noDispatch")}</code></dd>
                     <dt>{t("record.workerState")}</dt><dd>{row.workerState}</dd>
                     <dt>{t("worker.supervision")}</dt><dd>{t(`worker.supervision.${row.supervision}`)}</dd>
-                    <dt>{t("worker.autoReleaseAt")}</dt><dd>{scopedDetail?.autoReleaseAt ?? scopedDetail?.terminalResource?.autoReleaseAt ?? row.resource?.autoReleaseAt ?? row.projection?.autoReleaseAt ?? t("worker.unknown")}</dd>
+                    <dt>{t("worker.autoReleaseAt")}</dt>
+                    <dd style={{ display: "inline-flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <span>{autoReleaseIso ?? t("worker.unknown")}</span>
+                      {autoReleaseRemainingSec !== null && row.terminalState !== "released" && row.terminalState !== "retained" && (
+                        <span className="odag-console-tag">
+                          {autoReleaseRemainingSec > 0
+                            ? t("worker.autoReleaseIn", { seconds: autoReleaseRemainingSec })
+                            : t("worker.autoReleasePassed")}
+                        </span>
+                      )}
+                      {canRetain && autoReleaseRemainingSec !== null && autoReleaseRemainingSec > 0 && (
+                        <button
+                          type="button"
+                          className="odag-btn"
+                          style={{ blockSize: 22, paddingInline: 8, fontSize: "var(--text-xs)" }}
+                          disabled={disabled || busyId === row.dispatchId}
+                          onClick={() => void decide(row.dispatchId, "retain")}
+                        >
+                          {t("worker.keepOpenNow")}
+                        </button>
+                      )}
+                    </dd>
+                    {scopedDetail?.dispatch?.followUpOf && (
+                      <>
+                        <dt>{t("worker.followUpOf")}</dt>
+                        <dd><code>{scopedDetail.dispatch.followUpOf}</code></dd>
+                      </>
+                    )}
                     {projection?.outcome && <><dt>{t("record.outcome")}</dt><dd>{projection.outcome}</dd></>}
                   </dl>
                   {/* --- Liveness: both evidence layers, never merged away --- */}

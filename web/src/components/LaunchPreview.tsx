@@ -1,6 +1,7 @@
-import { useState } from "react";
-import type { LaunchPlanRequest, LaunchPreviewResponse } from "../api";
+import { useEffect, useMemo, useState } from "react";
+import { fetchAgentAccounts, type LaunchPlanRequest, type LaunchPreviewResponse } from "../api";
 import { useT, type TranslationKey } from "../i18n";
+import type { AgentAccountQuotaView } from "../types";
 import "./launch-preview.css";
 
 const ROUTE_LABEL: Record<string, TranslationKey> = {
@@ -59,6 +60,46 @@ export function LaunchPreview({
 }) {
   const t = useT();
   const [copyState, setCopyState] = useState<{ taskId: string; ok: boolean } | null>(null);
+  const [accounts, setAccounts] = useState<AgentAccountQuotaView[]>([]);
+  useEffect(() => {
+    let alive = true;
+    fetchAgentAccounts()
+      .then((list) => {
+        if (alive) setAccounts(list);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const quotaAdvisories = useMemo(() => {
+    const activeHarnesses = new Set(
+      preview.tasks
+        .filter((task) => !["completed", "failed"].includes(task.status))
+        .map((task) => task.harness),
+    );
+    const messages: string[] = [];
+    for (const acct of accounts) {
+      if (!activeHarnesses.has(acct.harness)) continue;
+      if (
+        acct.status === "unavailable" &&
+        (acct.failureKind === "missing-credentials" || acct.failureKind === "cli-unavailable")
+      ) {
+        messages.push(
+          t("exec.previewQuotaMissingAuth", {
+            harness: acct.harness,
+            detail: acct.error ?? acct.failureKind,
+          }),
+        );
+      } else {
+        const peak = Math.max(acct.sessionUsedPercent ?? 0, acct.weeklyUsedPercent ?? 0);
+        if (peak >= 90) {
+          messages.push(t("exec.previewQuotaHigh", { harness: acct.harness, pct: peak }));
+        }
+      }
+    }
+    return messages;
+  }, [accounts, preview.tasks, t]);
   const commonLimitations = preview.tasks[0]?.limitations.filter((code) =>
     preview.tasks.every((task) => task.limitations.includes(code)),
   ) ?? [];
@@ -97,6 +138,16 @@ export function LaunchPreview({
           )}
         </dl>
       </section>
+      {quotaAdvisories.length > 0 && (
+        <section className="launch-preview__limitations" aria-labelledby="launch-preview-quota-title" role="status">
+          <h3 id="launch-preview-quota-title">{t("exec.previewQuotaTitle")}</h3>
+          <ul>
+            {quotaAdvisories.map((msg, index) => (
+              <li key={index}>{msg}</li>
+            ))}
+          </ul>
+        </section>
+      )}
       {commonLimitations.length > 0 && (
         <section className="launch-preview__limitations" aria-labelledby="launch-preview-limits-title">
           <h3 id="launch-preview-limits-title">{t("exec.previewCommonLimits")}</h3>

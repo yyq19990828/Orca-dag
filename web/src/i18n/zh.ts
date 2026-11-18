@@ -1342,6 +1342,22 @@ const zh: Dict = {
   "ide.dock.schedQueue": "就绪与等待",
   "ide.dock.schedFleet": "持久集群",
   "ide.dock.schedAttention": "待处理项",
+  "permission.badge": "权限审批弹窗",
+  "permission.allowOnce": "允许一次",
+  "permission.allowDisabledTitle": "请在 Orca 设置中开启「允许协调器审批 Worker 权限请求」后再执行放行。",
+  "permission.deny": "拒绝并附理由",
+  "permission.reasonPlaceholder": "填写审批或拒绝理由（拒绝时必填，放行可留空）…",
+  "permission.approveDefaultReason": "操作员通过 Orca DAG Viewer 单次放行",
+  "worker.autoReleaseIn": "{seconds} 秒后自动释放",
+  "worker.autoReleasePassed": "自动释放窗口已到期",
+  "worker.keepOpenNow": "一键保留",
+  "worker.followUpOf": "追问前序派发",
+  "worker.evidenceChatNoPty": "原生对话（Native Chat）Worker 无 PTY 终端，无法切换聚焦。",
+  "placement.field.repositoryOptional": "所属仓库（多仓目录可选）",
+  "placement.repoInheritCurrent": "继承当前工作区仓库（默认）",
+  "exec.previewQuotaTitle": "账号与配额预检提示",
+  "exec.previewQuotaMissingAuth": "{harness}：未检测到有效订阅或登录凭证（{detail}）",
+  "exec.previewQuotaHigh": "{harness}：当前配额已使用 {pct}%，运行途中可能触发限流",
 };
 export default zh;
 export { zh };

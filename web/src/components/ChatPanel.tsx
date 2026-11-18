@@ -1,5 +1,5 @@
 import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { acknowledgeStopEvent, ApiError, replyToMessage, sendTaskMessage } from "../api";
+import { acknowledgeStopEvent, ApiError, decideWorkerPermission, replyToMessage, sendTaskMessage } from "../api";
 import { formatClock, formatDateTime, isUrgent, priorityLabel } from "../format";
 import { t, useLang, useT } from "../i18n";
 import { useDecisionDialog } from "./DecisionDialog";
@@ -570,6 +570,32 @@ export const ChatPanel = memo(function ChatPanel({
   );
 
 
+  async function decidePrompt(event: ActivityEvent, decision: "approve" | "deny") {
+    if (!event.dispatchId || !event.permissionPrompt || disabled || busy || actionBusy) return;
+    const reason = await dialog.prompt({
+      title: decision === "approve" ? t("permission.allowOnce") : t("permission.deny"),
+      message: `${t("permission.badge")}: ${event.permissionPrompt.id}`,
+      fieldLabel: t("permission.reasonPlaceholder"),
+      initialValue: decision === "approve" ? t("permission.approveDefaultReason") : "",
+      required: true,
+      confirmLabel: decision === "approve" ? t("permission.allowOnce") : t("permission.deny"),
+    });
+    if (!reason?.trim()) return;
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      const receipt = await withControl(runId, (control) =>
+        decideWorkerPermission(runId, event.dispatchId!, event.permissionPrompt!.id, decision, reason.trim(), control),
+      );
+      setOperatorReceipt({ runId, value: JSON.stringify(receipt) });
+      onResolved();
+    } catch (error) {
+      setActionError(String((error as Error).message ?? error));
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
   async function acknowledge(event: ActivityEvent) {
     if (!event.dispatchId || disabled || busy || actionBusy) return;
     const confirmed = await dialog.confirm({
@@ -900,6 +926,29 @@ export const ChatPanel = memo(function ChatPanel({
                     )}
                     {event.groupedCount > 1 && <small>{t("chat.message.grouped", { n: event.groupedCount })}</small>}
                     {event.actionable?.kind === "reply" && <span className="chat-message__waiting">{t("chat.state.waitingReply")}</span>}
+                    {event.permissionPrompt && event.dispatchId && (
+                      <div className="inbox__meta" style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                        <span className="odag-console-tag">{t("permission.badge")}</span>
+                        <code>{event.permissionPrompt.id}</code>
+                        <button
+                          type="button"
+                          className="btn btn--gate"
+                          disabled={disabled || busy || actionBusy || event.permissionPrompt.allowSupported === false}
+                          title={event.permissionPrompt.allowSupported === false ? t("permission.allowDisabledTitle") : undefined}
+                          onClick={() => void decidePrompt(event, "approve")}
+                        >
+                          {t("permission.allowOnce")}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={disabled || busy || actionBusy}
+                          onClick={() => void decidePrompt(event, "deny")}
+                        >
+                          {t("permission.deny")}
+                        </button>
+                      </div>
+                    )}
                     {event.kind === "stop_event" && (
                       <div className="inbox__meta">
                         {t("inbox.stopEvent", { reason: String((event.technical.payload as { stopReason?: unknown } | undefined)?.stopReason ?? t("worker.unknown")) })}

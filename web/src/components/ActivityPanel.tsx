@@ -13,6 +13,7 @@ import {
 import {
   acknowledgeStopEvent,
   ApiError,
+  decideWorkerPermission,
   fetchActivity,
   releaseWorker,
   replyToMessage,
@@ -284,6 +285,28 @@ export const ActivityPanel = memo(function ActivityPanel({
     setError(null);
     try {
       await acknowledgeStopEvent(runId, event.id, event.dispatchId);
+      await refresh();
+      onResolved();
+    } catch (err) {
+      setError(String((err as Error).message ?? err));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function decidePrompt(event: ActivityEvent, decision: "approve" | "deny") {
+    if (!event.dispatchId || !event.permissionPrompt || disabled || busyId) return;
+    const rawReason = (drafts[event.id] ?? "").trim();
+    const reason = decision === "approve" ? rawReason || t("permission.approveDefaultReason") : rawReason;
+    if (!reason) return;
+    setBusyId(event.id);
+    setError(null);
+    try {
+      const receipt = await withControl(runId, (control) =>
+        decideWorkerPermission(runId, event.dispatchId!, event.permissionPrompt!.id, decision, reason, control),
+      );
+      setOperatorReceipt({ runId, value: JSON.stringify(receipt) });
+      setDrafts(({ [event.id]: _drop, ...rest }) => rest);
       await refresh();
       onResolved();
     } catch (err) {
@@ -620,7 +643,68 @@ export const ActivityPanel = memo(function ActivityPanel({
                       </div>
                     )}
 
-                    {event.actionable?.kind === "reply" && (
+                    {event.permissionPrompt && event.dispatchId && (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6, maxInlineSize: 680 }}>
+                        <div style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                          <span className="odag-console-tag">{t("permission.badge")}</span>
+                          <code style={{ fontSize: "var(--text-xs)", color: "var(--fg-tertiary)" }}>
+                            {event.permissionPrompt.id}
+                          </code>
+                        </div>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                          <input
+                            type="text"
+                            value={drafts[event.id] ?? ""}
+                            disabled={disabled || busyId === event.id}
+                            placeholder={t("permission.reasonPlaceholder")}
+                            aria-label={t("permission.reasonPlaceholder")}
+                            onChange={(e) =>
+                              setDrafts((current) => ({ ...current, [event.id]: e.target.value }))
+                            }
+                            style={{
+                              flex: "1 1 260px",
+                              blockSize: 28,
+                              paddingInline: 8,
+                              borderRadius: 5,
+                              border: "1px solid var(--border-control)",
+                              background: "var(--bg-canvas)",
+                              fontSize: "var(--text-sm)",
+                            }}
+                          />
+                          <button
+                            type="button"
+                            className="odag-btn odag-btn--primary"
+                            style={{ blockSize: 28, fontSize: "var(--text-xs)" }}
+                            disabled={
+                              disabled ||
+                              busyId === event.id ||
+                              event.permissionPrompt.allowSupported === false
+                            }
+                            title={
+                              event.permissionPrompt.allowSupported === false
+                                ? t("permission.allowDisabledTitle")
+                                : undefined
+                            }
+                            onClick={() => void decidePrompt(event, "approve")}
+                          >
+                            {t("permission.allowOnce")}
+                          </button>
+                          <button
+                            type="button"
+                            className="odag-btn"
+                            style={{ blockSize: 28, fontSize: "var(--text-xs)" }}
+                            disabled={
+                              disabled || busyId === event.id || !(drafts[event.id] ?? "").trim()
+                            }
+                            onClick={() => void decidePrompt(event, "deny")}
+                          >
+                            {t("permission.deny")}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {event.actionable?.kind === "reply" && !event.permissionPrompt && (
                       <div style={{ display: "flex", gap: 8, alignItems: "flex-start", maxInlineSize: 680 }}>
                         <textarea
                           rows={2}

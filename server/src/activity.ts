@@ -6,8 +6,8 @@ import type {
   CoordinatorCheckReceipt,
   CoordinatorStatus,
 } from "./coordinator";
-import type { OrcaInboxWindow, OrcaMessage, OrcaTask, OrcaWorkerRow, WorkerObservation } from "./orca";
-import { presentWorkerLiveness } from "./orca";
+import type { OrcaInboxWindow, OrcaMessage, OrcaTask, OrcaWorkerRow, WorkerObservation, WorkerPermissionPrompt } from "./orca";
+import { extractPermissionPrompt, isStopEventReason, presentWorkerLiveness } from "./orca";
 import { prepareWorkspaceStateFile, workspaceStateReadPath, WORKSPACE_STATE_FILES } from "./workspaceState";
 
 export const ACTIVITY_FILE = WORKSPACE_STATE_FILES.activity;
@@ -79,6 +79,7 @@ export interface ActivityEvent {
     kind: "reply" | "release" | "retain" | "retry" | "acknowledge_stop";
     targetId: string;
   };
+  permissionPrompt?: WorkerPermissionPrompt | null;
   technical: {
     messageId?: string;
     terminalHandle?: string;
@@ -403,8 +404,8 @@ function normalizeMessage(
         actionable: pendingIds.has(eventId) ? { kind: "reply", targetId: eventId } : null,
       };
     case "escalation": {
-      const stopEvent = typeof payload.dispatchId === "string" &&
-        ["finished", "errored", "needs-input", "exited"].includes(String(payload.stopReason));
+      const stopEvent = typeof payload.dispatchId === "string" && isStopEventReason(payload.stopReason);
+      const permissionPrompt = !stopEvent && dispatchId ? extractPermissionPrompt(payload) : null;
       return {
         ...base,
         kind: stopEvent ? "stop_event" : "escalation",
@@ -415,6 +416,7 @@ function normalizeMessage(
         actionable: stopEvent
           ? pendingStopIds.has(eventId) && dispatchId ? { kind: "acknowledge_stop", targetId: eventId } : null
           : pendingIds.has(eventId) ? { kind: "reply", targetId: eventId } : null,
+        ...(permissionPrompt ? { permissionPrompt } : {}),
       };
     }
     case "worker_done": {

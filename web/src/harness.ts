@@ -348,7 +348,10 @@ function asPlacementSpec(raw: unknown): PlacementSpec | null {
     return { kind: "existing", selector: r.selector.trim() };
   }
   const creation = asCreationOptions(r);
-  if (r.kind === "new-child") return { kind: "new-child", ...creation };
+  if (r.kind === "new-child") {
+    const repo = typeof r.repo === "string" && r.repo.trim() ? r.repo.trim() : undefined;
+    return repo ? { kind: "new-child", repo, ...creation } : { kind: "new-child", ...creation };
+  }
   if (r.kind === "new-top-level" && typeof r.repo === "string" && r.repo.trim()) {
     return { kind: "new-top-level", repo: r.repo.trim(), ...creation };
   }
@@ -459,7 +462,7 @@ export function setNodeModel(taskId: string, model: string | null): void {
   else {
     delete modelByTask[taskId];
     const harness = effectiveHarness(taskId);
-    if (harness !== "omp" && harness !== "antigravity") delete effortByTask[taskId];
+    if (harness !== "antigravity") delete effortByTask[taskId];
   }
   update({ modelByTask, effortByTask });
 }

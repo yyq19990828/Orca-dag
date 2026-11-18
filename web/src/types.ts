@@ -352,6 +352,7 @@ export interface WorkerDetailView {
     completedAt: string | null;
     lastHeartbeatAt: string | null;
     retryOfDispatchId: string | null;
+    followUpOf?: string | null;
     depth: number | null;
   } | null;
   worker: {
@@ -633,6 +634,20 @@ export interface RequestDetailResponse {
   receipt: RequestReceiptView;
 }
 
+export interface WorkerPermissionPromptView {
+  id: string;
+  allowSupported?: boolean;
+}
+
+export interface AgentAccountQuotaView {
+  harness: string;
+  status: "ok" | "unavailable" | "unknown";
+  failureKind: string | null;
+  error: string | null;
+  sessionUsedPercent: number | null;
+  weeklyUsedPercent: number | null;
+}
+
 /** A worker question/escalation waiting on a human reply. */
 export interface PendingInboxItem {
   messageId: string;
@@ -644,6 +659,7 @@ export interface PendingInboxItem {
   taskId: string | null;
   stopReason?: string | null;
   dispatchId?: string | null;
+  permissionPrompt?: WorkerPermissionPromptView | null;
 }
 
 /** Cleanup work the coordinator refuses to guess its way through. */
@@ -715,6 +731,7 @@ export interface ActivityEvent {
     kind: "reply" | "release" | "retain" | "retry" | "acknowledge_stop";
     targetId: string;
   };
+  permissionPrompt?: WorkerPermissionPromptView | null;
   technical: {
     messageId?: string;
     terminalHandle?: string;
@@ -934,20 +951,22 @@ export const MODEL_PICKER: Record<string, ModelPickerKind> = {
   opencode: "select",
   claude: "text",
   codex: "text",
-  omp: "text",
+  omp: "select",
   antigravity: "text",
 };
 
 /**
- * Harnesses that accept `worker-start --effort` (Phase 5). Orca's contract:
- * effort requires a model, and opencode (the legacy path) has no effort flag —
- * so the effort picker renders only for these, and only when a model is set.
- * OMP and Antigravity reject every nonempty effort, including saved values.
+ * Harnesses that accept `worker-start --effort` (Phase 5 + Orca 1.4.263).
+ * Effort requires an explicit model; Antigravity still rejects nonempty effort.
  */
-export const EFFORT_SUPPORTED: Readonly<Partial<Record<string, true>>> = { claude: true, codex: true };
+export const EFFORT_SUPPORTED: Readonly<Partial<Record<string, true>>> = {
+  claude: true,
+  codex: true,
+  omp: true,
+};
 
 /** Common reasoning-effort levels. Orca owns the authoritative list per model. */
-export const EFFORT_LEVELS = ["low", "medium", "high"] as const;
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh"] as const;
 
 // --- Phase 6: saved environments, peer capabilities, exact placement ---------
 
@@ -995,7 +1014,7 @@ export interface CreationOptions {
 export type PlacementSpec =
   | { kind: "current" }
   | { kind: "existing"; selector: string }
-  | (CreationOptions & { kind: "new-child" })
+  | (CreationOptions & { kind: "new-child"; repo?: string })
   | (CreationOptions & { kind: "new-top-level"; repo: string });
 
 /** A lane's seed placement — every non-current kind (`current` is no lane). */

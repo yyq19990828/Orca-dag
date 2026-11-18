@@ -11,10 +11,15 @@ import {
   buildWorkerStartArgv,
   COORDINATOR_TITLE,
   computerSupports,
+  decideWorkerPermissionPrompt,
   deriveWorktreeName,
+  extractPermissionPrompt,
   fetchComputerCapabilities,
   focusTerminal,
   isArchiveHookFailure,
+  isChatSessionHandle,
+  isStopEventReason,
+  listAgentAccounts,
   listRuns,
   MIN_EXECUTION_VERSION,
   MIN_VIEW_VERSION,
@@ -36,6 +41,9 @@ import {
   initOrcaRuntime,
   getOrcaRuntime,
   isInsideManagedOrcaTerminal,
+  sanitizedOrcaChildEnv,
+  showRequest,
+  stopWorkerReceipt,
   listModels,
   listEnvironments,
   listProjects,
@@ -173,6 +181,9 @@ function writeScript(
     worktreeRm?: { fail?: boolean; error?: Record<string, unknown>; result?: Record<string, unknown> };
     /** computer capabilities receipt, or a raw-output fault for lost-response tests. */
     computerCapabilities?: { rawError?: string; exitCode?: number; result?: Record<string, unknown> };
+    workerStop?: Record<string, unknown>;
+    requestShow?: Record<string, unknown>;
+    accountList?: Record<string, unknown>;
   },
 ): void {
   writeFileSync(scriptPath, JSON.stringify(conf));
@@ -299,8 +310,29 @@ if (args[0] === "orchestration" && args[1] === "worker-abandon") {
 if (args[0] === "orchestration" && args[1] === "inbox") {
   const limitAt = args.indexOf("--limit");
   const limit = limitAt >= 0 ? Number(args[limitAt + 1]) : 100;
-  const messages = conf.inboxMessages ?? [];
+  const runAt = args.indexOf("--run");
+  const runFilter = runAt >= 0 ? args[runAt + 1] : null;
+  const rawMessages = conf.inboxMessages ?? [];
+  const messages = runFilter ? rawMessages.filter((m) => m && m.run_id === runFilter) : rawMessages;
   out.result = { messages: messages.slice(0, limit), count: Math.min(messages.length, limit) };
+}
+if (args[0] === "orchestration" && args[1] === "request-show") {
+  const reqId = args[args.indexOf("--request") + 1];
+  out.result = conf.requestShow ?? { requestId: reqId, state: "absent" };
+}
+if (args[0] === "orchestration" && args[1] === "worker-stop") {
+  const id = args[args.indexOf("--dispatch") + 1];
+  out.result = conf.workerStop ?? { dispatchId: id, state: "stopped", alreadySettled: false };
+}
+if (args[0] === "orchestration" && (args[1] === "approve" || args[1] === "deny")) {
+  out.result = {
+    dispatchId: args[args.indexOf("--dispatch") + 1],
+    promptId: args[args.indexOf("--prompt") + 1],
+    decision: args[1],
+  };
+}
+if (args[0] === "account" && args[1] === "list") {
+  out.result = conf.accountList ?? { rateLimits: {} };
 }
 if (args[0] === "orchestration" && args[1] === "task-list") {
   const runAt = args.indexOf("--run");
@@ -1276,14 +1308,25 @@ describe("startSupervisedWorker launch preferences", () => {
       useRuntime({ workspace: root });
       const callsBefore = readLog().length;
       const base = { taskId: "task_native", agent, runId: "run_native", from: "term_coord" };
-      for (const model of [undefined, "opaque/provider-model#variant"]) {
-        await assert.rejects(startSupervisedWorker({ ...base, model, effort: "high" }), { code: "unsupported_effort" });
+      await assert.rejects(startSupervisedWorker({ ...base, effort: "high" }), { code: "unsupported_effort" });
+      if (agent === "antigravity") {
+        await assert.rejects(
+          startSupervisedWorker({ ...base, model: "opaque/provider-model#variant", effort: "high" }),
+          { code: "unsupported_effort" },
+        );
       }
       for (const preference of [{ terminal: "term_existing" }, { on: "env_remote" },
         { worktree: "active" }, { worktree: "name:ambiguous" }]) {
         await assert.rejects(startSupervisedWorker({ ...base, ...preference }), { code: "invalid_placement" });
       }
       assert.equal(readLog().length, callsBefore, "unsupported requests do not even probe or prestart a terminal");
+      if (agent === "omp") {
+        writeScript({ version: "1.4.247" });
+        await assert.rejects(
+          startSupervisedWorker({ ...base, model: "@smol", effort: "high" }),
+          { code: "unsupported_effort" },
+        );
+      }
     });
 
     it(`will not start ${agent} in a missing or remote-owned existing workspace`, { skip: process.platform !== "linux" }, async () => {
@@ -3322,8 +3365,11 @@ describe("placement foundation: local creation gates (assertValidWorkerStart)", 
     }
   });
 
-  it("refuses --repo on new-child (a child anchors on the current workspace's repo)", () => {
-    rejectsWith({ ...base, worktree: "new-child", name: "kid", repo: "id:repoA" }, /--repo/);
+  it("accepts --repo on new-child (Orca 1.4.263 multi-repo / remote child) while refusing --repo on existing", () => {
+    assert.doesNotThrow(() =>
+      assertValidWorkerStart({ ...base, worktree: "new-child", name: "kid", repo: "id:repoA" }),
+    );
+    rejectsWith({ ...base, worktree: "id:repoA::/srv/ws", repo: "id:repoA" }, /creation flags/);
   });
 
   it("refuses malformed creation metadata before any spawn", () => {
@@ -3582,11 +3628,10 @@ describe("placement foundation: supervised starts through the fake CLI", () => {
         agent: "claude",
         runId: "run_f",
         from: "term_c",
-        worktree: "new-child",
-        name: "kid",
+        worktree: "id:repoA::/srv/ws",
         repo: "id:repoA",
       }),
-      (err: OrcaCliError) => err.code === "invalid_argument" && /--repo/.test(err.message),
+      (err: OrcaCliError) => err.code === "invalid_argument" && /creation flags/.test(err.message),
     );
     assert.equal(readLog().length, callsBefore, "no Orca mutation may be attempted");
   });
@@ -4101,5 +4146,186 @@ describe("computer capabilities umbrella parsing", () => {
       assert.equal((err as OrcaCliError).code, RESPONSE_LOST);
       return true;
     });
+  });
+});
+
+describe("Orca 1.4.263 orchestration upgrades", () => {
+  it("sanitizedOrcaChildEnv strips terminal/session attestation variables while keeping runtime connection env", () => {
+    const cleaned = sanitizedOrcaChildEnv({
+      PATH: "/usr/bin",
+      ORCA_RUNTIME_SOURCE_PORT: "4000",
+      ORCA_USER_DATA_PATH: "/home/u/.config/orca",
+      ORCA_TERMINAL_HANDLE: "term_parent",
+      ORCA_PANE_KEY: "pane_1",
+      ORCA_TAB_ID: "tab_1",
+      ORCA_AGENT_PANE: "1",
+      ORCA_AGENT_LAUNCH: "codex",
+      ORCA_AGENT_LAUNCH_TOKEN: "tok",
+      ORCA_OPENCODE_AGENT: "opencode",
+      ORCA_AGENT_HOOK_PORT: "1234",
+    });
+    assert.equal(cleaned.PATH, "/usr/bin");
+    assert.equal(cleaned.ORCA_RUNTIME_SOURCE_PORT, "4000");
+    assert.equal(cleaned.ORCA_USER_DATA_PATH, "/home/u/.config/orca");
+    assert.equal(cleaned.ORCA_TERMINAL_HANDLE, undefined);
+    assert.equal(cleaned.ORCA_PANE_KEY, undefined);
+    assert.equal(cleaned.ORCA_TAB_ID, undefined);
+    assert.equal(cleaned.ORCA_AGENT_PANE, undefined);
+    assert.equal(cleaned.ORCA_AGENT_LAUNCH, undefined);
+    assert.equal(cleaned.ORCA_AGENT_LAUNCH_TOKEN, undefined);
+    assert.equal(cleaned.ORCA_OPENCODE_AGENT, undefined);
+    assert.equal(cleaned.ORCA_AGENT_HOOK_PORT, undefined);
+  });
+
+  it("recognizes stopReason: lost and extracts permission prompt descriptors", () => {
+    for (const reason of ["finished", "errored", "needs-input", "exited", "lost"]) {
+      assert.equal(isStopEventReason(reason), true);
+    }
+    assert.equal(isStopEventReason("unknown"), false);
+    assert.deepEqual(
+      extractPermissionPrompt({ approvalId: "perm_123", allowSupported: true }),
+      { id: "perm_123", allowSupported: true },
+    );
+    assert.equal(extractPermissionPrompt({ stopReason: "lost" }), null);
+  });
+
+  it("registers 1.4.263 canonical runtime capabilities and parses worker-stop cascaded helpers", async () => {
+    const projected = describeRuntimeCapabilities([
+      "orchestration.worker-stop-helpers.v1",
+      "orchestration.peer-mail.v1",
+      "orchestration.remote-owned-workers.v1",
+    ]);
+    assert.deepEqual(projected.unknownAdvertised, []);
+    for (const id of [
+      "orchestration.worker-stop-helpers.v1",
+      "orchestration.peer-mail.v1",
+      "orchestration.remote-owned-workers.v1",
+    ]) {
+      assert.equal(projected.capabilities.find((c) => c.id === id)?.supported, true);
+    }
+
+    useRuntime({ workspace: root });
+    writeScript({
+      version: "1.4.263",
+      workerStop: {
+        dispatchId: "ctx_parent",
+        state: "stopped",
+        alreadySettled: false,
+        helpers: [{ dispatchId: "ctx_child", state: "stopped", alreadySettled: false }],
+      },
+    });
+    const receipt = await stopWorkerReceipt("ctx_parent");
+    assert.deepEqual(receipt.helpers, [
+      { dispatchId: "ctx_child", state: "stopped", alreadySettled: false },
+    ]);
+  });
+
+  it("passes --run to inbox, --on to request-show, omits --worktree on terminal reuse, and runs approve/deny on 1.4.263", async () => {
+    useRuntime({ workspace: root });
+    writeScript({
+      version: "1.4.263",
+      inboxMessages: [
+        { id: "m1", run_id: "run_1", from_handle: "t1", to_handle: null, subject: "hi", body: "a", type: "status", priority: "normal", thread_id: null, payload: null, created_at: "2026-01-01T00:00:00Z", delivered_at: null },
+        { id: "m2", run_id: "run_other", from_handle: "t2", to_handle: null, subject: "yo", body: "b", type: "status", priority: "normal", thread_id: null, payload: null, created_at: "2026-01-01T00:00:00Z", delivered_at: null },
+      ],
+      requestShow: { requestId: "req_r1", state: "completed", receipt: { ok: true } },
+      workerStart: { dispatchId: "ctx_263", status: "ready" },
+      accountList: {
+        rateLimits: {
+          codex: { status: "ok", weekly: { usedPercent: 53 }, session: null, error: null },
+          claude: { status: "unavailable", error: "No subscription", usageMetadata: { failureKind: "missing-credentials" } },
+        },
+      },
+    });
+    const before = readLog().length;
+    const page = await listRunMessagePage("run_1");
+    assert.equal(page.messages.length, 1);
+    assert.equal(page.window.observed, 1);
+
+    const reqReceipt = await showRequest("req_r1", { on: "env_remote" });
+    assert.equal(reqReceipt?.state, "completed");
+
+    await startSupervisedWorker({
+      taskId: "task_r",
+      agent: "codex",
+      runId: "run_1",
+      from: "term_c",
+      terminal: "term_reuse_263",
+    });
+
+    const perm = await decideWorkerPermissionPrompt({
+      dispatchId: "ctx_263",
+      promptId: "perm_1",
+      decision: "approve",
+      reason: "Approved once",
+      from: "term_c",
+      retryRequestId: "req_perm_1",
+    });
+    assert.equal(perm.decision, "approve");
+
+    const accounts = await listAgentAccounts();
+    assert.equal(accounts.find((a) => a.harness === "codex")?.weeklyUsedPercent, 53);
+    assert.equal(accounts.find((a) => a.harness === "claude")?.failureKind, "missing-credentials");
+
+    const calls = readLog().slice(before);
+    const inboxCall = calls.find((c) => c.argv[1] === "inbox")!;
+    assert.ok(inboxCall.argv.includes("--run") && inboxCall.argv.includes("run_1"));
+
+    const reqShowCall = calls.find((c) => c.argv[1] === "request-show")!;
+    assert.ok(reqShowCall.argv.includes("--on") && reqShowCall.argv.includes("env_remote"));
+
+    const reuseCall = calls.find((c) => c.argv[1] === "worker-start")!;
+    assert.ok(reuseCall.argv.includes("--terminal") && reuseCall.argv.includes("term_reuse_263"));
+    assert.ok(!reuseCall.argv.includes("--worktree"), "1.4.263 omits --worktree on bare --terminal reuse");
+
+    const approveCall = calls.find((c) => c.argv[1] === "approve")!;
+    assert.ok(approveCall.argv.includes("--prompt") && approveCall.argv.includes("perm_1"));
+
+    await assert.rejects(focusTerminal("orca_session_id:chat_1"), { code: "chat_session_not_terminal" });
+    assert.equal(isChatSessionHandle("orca_session_id:chat_1"), true);
+  });
+
+  it("supports omp --model + --effort on 1.4.263 Linux and remote new-child with --repo + --name", { skip: process.platform !== "linux" }, async () => {
+    useRuntime({ workspace: root });
+    writeScript({ version: "1.4.263", workerStart: { dispatchId: "ctx_omp", status: "ready" } });
+    const before = readLog().length;
+    await startSupervisedWorker({
+      taskId: "task_omp",
+      agent: "omp",
+      runId: "run_omp",
+      from: "term_c",
+      model: "@smol",
+      effort: "high",
+    });
+    const ompCall = readLog().slice(before).find((c) => c.argv[1] === "worker-start")!;
+    assert.ok(ompCall.argv.includes("--model") && ompCall.argv.includes("@smol"));
+    assert.ok(ompCall.argv.includes("--effort") && ompCall.argv.includes("high"));
+
+    assert.doesNotThrow(() =>
+      assertValidWorkerStart({
+        taskId: "task_rc",
+        agent: "codex",
+        runId: "run_omp",
+        from: "term_c",
+        on: "env_remote",
+        worktree: "new-child",
+        repo: "id:repoA",
+        name: "remote-kid",
+      }),
+    );
+    const remoteChildArgv = buildWorkerStartArgv(
+      {
+        taskId: "task_rc",
+        agent: "codex",
+        runId: "run_omp",
+        from: "term_c",
+        on: "env_remote",
+        worktree: "new-child",
+        repo: "id:repoA",
+        name: "remote-kid",
+      },
+      "req_rc",
+    );
+    assert.ok(remoteChildArgv.includes("--on") && remoteChildArgv.includes("new-child") && remoteChildArgv.includes("--repo"));
   });
 });

@@ -122,9 +122,12 @@ export function PlacementEditor({
       label: t("placement.mode.existing"),
       disabled: loading,
     });
-    if (scope !== "remote") {
-      options.push({ value: NEW_CHILD, label: t("placement.mode.newChild"), disabled: loading });
-    }
+    options.push({
+      value: NEW_CHILD,
+      label: t("placement.mode.newChild"),
+      disabled: loading || (scope === "remote" && repos !== null && repos.length === 0),
+      hint: scope === "remote" && repos !== null && repos.length === 0 ? t("placement.noRepos") : undefined,
+    });
     options.push({
       value: NEW_TOP_LEVEL,
       label: t("placement.mode.newTopLevel"),
@@ -141,9 +144,12 @@ export function PlacementEditor({
     if (v === CURRENT) {
       onChange({ kind: "current" });
     } else if (v === NEW_CHILD) {
-      // Fresh creation spec with Orca's default policy; the name stays empty
-      // → the server derives a deterministic bounded name.
-      onChange({ kind: "new-child", setup: "run" });
+      if (scope === "remote") {
+        const repo = repos?.[0]?.id ?? "";
+        if (repo) onChange({ kind: "new-child", repo, setup: "run" });
+      } else {
+        onChange({ kind: "new-child", setup: "run" });
+      }
     } else if (v === NEW_TOP_LEVEL) {
       const repo = repos?.[0]?.id ?? "";
       if (repo) onChange({ kind: "new-top-level", repo, setup: "run" });
@@ -158,7 +164,12 @@ export function PlacementEditor({
 
   function pickRepo(repo: string) {
     if (disabled) return;
-    if (value?.kind === "new-top-level") onChange({ ...value, repo });
+    if (value?.kind === "new-top-level") {
+      onChange({ ...value, repo });
+    } else if (value?.kind === "new-child") {
+      const { repo: _prev, ...rest } = value;
+      onChange(repo ? { ...rest, repo } : rest);
+    }
   }
 
   function patchCreation(patch: Partial<CreationOptions>): void {
@@ -173,7 +184,7 @@ export function PlacementEditor({
     value?.kind === "new-child" || value?.kind === "new-top-level" ? value : null;
   // Remote creation happens on ANOTHER server: a derived name could collide
   // with worktrees we cannot see, so the runtime requires an explicit name.
-  const nameRequired = scope === "remote" && creation?.kind === "new-top-level";
+  const nameRequired = scope === "remote" && (creation?.kind === "new-top-level" || creation?.kind === "new-child");
   const nameMissing = Boolean(nameRequired && creation && !creation.name);
 
   return (
@@ -218,7 +229,30 @@ export function PlacementEditor({
       )}
 
       {value?.kind === "new-child" && (
-        <span className="node-panel__hint">{t("placement.hint.newChild")}</span>
+        <>
+          <span className="node-panel__hint">{t("placement.hint.newChild")}</span>
+          {(scope === "remote" || Boolean(value.repo) || (repos?.length ?? 0) > 1) && (
+            <div className="placement__repo">
+              <span className="node-panel__key">
+                {t(scope === "remote" ? "placement.field.repository" : "placement.field.repositoryOptional")}
+              </span>
+              <DoodleSelect
+                value={value.repo ?? ""}
+                onChange={pickRepo}
+                disabled={disabled}
+                loading={repos === null}
+                options={[
+                  ...(scope === "remote" ? [] : [{ value: "", label: t("placement.repoInheritCurrent") }]),
+                  ...(repos ?? []).map((r) => ({
+                    value: r.id,
+                    label: r.displayName ?? r.id,
+                    hint: r.id,
+                  })),
+                ]}
+              />
+            </div>
+          )}
+        </>
       )}
 
       {value?.kind === "new-top-level" && (

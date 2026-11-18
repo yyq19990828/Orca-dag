@@ -224,9 +224,29 @@ describe("validateModel", () => {
 
 describe("native preset execution boundaries", () => {
   for (const harness of ["omp", "antigravity"]) {
-    it(`rejects ${harness} effort, external terminals, remote placement and ambiguous lane seeds`, () => {
+    it(`rejects invalid ${harness} effort, external terminals, remote placement and ambiguous lane seeds`, () => {
       for (const effort of ["high", "xhigh", "max", "auto", "default", " ", "model-specific"]) {
+        // Without a model, both omp and antigravity reject nonempty effort;
+        // antigravity rejects effort even with a model.
         assertThrowsWith(() => assertNativePresetConstraints(harness, { effort }, "linux"), "unsupported_effort");
+        if (harness === "antigravity") {
+          assertThrowsWith(
+            () => assertNativePresetConstraints(harness, { model: "gemini-3", effort }, "linux"),
+            "unsupported_effort",
+          );
+        }
+      }
+      if (harness === "omp") {
+        assert.doesNotThrow(() =>
+          assertNativePresetConstraints("omp", { model: "openai-codex/gpt-6.1-terra", effort: "high" }, "linux"),
+        );
+        assert.doesNotThrow(() =>
+          assertNativePresetConstraints("omp", { model: "@smol", effort: "xhigh" }, "linux"),
+        );
+        assertThrowsWith(
+          () => assertNativePresetConstraints("omp", { model: "@smol", effort: " " }, "linux"),
+          "unsupported_effort",
+        );
       }
       for (const options of [
         { environment: "env_remote" }, { lane: "lane_1" }, { terminal: "term_old" },
@@ -454,10 +474,14 @@ describe("validatePlacementSpec: local four-kind matrix (placement foundation)",
     }
   });
 
-  it("rejects repo on new-child (a child anchors on the current workspace's repo)", () => {
+  it("accepts optional exact repo selector on new-child (Orca 1.4.263 multi-repo / remote child)", () => {
+    assert.deepEqual(
+      validatePlacementSpec({ kind: "new-child", repo: "id:repoA", name: "kid" }, "p"),
+      { kind: "new-child", repo: "id:repoA", name: "kid", setup: "run" },
+    );
     assertThrowsWith(
-      () => validatePlacementSpec({ kind: "new-child", repo: "id:repoA" }, "p"),
-      "invalid_placement",
+      () => validatePlacementSpec({ kind: "new-child", repo: "bad repo!" }, "p"),
+      "invalid_selector",
     );
   });
 
@@ -498,11 +522,19 @@ describe("validatePlacementSpec: local four-kind matrix (placement foundation)",
 describe("validatePlacementSpec: the remote matrix is preserved (foundation)", () => {
   const remote = { remote: true } as const;
 
-  it("still refuses remote current and new-child", () => {
+  it("still refuses remote current and repoless/nameless remote new-child, while accepting repo+name remote new-child", () => {
     assertThrowsWith(() => validatePlacementSpec({ kind: "current" }, "p", remote), "invalid_placement");
     assertThrowsWith(
       () => validatePlacementSpec({ kind: "new-child", name: "kid" }, "p", remote),
       "invalid_placement",
+    );
+    assertThrowsWith(
+      () => validatePlacementSpec({ kind: "new-child", repo: "id:repoA" }, "p", remote),
+      "invalid_placement",
+    );
+    assert.deepEqual(
+      validatePlacementSpec({ kind: "new-child", repo: "id:repoA", name: "kid" }, "p", remote),
+      { kind: "new-child", repo: "id:repoA", name: "kid", setup: "run" },
     );
   });
 

@@ -46,6 +46,8 @@ export type RequestOperation =
   | "worker-retain"
   | "worker-stop"
   | "worker-abandon"
+  | "worker-approve"
+  | "worker-deny"
   | "check"
   | "send"
   | "reply"

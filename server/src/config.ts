@@ -168,7 +168,7 @@ export interface CreationOptions {
 export type PlacementSpec =
   | { kind: "current" }
   | { kind: "existing"; selector: string }
-  | (CreationOptions & { kind: "new-child" })
+  | (CreationOptions & { kind: "new-child"; repo?: string })
   | (CreationOptions & { kind: "new-top-level"; repo: string });
 
 /** A lane's seed placement — every non-current kind (`current` is no lane). */
@@ -247,10 +247,9 @@ export function sanitizePlacementSpec(v: unknown): PlacementSpec | null {
     return { kind: "existing", selector: r.selector.trim() };
   }
   if (kind === "new-child") {
-    // A child anchors on the current workspace's repo — a `repo` selection is
-    // a conflicting field and is never even read here, let alone persisted.
     const creation = sanitizeCreationOptions(r);
-    return { kind: "new-child", ...creation };
+    const repo = typeof r.repo === "string" && r.repo.trim() ? r.repo.trim() : undefined;
+    return repo ? { kind: "new-child", repo, ...creation } : { kind: "new-child", ...creation };
   }
   if (
     kind === "new-top-level" &&

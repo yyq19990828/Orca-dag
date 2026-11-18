@@ -283,13 +283,13 @@ export function NodePanel({
     if (manualModel && !launchLocked) modelInputRef.current?.focus();
   }, [manualModel, launchLocked]);
   useEffect(() => {
-    if (effHarness !== "opencode") {
+    if (effHarness !== "opencode" && effHarness !== "omp") {
       setOpenCodeDiscovery(null);
       return;
     }
     let alive = true;
     setOpenCodeDiscovery(null);
-    fetchModels("opencode").then(
+    fetchModels(effHarness).then(
       (result) => { if (alive) setOpenCodeDiscovery(result); },
       () => { if (alive) setOpenCodeDiscovery({ status: "unavailable", models: [], diagnostic: "Model discovery request failed", scope: "local-workspace" }); },
     );
@@ -573,7 +573,7 @@ export function NodePanel({
               value={modelDraft}
               aria-label={picker === "select" ? t("node.customModel") : t("node.modelKey", { harness: effHarness })}
               aria-describedby={`node-model-hint-${node.id}${invalidModelDraft ? ` node-model-error-${node.id}` : ""}`}
-              placeholder={t("node.modelPlaceholder", { example: effHarness === "opencode" ? "provider/model[#variant]" : effHarness === "claude" ? "opus" : effHarness === "codex" ? "o3" : "<model>" })}
+              placeholder={t("node.modelPlaceholder", { example: effHarness === "opencode" ? "provider/model[#variant]" : effHarness === "omp" ? "@smol or provider/model" : effHarness === "claude" ? "opus" : effHarness === "codex" ? "o3" : "<model>" })}
               onChange={(event) => {
                 const value = event.target.value;
                 setModelDraft(value);
@@ -596,7 +596,7 @@ export function NodePanel({
                 {t("node.modelInvalid", { model: model ?? t("node.defaultModel") })}
               </span>
             )}
-            {effHarness === "opencode" && (openCodeDiscovery === null || openCodeDiscovery.status === "unavailable") && (
+            {(effHarness === "opencode" || effHarness === "omp") && (openCodeDiscovery === null || openCodeDiscovery.status === "unavailable") && (
               <span className="node-panel__hint" role="status">
                 {openCodeDiscovery === null ? t("node.modelDiscoveryLoading")
                   : t("node.modelDiscoveryUnavailable", { diagnostic: openCodeDiscovery.diagnostic ?? "" })}
@@ -606,8 +606,8 @@ export function NodePanel({
         )}
 
         {/* Unsupported saved effort is evidence, not a migration opportunity.
-            Keep it visible even without a model, with only explicit removal. */}
-        {nativeAgent && effort && (
+            Keep it visible for Antigravity (or unpaired OMP effort), with explicit removal. */}
+        {((effHarness === "antigravity" && effort) || (effHarness === "omp" && effort && !model)) && (
           <div className="node-panel__field">
             <label className="node-panel__key" htmlFor={`node-effort-${node.id}`}>
               {t("node.effortKey", { harness: effHarness })}
@@ -623,7 +623,7 @@ export function NodePanel({
 
         {/* worker-start accepts effort only alongside a model, and only for
             supported harnesses. Clearing the model clears stored effort. */}
-        {model && EFFORT_SUPPORTED[effHarness] === true && peerModelEffort && (
+        {model && EFFORT_SUPPORTED[effHarness] === true && (peerModelEffort || effHarness === "omp") && (
           <div className="node-panel__field">
             <span className="node-panel__key">{t("node.effortKey", { harness: effHarness })}</span>
             <DoodleSelect
@@ -636,7 +636,11 @@ export function NodePanel({
               ariaLabel={t("node.effortKey", { harness: effHarness })}
               options={[
                 { value: "", label: t("node.defaultEffort") },
-                ...EFFORT_LEVELS.map((e) => ({ value: e, label: e })),
+                ...(
+                  effHarness === "omp" && openCodeDiscovery?.effortsByModel?.[model]?.length
+                    ? openCodeDiscovery.effortsByModel[model]
+                    : EFFORT_LEVELS
+                ).map((e) => ({ value: e, label: e })),
               ]}
             />
             <span className="node-panel__hint">{t("node.effortHint")}</span>

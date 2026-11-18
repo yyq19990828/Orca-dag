@@ -12,8 +12,10 @@ import {
   createLocalCodexWorktree,
   deriveWorktreeName,
   ensureCoordinatorTerminal,
+  extractPermissionPrompt,
   followableNextAction,
   getOrcaRuntime,
+  isStopEventReason,
   listGates,
   listTasks,
   listTerminals,
@@ -68,6 +70,7 @@ import {
   type TaskMessageReceipt,
   type NativeLaunchMode,
   type WorkerDetailView,
+  type WorkerPermissionPrompt,
   type WorkerTerminalReceipt,
   FLEET_CAPABILITY_GAP_REASONS,
 } from "./orca";
@@ -550,6 +553,7 @@ export interface PendingInboxItem {
   /** Dispatch identity from the worker payload, when the sender supplied it. */
   dispatchId?: string | null;
   stopReason?: string | null;
+  permissionPrompt?: WorkerPermissionPrompt | null;
 }
 
 /** Work this coordinator could not finish deciding — blocks completion. */
@@ -1158,6 +1162,7 @@ async function startCoordinatorLocked(opts: StartOpts): Promise<void> {
     const nativeReadiness = nativeLaunchTasks.length ? await checkReadiness(true) : undefined;
     for (const task of nativeLaunchTasks) {
       await assertNativePresetSupport(opts.harnessByTask[task.id] ?? opts.defaultHarness, {
+        model: opts.modelByTask?.[task.id],
         effort: opts.effortByTask?.[task.id], environment: opts.environmentByTask?.[task.id],
         lane: opts.laneByTask?.[task.id],
         placement: opts.laneByTask?.[task.id]
@@ -2495,6 +2500,20 @@ export async function stopCoordinator(): Promise<StopReport> {
             a.openCodeTui && receipt.providerExecutionExited ? "provider_stopped_accounting_abandoned" : "stopped",
           detail: cleanupDetail ?? receipt.warning ?? receipt.state,
         });
+        if (stopConfirmed && receipt.helpers) {
+          for (const helper of receipt.helpers) {
+            if (!helper.dispatchId || attemptedDispatches.has(helper.dispatchId)) continue;
+            const helperSettled = helper.state === "stopped" || helper.alreadySettled;
+            if (!helperSettled) continue;
+            attemptedDispatches.add(helper.dispatchId);
+            results.push({
+              target: helper.dispatchId,
+              kind: "supervised",
+              result: helper.alreadySettled ? "already_settled" : "stopped",
+              detail: "Cascaded by Orca worker-stop-helpers.v1",
+            });
+          }
+        }
       } catch (err) {
         results.push({
           target: a.dispatchId,
@@ -3129,8 +3148,8 @@ function stopEventReason(message: OrcaMessage): string | null {
   if (message.type !== "escalation" || !message.payload) return null;
   try {
     const payload = JSON.parse(message.payload) as { stopReason?: unknown; dispatchId?: unknown };
-    return typeof payload.dispatchId === "string" && ["finished", "errored", "needs-input", "exited"].includes(String(payload.stopReason))
-      ? String(payload.stopReason) : null;
+    return typeof payload.dispatchId === "string" && isStopEventReason(payload.stopReason)
+      ? payload.stopReason : null;
   } catch { return null; }
 }
 
@@ -3180,9 +3199,49 @@ export async function acknowledgeStopEvent(runId: string, messageId: string, dis
   await acknowledgePendingDeliveryIfResolved();
 }
 
+/** Clear pending permission-prompt escalations after an operator approve/deny decision. */
+export async function resolvePermissionPromptInboxItems(runId: string, dispatchId: string, promptId: string): Promise<void> {
+  if (!state.running || state.runId !== runId) return;
+  await withMailboxMutation(async () => {
+    for (const row of [...state.mailboxChecks.values()]) {
+      const matches = (row.delivery?.messages ?? []).filter((message) => {
+        if (!row.pendingQuestionIds.includes(message.id)) return false;
+        let rawPayload: Record<string, unknown> | null = null;
+        try {
+          rawPayload = message.payload ? (JSON.parse(message.payload) as Record<string, unknown>) : null;
+        } catch {
+          rawPayload = null;
+        }
+        const prompt = extractPermissionPrompt(rawPayload);
+        return prompt?.id === promptId && parseWorkerDonePayload(message)?.dispatchId === dispatchId;
+      });
+      if (!matches.length) continue;
+      const ids = new Set(matches.map((m) => m.id));
+      const pendingQuestionIds = row.pendingQuestionIds.filter((id) => !ids.has(id));
+      await saveMailbox({
+        ...row,
+        pendingQuestionIds,
+        state: row.state !== "received" && row.delivery?.deliveryAcknowledged === true && !pendingQuestionIds.length &&
+          row.processedMessageIds.length === row.delivery.messages.length ? "completed" : row.state,
+      });
+      state.inbox = state.inbox.filter((item) => !ids.has(item.messageId));
+    }
+  });
+  await acknowledgePendingDeliveryIfResolved();
+}
+
 function mailboxQuestion(message: OrcaMessage): void {
   if (message.type !== "question" && message.type !== "escalation") throw new Error("Invalid pending mailbox question");
   const payload = parseWorkerDonePayload(message);
+  let rawPayload: Record<string, unknown> | null = null;
+  if (message.payload) {
+    try {
+      const parsed = JSON.parse(message.payload) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) rawPayload = parsed as Record<string, unknown>;
+    } catch {
+      rawPayload = null;
+    }
+  }
   const payloadTaskId = payload?.taskId ?? null;
   const payloadDispatchId = payload?.dispatchId ?? null;
   const relatedAttempt = [...state.attempts.values()].find(attempt =>
@@ -3194,12 +3253,15 @@ function mailboxQuestion(message: OrcaMessage): void {
   const stopReason = stopEventReason(message);
   const stopAttempt = stopReason && payloadDispatchId
     ? [...state.attempts.values()].find(attempt => attempt.dispatchId === payloadDispatchId) : undefined;
+  const resolvedDispatchId = relatedAttempt?.dispatchId ?? stopAttempt?.dispatchId ?? payloadDispatchId;
+  const permissionPrompt = !stopReason && resolvedDispatchId ? extractPermissionPrompt(rawPayload) : null;
   state.inbox = [...state.inbox.filter(item => item.messageId !== message.id), {
     messageId: message.id, kind: stopReason ? "stop_event" : message.type, from: message.from_handle,
     subject: message.subject, body: message.body, createdAt: message.created_at,
     taskId: relatedAttempt?.taskId ?? stopAttempt?.taskId ?? null,
-    dispatchId: relatedAttempt?.dispatchId ?? stopAttempt?.dispatchId ?? payloadDispatchId,
+    dispatchId: resolvedDispatchId,
     ...(stopReason ? { stopReason } : {}),
+    ...(permissionPrompt ? { permissionPrompt } : {}),
   }];
 }
 
@@ -4611,7 +4673,10 @@ async function decideTerminalOwnership(attempt: Attempt, opts: StartOpts, readyT
     // exact terminal facts in the coordinator's real workspace.
     const exact = candidate ? await refreshAttemptDispatchDetail(attempt, state.runId!) : null;
     const terminal = exact?.terminal;
-    const reusable = exact?.observation?.exactWorker === true && exact.observation.status === "live" &&
+    const autoReleaseAtMs = exact?.autoReleaseAt ? Date.parse(exact.autoReleaseAt) : NaN;
+    const autoReleaseImminent = Number.isFinite(autoReleaseAtMs) && autoReleaseAtMs - Date.now() < 15_000;
+    const reusable = !autoReleaseImminent &&
+      exact?.observation?.exactWorker === true && exact.observation.status === "live" &&
       terminal?.handle === handle && terminal.connected === true && terminal.orphaned === false &&
       terminal.worktreePath === getOrcaRuntime().workspace.dir &&
       terminal.agentIdentity === attempt.harness;
@@ -5087,7 +5152,7 @@ async function startOne(
       );
     }
     await assertNativePresetSupport(attempt.harness, {
-      effort: opts.effortByTask?.[task.id], environment, lane: laneId, placement,
+      model, effort: opts.effortByTask?.[task.id], environment, lane: laneId, placement,
       terminal: reuseTerminal,
     });
     // This protection remains even if the experimental flag/harness changed
@@ -5171,12 +5236,12 @@ async function startOne(
         "lane_legacy_unsupported",
       );
     }
-    // 3. A remote new-child anchors on the wrong server — refused here before
-    //    a terminal exists; the adapter re-refuses it as the last gate.
-    if (lane && environment && placement.kind === "new-child") {
+    // 3. A remote new-child requires an exact repo selector and explicit name
+    //    so Orca 1.4.263 knows which remote repository to stack onto.
+    if (lane && environment && placement.kind === "new-child" && (!placement.repo || !placement.name)) {
       throw new OrcaCliError(
         `Cannot start task ${task.id} in lane "${laneId}" on environment "${environment}": remote ` +
-          `new-child placement is invalid — a stacked child would anchor on the wrong server.`,
+          `new-child placement requires an exact repo selector and explicit name.`,
         "invalid_placement",
       );
     }
@@ -5245,6 +5310,7 @@ async function startOne(
     } else if (!wt.worktree && placement.kind === "new-child") {
       wt = {
         worktree: "new-child",
+        repo: placement.repo,
         // A lane derives its deterministic fallback name from the LANE id so
         // every creation attempt for the lane targets the same identity;
         // direct placements keep the adapter's task-derived default.

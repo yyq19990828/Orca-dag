@@ -17,9 +17,12 @@ import {
   workerStopOperation,
   createRun,
   createTempCoordinatorTerminal,
+  decideWorkerPermissionPrompt,
   explainReadiness,
   focusTerminal,
   isArchiveHookFailure,
+  isChatSessionHandle,
+  listAgentAccounts,
   listEnvironments,
   listGates,
   listModels,
@@ -78,6 +81,7 @@ import {
   acknowledgeStopEvent,
   coordinatorStatus as liveCoordinatorStatus,
   noteManualRelease,
+  resolvePermissionPromptInboxItems,
   retryWorker,
   sendTaskGuidance,
   startCoordinator,
@@ -1249,7 +1253,10 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         "effortByTask",
         { maxKeys: 500, valueKind: "effort" },
         (value, key) => {
-          assertNativePresetConstraints(harnessByTask[key] ?? defaultHarness, { effort: String(value) });
+          assertNativePresetConstraints(harnessByTask[key] ?? defaultHarness, {
+            model: modelByTask[key],
+            effort: String(value),
+          });
           return validateEffort(value);
         },
       ) ?? {};
@@ -1284,6 +1291,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       const nativeReadiness = nativeTasks.length ? await checkReadiness(true) : undefined;
       for (const task of nativeTasks) {
         await assertNativePresetSupport(harnessByTask[task.id] ?? defaultHarness, {
+          model: modelByTask[task.id],
           effort: effortByTask[task.id], environment: environmentByTask[task.id],
           lane: laneByTask[task.id],
           placement: laneByTask[task.id]
@@ -1453,7 +1461,10 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         "effortByTask",
         { maxKeys: 500, valueKind: "effort" },
         (v, key) => {
-          assertNativePresetConstraints(harnessByTask?.[key] ?? defaultHarness, { effort: String(v) });
+          assertNativePresetConstraints(harnessByTask?.[key] ?? defaultHarness, {
+            model: modelByTask?.[key],
+            effort: String(v),
+          });
           return validateEffort(v);
         },
       );
@@ -2367,7 +2378,8 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
         });
         return;
       }
-      const receipt = await showRequest(requestId);
+      const on = req.query.on ? validateEnvironmentSelector(req.query.on, "on") : null;
+      const receipt = await showRequest(requestId, { on });
       res.json({
         request,
         receipt: receipt
@@ -2971,9 +2983,11 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       // switch to whatever pane happens to own that stale handle. No positive
       // terminal facts → nothing to focus → refuse, never guess.
       const handle = detail.terminal?.handle ?? null;
-      if (!handle) {
+      if (!handle || isChatSessionHandle(handle) || (detail.launchMode?.mode === "structured" && !handle.startsWith("term_"))) {
         res.status(409).json({
-          error: "This worker has no terminal this viewer can focus (remote or archived).",
+          error: isChatSessionHandle(handle) || detail.launchMode?.mode === "structured"
+            ? "This worker runs in an Orca native chat session and has no PTY terminal to focus."
+            : "This worker has no terminal this viewer can focus (remote or archived).",
           code: "focus_unavailable",
         });
         return;
@@ -3085,6 +3099,80 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
           }),
         );
       }
+      res.json({ ok: true, requestId, receipt });
+    }),
+  );
+
+  /**
+   * Decide a pending worker permission prompt (`orchestration approve` or
+   * `orchestration deny`, Orca 1.4.263+). Single-use only (never persists
+   * permanent allow rules); requires coordinator authority on the Run.
+   */
+  app.post(
+    "/api/workers/:dispatchId/permission",
+    requireToken(policy),
+    route(async (req, res) => {
+      const dispatchId = validateId(req.params.dispatchId, "dispatch id");
+      const runId = validateId(req.body?.runId, "runId");
+      const promptId = validateId(req.body?.promptId, "promptId");
+      const decisionRaw = validateText(req.body?.decision, "decision", 16);
+      const reason = validateText(req.body?.reason, "reason", 2000);
+      if (!dispatchId || !runId || !promptId || !reason) {
+        throw new ValidationError("runId, promptId, decision and reason are required");
+      }
+      if (decisionRaw !== "approve" && decisionRaw !== "deny") {
+        throw new ValidationError('decision must be "approve" or "deny"', "invalid_decision");
+      }
+      const evidence = await revalidateWorkerForMutation(dispatchId, runId);
+      if (!evidence.ok) {
+        res.status(evidence.status).json(evidence.body);
+        return;
+      }
+      await requireExecutionEnabled();
+      const operation = decisionRaw === "approve" ? "worker-approve" : "worker-deny";
+      const requestId = newRequestId();
+      await requestLedger
+        .record({ requestId, operation, runId, taskId: evidence.detail.taskId, dispatchId, target: promptId })
+        .catch(() => {});
+      const live = coordinatorStatus();
+      const execute = (from: string) =>
+        decideWorkerPermissionPrompt({
+          dispatchId,
+          promptId,
+          decision: decisionRaw,
+          reason,
+          from,
+          retryRequestId: requestId,
+        });
+      const receipt = live.running && live.runId === runId && live.coordinatorHandle
+        ? await execute(live.coordinatorHandle)
+        : await asCoordinator(runId, worktree, execute, req.body?.coordinatorControl);
+      await requestLedger
+        .record({
+          requestId,
+          operation,
+          runId,
+          taskId: evidence.detail.taskId,
+          dispatchId,
+          target: promptId,
+          settledLocally: true,
+          note: `${decisionRaw} prompt ${promptId}`,
+        })
+        .catch(() => {});
+      await resolvePermissionPromptInboxItems(runId, dispatchId, promptId);
+      await recordActivity(
+        createViewerActivity({
+          runId,
+          kind: "reply",
+          taskId: evidence.detail.taskId,
+          dispatchId,
+          title: decisionRaw === "approve"
+            ? "Approved worker permission prompt (once)"
+            : "Denied worker permission prompt",
+          summary: reason,
+          requestId,
+        }),
+      );
       res.json({ ok: true, requestId, receipt });
     }),
   );
@@ -3649,6 +3737,13 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
    * query remains distinct from a successful empty catalog; manual selection
    * is valid regardless of either result.
    */
+  app.get(
+    "/api/accounts",
+    route(async (_req, res) => {
+      res.json({ accounts: await listAgentAccounts() });
+    }),
+  );
+
   app.get(
     "/api/models/:harness",
     route(async (req, res) => {

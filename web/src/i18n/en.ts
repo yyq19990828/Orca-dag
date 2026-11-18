@@ -1406,6 +1406,22 @@ const en = {
   "ide.dock.schedQueue": "Ready & Waiting",
   "ide.dock.schedFleet": "Worker Fleet",
   "ide.dock.schedAttention": "Problems",
+  "permission.badge": "Permission Prompt",
+  "permission.allowOnce": "Allow Once",
+  "permission.allowDisabledTitle": "Enable 'Let coordinators approve worker permission prompts' in Orca Settings to allow from here.",
+  "permission.deny": "Deny with Reason",
+  "permission.reasonPlaceholder": "Reason for decision (required for deny, optional for allow)…",
+  "permission.approveDefaultReason": "Approved once by operator via Orca DAG Viewer",
+  "worker.autoReleaseIn": "Auto-release in {seconds}s",
+  "worker.autoReleasePassed": "Auto-release window elapsed",
+  "worker.keepOpenNow": "Keep Open",
+  "worker.followUpOf": "Follow-up of",
+  "worker.evidenceChatNoPty": "Native Chat worker has no PTY terminal to focus.",
+  "placement.field.repositoryOptional": "Repository (optional for multi-repo folders)",
+  "placement.repoInheritCurrent": "Current workspace repository (default)",
+  "exec.previewQuotaTitle": "Account & Quota Advisories",
+  "exec.previewQuotaMissingAuth": "{harness}: credentials or subscription unavailable ({detail})",
+  "exec.previewQuotaHigh": "{harness}: quota usage at {pct}% — workers may hit rate limits mid-Run",
 } as const;
 export default en;
 export { en };

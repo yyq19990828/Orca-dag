@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { newRequestId, OrcaCliError, replyToMessage, sendCoordinatorGroupMessage, showRequest, type OrcaRequestReceipt } from "./orca";
+import { isStopEventReason, newRequestId, OrcaCliError, replyToMessage, sendCoordinatorGroupMessage, showRequest, type OrcaRequestReceipt } from "./orca";
 import type { OperatorMessageCheckpoint, ProviderSessionStore } from "./providerSessions";
 
 export interface OperatorMessageDependencies {
@@ -73,7 +73,7 @@ export async function preflightOperatorMessage(input: OperatorMessagePreflight, 
     if (event?.type === "escalation" && event.payload) {
       let payload: Record<string, unknown> = {};
       try { payload = record(JSON.parse(event.payload)); } catch { /* malformed payload is not stop evidence */ }
-      if (["finished", "errored", "needs-input", "exited"].includes(String(payload.stopReason))) {
+      if (isStopEventReason(payload.stopReason)) {
         throw new OrcaCliError("A worker stop event is not a replyable question", "stop_event_not_question");
       }
     }
@@ -139,7 +139,7 @@ export async function performOperatorReply(input: OperatorReplyInput, deps: Oper
   if (event?.type === "escalation" && event.payload) {
     try {
       const payload = record(JSON.parse(event.payload));
-      if (["finished", "errored", "needs-input", "exited"].includes(String(payload.stopReason))) {
+      if (isStopEventReason(payload.stopReason)) {
         throw new OrcaCliError("A worker stop event is not a replyable question", "stop_event_not_question");
       }
     } catch (error) { if (error instanceof OrcaCliError) throw error; }
