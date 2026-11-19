@@ -183,7 +183,7 @@ export interface WorkerTranscriptMessageView {
   role: string;
   timestamp: number | null;
   model?: string | null;
-  source?: "transcript" | "opencode-api";
+  source?: "transcript" | "opencode-api" | "codex-session";
   blocks: WorkerTranscriptBlockView[];
 }
 

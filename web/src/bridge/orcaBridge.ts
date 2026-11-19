@@ -83,10 +83,10 @@ export function readOrcaHostLocale(): string | null {
 }
 
 /** Subscribe to Orca host theme updates (`<html class="light|dark">` + `--orca-*`). */
-export function subscribeOrcaHostTheme(onChange: () => void): () => void {
+export function subscribeOrcaHostTheme(onChange: (payload?: unknown) => void): () => void {
   const host = getOrcaGlobal();
   if (!host?.on) return () => {};
-  const sub = host.on("theme", () => onChange());
+  const sub = host.on("theme", (payload) => onChange(payload));
   return () => disposeOf(sub);
 }
 

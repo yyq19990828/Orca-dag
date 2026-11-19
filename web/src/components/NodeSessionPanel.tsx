@@ -564,10 +564,16 @@ export const NodeSessionPanel = memo(function NodeSessionPanel({
 
         {isTerminalOnly && (
           <>
-            <div className="odag-session__warn">{t("session.terminalFallbackNote")}</div>
-            <pre className="odag-session__terminal-fallback">
-              {output!.lines.length > 0 ? output!.lines.slice(-80).join("\n") : t("worker.outputEmpty")}
-            </pre>
+            {output!.source === "terminal" && (
+              <div className="odag-session__warn">{t("session.terminalFallbackNote")}</div>
+            )}
+            {output!.lines.length > 0 ? (
+              <pre className="odag-session__terminal-fallback">
+                {output!.lines.slice(-80).join("\n")}
+              </pre>
+            ) : (
+              <div className="odag-session__empty">{t("worker.outputEmpty")}</div>
+            )}
           </>
         )}
 

@@ -21,6 +21,28 @@ function readInitialChoice(): ColorSchemeChoice {
 
 let cachedOrcaRawBg: string | null = null;
 let cachedOrcaBgDark: boolean | null = null;
+let lastOrcaEventDark: boolean | null = null;
+
+function parseThemePayload(payload: unknown): boolean | null {
+  if (typeof payload === "string") {
+    const lower = payload.trim().toLowerCase();
+    if (lower === "dark") return true;
+    if (lower === "light") return false;
+    return null;
+  }
+  if (payload && typeof payload === "object") {
+    const rec = payload as Record<string, unknown>;
+    for (const key of ["colorScheme", "mode", "theme", "scheme"]) {
+      const val = rec[key];
+      if (typeof val === "string") {
+        const lower = val.trim().toLowerCase();
+        if (lower === "dark") return true;
+        if (lower === "light") return false;
+      }
+    }
+  }
+  return null;
+}
 
 function parseColorLuminance(raw: string): number | null {
   const hex = raw.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
@@ -38,7 +60,11 @@ function parseColorLuminance(raw: string): number | null {
     const b = Number(rgb[3]) / 255;
     return 0.2126 * r + 0.7152 * g + 0.0722 * b;
   }
-  const oklch = raw.match(/^oklch\(\s*([\d.]+)(%?)/i);
+  const srgb = raw.match(/^color\(\s*srgb\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/i);
+  if (srgb) {
+    return 0.2126 * Number(srgb[1]) + 0.7152 * Number(srgb[2]) + 0.0722 * Number(srgb[3]);
+  }
+  const oklch = raw.match(/^okl(?:ch|ab)\(\s*([\d.]+)(%?)/i);
   if (oklch) {
     const l = Number(oklch[1]);
     return oklch[2] === "%" ? l / 100 : l;
@@ -54,6 +80,7 @@ function detectOrcaCssDark(): boolean | null {
   if (typeof window === "undefined" || !isOrcaPluginFrame()) return null;
   if (document.documentElement.classList.contains("dark")) return true;
   if (document.documentElement.classList.contains("light")) return false;
+  if (lastOrcaEventDark !== null) return lastOrcaEventDark;
   try {
     const rootStyle = getComputedStyle(document.documentElement);
     const rawVar = rootStyle.getPropertyValue("--orca-background").trim();
@@ -87,6 +114,25 @@ function syncMeta(choice: ColorSchemeChoice): void {
   if (meta) {
     meta.setAttribute("content", choice ?? "light dark");
   }
+  if (choice) {
+    document.documentElement.setAttribute("data-theme", choice);
+  } else {
+    document.documentElement.removeAttribute("data-theme");
+  }
+}
+
+/**
+ * Sync the document's `color-scheme` meta and `data-theme` attribute so CSS
+ * `light-dark()` tokens follow Orca's host theme inside plugin frames (even
+ * when OS `prefers-color-scheme` disagrees) and user choice in standalone tabs.
+ */
+function syncDocumentTheme(): void {
+  const orcaDark = detectOrcaCssDark();
+  if (orcaDark !== null) {
+    syncMeta(orcaDark ? "dark" : "light");
+    return;
+  }
+  syncMeta(storedChoice);
 }
 
 function emit(): void {
@@ -96,26 +142,50 @@ function emit(): void {
 function ensureListeners(): void {
   if (initialized || typeof window === "undefined") return;
   initialized = true;
-  syncMeta(storedChoice);
+  syncDocumentTheme();
 
   const mq = window.matchMedia?.("(prefers-color-scheme: dark)");
   mq?.addEventListener("change", () => {
     systemDark = detectSystemDark();
     // Never clear storedChoice retroactively on OS day/night transitions (`dark-mode-toggle` rule).
+    syncDocumentTheme();
     emit();
   });
 
   window.addEventListener("storage", (event) => {
     if (event.key !== SCHEME_KEY) return;
     storedChoice = readInitialChoice();
-    syncMeta(storedChoice);
+    syncDocumentTheme();
     emit();
   });
 
-  subscribeOrcaHostTheme(() => {
+  const handleHostThemeUpdate = (payload?: unknown) => {
+    const parsed = parseThemePayload(payload);
+    if (parsed !== null) lastOrcaEventDark = parsed;
+    cachedOrcaRawBg = null;
     systemDark = detectSystemDark();
+    syncDocumentTheme();
     emit();
-  });
+  };
+
+  subscribeOrcaHostTheme(handleHostThemeUpdate);
+
+  if (isOrcaPluginFrame() && typeof MutationObserver !== "undefined") {
+    const observer = new MutationObserver(() => {
+      cachedOrcaRawBg = null;
+      const prev = cachedSnapshot.rendered;
+      systemDark = detectSystemDark();
+      syncDocumentTheme();
+      if (getSnapshot().rendered !== prev) emit();
+    });
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class", "style"],
+    });
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => handleHostThemeUpdate());
+    }
+  }
 }
 
 function subscribe(fn: () => void): () => void {

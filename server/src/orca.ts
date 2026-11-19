@@ -27,6 +27,7 @@ import {
   SETUP_POLICIES,
 } from "./config";
 import { ProviderSessionStore, openCodeSessionTitle } from "./providerSessions";
+import { readBoundCodexSessionOutput } from "./codexSession";
 
 const pExecFile = promisify(execFile);
 
@@ -2548,6 +2549,41 @@ async function exactOpenCodeBinding(detail: Pick<WorkerDetailView, "dispatchId" 
   return binding;
 }
 
+function extractLocalWorkspacePath(detail: Pick<WorkerDetailView, "fleet" | "terminal">): string | null {
+  if (typeof detail.terminal?.worktreePath === "string" && detail.terminal.worktreePath.startsWith("/")) {
+    return detail.terminal.worktreePath;
+  }
+  const ws: unknown = detail.fleet?.projection?.workspace;
+  if (typeof ws === "string" && ws.startsWith("/")) return ws;
+  if (ws && typeof ws === "object") {
+    const wsId = asRecord(ws).id;
+    if (typeof wsId === "string") {
+      const idx = wsId.indexOf("::/");
+      if (idx >= 0) {
+        const candidate = wsId.slice(idx + 2);
+        if (candidate.startsWith("/")) return candidate;
+      }
+      if (wsId.startsWith("/")) return wsId;
+    }
+  }
+  return null;
+}
+
+async function exactCodexBinding(detail: Pick<WorkerDetailView, "dispatchId" | "runId" | "taskId" | "fleet" | "terminal">) {
+  if (!detail.runId || !detail.taskId) return null;
+  const host = detail.fleet?.projection?.host;
+  const workspace = extractLocalWorkspacePath(detail);
+  if (host?.kind !== "local" || host.id !== "local" || !workspace) return null;
+  const binding = await new ProviderSessionStore(currentWorkspace().dir).get({
+    runId: detail.runId, taskId: detail.taskId, dispatchId: detail.dispatchId,
+  }).catch(() => null);
+  const resolvedWorkspace = realpathSyncSafe(workspace);
+  const resolvedBinding = binding ? realpathSyncSafe(binding.workspace) : null;
+  if (!binding || binding.harness !== "codex" || binding.host !== "local:local" ||
+      !resolvedWorkspace || !resolvedBinding || resolvedBinding !== resolvedWorkspace) return null;
+  return binding;
+}
+
 function realpathSyncSafe(path: string): string | null {
   try { return realpathSync(path); } catch { return null; }
 }
@@ -3014,7 +3050,7 @@ export interface WorkerTranscriptMessage {
   role: string;
   timestamp: number | null;
   model?: string | null;
-  source?: "transcript" | "opencode-api";
+  source?: "transcript" | "opencode-api" | "codex-session";
   blocks: WorkerTranscriptBlock[];
 }
 
@@ -3111,15 +3147,28 @@ function formatOpenCodeOutput(messages: Record<string, unknown>[]): {
       push(`[tool result] ${rendered}`);
     }
   };
+  let lastErrorText: string | null = null;
+  const formatErrorText = (rawError: unknown): string | null => {
+    if (typeof rawError === "string" && rawError.trim()) return rawError.trim();
+    if (!rawError || typeof rawError !== "object") return null;
+    const rec = asRecord(rawError);
+    const errType = typeof rec.type === "string" && rec.type.trim() ? rec.type.trim() : null;
+    const errMsg = typeof rec.message === "string" && rec.message.trim() ? rec.message.trim() : null;
+    if (errType && errMsg) return `[error: ${errType}] ${errMsg}`;
+    if (errMsg) return `[error] ${errMsg}`;
+    if (errType) return `[error: ${errType}]`;
+    const safe = safeToolInput(rawError);
+    return safe !== undefined ? `[error] ${JSON.stringify(safe)}` : null;
+  };
   for (const message of messages) {
     if (budget <= 0 || lines.length >= 10_000) { clipped = true; break; }
     const startLine = lines.length;
     const role = typeof message.type === "string" ? message.type : "unknown";
     const model = asRecord(message.model);
-    const modelLabel = role === "assistant" && model.providerID && model.id
+    const modelLabel = (role === "assistant" || role === "model-switched") && model.providerID && model.id
       ? `${String(model.providerID)}/${String(model.id)}${model.variant ? `#${String(model.variant)}` : ""}`
       : null;
-    const tag = modelLabel ? ` · ${modelLabel}` : "";
+    const tag = role === "assistant" && modelLabel ? ` · ${modelLabel}` : "";
     const blocks: WorkerTranscriptBlock[] = [];
     if (typeof message.text === "string") {
       blocks.push({ type: "text", text: clipText(message.text) });
@@ -3155,14 +3204,33 @@ function formatOpenCodeOutput(messages: Record<string, unknown>[]): {
         result(typeof part.tool === "string" ? part.tool : "unknown", part.output ?? part.text ?? part.content, blocks, part.isError === true, callId);
       }
     }
+    if ((role === "assistant" || role === "idle") && message.error !== undefined && message.error !== null) {
+      const errorText = formatErrorText(message.error);
+      if (errorText && (role === "assistant" || errorText !== lastErrorText)) {
+        lastErrorText = errorText;
+        blocks.push({ type: "text", text: clipText(errorText) });
+        push(`[${role}${tag}] ${errorText}`);
+      }
+    } else if (role === "model-switched" && modelLabel) {
+      const switchedText = `Switched model to ${modelLabel}`;
+      blocks.push({ type: "text", text: clipText(switchedText) });
+      push(`[system] ${switchedText}`);
+    }
+    const timeRec = asRecord(message.time);
+    const timestamp =
+      typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
+        ? message.timestamp
+        : typeof timeRec.created === "number" && Number.isFinite(timeRec.created)
+          ? timeRec.created
+          : null;
     if (blocks.length > 0 && structured.length < 1_000) {
       structured.push({
         startLine,
         message: {
           id: typeof message.id === "string" ? message.id : null,
-          role,
-          timestamp: typeof message.timestamp === "number" && Number.isFinite(message.timestamp) ? message.timestamp : null,
-          ...(modelLabel ? { model: modelLabel } : {}),
+          role: role === "model-switched" ? "system" : role,
+          timestamp,
+          ...(role === "assistant" && modelLabel ? { model: modelLabel } : {}),
           source: "opencode-api",
           blocks,
         },
@@ -3219,6 +3287,7 @@ export async function readWorkerOutput(
       contentComplete: !budgetClipped && execution.complete && execution.exited && !execution.evidence.userOwned && offset + page.length >= lines.length,
       clipped: budgetClipped || !execution.complete || offset + page.length < lines.length,
       sourceChanged,
+      ...(execution.exited ? { status: { worker: null, terminal: null, liveness: "exited" } } : {}),
       warnings: [
         `OpenCode API: ${execution.evidence.state}; model evidence comes from assistant turns, not Orca launch.effective`,
         ...(!execution.complete ? ["OpenCode history reached the bounded read budget; absence is not proof"] : []),
@@ -3227,10 +3296,12 @@ export async function readWorkerOutput(
       ],
     };
   }
+  let workerDetail: WorkerDetailView | null = null;
+  let codexBinding: Awaited<ReturnType<typeof exactCodexBinding>> = null;
   if (opts.source !== "terminal") {
-    const detail = await showWorkerDetail(dispatchId);
-    if (detail) {
-      const binding = await exactOpenCodeBinding(detail);
+    workerDetail = await showWorkerDetail(dispatchId);
+    if (workerDetail) {
+      const binding = await exactOpenCodeBinding(workerDetail);
       if (binding) {
         const read = await readOpenCodeBoundSession(binding);
         const { lines, structured, clipped: textClipped } = formatOpenCodeOutput(read.messages);
@@ -3264,6 +3335,7 @@ export async function readWorkerOutput(
           lines: page, messages: pageMessages,
           contentComplete: !clipped && read.status === "exited" && !read.userOwned,
           clipped, sourceChanged,
+          ...(read.status === "exited" ? { status: { worker: null, terminal: null, liveness: "exited" } } : {}),
           warnings: [
             `OpenCode API exact bound session: ${read.status}; provider state is separate from Orca fleet liveness and Task outcome.`,
             ...(read.status !== "exited" ? ["OpenCode has not positively confirmed execution exit; transcript is not complete."] : []),
@@ -3272,6 +3344,32 @@ export async function readWorkerOutput(
             ...(read.userOwned ? ["Additional user-owned prompts exist; only the original Dispatch turn is shown."] : []),
           ],
         };
+      }
+      codexBinding = await exactCodexBinding(workerDetail);
+      if (codexBinding && opts.cursor?.startsWith(`codex1:${dispatchId}:`)) {
+        const workerState = workerDetail.fleet?.workerState ?? null;
+        const workerSettled =
+          workerState === "succeeded" || workerState === "failed" || workerState === "stopped";
+        const terminalDisconnected = workerDetail.terminal?.connected === false;
+        const rawLiveness = workerDetail.liveness?.verdict ?? null;
+        const liveness =
+          rawLiveness === "exited" || (workerSettled && terminalDisconnected)
+            ? "exited"
+            : rawLiveness;
+        const codexPage = await readBoundCodexSessionOutput({
+          dispatchId,
+          taskId: codexBinding.taskId,
+          sessionId: codexBinding.sessionId,
+          workspace: codexBinding.workspace,
+          cursor: opts.cursor,
+          limit: opts.limit,
+          status: {
+            worker: workerState,
+            terminal: terminalDisconnected ? "exited" : null,
+            liveness,
+          },
+        });
+        if (codexPage) return codexPage;
       }
     }
   }
@@ -3414,21 +3512,60 @@ export async function readWorkerOutput(
       })(),
     };
   };
+  const tryCodexFallback = async (
+    fallbackStatus?: WorkerOutputReceipt["status"],
+  ): Promise<WorkerOutputReceipt | null> => {
+    if (opts.source === "terminal" || !codexBinding) return null;
+    const status = fallbackStatus ?? (workerDetail
+      ? { worker: workerDetail.fleet?.workerState ?? null, terminal: null, liveness: workerDetail.liveness?.verdict ?? null }
+      : undefined);
+    return readBoundCodexSessionOutput({
+      dispatchId,
+      taskId: codexBinding.taskId,
+      sessionId: codexBinding.sessionId,
+      workspace: codexBinding.workspace,
+      cursor: opts.cursor,
+      limit: opts.limit,
+      status,
+    }).catch(() => null);
+  };
   try {
-    return parse(await runOrca(buildArgs(opts.cursor)));
+    const receipt = parse(await runOrca(buildArgs(opts.cursor)));
+    if (
+      opts.source !== "terminal" &&
+      receipt.source !== "transcript" &&
+      receipt.fallbackReason === "session_not_reported"
+    ) {
+      const codexReceipt = await tryCodexFallback(receipt.status);
+      if (codexReceipt) return codexReceipt;
+    }
+    return receipt;
   } catch (err) {
     const e = err as OrcaCliError;
-    if (e?.code !== "source_changed") throw err;
-    // The cursor was pinned to a source that no longer exists (the terminal
-    // was released and the archive took over, or vice versa). One fresh read
-    // without the cursor — then label the discontinuity.
-    const receipt = parse(await runOrca(buildArgs(undefined)));
-    receipt.sourceChanged = true;
-    receipt.warnings = [
-      ...receipt.warnings,
-      "output source changed; the read restarted from the beginning of the new source",
-    ];
-    return receipt;
+    if (e?.code === "source_changed") {
+      // The cursor was pinned to a source that no longer exists (the terminal
+      // was released and the archive took over, or vice versa). One fresh read
+      // without the cursor — then label the discontinuity.
+      const receipt = parse(await runOrca(buildArgs(undefined)));
+      receipt.sourceChanged = true;
+      receipt.warnings = [
+        ...receipt.warnings,
+        "output source changed; the read restarted from the beginning of the new source",
+      ];
+      return receipt;
+    }
+    if (
+      opts.source === "transcript" &&
+      codexBinding &&
+      (e?.code === "session_not_reported" ||
+        e?.code === "archive_unavailable" ||
+        e?.code === "transcript_unavailable" ||
+        /session_not_reported|no transcript/i.test(String(e?.message ?? "")))
+    ) {
+      const codexReceipt = await tryCodexFallback();
+      if (codexReceipt) return codexReceipt;
+    }
+    throw err;
   }
 }
 

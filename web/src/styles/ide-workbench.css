@@ -186,16 +186,48 @@
       --canvas-dot: rgb(226 232 240 / 0.11);
     }
 
-    &:is(:has(> head > meta[name="color-scheme"][content="dark"]), .dark, [data-theme="dark"]) {
+    &:has(> head > meta[name="color-scheme"][content="dark"]),
+    &.dark,
+    &[data-theme="dark"] {
       color-scheme: dark;
+      --st-pending: var(--st-pending-dark);
+      --st-pending-bg: var(--st-pending-bg-dark);
+      --st-ready: var(--st-ready-dark);
+      --st-ready-bg: var(--st-ready-bg-dark);
+      --st-dispatched: var(--st-dispatched-dark);
+      --st-dispatched-bg: var(--st-dispatched-bg-dark);
+      --st-completed: var(--st-completed-dark);
+      --st-completed-bg: var(--st-completed-bg-dark);
+      --st-failed: var(--st-failed-dark);
+      --st-failed-bg: var(--st-failed-bg-dark);
+      --st-blocked: var(--st-blocked-dark);
+      --st-blocked-bg: var(--st-blocked-bg-dark);
+      --scrollbar-thumb: var(--odag-scroll-thumb-dark);
+      --scrollbar-track: var(--odag-scroll-track-dark);
       --shadow-card: 0 1px 0 rgb(255 255 255 / 0.04) inset, 0 12px 28px -12px rgb(0 0 0 / 0.65);
       --shadow-float: 0 1px 0 rgb(255 255 255 / 0.06) inset, 0 20px 44px -12px rgb(0 0 0 / 0.78);
       --bevel-top: inset 0 1px 0 rgb(255 255 255 / 0.045);
       --canvas-dot: rgb(226 232 240 / 0.11);
     }
 
-    &:is(:has(> head > meta[name="color-scheme"][content="light"]), .light, [data-theme="light"]) {
+    &:has(> head > meta[name="color-scheme"][content="light"]),
+    &.light,
+    &[data-theme="light"] {
       color-scheme: light;
+      --st-pending: var(--st-pending-light);
+      --st-pending-bg: var(--st-pending-bg-light);
+      --st-ready: var(--st-ready-light);
+      --st-ready-bg: var(--st-ready-bg-light);
+      --st-dispatched: var(--st-dispatched-light);
+      --st-dispatched-bg: var(--st-dispatched-bg-light);
+      --st-completed: var(--st-completed-light);
+      --st-completed-bg: var(--st-completed-bg-light);
+      --st-failed: var(--st-failed-light);
+      --st-failed-bg: var(--st-failed-bg-light);
+      --st-blocked: var(--st-blocked-light);
+      --st-blocked-bg: var(--st-blocked-bg-light);
+      --scrollbar-thumb: var(--odag-scroll-thumb-light);
+      --scrollbar-track: var(--odag-scroll-track-light);
       --shadow-card: 0 1px 2px rgb(15 20 30 / 0.05), 0 6px 16px -6px rgb(15 20 30 / 0.07);
       --shadow-float: 0 10px 30px -8px rgb(15 20 30 / 0.16), 0 2px 6px rgb(15 20 30 / 0.06);
       --bevel-top: inset 0 1px 0 rgb(255 255 255 / 0.7);
@@ -277,6 +309,21 @@
       --accent-fg: HighlightText;
     }
   }
+}
+
+/* Explicit dark/light overrides stay unlayered so an embedding host's unlayered
+   `:root { color-scheme: light dark }` cannot defeat explicit dark/light signals,
+   while the default `:root { color-scheme: light dark }` stays in `@layer tokens`. */
+:root:has(> head > meta[name="color-scheme"][content="dark"]),
+:root.dark,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+:root:has(> head > meta[name="color-scheme"][content="light"]),
+:root.light,
+:root[data-theme="light"] {
+  color-scheme: light;
 }
 
 @layer base {

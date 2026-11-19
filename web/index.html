@@ -7,8 +7,10 @@
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <script>
       try {
-        document.querySelector('meta[name="color-scheme"]').content =
-          localStorage.getItem("orca-dag:color-scheme") ?? "light dark";
+        if (!(window.orca && window.orca.plugin)) {
+          document.querySelector('meta[name="color-scheme"]').content =
+            localStorage.getItem("orca-dag:color-scheme") ?? "light dark";
+        }
       } catch {}
     </script>
     <title>Orchestration Panel</title>

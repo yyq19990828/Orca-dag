@@ -69,6 +69,45 @@ type TaskFilter = "all" | "dispatched" | "blocked" | "failed" | "completed";
 const PRIMARY_TABS: readonly SidebarTab[] = ["tasks", "inbox", "activity"];
 const DETAIL_TABS: readonly DetailTab[] = ["messages", "session", "output"];
 
+function isWorkerSucceeded(w: WorkerRowView): boolean {
+  return w.dispatchStatus === "completed" || w.workerState === "succeeded";
+}
+
+function isWorkerExitedUnfinished(w: WorkerRowView): boolean {
+  return w.projection?.liveness?.verdict === "exited" && !isWorkerSucceeded(w);
+}
+
+/**
+ * Pick the single active actionable failed/stopped Dispatch for a Task, or null
+ * if the Task is already completed or has a live/succeeded replacement Dispatch.
+ * Prevents historical pre-retry/pre-resume attempts from lingering in Pending
+ * or offering Resume on an already-finished Task.
+ */
+function pickActionableFailedWorker(
+  task: DagNode | undefined,
+  taskWorkers: readonly WorkerRowView[],
+): WorkerRowView | null {
+  if (task?.status === "completed") return null;
+  if (
+    taskWorkers.some(
+      (w) => isWorkerSucceeded(w) || w.projection?.liveness?.verdict === "live",
+    )
+  ) {
+    return null;
+  }
+  const exited = taskWorkers.filter(isWorkerExitedUnfinished);
+  if (exited.length === 0) return null;
+  if (task?.dispatchId) {
+    const current = exited.find((w) => w.dispatchId === task.dispatchId);
+    if (current) return current;
+  }
+  return exited.reduce((best, cur) => {
+    const bestTs = Date.parse(best.projection?.evidence?.lastObservedAt ?? "") || 0;
+    const curTs = Date.parse(cur.projection?.evidence?.lastObservedAt ?? "") || 0;
+    return curTs >= bestTs ? cur : best;
+  });
+}
+
 function formatShortTime(iso: string): string {
   try {
     return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -272,22 +311,11 @@ export default function SidebarApp() {
     return { total: nodes.length, running, blocked, failed, done, ready };
   }, [nodes]);
 
-  const pendingGates = useMemo(() => gates.filter((g) => isGatePending(g)), [gates]);
-  const pendingInbox = useMemo(
-    () => (status?.runId === runId ? status.inbox.pending : []),
-    [status, runId],
-  );
-  const failedWorkers = useMemo(
-    () =>
-      workers.filter(
-        (w) =>
-          w.projection?.liveness?.verdict === "exited" &&
-          w.dispatchStatus !== "completed" &&
-          w.workerState !== "succeeded",
-      ),
-    [workers],
-  );
-  const pendingCount = pendingGates.length + pendingInbox.length + failedWorkers.length;
+  const nodeById = useMemo(() => {
+    const map = new Map<string, DagNode>();
+    for (const n of nodes) map.set(n.id, n);
+    return map;
+  }, [nodes]);
 
   const workersByTask = useMemo(() => {
     const map = new Map<string, WorkerRowView[]>();
@@ -299,14 +327,35 @@ export default function SidebarApp() {
     return map;
   }, [workers]);
 
+  const pendingGates = useMemo(() => gates.filter((g) => isGatePending(g)), [gates]);
+  const pendingInbox = useMemo(() => {
+    if (status?.runId !== runId) return [];
+    return status.inbox.pending.filter((item) => {
+      if (!item.taskId) return true;
+      const task = nodeById.get(item.taskId);
+      // Historical stop_event notifications from pre-retry attempts are superseded once the Task completes.
+      if (task?.status === "completed" && item.kind === "stop_event") return false;
+      return true;
+    });
+  }, [status, runId, nodeById]);
+  const failedWorkers = useMemo(() => {
+    const actionable: WorkerRowView[] = [];
+    for (const [taskId, taskWorkers] of workersByTask) {
+      const picked = pickActionableFailedWorker(nodeById.get(taskId), taskWorkers);
+      if (picked) actionable.push(picked);
+    }
+    return actionable;
+  }, [workersByTask, nodeById]);
+  const pendingCount = pendingGates.length + pendingInbox.length + failedWorkers.length;
+
   const filteredNodes = useMemo(() => {
     if (filter === "all") return nodes;
     return nodes.filter((n) => n.status === filter);
   }, [nodes, filter]);
 
   const selectedTask: DagNode | null = useMemo(
-    () => (selectedTaskId ? nodes.find((n) => n.id === selectedTaskId) ?? null : null),
-    [nodes, selectedTaskId],
+    () => (selectedTaskId ? nodeById.get(selectedTaskId) ?? null : null),
+    [nodeById, selectedTaskId],
   );
 
   const selectedTaskWorkers = useMemo(
@@ -328,14 +377,8 @@ export default function SidebarApp() {
   );
 
   const resumableWorker = useMemo(
-    () =>
-      selectedTaskWorkers.find(
-        (w) =>
-          w.projection?.liveness?.verdict === "exited" &&
-          w.dispatchStatus !== "completed" &&
-          w.workerState !== "succeeded",
-      ) ?? null,
-    [selectedTaskWorkers],
+    () => (selectedTask ? pickActionableFailedWorker(selectedTask, selectedTaskWorkers) : null),
+    [selectedTask, selectedTaskWorkers],
   );
 
   // Sync default selected output dispatch when entering a task.
