@@ -13,7 +13,6 @@ import {
 import {
   AlertCircle,
   ChevronDown,
-  ChevronUp,
   Cpu,
   Diamond,
   GitBranch,
@@ -25,12 +24,13 @@ import {
   MessageSquareWarning,
   Moon,
   Network,
-  PanelLeft,
-  PanelRight,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   Search,
   SlidersHorizontal,
   Sun,
-  TerminalSquare,
   Workflow,
   X,
 } from "lucide-react";
@@ -61,7 +61,6 @@ import { RunPicker, type RunListReadState } from "./components/RunPicker";
 import { RunsView } from "./components/RunsView";
 import { SchedulerDockView } from "./components/SchedulerDockView";
 import { WorkerOutputDockView } from "./components/WorkerOutputDockView";
-import { WorkerPanel } from "./components/WorkerPanel";
 import {
   effectiveHarness,
   initConfig,
@@ -586,6 +585,7 @@ export default function App() {
 
   function beginInspectorResize(event: ReactPointerEvent<HTMLDivElement>) {
     if (!inspectorRef.current) return;
+    inspectorRef.current.dataset.resizing = "true";
     inspectorResize.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
@@ -605,6 +605,7 @@ export default function App() {
     const resize = inspectorResize.current;
     if (!resize || resize.pointerId !== event.pointerId) return;
     inspectorResize.current = null;
+    if (inspectorRef.current) delete inspectorRef.current.dataset.resizing;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
@@ -612,6 +613,7 @@ export default function App() {
 
   // Dock vertical resize
   function beginDockResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (dockRef.current) dockRef.current.dataset.resizing = "true";
     dockResize.current = {
       pointerId: event.pointerId,
       startY: event.clientY,
@@ -634,6 +636,7 @@ export default function App() {
     const resize = dockResize.current;
     if (!resize || resize.pointerId !== event.pointerId) return;
     dockResize.current = null;
+    if (dockRef.current) delete dockRef.current.dataset.resizing;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
@@ -716,6 +719,14 @@ export default function App() {
     },
     [visibleDag.gates, selectGate, switchView],
   );
+
+  // The dock's "Worker output" tab is the single worker-read viewer; other
+  // surfaces jump here instead of rendering their own copy of the output.
+  const openWorkerOutput = useCallback((dispatchId: string) => {
+    setSelectedOutputDispatchId(dispatchId);
+    setDockTab("output");
+    setDockOpen(true);
+  }, []);
 
   useEffect(() => {
     if (!operationFocus) return;
@@ -943,16 +954,21 @@ export default function App() {
           type="button"
           className="odag-btn odag-btn--icon"
           aria-pressed={sidebarOpen}
+          aria-expanded={sidebarOpen}
           aria-label={t("ide.sidebar.toggle")}
           title={t("ide.sidebar.toggle")}
           onClick={() => setSidebarOpen((v) => !v)}
         >
-          <PanelLeft size={15} aria-hidden="true" />
+          {sidebarOpen ? (
+            <PanelLeftClose size={16} className="odag-panel-icon" aria-hidden="true" />
+          ) : (
+            <PanelLeftOpen size={16} className="odag-panel-icon" aria-hidden="true" />
+          )}
         </button>
 
         <div className="odag-brand">
           <span className="odag-brand__mark" aria-hidden="true">
-            <Workflow size={15} />
+            <Workflow size={16} />
           </span>
           <div className="odag-brand__text">
             <strong>{t("topbar.title")}</strong>
@@ -1001,7 +1017,7 @@ export default function App() {
           title={connDetail}
           aria-label={connDetail}
         >
-          {!connectionError && readiness ? <Link2 size={15} /> : <Link2Off size={15} />}
+          {!connectionError && readiness ? <Link2 size={16} /> : <Link2Off size={16} />}
         </div>
 
         <div
@@ -1047,9 +1063,9 @@ export default function App() {
             onClick={toggleColorScheme}
           >
             {colorScheme.rendered === "dark" ? (
-              <Sun size={15} aria-hidden="true" />
+              <Sun size={16} aria-hidden="true" />
             ) : (
-              <Moon size={15} aria-hidden="true" />
+              <Moon size={16} aria-hidden="true" />
             )}
           </button>
 
@@ -1060,18 +1076,23 @@ export default function App() {
             title={`${t("ide.shortcuts.openAria")} (?)`}
             onClick={() => setShortcutsOpen(true)}
           >
-            <HelpCircle size={15} aria-hidden="true" />
+            <HelpCircle size={16} aria-hidden="true" />
           </button>
 
           <button
             type="button"
             className="odag-btn odag-btn--icon"
             aria-pressed={inspectorOpen}
+            aria-expanded={inspectorOpen}
             aria-label={t("ide.inspector.toggle")}
             title={t("ide.inspector.toggle")}
             onClick={() => setInspectorOpen((v) => !v)}
           >
-            <PanelRight size={15} aria-hidden="true" />
+            {inspectorOpen ? (
+              <PanelRightClose size={16} className="odag-panel-icon" aria-hidden="true" />
+            ) : (
+              <PanelRightOpen size={16} className="odag-panel-icon" aria-hidden="true" />
+            )}
           </button>
         </div>
       </header>
@@ -1114,6 +1135,8 @@ export default function App() {
         <aside
           className={`odag-sidebar${sidebarOpen ? "" : " odag-sidebar--collapsed"}`}
           aria-label={t("workbench.navigation")}
+          aria-hidden={!sidebarOpen}
+          {...(!sidebarOpen ? ({ inert: "" } as Record<string, string>) : undefined)}
         >
           <nav className="odag-nav" aria-label={t("workbench.navigation")}>
             <button
@@ -1122,7 +1145,7 @@ export default function App() {
               aria-current={route.view === "canvas" ? "page" : undefined}
               onClick={() => switchView("canvas")}
             >
-              <Network size={15} aria-hidden="true" />
+              <Network size={16} aria-hidden="true" />
               <span className="truncate" style={{ flex: 1 }}>
                 {t("ide.nav.canvas")}
               </span>
@@ -1135,7 +1158,7 @@ export default function App() {
               aria-current={route.view === "board" ? "page" : undefined}
               onClick={() => switchView("board")}
             >
-              <Kanban size={15} aria-hidden="true" />
+              <Kanban size={16} aria-hidden="true" />
               <span className="truncate" style={{ flex: 1 }}>
                 {t("ide.nav.board")}
               </span>
@@ -1154,7 +1177,7 @@ export default function App() {
               aria-current={route.view === "runs" ? "page" : undefined}
               onClick={() => switchView("runs")}
             >
-              <History size={15} aria-hidden="true" />
+              <History size={16} aria-hidden="true" />
               <span className="truncate" style={{ flex: 1 }}>
                 {t("ide.nav.runs")}
               </span>
@@ -1166,7 +1189,7 @@ export default function App() {
               aria-current={route.view === "resources" ? "page" : undefined}
               onClick={() => switchView("resources")}
             >
-              <GitBranch size={15} aria-hidden="true" />
+              <GitBranch size={16} aria-hidden="true" />
               <span className="truncate" style={{ flex: 1 }}>
                 {t("ide.nav.resources")}
               </span>
@@ -1181,7 +1204,7 @@ export default function App() {
               aria-current={route.view === "settings" ? "page" : undefined}
               onClick={() => switchView("settings")}
             >
-              <SlidersHorizontal size={15} aria-hidden="true" />
+              <SlidersHorizontal size={16} aria-hidden="true" />
               <span className="truncate" style={{ flex: 1 }}>
                 {t("ide.nav.settings")}
               </span>
@@ -1761,22 +1784,28 @@ export default function App() {
 
               <button
                 type="button"
-                className="odag-btn odag-btn--ghost odag-btn--icon"
-                style={{ minBlockSize: 24, inlineSize: 24, minInlineSize: 24 }}
+                className="odag-btn odag-btn--ghost odag-btn--icon odag-btn--icon-sm"
+                aria-expanded={dockOpen}
                 aria-label={dockOpen ? t("ide.dock.collapse") : t("ide.dock.expand")}
                 title={dockOpen ? t("ide.dock.collapse") : t("ide.dock.expand")}
                 onClick={() => setDockOpen((v) => !v)}
               >
-                {dockOpen ? <ChevronDown size={15} /> : <ChevronUp size={15} />}
+                <ChevronDown
+                  size={14}
+                  className="odag-chevron odag-chevron--dock"
+                  data-open={dockOpen || undefined}
+                  aria-hidden="true"
+                />
               </button>
             </div>
 
             {/* Single shared ActivityPanel stays mounted so its live SSE stream never drops */}
             <div
               className="odag-dock__content"
-              style={{ display: dockOpen ? "flex" : "none" }}
+              aria-hidden={!dockOpen}
+              {...(!dockOpen ? ({ inert: "" } as Record<string, string>) : undefined)}
             >
-              {dockOpen && dockTab === "scheduler" && (
+              {dockTab === "scheduler" && (
                 <div className="odag-dock-pane">
                   <SchedulerDockView
                     runId={runId}
@@ -1793,11 +1822,12 @@ export default function App() {
                     disabledReason={readiness?.reason}
                     onSelectTask={(id) => selectTask(id)}
                     onFocusOperation={openOperation}
+                    onOpenOutput={openWorkerOutput}
                   />
                 </div>
               )}
 
-              <div className="odag-dock-pane" hidden={!dockOpen || dockTab !== "activity"}>
+              <div className="odag-dock-pane" hidden={dockTab !== "activity"}>
                 <ActivityPanel
                   runId={runId}
                   onSelectTask={(id) => selectTask(id)}
@@ -1809,7 +1839,7 @@ export default function App() {
                 />
               </div>
 
-              {dockOpen && dockTab === "output" && (
+              {dockTab === "output" && (
                 <div className="odag-dock-pane">
                   <WorkerOutputDockView
                     runId={runId}
@@ -1817,11 +1847,12 @@ export default function App() {
                     labelsById={labelsById}
                     selectedDispatchId={selectedOutputDispatchId}
                     onSelectDispatchId={setSelectedOutputDispatchId}
+                    active={dockOpen}
                   />
                 </div>
               )}
 
-              <div className="odag-dock-pane" hidden={!dockOpen || dockTab !== "audit"}>
+              <div className="odag-dock-pane" hidden={dockTab !== "audit"}>
                 <RequestAuditPanel
                   labelsById={labelsById}
                   runId={runId}
@@ -1839,9 +1870,14 @@ export default function App() {
           className={`odag-inspector odag-inspector--compact-chat${
             inspectorOpen ? "" : " odag-inspector--closed"
           }`}
-          style={{ width: inspectorWidth === null ? undefined : `${inspectorWidth}px` }}
+          style={
+            {
+              "--inspector-w": inspectorWidth === null ? "416px" : `${inspectorWidth}px`,
+            } as React.CSSProperties
+          }
           aria-label={t("ide.inspector.toggle")}
           aria-hidden={!inspectorOpen}
+          {...(!inspectorOpen ? ({ inert: "" } as Record<string, string>) : undefined)}
         >
           <div
             className="odag-inspector__resize"
@@ -1915,7 +1951,8 @@ export default function App() {
               disabledReason={readiness?.reason}
               renderTask={(node) => (
                 <NodePanel
-                  key={`${runId}:${node.id}`}
+                  key={`${runId}:${node.id}:overview`}
+                  mode="overview"
                   node={node}
                   runId={runId}
                   isLead={node.id === leadTaskId}
@@ -1947,47 +1984,28 @@ export default function App() {
                   onOpenOperations={openOperation}
                 />
               )}
-              renderDispatch={(node) => {
-                const taskWorkers = workerRows.filter((row) => row.taskId === node.id);
-                const latestDispatch = taskWorkers[0]?.dispatchId ?? node.dispatchId;
-                return (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                    {latestDispatch && (
-                      <div style={{ display: "flex", justifyContent: "flex-end" }}>
-                        <button
-                          type="button"
-                          className="odag-btn"
-                          onClick={() => {
-                            setSelectedOutputDispatchId(latestDispatch);
-                            setDockTab("output");
-                            setDockOpen(true);
-                          }}
-                        >
-                          <TerminalSquare size={13} aria-hidden="true" />
-                          {t("ide.inspector.openOutput")}
-                        </button>
-                      </div>
-                    )}
-                    {taskWorkers.length === 0 && !workerHistoryError ? (
-                      <p style={{ color: "var(--fg-secondary)", fontSize: "var(--text-base)" }}>
-                        {t("operations.noWorkers")}
-                      </p>
-                    ) : (
-                      <WorkerPanel
-                        key={`${runId}:${node.id}`}
-                        labelsById={labelsById}
-                        focusId={operationFocus?.kind === "worker" ? operationFocus.id : null}
-                        runId={runId}
-                        rows={taskWorkers}
-                        rowsError={workerHistoryError}
-                        status={runStatus}
-                        disabled={execOff}
-                        disabledReason={readiness?.reason}
-                      />
-                    )}
-                  </div>
-                );
-              }}
+              renderConfig={(node) => (
+                <NodePanel
+                  key={`${runId}:${node.id}:config`}
+                  mode="config"
+                  node={node}
+                  runId={runId}
+                  isLead={node.id === leadTaskId}
+                  parentLabel={null}
+                  childLabels={[]}
+                  readiness={visibleDag.readiness[node.id] ?? null}
+                  edges={visibleDag.edges}
+                  labelsById={labelsById}
+                  onLeadChange={(taskId) => setLeadTask(runId, taskId)}
+                  permanentlyLocked={startedTaskIds.has(node.id)}
+                  temporarilyLocked={selectedRunExecuting}
+                  coordinatorStarting={selectedRunStarting}
+                  workerHistoryLoading={workerHistoryLoading}
+                  workerHistoryError={workerHistoryError}
+                  workerRows={workerRows}
+                  onRefresh={refresh}
+                />
+              )}
             />
           </div>
         </aside>

@@ -1,9 +1,9 @@
 import { useId, useMemo } from "react";
+import { ChevronDown } from "lucide-react";
 import { formatClock, formatDateTime } from "../format";
 import { t, useT } from "../i18n";
 import type { CoordinatorCheckAgentSummary, CoordinatorCheckReceipt, DagNode } from "../types";
 import { useScopedChatState } from "./useScopedChatState";
-import "./mailbox-checks.css";
 
 interface TimelineCheckGroup {
   receipts: CoordinatorCheckReceipt[];
@@ -212,7 +212,7 @@ export function MailboxChecks({ checks, tasks, taskId, scope }: {
                 return next;
               })}
             >
-              <span className="chat-checkpoint__chevron" aria-hidden="true">›</span>
+              <ChevronDown size={14} className="chat-checkpoint__chevron odag-chevron" data-open={visibleCount > 0 || undefined} aria-hidden="true" />
               {visibleCount > 0 ? t("chat.check.hide", { label: detailsLabel }) : t("chat.check.expand", { label: detailsLabel })}
             </button>
           </div>
@@ -283,7 +283,7 @@ export function MailboxChecks({ checks, tasks, taskId, scope }: {
                               <span>{item.messages!.length === 1
                                 ? t("chat.check.countOne", { n: item.messages!.length })
                                 : t("chat.check.countMany", { n: item.messages!.length })}</span>
-                              <span className="chat-checkpoint__chevron" aria-hidden="true">›</span>
+                              <ChevronDown size={14} className="chat-checkpoint__chevron odag-chevron" aria-hidden="true" />
                             </summary>
                             <ul>
                               {item.messages!.map((message) => {
@@ -337,11 +337,10 @@ export function MailboxChecks({ checks, tasks, taskId, scope }: {
   }
 
   return (
-    <section className="mailbox-checks" aria-label={t("chat.checks.title")}>
+    <section className="mailbox-checks odag-scroll" aria-label={t("chat.checks.title")}>
       <header className="mailbox-checks__header">
-        <h2>{t("chat.checks.title")}</h2>
         <p>{t("chat.checks.description")}</p>
-        <span className="chat-runtime-summary__meta">
+        <span className="chat-runtime-summary__meta mono">
           {lastCheck
             ? t("chat.summary.lastCheck", { time: formatClock(new Date(lastCheck.checkedAt).toISOString()) })
             : t("chat.summary.noChecks")}

@@ -1,46 +1,120 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { fetchWorkerOutput } from "../api";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { fetchEnvironments, fetchWorkerOutput } from "../api";
 import { useT } from "../i18n";
+import { usePageVisible } from "../visibility";
 import type { WorkerOutputView, WorkerRowView } from "../types";
 
+type OutputSource = "auto" | "terminal" | "transcript";
+
+/** Rows per worker-read page (server clamps to 200). */
+const PAGE_LIMIT = 120;
+/** Idle follow cadence while the worker may still produce output. */
+const FOLLOW_INTERVAL_MS = 3_000;
+/** Catch-up cadence while the previous page came back full (backlog). */
+const DRAIN_INTERVAL_MS = 250;
+/** Client-side retention cap; older loaded rows are dropped, never refetched. */
+const MAX_RETAINED_LINES = 5_000;
+/** Back-off while reads are failing (e.g. a transient CLI/runtime error). */
+const ERROR_INTERVAL_MS = 10_000;
+/** Distance from the bottom that still counts as "pinned to the tail". */
+const STICK_THRESHOLD_PX = 32;
+
+/**
+ * The single worker-read viewer (bottom dock → "Worker output").
+ *
+ * Every other surface (the Scheduler fleet rows) jumps here via
+ * `onOpenOutput` instead of rendering a second copy of the same bounded read.
+ *
+ * Auto-refresh ("follow") is plain cursor polling of `worker-read`: the
+ * returned cursor is a stable tail pointer, so each poll returns only rows
+ * appended since the last page. Polling runs only while the dock is open, the
+ * page is visible, and the worker has not positively exited with an empty
+ * page — a settled worker costs nothing. Output is evidence, never settlement:
+ * `status` from the read only decides whether to keep following.
+ */
 export const WorkerOutputDockView = memo(function WorkerOutputDockView({
   runId,
   workerRows,
   labelsById,
   selectedDispatchId,
   onSelectDispatchId,
+  active = true,
 }: {
   runId: string;
   workerRows: WorkerRowView[];
   labelsById: Record<string, string>;
   selectedDispatchId: string | null;
   onSelectDispatchId: (dispatchId: string) => void;
+  /** False while the dock is collapsed: follow polling pauses. */
+  active?: boolean;
 }) {
   const t = useT();
-  const [source, setSource] = useState<"auto" | "terminal" | "transcript">("auto");
-  const [output, setOutput] = useState<WorkerOutputView | null>(null);
+  const visible = usePageVisible();
+  const [source, setSource] = useState<OutputSource>("auto");
+  // Loaded rows + how many older rows the retention cap dropped, kept in one
+  // state so a page merge is a single pure update.
+  const [view, setView] = useState<{ output: WorkerOutputView; trimmed: number } | null>(null);
+  const output = view?.output ?? null;
+  const trimmed = view?.trimmed ?? 0;
+  const [lastPageCount, setLastPageCount] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [follow, setFollow] = useState(true);
+  const [filter, setFilter] = useState("");
+  const [envs, setEnvs] = useState<Awaited<ReturnType<typeof fetchEnvironments>>>([]);
   const reqSeq = useRef(0);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const stickToBottom = useRef(true);
 
-  const activeId = selectedDispatchId || workerRows[0]?.dispatchId || null;
+  useEffect(() => {
+    let alive = true;
+    fetchEnvironments()
+      .then((e) => alive && setEnvs(e))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // A selection from another Run (or a vanished row) never addresses a read.
+  const activeRow =
+    workerRows.find((row) => row.dispatchId === selectedDispatchId) ?? workerRows[0] ?? null;
+  const activeId = activeRow?.dispatchId || null;
+
+  // Structured transcript reads are a peer capability: always for local
+  // workers, for remote workers only when their environment advertises it.
+  const host = activeRow?.projection?.host ?? null;
+  const hostEnv = host ? envs.find((e) => e.id === host.id) : undefined;
+  const canTranscript =
+    host?.kind === "local" || (host?.kind != null && host.kind !== "local" && (hostEnv?.peer.transcriptRead ?? false));
+  const effectiveSource: OutputSource = source === "transcript" && !canTranscript ? "auto" : source;
 
   const loadPage = useCallback(
     async (cursor?: string) => {
       if (!runId || !activeId) {
-        setOutput(null);
+        setView(null);
         return;
       }
       const seq = ++reqSeq.current;
       setLoading(true);
       try {
-        const res = await fetchWorkerOutput(runId, activeId, { source, cursor, limit: 120 });
+        const res = await fetchWorkerOutput(runId, activeId, {
+          source: effectiveSource === "auto" ? undefined : effectiveSource,
+          cursor,
+          limit: PAGE_LIMIT,
+        });
         if (seq !== reqSeq.current) return;
-        setOutput((prev) =>
-          cursor && prev && !res.sourceChanged
-            ? { ...res, lines: [...prev.lines, ...res.lines] }
-            : res,
-        );
+        const continues = Boolean(cursor) && !res.sourceChanged;
+        setView((prev) => {
+          if (!continues || !prev) return { output: res, trimmed: 0 };
+          const merged = [...prev.output.lines, ...res.lines];
+          const overflow = Math.max(0, merged.length - MAX_RETAINED_LINES);
+          return {
+            output: { ...res, lines: overflow > 0 ? merged.slice(overflow) : merged },
+            trimmed: prev.trimmed + overflow,
+          };
+        });
+        setLastPageCount(res.lines.length);
         setError(null);
       } catch (err) {
         if (seq === reqSeq.current) setError(String((err as Error).message ?? err));
@@ -48,33 +122,92 @@ export const WorkerOutputDockView = memo(function WorkerOutputDockView({
         if (seq === reqSeq.current) setLoading(false);
       }
     },
-    [runId, activeId, source],
+    [runId, activeId, effectiveSource],
   );
 
+  // Fresh read whenever the addressed Dispatch or source changes.
   useEffect(() => {
+    setView(null);
+    setLastPageCount(null);
+    setFilter("");
+    stickToBottom.current = true;
     void loadPage();
   }, [loadPage]);
+
+  const exited =
+    output?.status?.liveness === "exited" ||
+    (output?.status == null && activeRow?.projection?.liveness?.verdict === "exited");
+  // Stop following once the worker positively exited AND a poll found nothing
+  // new — the tail is drained. Any later visibility/selection change re-arms.
+  const drained = exited && lastPageCount === 0;
+  const polling = follow && active && visible && Boolean(activeId) && !drained;
+
+  useEffect(() => {
+    if (!polling || loading) return;
+    const delay = error
+      ? ERROR_INTERVAL_MS
+      : lastPageCount !== null && lastPageCount >= PAGE_LIMIT
+        ? DRAIN_INTERVAL_MS
+        : FOLLOW_INTERVAL_MS;
+    const id = window.setTimeout(() => void loadPage(output?.cursor ?? undefined), delay);
+    return () => window.clearTimeout(id);
+  }, [polling, loading, error, output, lastPageCount, loadPage]);
+
+  // Keep the newest rows in view while following, unless the user scrolled up.
+  const lineCount = output?.lines.length ?? 0;
+  useLayoutEffect(() => {
+    const el = viewportRef.current;
+    if (!el || !follow || !stickToBottom.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [lineCount, trimmed, follow]);
 
   if (workerRows.length === 0) {
     return <div className="odag-console-empty">{t("ide.dock.noWorkers")}</div>;
   }
 
+  const q = filter.trim().toLowerCase();
+  const lines = output?.lines ?? [];
+  const rows = lines.map((line, idx) => ({ n: trimmed + idx + 1, line }));
+  const visibleRows = q ? rows.filter((r) => r.line.toLowerCase().includes(q)) : rows;
+
+  const downloadLoaded = () => {
+    if (!output) return;
+    const blob = new Blob([output.lines.join("\n")], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `worker-output-${output.dispatchId}-${output.source}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const selectStyle = {
+    blockSize: 21,
+    paddingInline: 6,
+    borderRadius: 4,
+    border: "1px solid var(--border-hairline)",
+    background: "var(--bg-panel)",
+    fontSize: "var(--text-xs)",
+  } as const;
+  const metaStyle = { fontSize: "var(--text-xs)", color: "var(--fg-tertiary)" } as const;
+
+  const followState = !follow
+    ? null
+    : drained
+      ? t("ide.dock.followDone")
+      : !visible || !active
+        ? t("ide.dock.followPaused")
+        : t("ide.dock.followLive");
+
   return (
     <div style={{ display: "flex", flexDirection: "column", blockSize: "100%", minBlockSize: 0 }}>
-      <div className="odag-dock-toolbar">
+      <div className="odag-dock-toolbar" style={{ flexWrap: "wrap" }}>
         <select
           value={activeId ?? ""}
           onChange={(e) => onSelectDispatchId(e.target.value)}
           aria-label={t("ide.dock.selectDispatch")}
           className="mono"
-          style={{
-            blockSize: 21,
-            paddingInline: 6,
-            borderRadius: 4,
-            border: "1px solid var(--border-hairline)",
-            background: "var(--bg-panel)",
-            fontSize: "var(--text-xs)",
-          }}
+          style={selectStyle}
         >
           {workerRows.map((row) => (
             <option key={row.dispatchId} value={row.dispatchId}>
@@ -89,58 +222,118 @@ export const WorkerOutputDockView = memo(function WorkerOutputDockView({
         >
           <span>{t("ide.dock.outputSource")}:</span>
           <select
-            value={source}
-            onChange={(e) => setSource(e.target.value as "auto" | "terminal" | "transcript")}
-            style={{
-              blockSize: 21,
-              paddingInline: 6,
-              borderRadius: 4,
-              border: "1px solid var(--border-hairline)",
-              background: "var(--bg-panel)",
-              fontSize: "var(--text-xs)",
-            }}
+            value={effectiveSource}
+            onChange={(e) => setSource(e.target.value as OutputSource)}
+            aria-label={t("worker.outputSourceLabel")}
+            style={selectStyle}
           >
             <option value="auto">auto</option>
             <option value="terminal">terminal</option>
-            <option value="transcript">transcript</option>
+            {canTranscript && <option value="transcript">transcript</option>}
           </select>
         </label>
 
+        <label
+          className="mono"
+          title={t("ide.dock.followTitle")}
+          style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: "var(--text-xs)", color: "var(--fg-secondary)" }}
+        >
+          <input
+            type="checkbox"
+            checked={follow}
+            onChange={(e) => {
+              setFollow(e.target.checked);
+              if (e.target.checked) stickToBottom.current = true;
+            }}
+          />
+          <span>{t("ide.dock.follow")}</span>
+          {followState && <span style={metaStyle}>· {followState}</span>}
+        </label>
+
+        <input
+          type="search"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder={t("worker.filterPlaceholder")}
+          aria-label={t("worker.filterOutputAria")}
+          className="mono"
+          style={{ ...selectStyle, inlineSize: 180 }}
+        />
+
         {output && (
-          <span className="mono" style={{ fontSize: "var(--text-xs)", color: "var(--fg-tertiary)" }}>
+          <span className="mono" style={metaStyle} title={t("worker.outputEvidenceNote")}>
             source={output.source}
-            {output.archived ? " · archived" : ""}
-            {output.clipped ? " · clipped" : ""}
+            {output.archived === true ? ` · ${t("worker.outputArchived")}` : output.archived === false ? ` · ${t("worker.outputLive")}` : ""}
+            {output.sourceExact != null ? ` · ${output.sourceExact ? t("worker.outputExact") : t("worker.outputNotExact")}` : ""}
+            {output.provider ? ` · ${output.provider}` : ""}
+            {output.clipped ? ` · ${t("worker.clipped")}` : ""}
+            {output.sourceChanged ? ` · ${t("worker.sourceChanged")}` : ""}
           </span>
         )}
 
-        {output?.cursor && !output.contentComplete && (
-          <button
-            type="button"
-            className="odag-dock-chip"
-            style={{ marginInlineStart: "auto", borderColor: "var(--border-control)" }}
-            disabled={loading}
-            onClick={() => void loadPage(output.cursor ?? undefined)}
-          >
-            {t("ide.dock.loadNextPage")}
-          </button>
-        )}
+        <span style={{ marginInlineStart: "auto", display: "inline-flex", gap: 6, alignItems: "center" }}>
+          {output && (
+            <span className="mono" style={metaStyle}>
+              {q
+                ? t("worker.matchCount", { visible: visibleRows.length, total: lines.length })
+                : t("ide.dock.rowsCount", { n: lines.length })}
+            </span>
+          )}
+          {!follow && output?.cursor && !output.contentComplete && (
+            <button
+              type="button"
+              className="odag-dock-chip"
+              style={{ borderColor: "var(--border-control)" }}
+              disabled={loading}
+              onClick={() => void loadPage(output.cursor ?? undefined)}
+            >
+              {t("ide.dock.loadNextPage")}
+            </button>
+          )}
+          {output && output.lines.length > 0 && (
+            <button
+              type="button"
+              className="odag-dock-chip"
+              style={{ borderColor: "var(--border-control)" }}
+              onClick={downloadLoaded}
+              title={t("worker.downloadTitle")}
+            >
+              {t("worker.download")}
+            </button>
+          )}
+        </span>
       </div>
 
       <div
+        ref={viewportRef}
         className="odag-dock-viewport odag-scroll"
         style={{ padding: "6px 10px" }}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight <= STICK_THRESHOLD_PX;
+        }}
       >
         {error && <div style={{ color: "var(--st-failed)", marginBlockEnd: 6 }}>{error}</div>}
+        {output?.fallbackReason != null && (
+          <div style={{ ...metaStyle, marginBlockEnd: 4 }}>
+            {t("worker.outputFallback")} {output.fallbackReason}
+          </div>
+        )}
         {output?.warnings?.map((w, idx) => (
           <div key={idx} style={{ color: "var(--st-dispatched)", marginBlockEnd: 4 }}>
             ⚠ {w}
           </div>
         ))}
-        {output?.lines.map((line, idx) => (
-          <div key={idx} style={{ display: "flex", gap: 10, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-            <span style={{ color: "var(--fg-tertiary)", inlineSize: 26, textAlign: "end", flex: "none", userSelect: "none" }}>
-              {idx + 1}
+        {trimmed > 0 && (
+          <div style={{ ...metaStyle, marginBlockEnd: 4 }}>{t("ide.dock.trimmed", { n: MAX_RETAINED_LINES })}</div>
+        )}
+        {output && visibleRows.length === 0 && (
+          <div style={metaStyle}>{t(q ? "worker.noMatch" : "worker.outputEmpty")}</div>
+        )}
+        {visibleRows.map(({ n, line }) => (
+          <div key={n} style={{ display: "flex", gap: 10, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+            <span style={{ color: "var(--fg-tertiary)", minInlineSize: 26, textAlign: "end", flex: "none", userSelect: "none" }}>
+              {n}
             </span>
             <span style={{ flex: 1 }}>{line}</span>
           </div>

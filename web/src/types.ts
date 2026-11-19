@@ -183,6 +183,8 @@ export interface WorkerOutputView {
   archived?: boolean | null;
   provider?: string | null;
   sourceIdentity?: string | null;
+  /** worker-read's lifecycle snapshot at read time — a follow hint, never settlement. */
+  status?: { worker: string | null; terminal: string | null; liveness: string | null } | null;
 }
 
 /** Terminal custody is independent of supervised lifecycle and agent liveness. */

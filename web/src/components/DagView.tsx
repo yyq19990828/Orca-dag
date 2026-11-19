@@ -1221,66 +1221,60 @@ function Flow({
             )}
             <button
               type="button"
-              className="odag-btn odag-btn--ghost odag-btn--icon"
-              style={{ inlineSize: 24, blockSize: 24 }}
+              className="odag-btn odag-btn--ghost odag-btn--icon odag-btn--icon-sm"
               aria-label={t("dag.canvas.zoomOut")}
               onClick={() => {
                 void rf.zoomOut({ duration: 150 });
                 window.setTimeout(() => setZoomPct(Math.round(rf.getZoom() * 100)), 170);
               }}
             >
-              <ZoomOut size={13} />
+              <ZoomOut size={14} />
             </button>
             <span className="mono" style={{ fontSize: "var(--text-xs)", minInlineSize: 38, textAlign: "center" }}>
               {zoomPct}%
             </span>
             <button
               type="button"
-              className="odag-btn odag-btn--ghost odag-btn--icon"
-              style={{ inlineSize: 24, blockSize: 24 }}
+              className="odag-btn odag-btn--ghost odag-btn--icon odag-btn--icon-sm"
               aria-label={t("dag.canvas.zoomIn")}
               onClick={() => {
                 void rf.zoomIn({ duration: 150 });
                 window.setTimeout(() => setZoomPct(Math.round(rf.getZoom() * 100)), 170);
               }}
             >
-              <ZoomIn size={13} />
+              <ZoomIn size={14} />
             </button>
             <button
               type="button"
-              className="odag-btn odag-btn--ghost odag-btn--icon"
-              style={{ inlineSize: 24, blockSize: 24 }}
+              className="odag-btn odag-btn--ghost odag-btn--icon odag-btn--icon-sm"
               aria-label={t("dag.canvas.fitView")}
               title={t("dag.canvas.fitView")}
               onClick={triggerFit}
             >
-              <Maximize2 size={12} />
+              <Maximize2 size={14} />
             </button>
             {onRelayout && (
               <button
                 type="button"
-                className="odag-btn odag-btn--ghost odag-btn--icon"
-                style={{ inlineSize: 24, blockSize: 24 }}
+                className="odag-btn odag-btn--ghost odag-btn--icon odag-btn--icon-sm"
                 aria-label={t("toolbar.relayout")}
                 title={t("toolbar.relayoutTitle")}
                 onClick={onRelayout}
               >
-                <RotateCcw size={12} />
+                <RotateCcw size={14} />
               </button>
             )}
             <button
               type="button"
-              className="odag-btn odag-btn--ghost odag-btn--icon"
+              className="odag-btn odag-btn--ghost odag-btn--icon odag-btn--icon-sm"
               style={{
-                inlineSize: 24,
-                blockSize: 24,
                 color: showMinimap ? "var(--accent)" : undefined,
               }}
               aria-label={t("ide.canvas.minimap")}
               title={t("ide.canvas.minimap")}
               onClick={() => setShowMinimap((v) => !v)}
             >
-              <MapIcon size={12} />
+              <MapIcon size={14} />
             </button>
           </div>
 

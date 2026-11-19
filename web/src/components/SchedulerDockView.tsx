@@ -36,6 +36,7 @@ export const SchedulerDockView = memo(function SchedulerDockView({
   disabledReason,
   onSelectTask,
   onFocusOperation,
+  onOpenOutput,
 }: {
   runId: string;
   dag: DagResponse;
@@ -51,6 +52,8 @@ export const SchedulerDockView = memo(function SchedulerDockView({
   disabledReason?: string | null;
   onSelectTask: (taskId: string) => void;
   onFocusOperation: (target: OperationFocus) => void;
+  /** Jump to the dock's single Worker-output viewer for one Dispatch. */
+  onOpenOutput?: (dispatchId: string) => void;
 }) {
   const t = useT();
   const lang = useLang();
@@ -377,6 +380,7 @@ export const SchedulerDockView = memo(function SchedulerDockView({
                 status={runStatus}
                 disabled={execOff}
                 disabledReason={disabledReason}
+                onOpenOutput={onOpenOutput}
               />
             )}
           </div>

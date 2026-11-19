@@ -179,8 +179,6 @@ export function ExecControls({
       : historyLockReason;
   const launchLocked = running || starting || Boolean(historyLockReason);
   const resolvedDefault = defHarness === CUSTOM ? custom.trim() : defHarness;
-  const defaultLabel = storedIsUnverified
-    ? t("exec.unverifiedHarness", { harness: config.defaultHarness }) : resolvedDefault;
   // Settlement/ownership bookkeeping worth surfacing while the loop runs.
   const settled = (ownStatus?.attempts ?? []).filter((a) => a.settled).length;
   const released = (ownStatus?.attempts ?? []).filter((a) =>
@@ -361,101 +359,116 @@ export function ExecControls({
 
   return (
     <div className="exec">
-      <details className="exec__settings">
-        <summary
-          aria-label={t("exec.settingsAria", {
-            harness: defaultLabel || t("exec.noDefaultHarness"),
-            n: config.maxConcurrency,
-          })}
-          title={launchLockReason ?? t("exec.settingsTitle")}
-        >
-          <span aria-hidden="true">⚙</span>
-          <span>{t("exec.settings")}</span>
-          <span className="exec__settings-summary">
-            {t("exec.summaryMax", {
-              harness: defaultLabel || t("exec.noHarness"),
-              n: config.maxConcurrency,
-            })}
-          </span>
-        </summary>
-        <div className="exec__settings-panel" role="group" aria-label={t("exec.groupAria")}>
-          {(config.defaultHarness === "opencode" || taskIds.some(id => (config.harnessByTask[id] ?? config.defaultHarness) === "opencode")) && (
-            <div className="exec__field">
-              <span className="exec__label">{t("openCode.uiLabel")}</span>
-              <DoodleSelect searchable={false} size="sm" value={config.defaultOpenCodeUi} disabled={launchLocked}
-                onChange={value => { if (!launchLocked && isOpenCodeUi(value)) setDefaultOpenCodeUi(value); }}
-                options={OPEN_CODE_UIS.map(value => ({ value, label: t(`openCode.ui.${value}`),
-                  disabled: value !== "auto" && Boolean(platform && platform !== "linux"), hint: value === "auto" ? undefined : t("openCode.uiRequirements") }))} />
-              <span className="exec__hint">{t("openCode.uiRequirements")}</span>
-              {config.defaultOpenCodeUi === "mini" && <span className="exec__hint">{t("openCode.miniPermissions")}</span>}
-            </div>
-          )}
-          <div className="exec__field">
-            <span className="exec__label">{t("exec.defaultHarness")}</span>
-            <DoodleSelect
-              searchable={false}
-              size="sm"
-              value={defHarness}
-              onChange={pickDefault}
-              disabled={launchLocked}
-              options={[
-                ...HARNESSES.map((h) => ({ value: h, label: h })),
-                // "Custom…" only exists while the server allows custom commands —
-                // but a *stored* custom default must stay visible (and switchable
-                // away from) even when the flag is off, so it's never hidden data.
-                ...(customOk || storedIsCustom
-                  ? [
-                      {
-                        value: CUSTOM,
-                        label: storedIsUnverified
-                          ? t("exec.unverifiedHarness", { harness: config.defaultHarness })
-                          : customOk ? t("exec.custom") : t("exec.customDisabled"),
-                        disabled: !customOk || storedIsUnverified,
-                        hint: storedIsUnverified ? undefined : customOk ? undefined : "ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1",
-                      },
-                    ]
-                  : []),
-              ]}
-            />
-            {defHarness === CUSTOM && (
-              <input
-                className="exec__custom"
-                value={custom}
-                placeholder={t("exec.commandPlaceholder")}
-                aria-label={t("exec.customCommandAria")}
-                onChange={(e) => {
-                  if (!launchLocked) setCustom(e.target.value);
-                }}
-                disabled={launchLocked || !customOk || storedIsUnverified}
-              />
-            )}
-            {storedIsUnverified ? (
-              <span className="exec__hint">{t("exec.unverifiedHarnessHint", { harness: config.defaultHarness })}</span>
-            ) : defHarness === CUSTOM && !customOk && <span className="exec__hint">{t(CUSTOM_OFF_HINT_KEY)}</span>}
-            {(resolvedDefault === "omp" || resolvedDefault === "antigravity") && (
-              <>
+      <section className="exec__section" aria-label={t("exec.groupAria")}>
+        <h4 className="cap__title">{t("exec.groupAria")}</h4>
+        <p className="cap__note">{t("exec.settingsTitle")}</p>
+        {launchLockReason && (
+          <p className="exec__lock-note" role="note">
+            {launchLockReason}
+          </p>
+        )}
+
+        <div className="exec__rows">
+          <div className="exec__row">
+            <div className="exec__row-copy">
+              <span className="exec__label">{t("exec.defaultHarness")}</span>
+              {storedIsUnverified ? (
+                <span className="exec__hint">{t("exec.unverifiedHarnessHint", { harness: config.defaultHarness })}</span>
+              ) : defHarness === CUSTOM && !customOk ? (
+                <span className="exec__hint">{t(CUSTOM_OFF_HINT_KEY)}</span>
+              ) : (resolvedDefault === "omp" || resolvedDefault === "antigravity") ? (
                 <span className="exec__hint">{t("nativeAgent.requirements")}</span>
-                <span className="exec__hint">{t("nativeAgent.surfaceHint")}</span>
-              </>
-            )}
+              ) : null}
+            </div>
+            <div className="exec__row-control">
+              <DoodleSelect
+                searchable={false}
+                size="sm"
+                value={defHarness}
+                onChange={pickDefault}
+                disabled={launchLocked}
+                ariaLabel={t("exec.defaultHarness")}
+                options={[
+                  ...HARNESSES.map((h) => ({ value: h, label: h })),
+                  ...(customOk || storedIsCustom
+                    ? [
+                        {
+                          value: CUSTOM,
+                          label: storedIsUnverified
+                            ? t("exec.unverifiedHarness", { harness: config.defaultHarness })
+                            : customOk ? t("exec.custom") : t("exec.customDisabled"),
+                          disabled: !customOk || storedIsUnverified,
+                          hint: storedIsUnverified ? undefined : customOk ? undefined : "ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1",
+                        },
+                      ]
+                    : []),
+                ]}
+              />
+              {defHarness === CUSTOM && (
+                <input
+                  className="exec__custom"
+                  value={custom}
+                  placeholder={t("exec.commandPlaceholder")}
+                  aria-label={t("exec.customCommandAria")}
+                  onChange={(e) => {
+                    if (!launchLocked) setCustom(e.target.value);
+                  }}
+                  disabled={launchLocked || !customOk || storedIsUnverified}
+                />
+              )}
+            </div>
           </div>
 
-          <label className="exec__field">
-            <span className="exec__label">{t("exec.maxParallel")}</span>
-            <input
-              className="exec__num"
-              type="number"
-              min={1}
-              max={16}
-              value={config.maxConcurrency}
-              onChange={(e) => {
-                if (!launchLocked) setMaxConcurrency(Number(e.target.value) || 1);
-              }}
-              disabled={launchLocked}
-            />
+          {resolvedDefault === "opencode" && (
+            <div className="exec__row">
+              <div className="exec__row-copy">
+                <span className="exec__label">{t("openCode.uiLabel")}</span>
+                <span className="exec__hint">{t("openCode.uiRequirements")}</span>
+                {config.defaultOpenCodeUi === "mini" && (
+                  <span className="exec__hint">{t("openCode.miniPermissions")}</span>
+                )}
+              </div>
+              <div className="exec__row-control">
+                <DoodleSelect
+                  searchable={false}
+                  size="sm"
+                  value={config.defaultOpenCodeUi}
+                  disabled={launchLocked}
+                  ariaLabel={t("openCode.uiLabel")}
+                  onChange={(value) => {
+                    if (!launchLocked && isOpenCodeUi(value)) setDefaultOpenCodeUi(value);
+                  }}
+                  options={OPEN_CODE_UIS.map((value) => ({
+                    value,
+                    label: t(`openCode.ui.${value}`),
+                    disabled: value !== "auto" && Boolean(platform && platform !== "linux"),
+                    hint: value === "auto" ? undefined : t("openCode.uiRequirements"),
+                  }))}
+                />
+              </div>
+            </div>
+          )}
+
+          <label className="exec__row">
+            <div className="exec__row-copy">
+              <span className="exec__label">{t("exec.maxParallel")}</span>
+            </div>
+            <div className="exec__row-control">
+              <input
+                className="exec__num"
+                type="number"
+                min={1}
+                max={16}
+                value={config.maxConcurrency}
+                onChange={(e) => {
+                  if (!launchLocked) setMaxConcurrency(Number(e.target.value) || 1);
+                }}
+                disabled={launchLocked}
+              />
+            </div>
           </label>
         </div>
-      </details>
+      </section>
       <ActionMount host={actionHost}>
       {/* Hard-disabling a busy trigger blurs it before the dialog can remember
           it. Handlers reject repeat clicks; policy locks stay native-disabled. */}
@@ -469,7 +482,7 @@ export function ExecControls({
           aria-busy={busy}
           aria-label={t("exec.previewButton")}
         >
-          <Eye size={15} />
+          <Eye size={16} />
         </button>
       </Tooltip>
 
@@ -531,7 +544,7 @@ export function ExecControls({
               disabled={busy || launchLocked || anotherRunStarting || Boolean(otherRunStatus) || !runId || execOff}
               aria-label={t("exec.runAgain")}
             >
-              <RefreshCw size={14} aria-hidden="true" />
+              <RefreshCw size={16} aria-hidden="true" />
             </button>
           </Tooltip>
           </ActionMount>
@@ -569,7 +582,7 @@ export function ExecControls({
             }
             aria-label={t("exec.runWithOrca")}
           >
-            <Play size={14} fill="currentColor" aria-hidden="true" />
+            <Play size={16} fill="currentColor" aria-hidden="true" />
           </button>
         </Tooltip>
         </ActionMount>

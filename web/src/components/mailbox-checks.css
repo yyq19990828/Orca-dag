@@ -1,25 +1,37 @@
 .mailbox-checks {
   flex: 1 1 0;
-  min-width: 0;
-  min-height: 0;
+  min-inline-size: 0;
+  min-block-size: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 18px;
+  padding: 0;
 }
 
 .mailbox-checks__header {
-  display: grid;
-  gap: 8px;
-  margin-bottom: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  border-block-end: 1px solid var(--border-hairline);
+  background: var(--bg-card);
+  font-size: var(--text-xs);
 }
 
-.mailbox-checks__header h2,
 .mailbox-checks__header p,
 .mailbox-checks__empty {
   margin: 0;
+  color: var(--fg-secondary);
 }
 
-.mailbox-checks__header h2 { font-size: 16px; }
-.mailbox-checks__header p,
-.mailbox-checks__empty { color: var(--ink-soft); }
-.mailbox-checks__groups { display: flex; flex-direction: column; gap: 16px; }
+.mailbox-checks__empty {
+  padding: 14px 12px;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+}
+
+.mailbox-checks__groups {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}

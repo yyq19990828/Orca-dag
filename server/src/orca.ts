@@ -3022,6 +3022,11 @@ export interface WorkerOutputReceipt {
   archived?: boolean | null;
   provider?: string | null;
   sourceIdentity?: string | null;
+  /**
+   * worker-read's own lifecycle snapshot at read time, verbatim and bounded.
+   * A presentation hint for follow/auto-refresh only — never settlement.
+   */
+  status?: { worker: string | null; terminal: string | null; liveness: string | null } | null;
 }
 
 function openCodeOutputPrefixHash(lines: string[], end: number): string {
@@ -3208,6 +3213,7 @@ export async function readWorkerOutput(
     archived?: unknown;
     provider?: unknown;
     sourceIdentity?: unknown;
+    status?: unknown;
   }): WorkerOutputReceipt => {
     let textClipped = false;
     const transcriptLines = (result.transcript?.messages ?? []).flatMap((rawMessage): string[] => {
@@ -3268,6 +3274,12 @@ export async function readWorkerOutput(
         ? { provider: typeof result.provider === "string" ? result.provider.slice(0, 256) : null } : {}),
       ...(result.sourceIdentity === null || typeof result.sourceIdentity === "string"
         ? { sourceIdentity: typeof result.sourceIdentity === "string" ? result.sourceIdentity.slice(0, 1024) : null } : {}),
+      ...(() => {
+        const status = asRecord(result.status);
+        if (!result.status || typeof result.status !== "object") return {};
+        const field = (value: unknown) => (typeof value === "string" ? value.slice(0, 64) : null);
+        return { status: { worker: field(status.worker), terminal: field(status.terminal), liveness: field(status.liveness) } };
+      })(),
     };
   };
   try {

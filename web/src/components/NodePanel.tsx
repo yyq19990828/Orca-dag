@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Lock, Star } from "lucide-react";
 import { createGate, fetchEnvironments, fetchModels, fetchWorkerDetail, type ModelDiscoveryResult } from "../api";
 import { useT, type Translator } from "../i18n";
 import { lanePlanProblems, laneLabel, laneProblemPrefix } from "../placement";
@@ -48,7 +49,6 @@ import {
 import { DoodleSelect } from "./DoodleSelect";
 import { ResultSummary } from "./ResultSummary";
 import { PlacementEditor } from "./PlacementEditor";
-import "../node-actions.css";
 
 const INHERIT = "__inherit__";
 const CUSTOM = "__custom__";
@@ -94,6 +94,8 @@ interface NodePanelProps {
   /** Run-scoped Dispatch rows; the selected worker's actual worktree comes from worker-show. */
   workerRows: WorkerRowView[];
   onRefresh: () => void;
+  /** Split overview facts (`任务`) from launch/workspace controls (`启动配置`). */
+  mode?: "all" | "overview" | "config";
 }
 
 /**
@@ -121,7 +123,10 @@ export function NodePanel({
   hasWorkerHistory = false,
   workerRows,
   onRefresh,
+  mode = "all",
 }: NodePanelProps) {
+  const showOverview = mode !== "config";
+  const showConfig = mode !== "overview";
   // Status copy is translated; STATUS_META keeps owning only the palette.
   const t = useT();
   const dialog = useDecisionDialog();
@@ -206,6 +211,7 @@ export function NodePanel({
   // lane overrides both: its members take placement from the lane's seed.
   const [envs, setEnvs] = useState<OrcaEnvironmentView[] | null>(null);
   useEffect(() => {
+    if (!showConfig) return;
     let alive = true;
     fetchEnvironments()
       .then((e) => alive && setEnvs(e))
@@ -213,7 +219,7 @@ export function NodePanel({
     return () => {
       alive = false;
     };
-  }, []);
+  }, [showConfig]);
   const envId = getNodeEnvironment(node.id);
   const placement = getNodePlacement(node.id);
   const selectedEnv = envs?.find((e) => e.id === envId) ?? null;
@@ -263,42 +269,10 @@ export function NodePanel({
     setTaskLane(node.id, v || null);
   }
 
-  // --- per-node model ------------------------------------------------
-  // Discovery is advisory and scoped to the local viewer workspace. The
-  // editable value remains local draft state until it is a complete model ID.
-  const effHarness = effectiveHarness(node.id);
-  const nativeAgent = effHarness === "omp" || effHarness === "antigravity";
-  const picker = MODEL_PICKER[effHarness] ?? "none";
-  const model = getNodeModel(node.id);
-  const effort = getNodeEffort(node.id);
-  const [openCodeDiscovery, setOpenCodeDiscovery] = useState<ModelDiscoveryResult | null>(null);
-  const [modelDraft, setModelDraft] = useState(model ?? "");
-  useEffect(() => setModelDraft(model ?? ""), [model, node.id, effHarness]);
-  const [manualModel, setManualModel] = useState(false);
-  const modelInputRef = useRef<HTMLInputElement>(null);
-  const invalidModelDraft = effHarness === "opencode" && Boolean(modelDraft.trim()) &&
-    !OPEN_CODE_MODEL.test(modelDraft.trim());
-  useEffect(() => setManualModel(false), [node.id, effHarness]);
-  useEffect(() => {
-    if (manualModel && !launchLocked) modelInputRef.current?.focus();
-  }, [manualModel, launchLocked]);
-  useEffect(() => {
-    if (effHarness !== "opencode" && effHarness !== "omp") {
-      setOpenCodeDiscovery(null);
-      return;
-    }
-    let alive = true;
-    setOpenCodeDiscovery(null);
-    fetchModels(effHarness).then(
-      (result) => { if (alive) setOpenCodeDiscovery(result); },
-      () => { if (alive) setOpenCodeDiscovery({ status: "unavailable", models: [], diagnostic: "Model discovery request failed", scope: "local-workspace" }); },
-    );
-    return () => { alive = false; };
-  }, [effHarness]);
-
-  // Placement is launch intent. The worker's terminal observation is the
-  // actual worktree, including legacy starts whose fleet projection has no
-  // workspace (such as OpenCode tracking Dispatches). Keep the two distinct.
+  // Placement is launch intent. The worker's terminal observation + launch
+  // receipt carry the actual agent/model/effort/worktree once dispatched.
+  // Never fall back to the viewer's current global defaultHarness (e.g.
+  // `opencode`) when displaying a locked stage that actually ran under `omp`.
   const taskWorkers = workerRows.filter((row) => row.runId === runId && row.taskId === node.id);
   const worker = taskWorkers.find((row) => row.dispatchId === node.dispatchId) ?? taskWorkers[0];
   const dispatchId = worker?.dispatchId ?? null;
@@ -306,6 +280,9 @@ export function NodePanel({
     dispatchId: string;
     path: string | null;
     branch: string | null;
+    agent: string | null;
+    model: string | null;
+    effort: string | null;
     error: boolean;
   } | null>(null);
   useEffect(() => {
@@ -316,37 +293,154 @@ export function NodePanel({
         if (!alive) return;
         setWorkerWorktree({
           dispatchId,
-          path: detail.terminal?.worktreePath ?? workerWorkspaceLabel(detail.fleet?.projection?.workspace),
+          path:
+            detail.terminal?.worktreePath ??
+            detail.launch?.resolvedWorktreeId ??
+            workerWorkspaceLabel(detail.fleet?.projection?.workspace),
           branch: detail.terminal?.branch ?? null,
+          agent: detail.launch?.agent ?? detail.requestedLaunch?.agent ?? null,
+          model: detail.launch?.model ?? detail.requestedLaunch?.model ?? null,
+          effort: detail.launch?.effort ?? detail.requestedLaunch?.effort ?? null,
           error: false,
         });
       })
       .catch(() => {
         // The fleet row can still carry a usable workspace identity; a
         // failed detail read must never turn launch intent into actual fact.
-        if (alive) setWorkerWorktree({ dispatchId, path: null, branch: null, error: true });
+        if (alive) {
+          setWorkerWorktree({
+            dispatchId,
+            path: null,
+            branch: null,
+            agent: null,
+            model: null,
+            effort: null,
+            error: true,
+          });
+        }
       });
     return () => { alive = false; };
   }, [runId, dispatchId]);
+  const detailMatch = workerWorktree?.dispatchId === dispatchId ? workerWorktree : null;
   const actualWorktree =
-    (workerWorktree?.dispatchId === dispatchId ? workerWorktree.path : null) ??
+    detailMatch?.path ??
     workerWorkspaceLabel(worker?.projection?.workspace) ??
     worker?.projection?.launch?.worktree ?? null;
-  const actualBranch = workerWorktree?.dispatchId === dispatchId ? workerWorktree.branch : null;
-  const worktreeLoading = dispatchId && workerWorktree?.dispatchId !== dispatchId;
-  const worktreeError = workerWorktree?.dispatchId === dispatchId && workerWorktree.error;
+  const actualBranch = detailMatch?.branch ?? null;
+  const worktreeLoading = dispatchId && !detailMatch;
+  const worktreeError = Boolean(detailMatch?.error);
+
+  const recordedAgent = permanentLock
+    ? detailMatch?.agent ??
+      worker?.launchEvidence?.agent ??
+      worker?.projection?.launch?.agent ??
+      worker?.projection?.provider?.id ??
+      null
+    : null;
+  const recordedModel = permanentLock
+    ? detailMatch?.model ??
+      worker?.projection?.launch?.model ??
+      worker?.projection?.provider?.model ??
+      null
+    : null;
+  const recordedEffort = permanentLock
+    ? detailMatch?.effort ??
+      worker?.projection?.launch?.effort ??
+      null
+    : null;
+
+  // --- per-node model ------------------------------------------------
+  // Discovery is advisory and scoped to the local viewer workspace. The
+  // editable value remains local draft state until it is a complete model ID.
+  const effHarness = recordedAgent ?? effectiveHarness(node.id);
+  const effectiveSel = recordedAgent
+    ? (KNOWN.includes(recordedAgent) ? recordedAgent : CUSTOM)
+    : sel;
+  const effectiveCustom = recordedAgent
+    ? (KNOWN.includes(recordedAgent) ? "" : recordedAgent)
+    : custom;
+  const nativeAgent = effHarness === "omp" || effHarness === "antigravity";
+  const picker = MODEL_PICKER[effHarness] ?? "none";
+  const storedModel = getNodeModel(node.id);
+  const storedEffort = getNodeEffort(node.id);
+  const model = recordedAgent
+    ? (recordedModel ?? (stored === recordedAgent ? storedModel : null))
+    : storedModel;
+  const effort = recordedAgent
+    ? (recordedEffort ?? (stored === recordedAgent ? storedEffort : null))
+    : storedEffort;
+  const [openCodeDiscovery, setOpenCodeDiscovery] = useState<ModelDiscoveryResult | null>(null);
+  const [modelDraft, setModelDraft] = useState(model ?? "");
+  useEffect(() => setModelDraft(model ?? ""), [model, node.id, effHarness]);
+  const [manualModel, setManualModel] = useState(false);
+  const modelInputRef = useRef<HTMLInputElement>(null);
+  const invalidModelDraft = !launchLocked && effHarness === "opencode" && Boolean(modelDraft.trim()) &&
+    !OPEN_CODE_MODEL.test(modelDraft.trim());
+  useEffect(() => setManualModel(false), [node.id, effHarness]);
+  useEffect(() => {
+    if (manualModel && !launchLocked) modelInputRef.current?.focus();
+  }, [manualModel, launchLocked]);
+  useEffect(() => {
+    if (!showConfig || launchLocked || (effHarness !== "opencode" && effHarness !== "omp")) {
+      setOpenCodeDiscovery(null);
+      return;
+    }
+    let alive = true;
+    setOpenCodeDiscovery(null);
+    fetchModels(effHarness).then(
+      (result) => { if (alive) setOpenCodeDiscovery(result); },
+      () => { if (alive) setOpenCodeDiscovery({ status: "unavailable", models: [], diagnostic: "Model discovery request failed", scope: "local-workspace" }); },
+    );
+    return () => { alive = false; };
+  }, [effHarness, launchLocked, showConfig]);
+
+  const showReadinessReasons = Boolean(
+    readiness && readiness.reasons.length > 0 && node.status !== "completed",
+  );
+  const showSchedulerSection = Boolean(
+    parentLabel ||
+      childLabels.length > 0 ||
+      showReadinessReasons ||
+      (readiness && readiness.runnable && readiness.reasons.length === 0),
+  );
 
   return (
-    <section className="node-panel" aria-label={t("chat.view.task")}>
+    <section className="node-panel" aria-label={t(mode === "config" ? "ide.inspector.tabConfig" : "chat.view.task")}>
+      {showOverview && (
+        <>
       <div className="node-panel__topline">
-        <div className="node-panel__status">
-          <span className="dot" style={{ background: meta.color }} />
-          {t(`status.${node.status}`)}
+        <div className="node-panel__status-group">
+          <span className="node-panel__status">
+            <span className="dot" style={{ background: meta.color }} />
+            {t(`status.${node.status}`)}
+          </span>
+          <code className="node-panel__code-id">{node.id}</code>
         </div>
+        {isLead ? (
+          <button
+            type="button"
+            className="node-panel__lead-clear is-active"
+            onClick={() => onLeadChange(null)}
+            title={t("node.leadStageHint", { id: runId })}
+            aria-label={t("node.clearLeadAria", { label: node.label })}
+          >
+            <Star size={12} fill="currentColor" aria-hidden="true" />
+            <span>{t("node.leadStage")}</span>
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="node-panel__lead-mark"
+            onClick={() => onLeadChange(node.id)}
+            aria-pressed="false"
+            title={t("node.markLeadTitle")}
+          >
+            <Star size={12} aria-hidden="true" />
+            <span>{t("node.markLead")}</span>
+          </button>
+        )}
       </div>
-      <div className="node-panel__id">
-        <code>{node.id}</code>
-      </div>
+
       {(node.status === "pending" || node.status === "ready") && !node.dispatchId && !permanentlyLocked && !hasWorkerHistory && (
         <div className="node-panel__actions">
           <button type="button" className="node-panel__action" disabled={gateBusy || historyLocked || coordinatorStarting} onClick={() => void addGate()}>
@@ -356,7 +450,7 @@ export function NodePanel({
         </div>
       )}
 
-      {onOpenOperations && (readiness?.pendingGateIds.length || failedStart || hasWorkerHistory) ? (
+      {onOpenOperations && (readiness?.pendingGateIds.length || failedStart) ? (
         <nav className="node-panel__actions" aria-label={t("node.operationsAria")}>
           {readiness?.pendingGateIds.map((gateId) => (
             <button
@@ -377,39 +471,25 @@ export function NodePanel({
               {t("node.reviewFailedStart")}
             </button>
           )}
-          {hasWorkerHistory && (
-            <button
-              type="button"
-              className="node-panel__action"
-              onClick={() => onOpenOperations({ kind: "worker", id: node.id })}
-            >
-              {t("node.viewWorkerHistory")}
-            </button>
-          )}
         </nav>
       ) : null}
 
-      {/* Phase 4: scheduler state + ownership, derived from Run-scoped
-          task/gate/coordinator facts the server projected onto /api/dag.
-          A parent relation is ownership, never a dependency — the copy says
-          so explicitly so nobody reads order into it. */}
-      {(parentLabel || childLabels.length > 0 || (readiness && readiness.reasons.length > 0)) && (
+      {showSchedulerSection && (
         <div className="node-panel__field node-panel__scheduler">
           {parentLabel && (
             <p className="node-panel__relation">
-              <span aria-hidden="true">┄</span> {t("node.subStageOf")} <strong>{parentLabel}</strong>
+              {t("node.subStageOf")} <strong>{parentLabel}</strong>
               <span className="node-panel__hint"> {t("node.subStageHint")}</span>
             </p>
           )}
           {childLabels.length > 0 && (
             <p className="node-panel__relation">
-              <span aria-hidden="true">┄</span>{" "}
               {childLabels.length === 1
                 ? t("node.parentOfOne", { n: childLabels.length, list: childLabels.join(", ") })
                 : t("node.parentOfMany", { n: childLabels.length, list: childLabels.join(", ") })}
             </p>
           )}
-          {readiness && readiness.reasons.length > 0 && (
+          {showReadinessReasons && readiness && (
             <ul className="node-panel__readiness" aria-label={t("node.readinessAria")}>
               {readiness.reasons.map((reason, i) => (
                 <li key={readiness.codes[i] ?? i} data-code={readiness.codes[i] ?? "unknown"}>
@@ -425,43 +505,73 @@ export function NodePanel({
       )}
 
       {node.result && (
-        <div className="node-panel__field">
-          <span className="node-panel__key">{t("node.resultKey")}</span>
+        <section className="node-panel__group">
+          <h3 className="node-panel__group-title">{t("node.resultKey")}</h3>
           <ResultSummary raw={node.result} />
-        </div>
+        </section>
       )}
 
-      <div className="node-panel__lead" aria-live="polite">
-        {isLead ? (
-          <>
-            <div className="node-panel__lead-state">
-              <span aria-hidden="true">★</span>
-              <span>
-                <strong>{t("node.leadStage")}</strong>
-                <small>{t("node.leadStageHint", { id: runId })}</small>
-              </span>
-            </div>
-            <button
-              type="button"
-              className="node-panel__lead-clear"
-              onClick={() => onLeadChange(null)}
-              aria-label={t("node.clearLeadAria", { label: node.label })}
-            >
-              {t("node.clear")}
-            </button>
-          </>
-        ) : (
+      {(dispatchId || node.dispatchId) && (
+        <section className="node-panel__group">
+          <dl className="record-facts node-panel__facts">
+            {dispatchId && (
+              <>
+                <dt>{t("node.actualWorktreeKey")}</dt>
+                <dd>
+                  {actualWorktree ? <code>{actualWorktree}</code> : (
+                    <span>
+                      {worktreeLoading
+                        ? t("node.worktreeLoading")
+                        : worktreeError
+                          ? t("node.worktreeError")
+                          : t("node.worktreeNotReported")}
+                    </span>
+                  )}
+                  {actualBranch && (
+                    <span className="node-panel__hint">
+                      {" · "}{actualBranch.replace(/^refs\/heads\//, "")}
+                    </span>
+                  )}
+                </dd>
+              </>
+            )}
+            {node.dispatchId && (
+              <>
+                <dt>{t("node.currentDispatch")}</dt>
+                <dd><code>{node.dispatchId}</code></dd>
+              </>
+            )}
+            {node.assigneeHandle && (
+              <>
+                <dt>{t("node.workerTerminal")}</dt>
+                <dd><code>{node.assigneeHandle}</code></dd>
+              </>
+            )}
+          </dl>
+        </section>
+      )}
+
+      <section className="node-panel__group">
+        <div className="node-panel__spec-head">
+          <h3 className="node-panel__group-title" style={{ margin: 0 }}>{t("node.specKey")}</h3>
           <button
             type="button"
-            className="node-panel__lead-mark"
-            onClick={() => onLeadChange(node.id)}
-            aria-pressed="false"
-            title={t("node.markLeadTitle")}
+            className="node-panel__spec-toggle"
+            aria-expanded={specExpanded}
+            aria-controls={`stage-spec-${node.id}`}
+            onClick={() => setSpecExpanded((open) => !open)}
           >
-            <span aria-hidden="true">☆</span> {t("node.markLead")}
+            {specExpanded ? t("node.collapse") : t("node.expand")}
           </button>
-        )}
-      </div>
+        </div>
+        <p
+          id={`stage-spec-${node.id}`}
+          className={`node-panel__spec-ro${specExpanded ? " node-panel__spec-ro--expanded" : ""}`}
+          title={specExpanded ? undefined : node.spec}
+        >
+          {node.spec}
+        </p>
+      </section>
 
       {workerHistoryLoading && (
         <div className="node-panel__history" role="status">
@@ -473,21 +583,26 @@ export function NodePanel({
           {t("node.historyUnverified")}
         </div>
       )}
-
-      {lockReason && (
-        <div className="node-panel__lock" role="note">
-          <span aria-hidden="true">🔒</span>
-          <span>{lockReason}</span>
-        </div>
+        </>
       )}
 
-      <section className="node-panel__group node-panel__group--agent" aria-label={t("node.agentGroupAria")}>
-        <h3 className="node-panel__group-title">{t("node.agentGroup")}</h3>
-        <div className="node-panel__field">
-          <span className="node-panel__key">{t("node.harnessKey")}</span>
+      {showConfig && (
+        <div className="node-panel__config-pane">
+          {lockReason && (
+            <div className="node-panel__lock-banner" role="note">
+              <Lock size={12} style={{ flexShrink: 0, marginBlockStart: 2 }} aria-hidden="true" />
+              <span>{lockReason}</span>
+            </div>
+          )}
+
+          <section className="node-panel__group node-panel__group--first" aria-label={t("node.agentGroupAria")}>
+            <h3 className="node-panel__group-title">{t("node.agentGroup")}</h3>
+            <div className="node-panel__config-body">
+              <div className="node-panel__field">
+                <span className="node-panel__key">{t("node.harnessKey")}</span>
           <DoodleSelect
             searchable={false}
-            value={sel}
+            value={effectiveSel}
             onChange={pick}
             disabled={launchLocked}
             ariaLabel={t("node.harnessKey")}
@@ -503,15 +618,16 @@ export function NodePanel({
               },
               ...HARNESSES.map((h) => ({ value: h, label: h })),
               // Same policy as the toolbar: no "Custom…" unless the server allows
-              // it — but a stored custom value stays visible (and clearable via
-              // "Inherit") while the flag is off.
-              ...(customOk || (stored !== null && !KNOWN.includes(stored))
+              // it — but a stored/recorded custom value stays visible while off.
+              ...(customOk || effectiveSel === CUSTOM || (stored !== null && !KNOWN.includes(stored))
                 ? [
                     {
                       value: CUSTOM,
                       label: storedIsUnverified
                         ? t("exec.unverifiedHarness", { harness: stored! })
-                        : customOk ? t("exec.custom") : t("exec.customDisabled"),
+                        : effectiveCustom && !customOk
+                          ? effectiveCustom
+                          : customOk ? t("exec.custom") : t("exec.customDisabled"),
                       disabled: !customOk || storedIsUnverified,
                       hint: storedIsUnverified ? undefined : customOk ? undefined : "ORCA_DAG_ALLOW_CUSTOM_COMMANDS=1",
                     },
@@ -519,10 +635,10 @@ export function NodePanel({
                 : []),
             ]}
           />
-          {sel === CUSTOM && (
+          {effectiveSel === CUSTOM && (
             <input
               className="node-panel__custom"
-              value={custom}
+              value={effectiveCustom}
               placeholder={t("node.customPlaceholder")}
               onChange={(e) => pickCustom(e.target.value)}
               disabled={!customOk || launchLocked || storedIsUnverified}
@@ -532,7 +648,7 @@ export function NodePanel({
           {UNVERIFIED_HARNESSES[effHarness] === true && (
             <span className="node-panel__hint">{t("exec.unverifiedHarnessHint", { harness: effHarness })}</span>
           )}
-          {sel === CUSTOM && !customOk && !storedIsUnverified && (
+          {effectiveSel === CUSTOM && !recordedAgent && !customOk && !storedIsUnverified && (
             <span className="node-panel__hint">{t("exec.customOffHint")}</span>
           )}
         </div>
@@ -560,7 +676,7 @@ export function NodePanel({
                 disabled={launchLocked}
                 options={[
                   { value: "", label: t("node.defaultModel") },
-                  ...((model && !openCodeDiscovery?.models.includes(model)) ? [{ value: model, label: model, hint: t("node.savedModel") }] : []),
+                  ...((model && !openCodeDiscovery?.models.includes(model)) ? [{ value: model, label: model, hint: recordedModel ? undefined : t("node.savedModel") }] : []),
                   ...(openCodeDiscovery?.models ?? []).map((entry) => ({ value: entry, label: entry })),
                   { value: CUSTOM, label: t("node.customModel") },
                 ]}
@@ -588,7 +704,7 @@ export function NodePanel({
               autoCorrect="off"
               spellCheck={false}
             />}
-            {(picker !== "select" || manualModel) && (
+            {!launchLocked && (picker !== "select" || manualModel) && (
               <span id={`node-model-hint-${node.id}`} className="node-panel__hint">{t("node.modelInputHint")}</span>
             )}
             {invalidModelDraft && (
@@ -596,7 +712,7 @@ export function NodePanel({
                 {t("node.modelInvalid", { model: model ?? t("node.defaultModel") })}
               </span>
             )}
-            {(effHarness === "opencode" || effHarness === "omp") && (openCodeDiscovery === null || openCodeDiscovery.status === "unavailable") && (
+            {!launchLocked && (effHarness === "opencode" || effHarness === "omp") && (openCodeDiscovery === null || openCodeDiscovery.status === "unavailable") && (
               <span className="node-panel__hint" role="status">
                 {openCodeDiscovery === null ? t("node.modelDiscoveryLoading")
                   : t("node.modelDiscoveryUnavailable", { diagnostic: openCodeDiscovery.diagnostic ?? "" })}
@@ -623,12 +739,17 @@ export function NodePanel({
 
         {/* worker-start accepts effort only alongside a model, and only for
             supported harnesses. Clearing the model clears stored effort. */}
-        {model && EFFORT_SUPPORTED[effHarness] === true && (peerModelEffort || effHarness === "omp") && (
+        {model && EFFORT_SUPPORTED[effHarness] === true && (peerModelEffort || effHarness === "omp") && (() => {
+          const effortChoices: readonly string[] =
+            effHarness === "omp" && openCodeDiscovery?.effortsByModel?.[model]?.length
+              ? openCodeDiscovery.effortsByModel[model]
+              : EFFORT_LEVELS;
+          return (
           <div className="node-panel__field">
             <span className="node-panel__key">{t("node.effortKey", { harness: effHarness })}</span>
             <DoodleSelect
               searchable={false}
-              value={getNodeEffort(node.id) ?? ""}
+              value={effort ?? ""}
               onChange={(v) => {
                 if (!launchLocked) setNodeEffort(node.id, v || null);
               }}
@@ -636,16 +757,14 @@ export function NodePanel({
               ariaLabel={t("node.effortKey", { harness: effHarness })}
               options={[
                 { value: "", label: t("node.defaultEffort") },
-                ...(
-                  effHarness === "omp" && openCodeDiscovery?.effortsByModel?.[model]?.length
-                    ? openCodeDiscovery.effortsByModel[model]
-                    : EFFORT_LEVELS
-                ).map((e) => ({ value: e, label: e })),
+                ...((effort && !effortChoices.includes(effort)) ? [{ value: effort, label: effort }] : []),
+                ...effortChoices.map((e) => ({ value: e, label: e })),
               ]}
             />
-            <span className="node-panel__hint">{t("node.effortHint")}</span>
+            {!launchLocked && <span className="node-panel__hint">{t("node.effortHint")}</span>}
           </div>
-        )}
+          );
+        })()}
         {effHarness === "opencode" && (
           <div className="node-panel__field">
             <span className="node-panel__key">{t("openCode.uiLabel")}</span>
@@ -659,12 +778,12 @@ export function NodePanel({
                     config.laneByTask[node.id] || ["new-child", "new-top-level"].includes(config.placementByTask[node.id]?.kind ?? "current")),
                   hint: value === "auto" ? undefined : t("openCode.uiRequirements") })),
               ]} />
-            {(config.openCodeUiByTask[node.id] ?? config.defaultOpenCodeUi) === "mini" && (
+            {!launchLocked && (config.openCodeUiByTask[node.id] ?? config.defaultOpenCodeUi) === "mini" && (
               <span className="node-panel__hint">{t("openCode.miniPermissions")}</span>
             )}
           </div>
         )}
-        {(effHarness === "opencode" || nativeAgent) && (
+        {!launchLocked && (effHarness === "opencode" || nativeAgent) && (
           <details className="node-panel__launch-notes">
             <summary>{t("node.launchNotes")}</summary>
             <div>
@@ -687,40 +806,18 @@ export function NodePanel({
             </div>
           </details>
         )}
-      </section>
 
-      <section className="node-panel__group" aria-label={t("node.workspaceGroupAria")}>
-        <h3 className="node-panel__group-title">{t("node.workspaceGroup")}</h3>
-        {dispatchId && (
-          <div className="node-panel__field node-panel__actual-worktree">
-            <span className="node-panel__key">{t("node.actualWorktreeKey")}</span>
-            {actualWorktree ? <code>{actualWorktree}</code> : (
-              <span>
-                {worktreeLoading
-                  ? t("node.worktreeLoading")
-                  : worktreeError
-                    ? t("node.worktreeError")
-                    : t("node.worktreeNotReported")}
-              </span>
-            )}
-            {actualBranch && (
-              <span className="node-panel__hint">
-                {t("node.branchLabel", { branch: actualBranch.replace(/^refs\/heads\//, "") })}
-              </span>
-            )}
-            {taskWorkers.length > 1 && (
-              <span className="node-panel__hint">
-                {t("node.dispatchOtherAttempts", { id: dispatchId })}
-              </span>
-            )}
-          </div>
-        )}
+            </div>
+          </section>
 
-        {/* Phase 6: run this node on a saved environment (or keep it local —
-            the zero-configuration default). List contents come only from
-            `orca environment list`; nothing is ever invented client-side. */}
-        <div className="node-panel__field">
-          <span className="node-panel__key">{t("node.environmentKey")}</span>
+          <section className="node-panel__group" aria-label={t("node.workspaceGroupAria")}>
+            <h3 className="node-panel__group-title">{t("node.workspaceGroup")}</h3>
+            <div className="node-panel__config-body">
+              {/* Phase 6: run this node on a saved environment (or keep it local —
+                  the zero-configuration default). List contents come only from
+                  `orca environment list`; nothing is ever invented client-side. */}
+              <div className="node-panel__field">
+                <span className="node-panel__key">{t("node.environmentKey")}</span>
           <DoodleSelect
             value={envId ?? ""}
             onChange={pickEnvironment}
@@ -801,7 +898,7 @@ export function NodePanel({
               )}
             </>
           )}
-          {!laneId && (
+          {!launchLocked && !laneId && (
             <span className="node-panel__hint">{t("node.laneHint")}</span>
           )}
         </div>
@@ -831,65 +928,26 @@ export function NodePanel({
               onChange={pickPlacement}
               disabled={launchLocked}
             />
-            {placement === null && (
+            {!launchLocked && placement === null && (
               <span className="node-panel__hint">{t("node.remotePlacementHint")}</span>
             )}
           </div>
         )}
 
-      </section>
-
-      {/* Phase 5: retain-for-debugging — the settled worker's terminal stays
-          alive and visible (in the Workers panel) until manually released. */}
-      <label className="node-panel__field node-panel__retain">
-        <input
-          type="checkbox"
-          checked={getNodeRetain(node.id)}
-          onChange={(e) => setNodeRetain(node.id, e.target.checked)}
-        />
-        <span className="node-panel__key">{t("node.retainLabel")}</span>
-      </label>
-
-      {/* Orca tracks the running attempt as a Dispatch; task-list only carries
-          these while the task is dispatched. */}
-      {node.dispatchId && (
-        <div className="node-panel__field">
-          <span className="node-panel__key">{t("node.currentDispatch")}</span>
-          <div className="node-panel__id">
-            <code>{node.dispatchId}</code>
-          </div>
-          {node.assigneeHandle && (
-            <span className="node-panel__hint">
-              {t("node.workerTerminal")} <code>{node.assigneeHandle}</code>
-              {t("node.inspectOutputWith")}{" "}
-              <code>orca orchestration worker-read --dispatch {node.dispatchId}</code>
-            </span>
-          )}
+        {/* Phase 5: retain-for-debugging — the settled worker's terminal stays
+            alive and visible (in the Workers panel) until manually released. */}
+              <label className="node-panel__field node-panel__retain">
+                <input
+                  type="checkbox"
+                  checked={getNodeRetain(node.id)}
+                  onChange={(e) => setNodeRetain(node.id, e.target.checked)}
+                />
+                <span className="node-panel__key">{t("node.retainLabel")}</span>
+              </label>
+            </div>
+          </section>
         </div>
       )}
-
-      <div className="node-panel__field">
-        <div className="node-panel__spec-head">
-          <span className="node-panel__key">{t("node.specKey")}</span>
-          <button
-            type="button"
-            className="node-panel__spec-toggle"
-            aria-expanded={specExpanded}
-            aria-controls={`stage-spec-${node.id}`}
-            onClick={() => setSpecExpanded((open) => !open)}
-          >
-            {specExpanded ? t("node.collapse") : t("node.expand")}
-          </button>
-        </div>
-        <p
-          id={`stage-spec-${node.id}`}
-          className={`node-panel__spec-ro${specExpanded ? " node-panel__spec-ro--expanded" : ""}`}
-          title={specExpanded ? undefined : node.spec}
-        >
-          {node.spec}
-        </p>
-        <span className="node-panel__hint">{t("node.specHint")}</span>
-      </div>
 
     </section>
   );

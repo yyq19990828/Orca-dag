@@ -33,15 +33,25 @@ export function ResultSummary({ raw }: { raw: string }) {
           <ul>{files.map((file, index) => <li key={index}><code>{file}</code></li>)}</ul>
         </div>}
         {text("reportPath") && <p>{t("report.reportLabel")} <code>{text("reportPath")}</code></p>}
-        <details className="node-result__details">
-          <summary>{t("report.details")}</summary>
-          <StructuredData value={Object.fromEntries(Object.entries(report!).filter(([key]) => !["body", "subject", "filesModified", "reportPath"].includes(key)))} />
-        </details>
-      </> : <StructuredData value={value} />}
-      <details className="node-result__details">
-        <summary>{t("report.raw")}</summary>
-        <pre>{raw}</pre>
-      </details>
+        <div className="node-result__disclosures">
+          <details className="node-result__details">
+            <summary>{t("report.details")}</summary>
+            <StructuredData value={Object.fromEntries(Object.entries(report!).filter(([key]) => !["body", "subject", "filesModified", "reportPath"].includes(key)))} />
+          </details>
+          <details className="node-result__details">
+            <summary>{t("report.raw")}</summary>
+            <pre>{raw}</pre>
+          </details>
+        </div>
+      </> : (
+        <>
+          <StructuredData value={value} />
+          <details className="node-result__details">
+            <summary>{t("report.raw")}</summary>
+            <pre>{raw}</pre>
+          </details>
+        </>
+      )}
     </section>
   );
 }

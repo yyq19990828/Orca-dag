@@ -298,8 +298,8 @@ export function ShortcutsDialog({
           </h2>
         </div>
         <form method="dialog">
-          <button value="close" className="odag-btn odag-btn--ghost odag-btn--icon" aria-label={t("ide.inspector.close")}>
-            <X size={15} />
+          <button value="close" className="odag-btn odag-btn--ghost odag-btn--icon odag-btn--icon-md" aria-label={t("ide.inspector.close")}>
+            <X size={14} />
           </button>
         </form>
       </header>

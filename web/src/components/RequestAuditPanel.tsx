@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Loader2, Search, X } from "lucide-react";
+import { ChevronDown, Loader2, Search, X } from "lucide-react";
 import { fetchRequestDetail, fetchRequests } from "../api";
 import { formatConsoleTime, formatTimestamp, operationLabel } from "../format";
 import { t, useT } from "../i18n";
@@ -240,10 +240,8 @@ export const RequestAuditPanel = memo(function RequestAuditPanel({
                     <span style={{ color: "var(--fg-tertiary)", display: "inline-flex" }} aria-hidden="true">
                       {isProbing ? (
                         <Loader2 size={12} />
-                      ) : isOpen ? (
-                        <ChevronDown size={12} />
                       ) : (
-                        <ChevronRight size={12} />
+                        <ChevronDown size={12} className="odag-chevron" data-open={isOpen || undefined} />
                       )}
                     </span>
 

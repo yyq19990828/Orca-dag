@@ -69,10 +69,27 @@ const harnessIcons: Record<string, string> = {
 export function HarnessAvatar({ harness, size = 36, kind = "agent" }: HarnessAvatarProps) {
   const name = harness?.trim().toLowerCase();
   const icon = kind === "agent" && name && Object.prototype.hasOwnProperty.call(harnessIcons, name) ? harnessIcons[name] : undefined;
-  const background = icon ? (name === "omp" || name === "codex" ? "#000" : "#fff") : "#eaecef";
+  const background = icon ? (name === "omp" || name === "codex" ? "#09090b" : "#ffffff") : "var(--bg-subtle)";
+  const radius = Math.max(4, Math.round(size * 0.22));
 
   return (
-    <span aria-hidden="true" style={{ width: size, height: size, flex: "none", display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: "50%", background, color: "#565b65", overflow: "hidden" }}>
+    <span
+      aria-hidden="true"
+      style={{
+        width: size,
+        height: size,
+        flex: "none",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        borderRadius: radius,
+        border: "1px solid var(--border-hairline)",
+        boxSizing: "border-box",
+        background,
+        color: "var(--fg-secondary)",
+        overflow: "hidden",
+      }}
+    >
       {icon ? (
         <img src={icon} alt="" style={{ width: "68%", height: "68%", objectFit: "contain" }} />
       ) : (

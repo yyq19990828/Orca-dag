@@ -106,8 +106,8 @@
 .chat .chat__composer:has(.chat__mention-target) { max-height: 65%; }
 .chat .chat__mention-target { display: grid; gap: 6px; min-width: 0; margin-bottom: 12px; font-size: 14px; color: var(--ink-soft); }
 .chat .chat__mention-target .doodle-select { width: 100%; min-width: 0; min-height: 44px; }
-.chat .chat-message-avatar { display: grid; place-items: center; flex: none; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 50%; background: transparent; cursor: pointer; }
-.chat .chat-message-avatar:hover { background: var(--sky-wash); }
+.chat .chat-message-avatar { display: grid; place-items: center; flex: none; width: 26px; height: 26px; padding: 0; border: 0; border-radius: var(--radius-sm, 6px); background: transparent; cursor: pointer; }
+.chat .chat-message-avatar:hover { background: var(--bg-subtle, var(--line)); }
 .chat .chat-message__mention { display: block; margin: 0 0 6px; color: var(--sky-ink); font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
 .chat .chat-message__reply-context { overflow: visible; white-space: normal; overflow-wrap: anywhere; text-overflow: clip; font-size: 14px; }
 .chat :is(.chat-checkpoint__head strong, .chat-checkpoint__summary, .chat-checkpoint__message-subject, .chat-checkpoint__agent > span, .chat-runtime-summary strong, .chat-runtime-summary__detail) {

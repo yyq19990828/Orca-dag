@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { ChevronDown } from "lucide-react";
 import { Popover, Select } from "radix-ui";
 import { useT } from "../i18n";
-import "./doodle-select.css";
 
 export interface DoodleOption {
   value: string;
@@ -27,7 +27,7 @@ type Props = {
 };
 
 function Chevron() {
-  return <svg className="doodle-select__chev" viewBox="0 0 14 9" aria-hidden="true"><path d="M1.5 1.5 L7 7 L12.5 1.5" /></svg>;
+  return <ChevronDown size={14} className="doodle-select__chev odag-chevron odag-chevron--select" aria-hidden="true" />;
 }
 
 function OptionText({ option }: { option: DoodleOption }) {

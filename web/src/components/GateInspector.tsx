@@ -115,17 +115,17 @@ export const GateInspector = memo(function GateInspector({
         </div>
         <button
           type="button"
-          className="odag-btn odag-btn--ghost odag-btn--icon"
+          className="odag-btn odag-btn--ghost odag-btn--icon odag-btn--icon-md"
           aria-label={t("ide.inspector.close")}
           title={t("ide.inspector.close")}
           onClick={onClose}
         >
-          <X size={15} />
+          <X size={14} />
         </button>
       </header>
 
-      <div className="odag-scroll" style={{ flex: 1, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 12 }}>
-        <div className="odag-card" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div className="odag-scroll" style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}>
+        <div className="odag-inspector-section" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <div style={{ fontSize: "var(--text-base)", fontWeight: 600, lineHeight: 1.45 }}>
             {gate.question || t("gate.resolveFallback")}
           </div>
@@ -133,11 +133,12 @@ export const GateInspector = memo(function GateInspector({
           {integration && (
             <div
               style={{
-                padding: "8px 10px",
-                borderRadius: 6,
+                padding: "6px 8px",
+                borderRadius: "var(--radius-sm)",
+                border: "1px solid color-mix(in oklab, var(--st-blocked), transparent 65%)",
                 background: "var(--st-blocked-bg)",
                 color: "var(--st-blocked)",
-                fontSize: "var(--text-sm)",
+                fontSize: "var(--text-xs)",
                 lineHeight: 1.45,
               }}
             >
@@ -146,7 +147,7 @@ export const GateInspector = memo(function GateInspector({
           )}
 
           {pending ? (
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBlockStart: 4 }}>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBlockStart: 2 }}>
               {gate.options.map((opt) => (
                 <button
                   key={opt}
@@ -158,10 +159,10 @@ export const GateInspector = memo(function GateInspector({
                       ? "odag-btn odag-btn--danger"
                       : "odag-btn odag-btn--primary"
                   }
-                  style={{ flex: 1, blockSize: 32 }}
+                  style={{ flex: 1, blockSize: 30 }}
                   onClick={() => void resolve(opt)}
                 >
-                  <ShieldCheck size={14} aria-hidden="true" />
+                  <ShieldCheck size={13} aria-hidden="true" />
                   {opt}
                 </button>
               ))}
@@ -179,19 +180,19 @@ export const GateInspector = memo(function GateInspector({
           )}
         </div>
 
-        {/* Upstream Worktree Evidence Comparison Cards */}
+        {/* Upstream Worktree Evidence Flat List */}
         {upstreamTasks.length > 0 && (
-          <div>
-            <div className="mono" style={{ fontSize: "var(--text-xs)", fontWeight: 600, color: "var(--fg-secondary)", marginBlockEnd: 6 }}>
+          <div className="odag-inspector-section">
+            <div className="odag-inspector-label">
               {t("ide.gate.upstreamEvidence", { n: upstreamTasks.length })}
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {upstreamTasks.map((up) => {
                 const vars = statusTokenVars(up.status);
                 const harness = actualHarnessByTask.get(up.id) ?? effectiveHarness(up.id);
                 const laneId = config.laneByTask[up.id];
                 return (
-                  <div key={up.id} className="odag-card" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  <div key={up.id} className="odag-inspector-item">
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
                       <button
                         type="button"
@@ -205,6 +206,7 @@ export const GateInspector = memo(function GateInspector({
                           gap: 6,
                           fontWeight: 600,
                           fontSize: "var(--text-sm)",
+                          color: "var(--fg-primary)",
                           textAlign: "start",
                         }}
                       >
@@ -217,7 +219,7 @@ export const GateInspector = memo(function GateInspector({
                     </div>
 
                     {up.result && (
-                      <div style={{ fontSize: "var(--text-sm)" }}>
+                      <div style={{ fontSize: "var(--text-xs)", color: "var(--fg-secondary)" }}>
                         <ResultSummary raw={up.result} />
                       </div>
                     )}
@@ -228,7 +230,7 @@ export const GateInspector = memo(function GateInspector({
                         <button
                           type="button"
                           className="odag-btn"
-                          style={{ blockSize: 24, fontSize: "var(--text-xs)" }}
+                          style={{ blockSize: 24, fontSize: "var(--text-xs)", paddingInline: 8 }}
                           disabled={disabled}
                           onClick={() => void handleOpenLaneDiff(laneId)}
                         >
@@ -245,24 +247,24 @@ export const GateInspector = memo(function GateInspector({
         )}
 
         {blockedTask && (
-          <div>
-            <div className="mono" style={{ fontSize: "var(--text-xs)", fontWeight: 600, color: "var(--fg-secondary)", marginBlockEnd: 6 }}>
+          <div className="odag-inspector-section">
+            <div className="odag-inspector-label">
               {t("ide.gate.unblocksTask")}
             </div>
             <button
               type="button"
-              className="odag-card"
+              className="odag-inspector-item"
               onClick={() => onSelectTask(blockedTask.id)}
               style={{
                 inlineSize: "100%",
                 textAlign: "start",
-                display: "flex",
+                flexDirection: "row",
                 alignItems: "center",
                 justifyContent: "space-between",
                 gap: 8,
               }}
             >
-              <span style={{ fontWeight: 600 }}>{blockedTask.label}</span>
+              <span style={{ fontWeight: 600, fontSize: "var(--text-sm)" }}>{blockedTask.label}</span>
               <code style={{ fontSize: "var(--text-xs)", color: "var(--fg-tertiary)" }}>{blockedTask.id}</code>
             </button>
           </div>

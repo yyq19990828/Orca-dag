@@ -2,7 +2,6 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckCircle2,
   ChevronDown,
-  ChevronRight,
   CircleX,
   ExternalLink,
   Search,
@@ -507,7 +506,7 @@ export const ActivityPanel = memo(function ActivityPanel({
                     onClick={() => toggleRow(event.id)}
                   >
                     <span style={{ color: "var(--fg-tertiary)", display: "inline-flex" }} aria-hidden="true">
-                      {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                      <ChevronDown size={12} className="odag-chevron" data-open={expanded || undefined} />
                     </span>
 
                     <time

@@ -1,100 +1,118 @@
 .node-panel__actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 7px;
-  margin: 13px 0 16px;
-  padding: 11px 0 0;
-  border-top: 1px solid var(--line-strong);
+  gap: 6px;
+  margin: 8px 0 12px;
+  padding: 8px 0 0;
+  border-block-start: 1px solid var(--border-hairline);
 }
 
 .node-panel__action {
-  padding: 5px 9px;
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-  background: var(--paper-2);
-  color: var(--ink);
-  font: 14px var(--font-body);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-block-size: var(--ctrl-h);
+  padding: 4px 10px;
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--fg-primary);
+  font: 500 var(--text-sm)/1.25 var(--font-sans);
   cursor: pointer;
-}
-
-.node-panel__action:hover {
-  border-color: var(--sky-ink);
-  background: var(--sky-wash);
-}
-
-.node-panel__action:focus-visible {
-  outline: 2px solid var(--sky-ink);
-  outline-offset: 2px;
-}
-
-/* Configuration fields share a control rhythm; explanatory copy grows naturally. */
-.node-panel {
-  container-type: inline-size;
-  min-width: 0;
-  font: 16px/1.6 var(--font-body);
-  overflow-wrap: anywhere;
-}
-
-.node-panel__group .node-panel__field {
-  min-width: 0;
-  gap: 6px;
-  margin-bottom: 20px;
-}
-
-.node-panel__group .node-panel__key {
-  margin: 0;
-  font: 600 14px/1.5 var(--font-body);
-}
-
-.node-panel__group :is(.doodle-select, .node-panel__custom) {
-  width: 100%;
-  min-width: 0;
-  min-height: 44px;
-  margin-top: 0;
-  font: 16px/1.5 var(--font-body);
-}
-
-.node-panel__group .doodle-select__value {
   white-space: normal;
   overflow-wrap: anywhere;
 }
 
+.node-panel__action:hover:not(:disabled) {
+  border-color: var(--fg-secondary);
+  background: var(--bg-subtle);
+}
+
+.node-panel__action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* IDE Property Inspector rhythm: compact 30px controls, 12px labels, 13px values */
+.node-panel {
+  container-type: inline-size;
+  min-inline-size: 0;
+  font: var(--text-base)/1.5 var(--font-sans);
+  overflow-wrap: anywhere;
+}
+
+.node-panel__group .node-panel__field {
+  min-inline-size: 0;
+  gap: 4px;
+  margin-block-end: 12px;
+}
+
+.node-panel__group .node-panel__key {
+  margin: 0;
+  color: var(--fg-secondary);
+  font: 500 var(--text-sm)/1.4 var(--font-sans);
+}
+
+.node-panel__group :is(.doodle-select, .node-panel__custom) {
+  inline-size: 100%;
+  min-inline-size: 0;
+  min-block-size: var(--ctrl-h);
+  padding: 4px 10px;
+  margin-block-start: 0;
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--fg-primary);
+  font: var(--text-base)/1.35 var(--font-sans);
+}
+
+.node-panel__group .doodle-select__value {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .node-panel__group .node-panel__hint {
-  margin-top: 0;
-  font-size: 14px;
-  line-height: 1.5;
+  margin-block-start: 0;
+  color: var(--fg-tertiary);
+  font-size: var(--text-xs);
+  line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
 .node-panel .placement__row {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: stretch;
+  gap: 8px;
 }
 
 .node-panel .placement__row .placement__field {
   display: grid;
-  grid-template-rows: 1fr auto;
-  align-items: end;
+  grid-template-rows: auto 1fr;
+  gap: 4px;
+  align-items: start;
 }
 
 .node-panel .placement__creation {
-  min-width: 0;
+  min-inline-size: 0;
 }
 
 .node-panel .placement__comment {
-  width: 100%;
-  min-width: 0;
-  font-size: 16px;
-}
-
-.node-panel__action {
-  min-height: 44px;
-  white-space: normal;
-  overflow-wrap: anywhere;
+  inline-size: 100%;
+  min-inline-size: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--fg-primary);
+  font-size: var(--text-base);
 }
 
 @container (max-width: 380px) {
-  .node-panel .placement__row { grid-template-columns: minmax(0, 1fr); }
+  .node-panel .placement__row {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 [data-operation-kind] {
@@ -102,11 +120,11 @@
 }
 
 [data-operation-kind]:focus-visible {
-  outline: 2px solid var(--sky-ink);
-  outline-offset: 3px;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 [data-operation-kind].operation-target {
-  outline: 3px solid var(--sky);
-  outline-offset: 3px;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }

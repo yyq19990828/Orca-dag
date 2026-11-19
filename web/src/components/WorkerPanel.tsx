@@ -1,9 +1,8 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { ChevronDown, Crosshair, Square } from "lucide-react";
 import {
   abandonWorker,
-  fetchEnvironments,
   fetchWorkerDetail,
-  fetchWorkerOutput,
   focusWorker,
   releaseWorker,
   retainWorker,
@@ -15,7 +14,6 @@ import type {
   RunStatus,
   WorkerControlReceiptView,
   WorkerDetailView,
-  WorkerOutputView,
   WorkerRowView,
   WorkerTerminalReceiptView,
 } from "../types";
@@ -29,9 +27,8 @@ import { NativeLaunchEvidence } from "./NativeLaunchEvidence";
  * and active workers stay visible even when this viewer is not coordinating
  * the Run. Expanding a row fetches `worker-show` evidence on demand — exact
  * observation, agent-wait, requested/effective launch preferences, the
- * runtime's prescribed next action — while `worker-read` output stays a
- * bounded, explicitly sourced surface with cursor paging and source-change
- * warnings.
+ * runtime's prescribed next action. `worker-read` output lives in exactly
+ * one place — the dock's "Worker output" tab — reached via `onOpenOutput`.
  *
  * Everything here is evidence-backed: fleet liveness is the authoritative
  * verdict and is never upgraded from PTY facts. The one exception is the
@@ -72,6 +69,7 @@ export const WorkerPanel = memo(function WorkerPanel({
   status,
   disabled = false,
   disabledReason,
+  onOpenOutput,
 }: {
   runId: string;
   /** Durable, Run-scoped fleet rows (fully paginated server-side). */
@@ -85,6 +83,8 @@ export const WorkerPanel = memo(function WorkerPanel({
   status: RunStatus | null;
   disabled?: boolean;
   disabledReason?: string | null;
+  /** Open this Dispatch in the dock's single Worker-output viewer. */
+  onOpenOutput?: (dispatchId: string) => void;
 }) {
   const t = useT();
   const [openDispatch, setOpenDispatch] = useState<string | null>(null);
@@ -96,30 +96,23 @@ export const WorkerPanel = memo(function WorkerPanel({
     return () => window.clearInterval(id);
   }, [openDispatch]);
   const generation = useRef(0);
-  const outputGeneration = useRef(0);
   const selectedRun = useRef(runId);
   if (selectedRun.current !== runId) {
     selectedRun.current = runId;
     generation.current++;
-    outputGeneration.current++;
   }
   useEffect(() => {
     setOpenDispatch(null);
     setDetail(null);
     setDetailErr(null);
-    setOutput(null);
-    setOutputErr(null);
     setErr(null);
-    return () => { generation.current++; outputGeneration.current++; };
+    return () => {
+      generation.current++;
+    };
   }, [runId]);
   const [detail, setDetail] = useState<WorkerDetailView | null>(null);
   const [detailErr, setDetailErr] = useState<string | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
-  const [output, setOutput] = useState<WorkerOutputView | null>(null);
-  const [outputErr, setOutputErr] = useState<string | null>(null);
-  // Phase 5: in-loaded-rows search — deliberately client-side only. It can
-  // NEVER fetch more transcript than the user already paged in.
-  const [outputFilter, setOutputFilter] = useState("");
   // Phase 5: the receipt of the last manual release/retain on this panel,
   // including Orca's archive facts (evidence — not settlement).
   const [decision, setDecision] = useState<{
@@ -145,65 +138,19 @@ export const WorkerPanel = memo(function WorkerPanel({
     setTerminalFilter("all");
     setAttentionFilter("all");
   }, [focusId]);
-  // Structured-read source picker + the environment capability list it is
-  // gated on (cached in api.ts; one fetch, not one per render).
-  const [source, setSource] = useState<string>("auto");
-  const [envs, setEnvs] = useState<Awaited<ReturnType<typeof fetchEnvironments>>>([]);
-  useEffect(() => {
-    let alive = true;
-    fetchEnvironments()
-      .then((e) => alive && setEnvs(e))
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, []);
-
   // The status endpoint describes the one process-local coordinator, so its
   // attempts (requested launch prefs, viewer decisions) merge only under the
   // same selected Run. Rows render regardless — that is the point of Phase 2.
   const attempts = status?.runId === runId ? status.attempts : [];
 
-  const loadOutput = useCallback(
-    async (dispatchId: string, cursor?: string, src?: string) => {
-      const selection = generation.current;
-      const request = ++outputGeneration.current;
-      setOutputErr(null);
-      if (!cursor) setOutput(null);
-      try {
-        const page = await fetchWorkerOutput(runId, dispatchId, {
-          cursor,
-          limit: 40,
-          source: src && src !== "auto" ? src : undefined,
-        });
-        if (selection !== generation.current || request !== outputGeneration.current) return;
-        setOutput((prev) => {
-          // A cursor page CONTINUES the previous read; a fresh read replaces it.
-          if (cursor && prev && prev.dispatchId === page.dispatchId && !page.sourceChanged) {
-            return { ...page, lines: [...prev.lines, ...page.lines] };
-          }
-          return page;
-        });
-      } catch (e) {
-        if (selection === generation.current && request === outputGeneration.current) setOutputErr(String((e as Error).message ?? e));
-      }
-    },
-    [runId],
-  );
-
   const loadDetail = useCallback(
     async (dispatchId: string) => {
       const request = ++generation.current;
-      outputGeneration.current++;
       setDetailLoading(true);
       setDetailErr(null);
       setDetail(null);
-      setOutput(null);
-      setOutputErr(null);
-      setOutputFilter("");
       setDecision(null);
       setControl(null);
-      setSource("auto");
       try {
         const result = await fetchWorkerDetail(runId, dispatchId);
         if (request === generation.current) setDetail(result);
@@ -219,7 +166,6 @@ export const WorkerPanel = memo(function WorkerPanel({
   function toggle(row: WorkerRowView) {
     const open = openDispatch === row.dispatchId;
     generation.current++;
-    outputGeneration.current++;
     setOpenDispatch(open ? null : row.dispatchId);
     setDetail(null);
     setDetailErr(null);
@@ -235,17 +181,6 @@ export const WorkerPanel = memo(function WorkerPanel({
     } catch {
       return null;
     }
-  }
-
-  /** Export ONLY the rows already read — a local Blob, no server round-trip. */
-  function downloadLoaded(output: WorkerOutputView) {
-    const blob = new Blob([output.lines.join("\n")], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `worker-output-${output.dispatchId}-${output.source}.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
   }
 
   async function decide(dispatchId: string, kind: "release" | "retain") {
@@ -440,7 +375,10 @@ export const WorkerPanel = memo(function WorkerPanel({
   if (!runId || (rows.length === 0 && !rowsError)) return null;
 
   return (
-    <div className="gates inbox workers" data-testid="worker-panel">
+    <div
+      className="gates inbox workers"
+      data-testid="worker-panel"
+    >
       <div className="gate inbox__item">
         <div className="gate__badge">{t("worker.badge")}</div>
         {rows.length > 0 && (
@@ -519,13 +457,6 @@ export const WorkerPanel = memo(function WorkerPanel({
           const providerLabel = requestedModel
             ? `${provider ?? attempt?.requested.agent ?? t("worker.unknown")} · ${requestedModel}${t("worker.requestedSuffix")}`
             : provider;
-          // Structured transcript reads are a peer capability (Phase 6):
-          // offered for local workers always, for remote workers only when
-          // their environment advertises it. Unknown host → auto only.
-          const hostEnv = host ? envs.find((e) => e.id === host.id) : undefined;
-          const canTranscript =
-            host?.kind === "local" ||
-            (host?.kind != null && host.kind !== "local" && (hostEnv?.peer.transcriptRead ?? false));
           // Lifecycle decisions appear only on positive proof: Orca's own
           // accounting says a decision is owed (release_pending), or this
           // viewer's coordinator settled the attempt without a decision yet.
@@ -567,7 +498,7 @@ export const WorkerPanel = memo(function WorkerPanel({
                 <span className="workers__liveness" data-verdict={verdict} title={liveness?.reason ?? verdict}>
                   {t(`worker.live.${verdict}`)}
                 </span>
-                <span aria-hidden="true">{open ? "−" : "+"}</span>
+                <ChevronDown size={14} className="odag-chevron" data-open={open || undefined} aria-hidden="true" />
               </button>
 
               {open && (
@@ -879,92 +810,6 @@ export const WorkerPanel = memo(function WorkerPanel({
                     </>
                   )}
 
-                  {/* --- bounded output (worker-read), explicitly sourced --- */}
-                  {output?.dispatchId === row.dispatchId && (
-                    <>
-                      {(() => {
-                        // Search runs ONLY over rows already loaded on this
-                        // page stack — it can never fetch or render an
-                        // unbounded transcript.
-                        const q = outputFilter.trim().toLowerCase();
-                        const visible = q
-                          ? output.lines.filter((line) => line.toLowerCase().includes(q))
-                          : output.lines;
-                        return (
-                          <>
-                            <div className="workers__outputmeta" data-testid="output-meta">
-                              <span className="workers__srcbadge" data-source={output.source}>
-                                {output.source}
-                              </span>
-                              {output.clipped && (
-                                <span className="workers__flag" data-flag="clipped">
-                                  {t("worker.clipped")}
-                                </span>
-                              )}
-                              <span className="workers__flag" data-flag={output.contentComplete ? "complete" : "more"}>
-                                {output.contentComplete ? t("worker.outputComplete") : t("worker.outputMore")}
-                              </span>
-                              {output.sourceChanged && (
-                                <span className="workers__flag" data-flag="changed">
-                                  {t("worker.sourceChanged")}
-                                </span>
-                              )}
-                            </div>
-                            <div className="inbox__body" data-testid="output-provenance">
-                              {t("worker.outputArchive")} <b>{output.archived === true
-                                ? t("worker.outputArchived")
-                                : output.archived === false ? t("worker.outputLive") : t("worker.unknown")}</b>
-                              {output.sourceExact != null && <>{" · "}{output.sourceExact
-                                ? t("worker.outputExact") : t("worker.outputNotExact")}</>}
-                              {output.provider != null && <div>{t("worker.outputProvider")} <code>{output.provider}</code></div>}
-                              {output.sourceIdentity != null && <div>{t("worker.outputIdentity")} <code>{output.sourceIdentity}</code></div>}
-                              {output.fallbackReason != null && <div>{t("worker.outputFallback")} {output.fallbackReason}</div>}
-                              <div className="inbox__meta">{t("worker.outputEvidenceNote")}</div>
-                            </div>
-                            <input
-                              className="workers__search"
-                              type="search"
-                              value={outputFilter}
-                              onChange={(e) => setOutputFilter(e.target.value)}
-                              placeholder={t("worker.filterPlaceholder")}
-                              aria-label={t("worker.filterOutputAria")}
-                            />
-                            <pre className="workers__output" data-testid="output-pre">
-                              {visible.length > 0 ? visible.join("\n") : t(q ? "worker.noMatch" : "worker.outputEmpty")}
-                              {!q && !output.contentComplete && "\n…"}
-                              {!q && output.clipped ? `\n${t("worker.clippedMark")}` : ""}
-                            </pre>
-                            <div className="inbox__meta">
-                              {q
-                                ? t("worker.matchCount", {
-                                    visible: visible.length,
-                                    total: output.lines.length,
-                                  })
-                                : output.lines.length === 1
-                                  ? t("worker.loadedRowsOne", { n: output.lines.length })
-                                  : t("worker.loadedRowsMany", { n: output.lines.length })}
-                              {" · "}
-                              <button
-                                type="button"
-                                className="workers__download"
-                                onClick={() => downloadLoaded(output)}
-                                title={t("worker.downloadTitle")}
-                              >
-                                {t("worker.download")}
-                              </button>
-                            </div>
-                          </>
-                        );
-                      })()}
-                    </>
-                  )}
-                  {output?.dispatchId === row.dispatchId && output.warnings.map((w, i) => (
-                    <div key={i} className="inbox__body workers__warn">
-                      ⚠ {w}
-                    </div>
-                  ))}
-                  {outputErr && <div className="exec__err inbox__err">⚠️ {outputErr}</div>}
-
                   {decision && decision.dispatchId === row.dispatchId && (
                     <div className="inbox__body workers__decision" data-testid="decision-receipt">
                       {t("worker.decisionReceipt")} <b>{decision.receipt.state}</b>
@@ -1001,39 +846,15 @@ export const WorkerPanel = memo(function WorkerPanel({
                   )}
 
                   <div className="gate__actions">
-                    {(output?.dispatchId !== row.dispatchId || output?.contentComplete) && (
+                    {onOpenOutput && row.dispatchId && (
                       <button
+                        type="button"
                         className="btn btn--gate"
-                        onClick={() => row.dispatchId && void loadOutput(row.dispatchId, undefined, source)}
+                        onClick={() => onOpenOutput(row.dispatchId)}
+                        title={t("worker.viewOutputTitle")}
                       >
-                        {t("worker.readOutput")}
+                        {t("worker.viewOutput")}
                       </button>
-                    )}
-                    {output?.dispatchId === row.dispatchId && output.cursor && !output.contentComplete && (
-                      <button
-                        className="btn btn--gate"
-                        onClick={() =>
-                          row.dispatchId && void loadOutput(row.dispatchId, output.cursor ?? undefined, source)
-                        }
-                      >
-                        {t("worker.loadMore")}
-                      </button>
-                    )}
-                    {output?.dispatchId === row.dispatchId && (
-                      <select
-                        className="workers__source"
-                        aria-label={t("worker.outputSourceLabel")}
-                        value={source}
-                        onChange={(e) => {
-                          setSource(e.target.value);
-                          if (row.dispatchId) void loadOutput(row.dispatchId, undefined, e.target.value);
-                        }}
-                      >
-                        <option value="auto">{t("worker.sourceAuto")}</option>
-                        {canTranscript && (
-                          <option value="transcript">{t("worker.sourceTranscript")}</option>
-                        )}
-                      </select>
                     )}
                     {(canRelease || canRetain) && row.dispatchId && (
                       <>
@@ -1065,6 +886,7 @@ export const WorkerPanel = memo(function WorkerPanel({
                     {evidence && row.dispatchId && (
                       <>
                         <button
+                          type="button"
                           className="btn btn--gate workers__ctl"
                           disabled={!evidence.canFocus || disabled || busyId === row.dispatchId}
                           title={
@@ -1074,9 +896,11 @@ export const WorkerPanel = memo(function WorkerPanel({
                           }
                           onClick={() => row.dispatchId && void intervene(row, "focus", evidence.focusWhy)}
                         >
-                          {t("worker.focusButton")}
+                          <Crosshair size={12} aria-hidden="true" />
+                          <span>{t("worker.focusButton")}</span>
                         </button>
                         <button
+                          type="button"
                           className="btn btn--gate btn--danger workers__ctl"
                           disabled={!evidence.canStop || disabled || busyId === row.dispatchId}
                           title={
@@ -1086,9 +910,11 @@ export const WorkerPanel = memo(function WorkerPanel({
                           }
                           onClick={() => row.dispatchId && void intervene(row, "stop", evidence.stopWhy)}
                         >
-                          {t("worker.stopButton")}
+                          <Square size={10} fill="currentColor" aria-hidden="true" />
+                          <span>{t("worker.stopButton")}</span>
                         </button>
                         <button
+                          type="button"
                           className="btn btn--gate workers__ctl"
                           disabled={!evidence.canAbandon || disabled || busyId === row.dispatchId}
                           title={
@@ -1098,7 +924,7 @@ export const WorkerPanel = memo(function WorkerPanel({
                           }
                           onClick={() => row.dispatchId && void intervene(row, "abandon", evidence.abandonWhy)}
                         >
-                          {t("worker.abandonButton")}
+                          <span>{t("worker.abandonButton")}</span>
                         </button>
                       </>
                     )}

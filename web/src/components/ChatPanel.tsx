@@ -35,9 +35,15 @@ function MessageComposer({
   const t = useT();
   const hintId = useId();
   return (
-    <div className="chat__compose-row">
+    <form
+      className="chat__compose-row"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (!sendDisabled) void onSend();
+      }}
+    >
       <textarea
-        rows={3}
+        rows={2}
         value={value}
         disabled={disabled}
         placeholder={placeholder}
@@ -56,18 +62,17 @@ function MessageComposer({
       <div className="chat__compose-toolbar">
         <span id={hintId}>{t("chat.compose.shortcut")}</span>
         <button
-          type="button"
+          type="submit"
           className="btn btn--run"
           disabled={sendDisabled}
           aria-busy={busy}
           title={sendTitle}
-          onClick={() => void onSend()}
         >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 19V5m-7 7 7-7 7 7" /></svg>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 19V5m-7 7 7-7 7 7" /></svg>
           {busy ? t("chat.compose.sending") : sendLabel}
         </button>
       </div>
-    </div>
+    </form>
   );
 }
 
@@ -218,7 +223,7 @@ export const ChatPanel = memo(function ChatPanel({
   taskSelection,
   groupSelection = null,
   renderTask,
-  renderDispatch,
+  renderConfig,
   onCloseInspector,
   leadTaskId,
   onSelectTask,
@@ -237,7 +242,7 @@ export const ChatPanel = memo(function ChatPanel({
   /** Explicit navigation into the Run Group Chat thread from the IDE Inspector. */
   groupSelection?: { nonce: number } | null;
   renderTask: (task: DagNode) => ReactNode;
-  renderDispatch?: (task: DagNode) => ReactNode;
+  renderConfig?: (task: DagNode) => ReactNode;
   onCloseInspector?: () => void;
   leadTaskId: string | null;
   onSelectTask: (taskId: string | null) => void;
@@ -328,7 +333,7 @@ export const ChatPanel = memo(function ChatPanel({
   const setSelectedId = chatView === "private" ? setPrivateSelectedId : setGroupSelectedId;
   const [groupTargetId, setGroupTargetId] = useScopedChatState(runId, "");
   const [mobileConversationOpen, setMobileConversationOpen] = useScopedChatState(runId, false);
-  const [threadView, setThreadView] = useScopedChatState<"messages" | "task" | "dispatch" | "checks">(runId, "messages");
+  const [threadView, setThreadView] = useScopedChatState<"messages" | "task" | "config" | "checks">(runId, "messages");
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const sidebarRef = useRef<HTMLElement>(null);
   const conversationHeadingRef = useRef<HTMLHeadingElement>(null);
@@ -360,14 +365,20 @@ export const ChatPanel = memo(function ChatPanel({
     setThreadView("messages");
     setMobileConversationOpen(true);
   }, [active, groupSelection, setGroupSelectedId, setChatView, setThreadView, setMobileConversationOpen]);
-  const timelineActive = active && (!compact || mobileConversationOpen) && threadView === "messages";
+  const selected = conversations.find((conversation) => conversation.id === selectedId) ?? null;
+  const effectiveThreadView =
+    selected?.taskId && threadView === "checks"
+      ? "messages"
+      : !selected?.taskId && (threadView === "task" || threadView === "config")
+        ? "messages"
+        : threadView;
+  const timelineActive = active && (!compact || mobileConversationOpen) && effectiveThreadView === "messages";
   const [threadQuery, setThreadQuery] = useScopedChatState(runId, "");
   const query = threadQuery.trim().toLocaleLowerCase();
   const filteredConversations = conversations.filter((conversation) =>
     chatView === "group" ? conversation.taskId === null
       : conversation.taskId !== null && (!query || [conversation.label, conversation.taskId, conversation.subtitle]
         .some((value) => value?.toLocaleLowerCase().includes(query))));
-  const selected = conversations.find((conversation) => conversation.id === selectedId) ?? null;
   // Never infer an @recipient from the latest speaker or the last private
   // conversation. Missing/stale selections remain unsendable, not redirected.
   const composeTarget = chatView === "group"
@@ -391,7 +402,13 @@ export const ChatPanel = memo(function ChatPanel({
   // Mount Task controls on first use, then retain their drafts, disclosures
   // and in-flight receipts while switching sibling tabs in this conversation.
   const [taskVisited, setTaskVisited] = useScopedChatState(conversationScope, false);
-  const [dispatchVisited, setDispatchVisited] = useScopedChatState(`${conversationScope}:dispatch`, false);
+  const [configVisited, setConfigVisited] = useScopedChatState(`${conversationScope}:config`, false);
+  useEffect(() => {
+    const activeTab = chatContainerRef.current?.querySelector<HTMLElement>(
+      '.chat__view-tabs [role="tab"][aria-selected="true"]',
+    );
+    activeTab?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [effectiveThreadView]);
   useLayoutEffect(() => {
     if (!active || !compact) return;
     if (mobileConversationOpen) conversationHeadingRef.current?.focus({ preventScroll: true });
@@ -517,11 +534,6 @@ export const ChatPanel = memo(function ChatPanel({
   // heartbeats remain in the runtime summary, not repeated chat bubbles.
   const visibleEvents = selected?.events.filter((event) => !isAgentProgressSignal(event) ||
     (event.kind === "status" && event.technical.provenance === "orca_message")) ?? [];
-  const selectedChecks = selected
-    ? snapshot.checks.filter(
-        (receipt) => !selected.taskId || receipt.agents.some((agent) => agent.taskId === selected.taskId),
-      )
-    : [];
   // Keep unresolved actions visible even when their message predates the
   // reading window. Older history remains available explicitly, not mounted
   // forever in every hidden conversation.
@@ -710,14 +722,18 @@ export const ChatPanel = memo(function ChatPanel({
             </div>
       </aside>
 
-      <Tabs.Root className="chat__conversation" value={threadView} onValueChange={(value) => {
+      <Tabs.Root className="chat__conversation" value={effectiveThreadView} onValueChange={(value) => {
         if (value === "task") openTaskDetails();
-        else if (value === "dispatch") {
+        else if (value === "config") {
           if (!selected?.taskId) return;
-          setDispatchVisited(true);
-          setThreadView("dispatch");
+          setConfigVisited(true);
+          setThreadView("config");
         }
-        else if (value === "messages" || value === "checks") setThreadView(value);
+        else if (value === "checks") {
+          if (selected?.taskId) return;
+          setThreadView("checks");
+        }
+        else if (value === "messages") setThreadView("messages");
       }}>
         {!selected && <p className="chat__choose-conversation">{t("chat.chooseConversation")}</p>}
         {selected && (
@@ -728,11 +744,11 @@ export const ChatPanel = memo(function ChatPanel({
                   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
                 </button>
               )}
-              <HarnessAvatar harness={selected.harness} kind={selected.taskId ? "agent" : "system"} size={30} />
+              <HarnessAvatar harness={selected.harness} kind={selected.taskId ? "agent" : "system"} size={24} />
               <div className="chat__conversation-info">
                 <div className="chat__conversation-title">
                   <h2 ref={conversationHeadingRef} tabIndex={-1}>{selected.label}</h2>
-                  {chatView === "private" && selected.isLead && <span>{t("chat.leadStage")}</span>}
+                  {chatView === "private" && selected.isLead && <span className="odag-console-tag">{t("chat.leadStage")}</span>}
                 </div>
                 {chatView === "group" ? <p>{t("chat.sidebar.groupNote")}</p>
                   : selected.subtitle && selected.subtitle !== selected.label && selected.subtitle !== selected.taskId
@@ -743,8 +759,8 @@ export const ChatPanel = memo(function ChatPanel({
                 {selected.taskId && (
                   <Popover.Root key={conversationScope}>
                     <Popover.Trigger asChild>
-                      <button type="button" className="chat__identity-button" aria-label={t("chat.recipient.details")} title={t("chat.recipient.details")}>
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 11v6m0-10v.01" /></svg>
+                      <button type="button" className="odag-btn odag-btn--ghost odag-btn--icon odag-btn--icon-md chat__identity-button" aria-label={t("chat.recipient.details")} title={t("chat.recipient.details")}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 11v6m0-10v.01" /></svg>
                       </button>
                     </Popover.Trigger>
                     <Popover.Portal>
@@ -757,7 +773,7 @@ export const ChatPanel = memo(function ChatPanel({
                           {replyTarget?.dispatchId && replyTarget.dispatchId !== selected.task?.dispatchId && <><dt>{t("record.dispatch")}</dt><dd><code>{replyTarget.dispatchId}</code></dd></>}
                         </dl>
                         <Popover.Close asChild>
-                          <button type="button" className="btn btn--ghost" onClick={() => {
+                          <button type="button" className="odag-btn" onClick={() => {
                             openTaskDetails();
                             window.requestAnimationFrame(() => taskTabRef.current?.focus());
                           }}>{t("chat.openStage")}</button>
@@ -769,23 +785,28 @@ export const ChatPanel = memo(function ChatPanel({
                 {onCloseInspector && (
                   <button
                     type="button"
-                    className="odag-btn odag-btn--ghost odag-btn--icon"
+                    className="odag-btn odag-btn--ghost odag-btn--icon odag-btn--icon-md"
                     onClick={onCloseInspector}
                     aria-label={t("ide.inspector.close")}
                     title={t("ide.inspector.close")}
                   >
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
                   </button>
                 )}
               </div>
             </header>
-            <Tabs.List className="chat__view-tabs" aria-label={t("chat.view.label")}>
-              <Tabs.Trigger value="messages">{t("chat.view.messages")}</Tabs.Trigger>
-              {selected.taskId && <Tabs.Trigger value="task" ref={taskTabRef}>{t("chat.view.task")}</Tabs.Trigger>}
-              {selected.taskId && renderDispatch && <Tabs.Trigger value="dispatch">{t("ide.inspector.tabDispatch")}</Tabs.Trigger>}
-              <Tabs.Trigger value="checks">{t("chat.checks.title")}<span>{selectedChecks.length}</span></Tabs.Trigger>
+            <Tabs.List className="chat__view-tabs odag-tablist" aria-label={t("chat.view.label")}>
+              <Tabs.Trigger className="odag-tab" value="messages">{t("chat.view.messages")}</Tabs.Trigger>
+              {selected.taskId && <Tabs.Trigger className="odag-tab" value="task" ref={taskTabRef}>{t("chat.view.task")}</Tabs.Trigger>}
+              {selected.taskId && renderConfig && <Tabs.Trigger className="odag-tab" value="config">{t("ide.inspector.tabConfig")}</Tabs.Trigger>}
+              {!selected.taskId && (
+                <Tabs.Trigger className="odag-tab" value="checks">
+                  <span>{t("chat.checks.title")}</span>
+                  <span className="odag-count">{snapshot.checks.length}</span>
+                </Tabs.Trigger>
+              )}
             </Tabs.List>
-            <Tabs.Content className="chat__view chat__view--messages" value="messages" forceMount hidden={threadView !== "messages"}>
+            <Tabs.Content className="chat__view chat__view--messages" value="messages" forceMount hidden={effectiveThreadView !== "messages"}>
 
             <div className="chat__timeline">
             <div className="chat__messages" role="region" aria-label={t("chat.timeline.label")} aria-live="polite" tabIndex={0} ref={messagesRef} onScroll={(event) => {
@@ -812,7 +833,7 @@ export const ChatPanel = memo(function ChatPanel({
               )}
               {selected.task && !hasRecordedAssignment && (
                 <div className="chat-message-row chat-message-row--outgoing">
-                <HarnessAvatar kind="operator" size={28} />
+                <HarnessAvatar kind="operator" size={24} />
                 <article className="chat-message chat-message--outgoing chat-message--brief">
                   <div className="chat-message__meta">
                     <strong>{t("chat.actor.coordinator")}</strong>
@@ -851,9 +872,9 @@ export const ChatPanel = memo(function ChatPanel({
                   <div className={`chat-message-row${outgoing ? " chat-message-row--outgoing" : ""}`} key={event.id}>
                     {chatView === "group" && !outgoing && event.taskId
                       ? <button type="button" className="chat-message-avatar" onClick={() => onSelectTask(event.taskId!)} aria-label={t("chat.avatar.openPrivate", { label: taskMap.get(event.taskId)?.label ?? event.taskId })}>
-                          <HarnessAvatar harness={event.actor.harness} size={36} />
+                          <HarnessAvatar harness={event.actor.harness} size={24} />
                         </button>
-                      : <HarnessAvatar harness={event.actor.harness} kind={outgoing ? "operator" : "agent"} size={28} />}
+                      : <HarnessAvatar harness={event.actor.harness} kind={outgoing ? "operator" : "agent"} size={24} />}
                     <article
                       className={`chat-message ${outgoing ? "chat-message--outgoing" : "chat-message--incoming"} chat-message--${event.kind} chat-message--${event.severity}${isUrgent(event) ? " chat-message--urgent" : ""}${event.audience ? " chat-message--group" : ""}`}
                     >
@@ -1067,23 +1088,25 @@ export const ChatPanel = memo(function ChatPanel({
               )}
             </footer>
             </Tabs.Content>
-            {selected.taskId && <Tabs.Content className="chat__view chat__view--task" value="task" forceMount hidden={threadView !== "task"}>
+            {selected.taskId && <Tabs.Content className="chat__view chat__view--task" value="task" forceMount hidden={effectiveThreadView !== "task"}>
               <div className="chat__task">
                 {selected.task
                   ? taskVisited && renderTask(selected.task)
                   : <p role="status">{t("workbench.taskUnavailable")} <code>{selected.taskId}</code></p>}
               </div>
             </Tabs.Content>}
-            {selected.taskId && renderDispatch && <Tabs.Content className="chat__view chat__view--task" value="dispatch" forceMount hidden={threadView !== "dispatch"}>
+            {selected.taskId && renderConfig && <Tabs.Content className="chat__view chat__view--task" value="config" forceMount hidden={effectiveThreadView !== "config"}>
               <div className="chat__task">
                 {selected.task
-                  ? dispatchVisited && renderDispatch(selected.task)
+                  ? configVisited && renderConfig(selected.task)
                   : <p role="status">{t("workbench.taskUnavailable")} <code>{selected.taskId}</code></p>}
               </div>
             </Tabs.Content>}
-            <Tabs.Content className="chat__view" value="checks" forceMount hidden={threadView !== "checks"}>
-              <MailboxChecks checks={selectedChecks} tasks={tasks} taskId={selected.taskId} scope={conversationScope} />
-            </Tabs.Content>
+            {!selected.taskId && (
+              <Tabs.Content className="chat__view" value="checks" forceMount hidden={effectiveThreadView !== "checks"}>
+                <MailboxChecks checks={snapshot.checks} tasks={tasks} taskId={null} scope={conversationScope} />
+              </Tabs.Content>
+            )}
           </>
         )}
       </Tabs.Root>
