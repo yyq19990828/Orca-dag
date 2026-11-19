@@ -76,6 +76,24 @@ export const CapabilityPanel = memo(function CapabilityPanel() {
       {view.advertised !== null && (
         <p className="cap__note">{t("capability.localAdvertisement")}</p>
       )}
+      {view.plugin && (
+        <p className="cap__note" data-testid="plugin-bridge-status">
+          <strong>{t("capability.pluginLabel")}</strong>{" "}
+          {view.plugin.connected ? (
+            <>
+              <span className="cap__state cap__state--on">{t("capability.pluginConnected")}</span>{" "}
+              <code>{view.plugin.pluginId ?? "orchestration-panel"}</code>
+              {view.plugin.version ? ` v${view.plugin.version}` : ""}
+              {view.plugin.hostApiMinor != null ? ` · Host API 1.${view.plugin.hostApiMinor}` : ""}
+              {view.plugin.grantedCapabilities.length > 0
+                ? ` · ${view.plugin.grantedCapabilities.join(", ")}`
+                : ""}
+            </>
+          ) : (
+            <span className="cap__state cap__state--off">{t("capability.pluginDisconnected")}</span>
+          )}
+        </p>
+      )}
       <ul className="cap__list">
         {view.capabilities.map((cap) => {
           // Umbrella rows (orchestration.contract.v1 / federation.v1) are

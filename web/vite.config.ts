@@ -4,6 +4,7 @@ import react from "@vitejs/plugin-react";
 // The web app talks to the local Express server (server/) over /api.
 // Vite proxies those calls in dev so the browser hits a single origin.
 export default defineConfig({
+  base: process.env.VITE_BASE || "/",
   plugins: [react()],
   build: {
     rollupOptions: {

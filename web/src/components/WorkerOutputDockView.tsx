@@ -1,36 +1,29 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { fetchEnvironments, fetchWorkerOutput } from "../api";
+import { fetchEnvironments, fetchWorkerOutput, openWorkerOutputStream } from "../api";
 import { useT } from "../i18n";
 import { usePageVisible } from "../visibility";
 import type { WorkerOutputView, WorkerRowView } from "../types";
 
 type OutputSource = "auto" | "terminal" | "transcript";
 
-/** Rows per worker-read page (server clamps to 200). */
+/** Rows per manual worker-read page (server clamps to 200). */
 const PAGE_LIMIT = 120;
-/** Idle follow cadence while the worker may still produce output. */
-const FOLLOW_INTERVAL_MS = 3_000;
-/** Catch-up cadence while the previous page came back full (backlog). */
-const DRAIN_INTERVAL_MS = 250;
 /** Client-side retention cap; older loaded rows are dropped, never refetched. */
 const MAX_RETAINED_LINES = 5_000;
-/** Back-off while reads are failing (e.g. a transient CLI/runtime error). */
-const ERROR_INTERVAL_MS = 10_000;
 /** Distance from the bottom that still counts as "pinned to the tail". */
 const STICK_THRESHOLD_PX = 32;
 
 /**
  * The single worker-read viewer (bottom dock → "Worker output").
  *
- * Every other surface (the Scheduler fleet rows) jumps here via
- * `onOpenOutput` instead of rendering a second copy of the same bounded read.
+ * Every other surface (Scheduler fleet rows, Node Session panel) jumps here
+ * via `onOpenOutput` instead of rendering a second copy of the raw output.
  *
- * Auto-refresh ("follow") is plain cursor polling of `worker-read`: the
- * returned cursor is a stable tail pointer, so each poll returns only rows
- * appended since the last page. Polling runs only while the dock is open, the
- * page is visible, and the worker has not positively exited with an empty
- * page — a settled worker costs nothing. Output is evidence, never settlement:
- * `status` from the read only decides whether to keep following.
+ * Auto-refresh ("follow") subscribes to the server's centralized OutputTail
+ * SSE stream (`/api/workers/:id/output/stream`), so multiple views share one
+ * upstream `worker-read` poller — woke immediately by the companion Orca
+ * plugin when connected. Pauses when the dock is collapsed or the page is
+ * hidden, and shows "worker exited · stopped" once drained.
  */
 export const WorkerOutputDockView = memo(function WorkerOutputDockView({
   runId,
@@ -45,18 +38,21 @@ export const WorkerOutputDockView = memo(function WorkerOutputDockView({
   labelsById: Record<string, string>;
   selectedDispatchId: string | null;
   onSelectDispatchId: (dispatchId: string) => void;
-  /** False while the dock is collapsed: follow polling pauses. */
+  /** False while the dock is collapsed: live stream closes to avoid idle work. */
   active?: boolean;
 }) {
   const t = useT();
   const visible = usePageVisible();
   const [source, setSource] = useState<OutputSource>("auto");
-  // Loaded rows + how many older rows the retention cap dropped, kept in one
-  // state so a page merge is a single pure update.
-  const [view, setView] = useState<{ output: WorkerOutputView; trimmed: number } | null>(null);
+  const [view, setView] = useState<{
+    output: WorkerOutputView;
+    trimmed: number;
+    drained: boolean;
+  } | null>(null);
   const output = view?.output ?? null;
   const trimmed = view?.trimmed ?? 0;
-  const [lastPageCount, setLastPageCount] = useState<number | null>(null);
+  const drained = view?.drained ?? false;
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [follow, setFollow] = useState(true);
@@ -89,6 +85,7 @@ export const WorkerOutputDockView = memo(function WorkerOutputDockView({
     host?.kind === "local" || (host?.kind != null && host.kind !== "local" && (hostEnv?.peer.transcriptRead ?? false));
   const effectiveSource: OutputSource = source === "transcript" && !canTranscript ? "auto" : source;
 
+  // Manual one-shot paging (used when auto-refresh is off).
   const loadPage = useCallback(
     async (cursor?: string) => {
       if (!runId || !activeId) {
@@ -105,16 +102,19 @@ export const WorkerOutputDockView = memo(function WorkerOutputDockView({
         });
         if (seq !== reqSeq.current) return;
         const continues = Boolean(cursor) && !res.sourceChanged;
+        const exited = res.status?.liveness === "exited";
         setView((prev) => {
-          if (!continues || !prev) return { output: res, trimmed: 0 };
+          if (!continues || !prev) {
+            return { output: res, trimmed: 0, drained: exited && res.lines.length === 0 };
+          }
           const merged = [...prev.output.lines, ...res.lines];
           const overflow = Math.max(0, merged.length - MAX_RETAINED_LINES);
           return {
             output: { ...res, lines: overflow > 0 ? merged.slice(overflow) : merged },
             trimmed: prev.trimmed + overflow,
+            drained: exited && res.lines.length === 0,
           };
         });
-        setLastPageCount(res.lines.length);
         setError(null);
       } catch (err) {
         if (seq === reqSeq.current) setError(String((err as Error).message ?? err));
@@ -125,33 +125,76 @@ export const WorkerOutputDockView = memo(function WorkerOutputDockView({
     [runId, activeId, effectiveSource],
   );
 
-  // Fresh read whenever the addressed Dispatch or source changes.
+  // Reset state on Dispatch/source change.
   useEffect(() => {
     setView(null);
-    setLastPageCount(null);
+    setError(null);
     setFilter("");
     stickToBottom.current = true;
-    void loadPage();
-  }, [loadPage]);
+  }, [runId, activeId, effectiveSource]);
 
-  const exited =
-    output?.status?.liveness === "exited" ||
-    (output?.status == null && activeRow?.projection?.liveness?.verdict === "exited");
-  // Stop following once the worker positively exited AND a poll found nothing
-  // new — the tail is drained. Any later visibility/selection change re-arms.
-  const drained = exited && lastPageCount === 0;
-  const polling = follow && active && visible && Boolean(activeId) && !drained;
-
+  // Live mode: subscribe to server-side OutputTail SSE when visible & open.
+  const streamActive = follow && active && visible && Boolean(runId && activeId);
   useEffect(() => {
-    if (!polling || loading) return;
-    const delay = error
-      ? ERROR_INTERVAL_MS
-      : lastPageCount !== null && lastPageCount >= PAGE_LIMIT
-        ? DRAIN_INTERVAL_MS
-        : FOLLOW_INTERVAL_MS;
-    const id = window.setTimeout(() => void loadPage(output?.cursor ?? undefined), delay);
-    return () => window.clearTimeout(id);
-  }, [polling, loading, error, output, lastPageCount, loadPage]);
+    if (!streamActive || !runId || !activeId) return;
+    setLoading(true);
+    const close = openWorkerOutputStream(
+      runId,
+      activeId,
+      { source: effectiveSource },
+      {
+        onInit: (snap) => {
+          setLoading(false);
+          setError(null);
+          setView({
+            output: snap.output,
+            trimmed: snap.trimmedLines,
+            drained: snap.streamingState === "drained",
+          });
+        },
+        onReset: (snap) => {
+          setLoading(false);
+          setError(null);
+          setView({
+            output: snap.output,
+            trimmed: snap.trimmedLines,
+            drained: snap.streamingState === "drained",
+          });
+        },
+        onAppend: (delta) => {
+          setLoading(false);
+          setError(null);
+          setView((prev) => {
+            if (!prev) {
+              return {
+                output: delta.output,
+                trimmed: delta.trimmedLines,
+                drained: delta.streamingState === "drained",
+              };
+            }
+            const merged = [...prev.output.lines, ...delta.output.lines];
+            const overflow = Math.max(0, merged.length - MAX_RETAINED_LINES);
+            return {
+              output: { ...delta.output, lines: overflow > 0 ? merged.slice(overflow) : merged },
+              trimmed: Math.max(delta.trimmedLines, prev.trimmed + overflow),
+              drained: delta.streamingState === "drained",
+            };
+          });
+        },
+        onError: (msg) => {
+          setLoading(false);
+          setError(msg);
+        },
+      },
+    );
+    return close;
+  }, [streamActive, runId, activeId, effectiveSource]);
+
+  // Manual mode: fetch initial page if switching to manual before anything loaded.
+  useEffect(() => {
+    if (follow || !active || !runId || !activeId || output !== null) return;
+    void loadPage();
+  }, [follow, active, runId, activeId, output, loadPage]);
 
   // Keep the newest rows in view while following, unless the user scrolled up.
   const lineCount = output?.lines.length ?? 0;

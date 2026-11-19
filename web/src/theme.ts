@@ -19,10 +19,65 @@ function readInitialChoice(): ColorSchemeChoice {
   }
 }
 
+let cachedOrcaRawBg: string | null = null;
+let cachedOrcaBgDark: boolean | null = null;
+
+function parseColorLuminance(raw: string): number | null {
+  const hex = raw.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if (hex) {
+    const h = hex[1];
+    const r = parseInt(h.length === 3 ? h[0] + h[0] : h.slice(0, 2), 16) / 255;
+    const g = parseInt(h.length === 3 ? h[1] + h[1] : h.slice(2, 4), 16) / 255;
+    const b = parseInt(h.length === 3 ? h[2] + h[2] : h.slice(4, 6), 16) / 255;
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  }
+  const rgb = raw.match(/^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)/i);
+  if (rgb) {
+    const r = Number(rgb[1]) / 255;
+    const g = Number(rgb[2]) / 255;
+    const b = Number(rgb[3]) / 255;
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  }
+  const oklch = raw.match(/^oklch\(\s*([\d.]+)(%?)/i);
+  if (oklch) {
+    const l = Number(oklch[1]);
+    return oklch[2] === "%" ? l / 100 : l;
+  }
+  const hsl = raw.match(/^hsla?\(\s*[\d.]+[a-z]*[,\s]+[\d.]+%[,\s]+([\d.]+)%/i);
+  if (hsl) {
+    return Number(hsl[1]) / 100;
+  }
+  return null;
+}
+
+function detectOrcaCssDark(): boolean | null {
+  if (typeof window === "undefined" || !isOrcaPluginFrame()) return null;
+  if (document.documentElement.classList.contains("dark")) return true;
+  if (document.documentElement.classList.contains("light")) return false;
+  try {
+    const rootStyle = getComputedStyle(document.documentElement);
+    const rawVar = rootStyle.getPropertyValue("--orca-background").trim();
+    const resolvedBg = document.body ? getComputedStyle(document.body).backgroundColor : "";
+    const key = `${rawVar}|${resolvedBg}`;
+    if (key === cachedOrcaRawBg) return cachedOrcaBgDark;
+    let luma = rawVar ? parseColorLuminance(rawVar) : null;
+    if (luma === null && resolvedBg && resolvedBg !== "rgba(0, 0, 0, 0)" && resolvedBg !== "transparent") {
+      luma = parseColorLuminance(resolvedBg);
+    }
+    cachedOrcaRawBg = key;
+    cachedOrcaBgDark = luma === null ? null : luma < 0.45;
+    return cachedOrcaBgDark;
+  } catch {
+    return null;
+  }
+}
+
 function detectSystemDark(): boolean {
   if (typeof window === "undefined") return false;
   if (document.documentElement.classList.contains("dark")) return true;
   if (document.documentElement.classList.contains("light")) return false;
+  const orcaDark = detectOrcaCssDark();
+  if (orcaDark !== null) return orcaDark;
   return window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false;
 }
 
@@ -82,11 +137,10 @@ let cachedSnapshot: ColorSchemeState = {
 };
 
 function getSnapshot(): ColorSchemeState {
-  const pluginManaged = isOrcaPluginFrame() &&
-    (document.documentElement.classList.contains("dark") ||
-      document.documentElement.classList.contains("light"));
+  const orcaDark = detectOrcaCssDark();
+  const pluginManaged = orcaDark !== null;
   const rendered: "light" | "dark" = pluginManaged
-    ? document.documentElement.classList.contains("dark")
+    ? orcaDark
       ? "dark"
       : "light"
     : storedChoice ?? (systemDark ? "dark" : "light");

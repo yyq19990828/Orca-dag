@@ -1,6 +1,8 @@
 node_modules/
 dist/
 dist-npm/
+dist-plugin/
+plugin/.orca/
 server/src/generated/
 *.log
 *.tsbuildinfo

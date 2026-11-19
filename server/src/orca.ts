@@ -2997,6 +2997,27 @@ export function retainWorker(
   );
 }
 
+/** One typed content block inside a structured worker transcript message. */
+export type WorkerTranscriptBlock =
+  | { type: "text"; text: string }
+  | { type: "tool-call"; name: string; input: string; callId?: string | null; status?: string | null }
+  | { type: "tool-result"; output: string; isError?: boolean; callId?: string | null }
+  | { type: "image-ref"; reference: string | null }
+  | { type: "subagent"; label: string; state: string }
+  | { type: "subagent-group"; count: number | null }
+  | { type: "background-task"; label: string; state: string }
+  | { type: "unsupported"; blockType: string | null };
+
+/** One structured transcript turn preserved alongside `lines` for session UI rendering. */
+export interface WorkerTranscriptMessage {
+  id: string | null;
+  role: string;
+  timestamp: number | null;
+  model?: string | null;
+  source?: "transcript" | "opencode-api";
+  blocks: WorkerTranscriptBlock[];
+}
+
 /** Bounded output read (evidence preserved before/after release). */
 export interface WorkerOutputReceipt {
   dispatchId: string;
@@ -3006,6 +3027,12 @@ export interface WorkerOutputReceipt {
   cursor: string | null;
   /** Labeled terminal tail or formatted native transcript messages. */
   lines: string[];
+  /**
+   * Structured transcript turns with typed blocks (`text`, `tool-call`,
+   * `tool-result`, etc.) when the answering source is a structured transcript
+   * or OpenCode API session. Omitted for raw terminal tails.
+   */
+  messages?: WorkerTranscriptMessage[];
   contentComplete: boolean;
   clipped: boolean;
   /** The runtime's own warnings for this page, verbatim (Phase 5). */
@@ -3040,10 +3067,20 @@ function openCodeOutputPrefixHash(lines: string[], end: number): string {
  * Ignore reasoning/native payloads, bound visible text, and keep auth/config
  * tool results out of this general-purpose output surface.
  */
-function formatOpenCodeOutput(messages: Record<string, unknown>[]): { lines: string[]; clipped: boolean } {
+function formatOpenCodeOutput(messages: Record<string, unknown>[]): {
+  lines: string[];
+  structured: Array<{ startLine: number; message: WorkerTranscriptMessage }>;
+  clipped: boolean;
+} {
   const lines: string[] = [];
+  const structured: Array<{ startLine: number; message: WorkerTranscriptMessage }> = [];
   let clipped = false;
   let budget = 160_000;
+  const clipText = (text: string): string => {
+    const count = Math.min(16_000, Math.max(0, budget));
+    if (text.length > count) clipped = true;
+    return text.slice(0, count);
+  };
   const push = (text: string) => {
     if (budget <= 0 || lines.length >= 10_000) { clipped = true; return; }
     const count = Math.min(16_000, budget);
@@ -3055,46 +3092,84 @@ function formatOpenCodeOutput(messages: Record<string, unknown>[]): { lines: str
     lines.push(...chunks.slice(0, remaining));
     if (chunks.length > remaining) clipped = true;
   };
-  const result = (tool: string, value: unknown) => {
+  const result = (tool: string, value: unknown, blocks: WorkerTranscriptBlock[], isError = false, callId?: string | null) => {
     if (/auth|settings|config/i.test(tool) || value === undefined) return;
-    if (typeof value === "string") push(`[tool result] ${value}`);
-    else if (Array.isArray(value)) {
+    if (typeof value === "string") {
+      blocks.push({ type: "tool-result", output: clipText(value), isError, callId: callId ?? null });
+      push(`[tool result] ${value}`);
+    } else if (Array.isArray(value)) {
       for (const item of value) {
         const part = asRecord(item);
-        if (part.type === "text" && typeof part.text === "string") push(`[tool result] ${part.text}`);
+        if (part.type === "text" && typeof part.text === "string") {
+          blocks.push({ type: "tool-result", output: clipText(part.text), isError, callId: callId ?? null });
+          push(`[tool result] ${part.text}`);
+        }
       }
-    } else push(`[tool result] ${JSON.stringify(safeToolInput(value))}`);
+    } else {
+      const rendered = JSON.stringify(safeToolInput(value));
+      blocks.push({ type: "tool-result", output: clipText(rendered), isError, callId: callId ?? null });
+      push(`[tool result] ${rendered}`);
+    }
   };
   for (const message of messages) {
     if (budget <= 0 || lines.length >= 10_000) { clipped = true; break; }
+    const startLine = lines.length;
     const role = typeof message.type === "string" ? message.type : "unknown";
     const model = asRecord(message.model);
-    const tag = role === "assistant" && model.providerID && model.id
-      ? ` · ${String(model.providerID)}/${String(model.id)}${model.variant ? `#${String(model.variant)}` : ""}`
-      : "";
-    if (typeof message.text === "string") push(`[${role}] ${message.text}`);
+    const modelLabel = role === "assistant" && model.providerID && model.id
+      ? `${String(model.providerID)}/${String(model.id)}${model.variant ? `#${String(model.variant)}` : ""}`
+      : null;
+    const tag = modelLabel ? ` · ${modelLabel}` : "";
+    const blocks: WorkerTranscriptBlock[] = [];
+    if (typeof message.text === "string") {
+      blocks.push({ type: "text", text: clipText(message.text) });
+      push(`[${role}] ${message.text}`);
+    }
     for (const raw of Array.isArray(message.content) ? message.content : []) {
       if (budget <= 0 || lines.length >= 10_000) { clipped = true; break; }
       const part = asRecord(raw);
-      if (part.type === "text" && typeof part.text === "string") push(`[${role}${tag}] ${part.text}`);
-      else if (part.type === "tool" || part.type === "tool-call") {
+      if (part.type === "text" && typeof part.text === "string") {
+        blocks.push({ type: "text", text: clipText(part.text) });
+        push(`[${role}${tag}] ${part.text}`);
+      } else if (part.type === "tool" || part.type === "tool-call") {
         const tool = typeof part.name === "string" ? part.name : typeof part.tool === "string" ? part.tool : "unknown";
         const state = asRecord(part.state);
+        const callId = typeof part.callID === "string" ? part.callID : typeof part.callId === "string" ? part.callId : typeof part.id === "string" ? part.id : null;
         let input = "";
+        let rawInput = "";
         try {
           const value = safeToolInput(part.input ?? state.input);
-          input = value === undefined ? "" : ` ${JSON.stringify(value)}`;
-        } catch { input = " [tool input omitted]"; }
-        const status = typeof state.status === "string" ? ` ${state.status}` : "";
-        push(`[tool ${tool}]${status}${input}`);
-        result(tool, state.output ?? state.content);
-        if (state.error !== undefined) result(tool, state.error);
+          rawInput = value === undefined ? "" : JSON.stringify(value);
+          input = rawInput ? ` ${rawInput}` : "";
+        } catch {
+          rawInput = "[tool input omitted]";
+          input = " [tool input omitted]";
+        }
+        const status = typeof state.status === "string" ? state.status : null;
+        blocks.push({ type: "tool-call", name: tool, input: clipText(rawInput), callId, status });
+        push(`[tool ${tool}]${status ? ` ${status}` : ""}${input}`);
+        result(tool, state.output ?? state.content, blocks, false, callId);
+        if (state.error !== undefined) result(tool, state.error, blocks, true, callId);
       } else if (part.type === "tool-result") {
-        result(typeof part.tool === "string" ? part.tool : "unknown", part.output ?? part.text ?? part.content);
+        const callId = typeof part.callID === "string" ? part.callID : typeof part.callId === "string" ? part.callId : null;
+        result(typeof part.tool === "string" ? part.tool : "unknown", part.output ?? part.text ?? part.content, blocks, part.isError === true, callId);
       }
     }
+    if (blocks.length > 0 && structured.length < 1_000) {
+      structured.push({
+        startLine,
+        message: {
+          id: typeof message.id === "string" ? message.id : null,
+          role,
+          timestamp: typeof message.timestamp === "number" && Number.isFinite(message.timestamp) ? message.timestamp : null,
+          ...(modelLabel ? { model: modelLabel } : {}),
+          source: "opencode-api",
+          blocks,
+        },
+      });
+    }
   }
-  return { lines, clipped };
+  return { lines, structured, clipped };
 }
 
 /**
@@ -3117,7 +3192,7 @@ export async function readWorkerOutput(
     // Orca 1.4.222 cannot report this precreated session's transcript. Keep the
     // API source labeled and cursor-pinned; never pass our cursor to Orca.
     const execution = await readOpenCodeExecution(launch);
-    const { lines, clipped: budgetClipped } = formatOpenCodeOutput(execution.messages);
+    const { lines, structured, clipped: budgetClipped } = formatOpenCodeOutput(execution.messages);
     // Tool states can change in place while the session runs. As in CLI-run,
     // pin bytes before the cursor so a changed prefix is explicitly restarted.
     const prefix = `ocapi2:${dispatchId}:${launch.sessionId}:`;
@@ -3135,9 +3210,13 @@ export async function readWorkerOutput(
     if (!Number.isSafeInteger(offset) || offset < 0) throw new OrcaCliError("Invalid OpenCode API cursor", "invalid_cursor");
     const limit = Math.max(1, Math.min(200, opts.limit ?? 40));
     const page = lines.slice(offset, offset + limit);
+    const pageMessages = structured
+      .filter((entry) => entry.startLine >= offset && entry.startLine < offset + page.length)
+      .map((entry) => entry.message);
     return {
       dispatchId, source: "opencode-api", cursor: `${prefix}${offset + page.length}:${openCodeOutputPrefixHash(lines, offset + page.length)}`,
-      lines: page, contentComplete: !budgetClipped && execution.complete && execution.exited && !execution.evidence.userOwned && offset + page.length >= lines.length,
+      lines: page, messages: pageMessages,
+      contentComplete: !budgetClipped && execution.complete && execution.exited && !execution.evidence.userOwned && offset + page.length >= lines.length,
       clipped: budgetClipped || !execution.complete || offset + page.length < lines.length,
       sourceChanged,
       warnings: [
@@ -3154,7 +3233,7 @@ export async function readWorkerOutput(
       const binding = await exactOpenCodeBinding(detail);
       if (binding) {
         const read = await readOpenCodeBoundSession(binding);
-        const { lines, clipped: textClipped } = formatOpenCodeOutput(read.messages);
+        const { lines, structured, clipped: textClipped } = formatOpenCodeOutput(read.messages);
         // Pin already-rendered bytes, not the whole growing history: appending
         // output must not restart paging. Changes before the cursor do restart
         // it, so the client can replace stale text instead of combining sources.
@@ -3175,11 +3254,15 @@ export async function readWorkerOutput(
         }
         const limit = Math.max(1, Math.min(200, opts.limit ?? 40));
         const page = outputLines.slice(offset, offset + limit);
+        const pageMessages = structured
+          .filter((entry) => entry.startLine >= offset && entry.startLine < offset + page.length)
+          .map((entry) => entry.message);
         const clipped = textClipped || !read.complete || offset + page.length < outputLines.length;
         return {
           dispatchId, source: "opencode-api",
           cursor: `${prefix}${offset + page.length}:${openCodeOutputPrefixHash(outputLines, offset + page.length)}`,
-          lines: page, contentComplete: !clipped && read.status === "exited" && !read.userOwned,
+          lines: page, messages: pageMessages,
+          contentComplete: !clipped && read.status === "exited" && !read.userOwned,
           clipped, sourceChanged,
           warnings: [
             `OpenCode API exact bound session: ${read.status}; provider state is separate from Orca fleet liveness and Task outcome.`,
@@ -3216,36 +3299,84 @@ export async function readWorkerOutput(
     status?: unknown;
   }): WorkerOutputReceipt => {
     let textClipped = false;
+    const transcriptMessages: WorkerTranscriptMessage[] = [];
     const transcriptLines = (result.transcript?.messages ?? []).flatMap((rawMessage): string[] => {
       const message = asRecord(rawMessage);
       const role = typeof message.role === "string" ? message.role : "unknown";
       const blocks = Array.isArray(message.blocks) ? message.blocks : [];
+      const structuredBlocks: WorkerTranscriptBlock[] = [];
+      let blockBudget = 16_000;
+      const clipBlock = (value: string): string => {
+        if (blockBudget <= 0) {
+          textClipped = true;
+          return "";
+        }
+        if (value.length > blockBudget) textClipped = true;
+        const out = value.slice(0, blockBudget);
+        blockBudget -= out.length;
+        return out;
+      };
       const rendered = blocks.flatMap((rawBlock): string[] => {
         const block = asRecord(rawBlock);
         switch (block.type) {
-          case "text":
-            return typeof block.text === "string" ? [block.text] : ["[malformed text block]"];
+          case "text": {
+            const textVal = typeof block.text === "string" ? block.text : "[malformed text block]";
+            structuredBlocks.push({ type: "text", text: clipBlock(textVal) });
+            return [textVal];
+          }
           case "tool-call": {
             let input: string;
             try { input = JSON.stringify(block.input) ?? "null"; } catch { input = "[unserializable input]"; }
-            return [`[tool ${typeof block.name === "string" ? block.name : "unknown"}] ${input}`];
+            const name = typeof block.name === "string" ? block.name : "unknown";
+            const callId = typeof block.callId === "string" ? block.callId : null;
+            structuredBlocks.push({ type: "tool-call", name, input: clipBlock(input), callId });
+            return [`[tool ${name}] ${input}`];
           }
-          case "tool-result":
-            return [`[tool result${block.isError === true ? " error" : ""}] ${typeof block.output === "string" ? block.output : "[malformed output]"}`];
+          case "tool-result": {
+            const outputVal = typeof block.output === "string" ? block.output : "[malformed output]";
+            const isError = block.isError === true;
+            const callId = typeof block.callId === "string" ? block.callId : null;
+            structuredBlocks.push({ type: "tool-result", output: clipBlock(outputVal), isError, callId });
+            return [`[tool result${isError ? " error" : ""}] ${outputVal}`];
+          }
           case "image-ref": {
             const reference = typeof block.url === "string" ? block.url : typeof block.path === "string" ? block.path : null;
+            structuredBlocks.push({ type: "image-ref", reference });
             return [reference ? `[image] ${reference}` : "[image omitted]"];
           }
-          case "subagent":
-            return [`[subagent ${typeof block.label === "string" ? block.label : typeof block.id === "string" ? block.id : "unknown"} · ${typeof block.state === "string" ? block.state : "unknown"}]`];
-          case "subagent-group":
-            return [`[subagents] ${Array.isArray(block.agents) ? `${block.agents.length} agents` : "unknown"}`];
-          case "background-task":
-            return [`[background task ${typeof block.label === "string" ? block.label : "unknown"} · ${typeof block.state === "string" ? block.state : "unknown"}]`];
-          default:
-            return [`[unsupported block${typeof block.type === "string" ? `: ${block.type}` : ""}]`];
+          case "subagent": {
+            const label = typeof block.label === "string" ? block.label : typeof block.id === "string" ? block.id : "unknown";
+            const state = typeof block.state === "string" ? block.state : "unknown";
+            structuredBlocks.push({ type: "subagent", label, state });
+            return [`[subagent ${label} · ${state}]`];
+          }
+          case "subagent-group": {
+            const count = Array.isArray(block.agents) ? block.agents.length : null;
+            structuredBlocks.push({ type: "subagent-group", count });
+            return [`[subagents] ${count !== null ? `${count} agents` : "unknown"}`];
+          }
+          case "background-task": {
+            const label = typeof block.label === "string" ? block.label : "unknown";
+            const state = typeof block.state === "string" ? block.state : "unknown";
+            structuredBlocks.push({ type: "background-task", label, state });
+            return [`[background task ${label} · ${state}]`];
+          }
+          default: {
+            const blockType = typeof block.type === "string" ? block.type : null;
+            structuredBlocks.push({ type: "unsupported", blockType });
+            return [`[unsupported block${blockType ? `: ${blockType}` : ""}]`];
+          }
         }
       });
+      if (transcriptMessages.length < 500) {
+        transcriptMessages.push({
+          id: typeof message.id === "string" ? message.id : null,
+          role,
+          timestamp: typeof message.timestamp === "number" && Number.isFinite(message.timestamp) ? message.timestamp : null,
+          source: "transcript",
+          blocks: structuredBlocks,
+        });
+      }
       const text = `[${role}]${rendered.length ? ` ${rendered.join("\n")}` : ""}`;
       if (text.length > 16_000) textClipped = true;
       return text.slice(0, 16_000).split("\n");
@@ -3259,6 +3390,7 @@ export async function readWorkerOutput(
       source: String(result.source ?? "auto"),
       cursor: result.cursor ?? null,
       lines,
+      ...(result.source === "transcript" ? { messages: transcriptMessages } : {}),
       contentComplete: Boolean(result.contentComplete) && !budgetClipped && !result.transcript?.limited,
       clipped:
         Boolean(result.terminal?.truncated || result.terminal?.limited || result.transcript?.limited) ||
@@ -6241,4 +6373,122 @@ export function explainReadiness(
   }
 
   return { readyWave, readiness };
+}
+
+export interface OpenViewerTabResult {
+  ok: true;
+  reused: boolean;
+  pageId: string | null;
+  url: string;
+}
+
+interface OrcaBrowserTabRow {
+  browserPageId?: string;
+  pageId?: string;
+  id?: string;
+  url?: string;
+  title?: string;
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
+}
+
+/**
+ * Open or focus the full Orchestration Panel web UI inside an Orca browser tab.
+ *
+ * Reuses an existing tab in the same worktree whose URL matches this viewer
+ * origin (or an already-open local dev tab titled "Orchestration Panel") rather
+ * than spawning duplicates. When a `hash` deep-link is supplied, navigates the
+ * reused tab to that hash before focusing it.
+ */
+export async function openOrcaViewerTab(opts: {
+  baseUrl: string;
+  hash?: string;
+  worktree?: string;
+  runOrcaFn?: typeof runOrca;
+}): Promise<OpenViewerTabResult> {
+  const execOrca = opts.runOrcaFn ?? runOrca;
+  const targetOrigin = new URL(opts.baseUrl).origin;
+  const targetPort = new URL(opts.baseUrl).port;
+  const normalizedBase = opts.baseUrl.replace(/\/+$/, "");
+  const hash = opts.hash ?? "";
+  const defaultUrl = hash ? `${normalizedBase}/${hash}` : `${normalizedBase}/`;
+
+  let tabs: OrcaBrowserTabRow[] = [];
+  try {
+    const listArgs = opts.worktree ? ["tab", "list", "--worktree", opts.worktree] : ["tab", "list"];
+    const listed = await execOrca<{ tabs?: OrcaBrowserTabRow[] }>(listArgs);
+    if (Array.isArray(listed?.tabs)) tabs = listed.tabs;
+  } catch {
+    try {
+      const listed = await execOrca<{ tabs?: OrcaBrowserTabRow[] }>(["tab", "list"]);
+      if (Array.isArray(listed?.tabs)) tabs = listed.tabs;
+    } catch {
+      tabs = [];
+    }
+  }
+
+  const findExisting = (): { pageId: string; origin: string; url: string } | null => {
+    let fallbackDevMatch: { pageId: string; origin: string; url: string } | null = null;
+    for (const tab of tabs) {
+      const pageId =
+        (typeof tab.browserPageId === "string" && tab.browserPageId) ||
+        (typeof tab.pageId === "string" && tab.pageId) ||
+        (typeof tab.id === "string" && tab.id) ||
+        "";
+      if (!pageId || typeof tab.url !== "string") continue;
+      let parsed: URL;
+      try {
+        parsed = new URL(tab.url);
+      } catch {
+        continue;
+      }
+      if (!isLoopbackHost(parsed.hostname)) continue;
+      if (parsed.origin === targetOrigin || (targetPort && parsed.port === targetPort)) {
+        return { pageId, origin: parsed.origin, url: tab.url };
+      }
+      const title = typeof tab.title === "string" ? tab.title.trim() : "";
+      if (!fallbackDevMatch && (title === "Orchestration Panel" || title === "Orca DAG Viewer")) {
+        fallbackDevMatch = { pageId, origin: parsed.origin, url: tab.url };
+      }
+    }
+    return fallbackDevMatch;
+  };
+
+  const existing = findExisting();
+  if (existing) {
+    const targetUrl = hash ? `${existing.origin}/${hash}` : existing.url;
+    if (hash && existing.url !== targetUrl) {
+      try {
+        await execOrca(["goto", "--page", existing.pageId, "--url", targetUrl]);
+      } catch {
+        // Best-effort deep-link navigation; still focus the tab below.
+      }
+    }
+    await execOrca(["tab", "switch", "--page", existing.pageId, "--focus"]);
+    return { ok: true, reused: true, pageId: existing.pageId, url: targetUrl };
+  }
+
+  let created: { browserPageId?: string; pageId?: string } | null = null;
+  try {
+    const createArgs = opts.worktree
+      ? ["tab", "create", "--worktree", opts.worktree, "--url", defaultUrl]
+      : ["tab", "create", "--url", defaultUrl];
+    created = await execOrca<{ browserPageId?: string; pageId?: string }>(createArgs);
+  } catch {
+    created = await execOrca<{ browserPageId?: string; pageId?: string }>(["tab", "create", "--url", defaultUrl]);
+  }
+  const pageId =
+    (typeof created?.browserPageId === "string" && created.browserPageId) ||
+    (typeof created?.pageId === "string" && created.pageId) ||
+    null;
+  if (pageId) {
+    try {
+      await execOrca(["tab", "switch", "--page", pageId, "--focus"]);
+    } catch {
+      // Tab is already created and active; focus failure is non-fatal.
+    }
+  }
+  return { ok: true, reused: false, pageId, url: defaultUrl };
 }

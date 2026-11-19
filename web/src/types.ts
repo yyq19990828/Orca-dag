@@ -168,11 +168,45 @@ export type NativeLaunchMode = {
 };
 
 /** One page of bounded worker output (GET /api/workers/:id/output). */
+export type WorkerTranscriptBlockView =
+  | { type: "text"; text: string }
+  | { type: "tool-call"; name: string; input: string; callId?: string | null; status?: string | null }
+  | { type: "tool-result"; output: string; isError?: boolean; callId?: string | null }
+  | { type: "image-ref"; reference: string | null }
+  | { type: "subagent"; label: string; state: string }
+  | { type: "subagent-group"; count: number | null }
+  | { type: "background-task"; label: string; state: string }
+  | { type: "unsupported"; blockType: string | null };
+
+export interface WorkerTranscriptMessageView {
+  id: string | null;
+  role: string;
+  timestamp: number | null;
+  model?: string | null;
+  source?: "transcript" | "opencode-api";
+  blocks: WorkerTranscriptBlockView[];
+}
+
+export interface PluginLiveToolView {
+  id: string;
+  observedAt: number;
+  agent: string;
+  workspaceId: string | null;
+  terminalId: string;
+  tool: string;
+  callId: string | null;
+  inputPreview: string;
+  inputTruncated: boolean;
+  outputPreview: string;
+  outputTruncated: boolean;
+}
+
 export interface WorkerOutputView {
   dispatchId: string;
   source: string;
   cursor: string | null;
   lines: string[];
+  messages?: WorkerTranscriptMessageView[];
   contentComplete: boolean;
   clipped: boolean;
   warnings: string[];
@@ -185,6 +219,72 @@ export interface WorkerOutputView {
   sourceIdentity?: string | null;
   /** worker-read's lifecycle snapshot at read time — a follow hint, never settlement. */
   status?: { worker: string | null; terminal: string | null; liveness: string | null } | null;
+}
+
+export interface WorkerOutputStreamSnapshot {
+  output: WorkerOutputView;
+  trimmedLines: number;
+  trimmedMessages: number;
+  liveTools: PluginLiveToolView[];
+  streamingState: "live" | "drained";
+}
+
+export interface WorkerOutputStreamDelta {
+  output: WorkerOutputView;
+  trimmedLines: number;
+  trimmedMessages: number;
+  streamingState: "live" | "drained";
+}
+
+export interface PluginCapabilitiesView {
+  connected: boolean;
+  pluginId: string | null;
+  version: string | null;
+  hostApiMinor: number | null;
+  grantedCapabilities: string[];
+  transport: "loopback-http" | null;
+  lastSeenAt: string | null;
+  observedAgentCount: number;
+}
+
+export interface ResumeCandidateSessionView {
+  sessionId: string;
+  agent: string;
+  title: string;
+  updatedAt: number;
+  running: boolean;
+}
+
+export interface NativeResumePreviewView {
+  eligible: boolean;
+  reason: string | null;
+  code: string | null;
+  runId: string;
+  taskId: string | null;
+  dispatchId: string;
+  harness: string | null;
+  sessionId: string | null;
+  sessionSource: "binding" | "plugin-live" | "explicit" | null;
+  workspaceId: string | null;
+  workspacePath: string | null;
+  hostKind: string | null;
+  pluginConnected: boolean;
+  hasLaunchCapability: boolean;
+  candidateSessions: ResumeCandidateSessionView[];
+  unresolvedRequestId: string | null;
+}
+
+export interface NativeResumeResultView {
+  ok: true;
+  requestId: string;
+  taskId: string;
+  dispatchId: string;
+  retriedFrom: string;
+  harness: string;
+  sessionId: string;
+  workspaceId: string;
+  resumedTerminalId: string;
+  startedNewPane: boolean;
 }
 
 /** Terminal custody is independent of supervised lifecycle and agent liveness. */
@@ -1229,6 +1329,8 @@ export interface RuntimeCapabilitiesResponse extends RuntimeCapabilityProjection
   /** null = this source exposes no capability list (unknown, not "none"). */
   advertised: string[] | null;
   advertisedSource: string;
+  /** Companion Orca plugin bridge status (M1). */
+  plugin?: PluginCapabilitiesView;
 }
 
 /** The five Run ownership states the health projection distinguishes. */

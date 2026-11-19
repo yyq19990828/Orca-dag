@@ -9,9 +9,11 @@
  * `ui: "html"` or `contributes.customEditors`), external HTTP/SSE requests are
  * blocked by the host sandbox. Detecting `window.orca` switches transport to
  * `window.orca.plugin.request(...)` (handled by the plugin's out-of-process
- * `trusted-worker`), push events via `window.orca.on(...)`, and host locale /
- * `--orca-*` theme variables.
+ * `trusted-worker`), push events via `window.orca.plugin.on(...)` / `window.orca.on(...)`,
+ * and host locale / `--orca-*` theme variables.
  */
+
+type OrcaDisposable = (() => void) | { dispose: () => void } | void;
 
 interface OrcaPluginBridgeResponse {
   status: number;
@@ -21,14 +23,14 @@ interface OrcaPluginBridgeResponse {
 
 interface OrcaHostGlobal {
   locale?: string;
-  on?: (event: string, handler: (payload: unknown) => void) => (() => void) | void;
+  on?: (event: string, handler: (payload: unknown) => void) => OrcaDisposable;
   plugin?: {
     request: <T = unknown>(
       name: string,
       input?: unknown,
       opts?: { timeoutMs?: number },
     ) => Promise<T>;
-    on?: (event: string, handler: (payload: unknown) => void) => (() => void) | void;
+    on?: (event: string, handler: (payload: unknown) => void) => OrcaDisposable;
   };
   storage?: {
     get: (key: string) => Promise<unknown>;
@@ -38,6 +40,12 @@ interface OrcaHostGlobal {
   shell?: {
     openExternal: (url: string) => Promise<{ opened: boolean; reason?: string }>;
   };
+}
+
+function disposeOf(sub: OrcaDisposable): void {
+  if (!sub) return;
+  if (typeof sub === "function") sub();
+  else if (typeof sub === "object" && typeof sub.dispose === "function") sub.dispose();
 }
 
 function getOrcaGlobal(): OrcaHostGlobal | null {
@@ -53,6 +61,21 @@ export function isOrcaPluginFrame(): boolean {
   return Boolean(host && host.plugin && typeof host.plugin.request === "function");
 }
 
+/**
+ * True when the compact Orca right-sidebar UI should be rendered instead of
+ * the full wide-canvas workbench (auto-enabled inside the Orca sidebar plugin
+ * frame, or previewable in any browser via `?view=sidebar`).
+ */
+export function isSidebarMode(): boolean {
+  if (isOrcaPluginFrame()) return true;
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("view") === "sidebar";
+  } catch {
+    return false;
+  }
+}
+
 /** Read Orca's active UI locale (`en`, `zh-CN`, etc.) when inside a plugin frame. */
 export function readOrcaHostLocale(): string | null {
   const host = getOrcaGlobal();
@@ -63,8 +86,8 @@ export function readOrcaHostLocale(): string | null {
 export function subscribeOrcaHostTheme(onChange: () => void): () => void {
   const host = getOrcaGlobal();
   if (!host?.on) return () => {};
-  const off = host.on("theme", () => onChange());
-  return typeof off === "function" ? off : () => {};
+  const sub = host.on("theme", () => onChange());
+  return () => disposeOf(sub);
 }
 
 /**
@@ -80,9 +103,10 @@ export async function pluginApiRequest(
   if (!host?.plugin?.request) {
     throw new Error("Orca plugin bridge is unavailable.");
   }
+  const payload = body === undefined ? { method, url } : { method, url, body };
   const raw = await host.plugin.request<OrcaPluginBridgeResponse | { output?: OrcaPluginBridgeResponse }>(
     "orca-dag.api",
-    { method, url, body },
+    payload,
   );
   if (raw && typeof raw === "object" && "output" in raw && raw.output) {
     return raw.output;
@@ -90,10 +114,50 @@ export async function pluginApiRequest(
   return raw as OrcaPluginBridgeResponse;
 }
 
+let outputSubSeq = 0;
+
+/**
+ * Subscribe to a worker's centralized OutputTail stream through the plugin
+ * worker (`orca-dag.output.subscribe` + `orca-dag.output` panel posts).
+ */
+export function openPluginOutputStream(
+  runId: string,
+  dispatchId: string,
+  source: "auto" | "terminal" | "transcript",
+  handlers: {
+    onEvent: (event: string, data: unknown) => void;
+    onError: (message: string) => void;
+  },
+): () => void {
+  const host = getOrcaGlobal();
+  if (!host?.plugin?.request || !host.plugin.on) {
+    handlers.onError("Orca plugin output bridge is unavailable.");
+    return () => {};
+  }
+  const subId = `out_${++outputSubSeq}_${Date.now()}`;
+  let closed = false;
+  const sub = host.plugin.on("orca-dag.output", (raw) => {
+    if (closed || !raw || typeof raw !== "object") return;
+    const msg = raw as { subId?: unknown; event?: unknown; data?: unknown };
+    if (msg.subId !== subId || typeof msg.event !== "string") return;
+    handlers.onEvent(msg.event, msg.data);
+  });
+  void host.plugin
+    .request("orca-dag.output.subscribe", { subId, runId, dispatchId, source })
+    .catch((err) => {
+      if (!closed) handlers.onError(String((err as Error)?.message ?? err));
+    });
+  return () => {
+    closed = true;
+    disposeOf(sub);
+    void host.plugin?.request("orca-dag.output.unsubscribe", { subId }).catch(() => {});
+  };
+}
+
 /**
  * Subscribe to live Run activity updates:
  * - Standalone mode: opens `EventSource('/api/activity/stream?run=...')`
- * - Orca plugin mode: subscribes to worker push events via `window.orca.plugin.on` / `window.orca.on`
+ * - Orca plugin mode: subscribes to worker push events via `window.orca.plugin.on`
  */
 export function openActivityStream(
   runId: string,
@@ -110,8 +174,8 @@ export function openActivityStream(
       if (closed) return;
       handlers.onSnapshot(payload);
     };
-    const offPlugin = host.plugin?.on?.("orca-dag.activity", listener);
-    const offFrame = !offPlugin ? host.on?.("orca-dag.activity", listener) : undefined;
+    const subPlugin = host.plugin?.on?.("orca-dag.activity", listener);
+    const subFrame = !subPlugin ? host.on?.("orca-dag.activity", listener) : undefined;
     void host.plugin
       ?.request("orca-dag.activity.subscribe", { runId })
       .then(() => {
@@ -122,8 +186,8 @@ export function openActivityStream(
       });
     return () => {
       closed = true;
-      if (typeof offPlugin === "function") offPlugin();
-      if (typeof offFrame === "function") offFrame();
+      disposeOf(subPlugin);
+      disposeOf(subFrame);
       void host.plugin?.request("orca-dag.activity.unsubscribe", { runId }).catch(() => {});
     };
   }

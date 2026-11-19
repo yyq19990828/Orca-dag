@@ -87,7 +87,7 @@
     --bg-panel: var(--orca-muted, var(--odag-panel-light));
     --bg-card: var(--orca-card, var(--odag-card-light));
     --bg-elevated: var(--orca-popover, var(--odag-elevated-light));
-    --bg-subtle: var(--odag-muted-bg-light);
+    --bg-subtle: var(--orca-secondary, color-mix(in oklab, var(--bg-canvas), var(--fg-primary) 9%));
 
     --fg-primary: var(--orca-foreground, var(--odag-fg-light));
     --fg-secondary: var(--orca-muted-foreground, var(--odag-fg-muted-light));
@@ -157,7 +157,7 @@
       --bg-panel: var(--orca-muted, var(--odag-panel-dark));
       --bg-card: var(--orca-card, var(--odag-card-dark));
       --bg-elevated: var(--orca-popover, var(--odag-elevated-dark));
-      --bg-subtle: var(--odag-muted-bg-dark);
+      --bg-subtle: var(--orca-secondary, color-mix(in oklab, var(--bg-canvas), var(--fg-primary) 9%));
       --fg-primary: var(--orca-foreground, var(--odag-fg-dark));
       --fg-secondary: var(--orca-muted-foreground, var(--odag-fg-muted-dark));
       --fg-tertiary: var(--odag-fg-subtle-dark);
@@ -186,7 +186,7 @@
       --canvas-dot: rgb(226 232 240 / 0.11);
     }
 
-    &:is(:has(> head > meta[name="color-scheme"][content="dark"]), .dark) {
+    &:is(:has(> head > meta[name="color-scheme"][content="dark"]), .dark, [data-theme="dark"]) {
       color-scheme: dark;
       --shadow-card: 0 1px 0 rgb(255 255 255 / 0.04) inset, 0 12px 28px -12px rgb(0 0 0 / 0.65);
       --shadow-float: 0 1px 0 rgb(255 255 255 / 0.06) inset, 0 20px 44px -12px rgb(0 0 0 / 0.78);
@@ -194,7 +194,7 @@
       --canvas-dot: rgb(226 232 240 / 0.11);
     }
 
-    &:is(:has(> head > meta[name="color-scheme"][content="light"]), .light) {
+    &:is(:has(> head > meta[name="color-scheme"][content="light"]), .light, [data-theme="light"]) {
       color-scheme: light;
       --shadow-card: 0 1px 2px rgb(15 20 30 / 0.05), 0 6px 16px -6px rgb(15 20 30 / 0.07);
       --shadow-float: 0 10px 30px -8px rgb(15 20 30 / 0.16), 0 2px 6px rgb(15 20 30 / 0.06);
@@ -207,7 +207,7 @@
       --bg-panel: var(--orca-muted, light-dark(var(--odag-panel-light), var(--odag-panel-dark)));
       --bg-card: var(--orca-card, light-dark(var(--odag-card-light), var(--odag-card-dark)));
       --bg-elevated: var(--orca-popover, light-dark(var(--odag-elevated-light), var(--odag-elevated-dark)));
-      --bg-subtle: light-dark(var(--odag-muted-bg-light), var(--odag-muted-bg-dark));
+      --bg-subtle: var(--orca-secondary, color-mix(in oklab, var(--bg-canvas), var(--fg-primary) 9%));
 
       --fg-primary: var(--orca-foreground, light-dark(var(--odag-fg-light), var(--odag-fg-dark)));
       --fg-secondary: var(--orca-muted-foreground, light-dark(var(--odag-fg-muted-light), var(--odag-fg-muted-dark)));
@@ -222,8 +222,8 @@
 
       --st-pending: light-dark(var(--st-pending-light), var(--st-pending-dark));
       --st-pending-bg: light-dark(var(--st-pending-bg-light), var(--st-pending-bg-dark));
-      --st-ready: light-dark(var(--st-ready-light), var(--st-ready-dark));
-      --st-ready-bg: light-dark(var(--st-ready-bg-light), var(--st-ready-bg-dark));
+      --st-ready: var(--fg-primary);
+      --st-ready-bg: var(--bg-subtle);
       --st-dispatched: light-dark(var(--st-dispatched-light), var(--st-dispatched-dark));
       --st-dispatched-bg: light-dark(var(--st-dispatched-bg-light), var(--st-dispatched-bg-dark));
       --st-completed: light-dark(var(--st-completed-light), var(--st-completed-dark));

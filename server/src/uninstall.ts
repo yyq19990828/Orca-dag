@@ -24,7 +24,12 @@ import { isSafeSkillPath, resolveAgentSkillDirs, SKILL_NAME } from "./skill";
 import { COORDINATOR_TITLE, closeTerminal, listTerminals, parseCoordinatorTitle } from "./orca";
 import { stageGitStoreDir } from "./stageGit";
 import { LEGACY_PLANNING_DIR, PLANNING_DIR, removePlanningIgnore } from "./planning";
-import { assertWorkspaceStateDirectory, legacyWorkspaceStatePath, WORKSPACE_STATE_FILES } from "./workspaceState";
+import {
+  assertWorkspaceStateDirectory,
+  legacyWorkspaceStatePath,
+  WORKSPACE_ENDPOINT_FILE,
+  WORKSPACE_STATE_FILES,
+} from "./workspaceState";
 
 export interface UninstallOptions {
   /** Print what would happen, change nothing. */
@@ -189,6 +194,25 @@ export async function runUninstall(opts: UninstallOptions): Promise<void> {
       }
     } catch (err) {
       log(`${act("failed")}${item.path}: ${String((err as Error)?.message ?? err)}`);
+    }
+  }
+  // Ephemeral companion-plugin discovery file: contains no user history, so
+  // ordinary uninstall cleans it up symmetrically (never traversing symlinks).
+  if (safeStateDir) {
+    const endpointPath = join(opts.workspace, WORKSPACE_ENDPOINT_FILE);
+    if (existsSync(endpointPath) || isBrokenLink(endpointPath)) {
+      try {
+        const info = lstatSync(endpointPath);
+        if (!info.isFile() && !info.isSymbolicLink()) {
+          log(`${act("skipped")}${endpointPath} — not a runtime endpoint file; left untouched`);
+        } else {
+          if (!opts.dryRun) rmSync(endpointPath);
+          log(`${act(opts.dryRun ? "would remove" : "removed")}${endpointPath} — plugin discovery endpoint`);
+          workspaceFiles++;
+        }
+      } catch (err) {
+        log(`${act("failed")}${endpointPath}: ${String((err as Error)?.message ?? err)}`);
+      }
     }
   }
   // Committed-Stage snapshots live in Git metadata (shared by this repo's

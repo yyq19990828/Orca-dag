@@ -1,4 +1,4 @@
-import { isOrcaPluginFrame, pluginApiRequest } from "./bridge/orcaBridge";
+import { isOrcaPluginFrame, openPluginOutputStream, pluginApiRequest } from "./bridge/orcaBridge";
 import type {
   ActivitySnapshot,
   AgentAccountQuotaView,
@@ -23,7 +23,12 @@ import type {
   ViewerConfig,
   WorkerControlReceiptView,
   WorkerDetailView,
+  WorkerOutputStreamDelta,
+  WorkerOutputStreamSnapshot,
   WorkerOutputView,
+  PluginLiveToolView,
+  NativeResumePreviewView,
+  NativeResumeResultView,
   WorkerRowView,
   WorkerTerminalReceiptView,
   WorktreeLaneSpec,
@@ -477,6 +482,78 @@ export async function fetchWorkerOutput(
   return output;
 }
 
+/**
+ * Subscribe to the centralized server-side OutputTail SSE stream for one
+ * Dispatch. Multiple views share a single upstream `worker-read` poller,
+ * accelerated by companion-plugin status/tool events when connected.
+ */
+export function openWorkerOutputStream(
+  runId: string,
+  dispatchId: string,
+  opts: { source?: "auto" | "terminal" | "transcript" },
+  handlers: {
+    onInit: (snapshot: WorkerOutputStreamSnapshot) => void;
+    onAppend: (delta: WorkerOutputStreamDelta) => void;
+    onReset: (snapshot: WorkerOutputStreamSnapshot) => void;
+    onLiveTool?: (tool: PluginLiveToolView) => void;
+    onError: (message: string) => void;
+  },
+): () => void {
+  if (isOrcaPluginFrame()) {
+    return openPluginOutputStream(runId, dispatchId, opts.source ?? "auto", {
+      onEvent: (event, data) => {
+        if (event === "init") handlers.onInit(data as WorkerOutputStreamSnapshot);
+        else if (event === "reset") handlers.onReset(data as WorkerOutputStreamSnapshot);
+        else if (event === "append") handlers.onAppend(data as WorkerOutputStreamDelta);
+        else if (event === "liveTool" && handlers.onLiveTool) handlers.onLiveTool(data as PluginLiveToolView);
+        else if (event === "streamError") {
+          const payload = data as { error?: string } | null;
+          handlers.onError(payload?.error ?? "Worker output stream error");
+        }
+      },
+      onError: handlers.onError,
+    });
+  }
+
+  const params = new URLSearchParams();
+  params.set("run", runId);
+  if (opts.source && opts.source !== "auto") params.set("source", opts.source);
+  const url = `/api/workers/${encodeURIComponent(dispatchId)}/output/stream?${params.toString()}`;
+  const es = new EventSource(url);
+  let closed = false;
+
+  const parseEvent = <T,>(raw: MessageEvent, cb: (val: T) => void) => {
+    if (closed) return;
+    try {
+      cb(JSON.parse(raw.data) as T);
+    } catch {
+      handlers.onError("Malformed worker output stream frame");
+    }
+  };
+
+  es.addEventListener("init", (evt) => parseEvent<WorkerOutputStreamSnapshot>(evt as MessageEvent, handlers.onInit));
+  es.addEventListener("reset", (evt) => parseEvent<WorkerOutputStreamSnapshot>(evt as MessageEvent, handlers.onReset));
+  es.addEventListener("append", (evt) => parseEvent<WorkerOutputStreamDelta>(evt as MessageEvent, handlers.onAppend));
+  if (handlers.onLiveTool) {
+    es.addEventListener("liveTool", (evt) => parseEvent<PluginLiveToolView>(evt as MessageEvent, handlers.onLiveTool!));
+  }
+  es.addEventListener("streamError", (evt) => {
+    parseEvent<{ error?: string }>(evt as MessageEvent, (payload) => {
+      handlers.onError(payload.error ?? "Worker output stream error");
+    });
+  });
+  es.onerror = () => {
+    if (!closed && es.readyState === EventSource.CLOSED) {
+      handlers.onError("Worker output stream disconnected");
+    }
+  };
+
+  return () => {
+    closed = true;
+    es.close();
+  };
+}
+
 /** Explicit debug retention — keep a settled worker's terminal live. */
 export async function retainWorker(runId: string, dispatchId: string): Promise<WorkerTerminalReceiptView> {
   const { receipt } = await post<{ receipt: WorkerTerminalReceiptView }>(
@@ -515,6 +592,33 @@ export async function retryWorker(id: string): Promise<RetryWorkerResult> {
     dispatchId: value.dispatchId,
     retriedFrom: value.retriedFrom,
   };
+}
+
+/** Read-only eligibility check for L1 native session resume (M3). */
+export async function fetchResumePreview(
+  runId: string,
+  dispatchId: string,
+  sessionId?: string | null,
+): Promise<NativeResumePreviewView> {
+  const params = new URLSearchParams({ run: runId });
+  if (sessionId) params.set("sessionId", sessionId);
+  const { preview } = await get<{ preview: NativeResumePreviewView }>(
+    `/api/workers/${encodeURIComponent(dispatchId)}/resume-preview?${params.toString()}`,
+  );
+  return preview;
+}
+
+/** Execute L1 native session resume via the companion Orca plugin (M3). */
+export function resumeWorkerSession(
+  runId: string,
+  dispatchId: string,
+  opts: { sessionId?: string | null; coordinatorControl?: CoordinatorControl } = {},
+): Promise<NativeResumeResultView> {
+  return post<NativeResumeResultView>(`/api/workers/${encodeURIComponent(dispatchId)}/resume`, {
+    runId,
+    ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
+    ...(opts.coordinatorControl ? { coordinatorControl: opts.coordinatorControl } : {}),
+  });
 }
 
 export async function resolveGate(id: string, resolution: string, runId: string, coordinatorControl?: CoordinatorControl): Promise<void> {
@@ -780,4 +884,14 @@ export async function focusWorker(dispatchId: string, runId: string): Promise<Wo
     { runId },
   );
   return controlReceiptView("focus", body);
+}
+
+/**
+ * Open or focus the full Orchestration Panel web workbench in an Orca browser
+ * tab, optionally deep-linking to a specific `#section=...` fragment.
+ */
+export async function openFullTab(
+  hash?: string,
+): Promise<{ ok: boolean; reused: boolean; pageId: string | null; url: string }> {
+  return post("/api/open-tab", hash ? { hash } : {});
 }

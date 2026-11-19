@@ -222,6 +222,7 @@ export const ChatPanel = memo(function ChatPanel({
   tasks,
   taskSelection,
   groupSelection = null,
+  renderSession,
   renderTask,
   renderConfig,
   onCloseInspector,
@@ -241,6 +242,7 @@ export const ChatPanel = memo(function ChatPanel({
   taskSelection: { taskId: string } | null;
   /** Explicit navigation into the Run Group Chat thread from the IDE Inspector. */
   groupSelection?: { nonce: number } | null;
+  renderSession?: (task: DagNode, sessionActive: boolean) => ReactNode;
   renderTask: (task: DagNode) => ReactNode;
   renderConfig?: (task: DagNode) => ReactNode;
   onCloseInspector?: () => void;
@@ -333,7 +335,7 @@ export const ChatPanel = memo(function ChatPanel({
   const setSelectedId = chatView === "private" ? setPrivateSelectedId : setGroupSelectedId;
   const [groupTargetId, setGroupTargetId] = useScopedChatState(runId, "");
   const [mobileConversationOpen, setMobileConversationOpen] = useScopedChatState(runId, false);
-  const [threadView, setThreadView] = useScopedChatState<"messages" | "task" | "config" | "checks">(runId, "messages");
+  const [threadView, setThreadView] = useScopedChatState<"messages" | "session" | "task" | "config" | "checks">(runId, "messages");
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const sidebarRef = useRef<HTMLElement>(null);
   const conversationHeadingRef = useRef<HTMLHeadingElement>(null);
@@ -369,10 +371,11 @@ export const ChatPanel = memo(function ChatPanel({
   const effectiveThreadView =
     selected?.taskId && threadView === "checks"
       ? "messages"
-      : !selected?.taskId && (threadView === "task" || threadView === "config")
+      : !selected?.taskId && (threadView === "session" || threadView === "task" || threadView === "config")
         ? "messages"
         : threadView;
   const timelineActive = active && (!compact || mobileConversationOpen) && effectiveThreadView === "messages";
+  const sessionActive = active && (!compact || mobileConversationOpen) && effectiveThreadView === "session";
   const [threadQuery, setThreadQuery] = useScopedChatState(runId, "");
   const query = threadQuery.trim().toLocaleLowerCase();
   const filteredConversations = conversations.filter((conversation) =>
@@ -402,6 +405,7 @@ export const ChatPanel = memo(function ChatPanel({
   // Mount Task controls on first use, then retain their drafts, disclosures
   // and in-flight receipts while switching sibling tabs in this conversation.
   const [taskVisited, setTaskVisited] = useScopedChatState(conversationScope, false);
+  const [sessionVisited, setSessionVisited] = useScopedChatState(`${conversationScope}:session`, false);
   const [configVisited, setConfigVisited] = useScopedChatState(`${conversationScope}:config`, false);
   useEffect(() => {
     const activeTab = chatContainerRef.current?.querySelector<HTMLElement>(
@@ -724,6 +728,11 @@ export const ChatPanel = memo(function ChatPanel({
 
       <Tabs.Root className="chat__conversation" value={effectiveThreadView} onValueChange={(value) => {
         if (value === "task") openTaskDetails();
+        else if (value === "session") {
+          if (!selected?.taskId) return;
+          setSessionVisited(true);
+          setThreadView("session");
+        }
         else if (value === "config") {
           if (!selected?.taskId) return;
           setConfigVisited(true);
@@ -797,6 +806,7 @@ export const ChatPanel = memo(function ChatPanel({
             </header>
             <Tabs.List className="chat__view-tabs odag-tablist" aria-label={t("chat.view.label")}>
               <Tabs.Trigger className="odag-tab" value="messages">{t("chat.view.messages")}</Tabs.Trigger>
+              {selected.taskId && renderSession && <Tabs.Trigger className="odag-tab" value="session">{t("ide.inspector.tabSession")}</Tabs.Trigger>}
               {selected.taskId && <Tabs.Trigger className="odag-tab" value="task" ref={taskTabRef}>{t("chat.view.task")}</Tabs.Trigger>}
               {selected.taskId && renderConfig && <Tabs.Trigger className="odag-tab" value="config">{t("ide.inspector.tabConfig")}</Tabs.Trigger>}
               {!selected.taskId && (
@@ -1088,6 +1098,11 @@ export const ChatPanel = memo(function ChatPanel({
               )}
             </footer>
             </Tabs.Content>
+            {selected.taskId && renderSession && <Tabs.Content className="chat__view chat__view--session" value="session" forceMount hidden={effectiveThreadView !== "session"}>
+              {selected.task
+                ? sessionVisited && renderSession(selected.task, sessionActive)
+                : <p role="status" className="chat__task">{t("workbench.taskUnavailable")} <code>{selected.taskId}</code></p>}
+            </Tabs.Content>}
             {selected.taskId && <Tabs.Content className="chat__view chat__view--task" value="task" forceMount hidden={effectiveThreadView !== "task"}>
               <div className="chat__task">
                 {selected.task

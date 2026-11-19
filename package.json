@@ -13,6 +13,8 @@
     "dev:server": "WORKSPACE_DIR=\"${WORKSPACE_DIR:-$PWD}\" npm run dev -w server",
     "dev:web": "npm run dev -w web",
     "build": "npm run build -w web",
+    "build:plugin-panel": "node scripts/build-plugin-panel.mjs",
+    "build:plugin": "node scripts/build-plugin.mjs",
     "build:binary": "node scripts/build-binary.mjs",
     "build:npm": "node scripts/build-npm.mjs",
     "typecheck": "tsc -p server/tsconfig.json --noEmit && tsc -b web",

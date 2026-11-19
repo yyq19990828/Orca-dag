@@ -1,0 +1,93 @@
+{
+  "manifestVersion": 2,
+  "id": "orchestration-panel",
+  "name": "Orchestration Panel",
+  "version": "0.1.0",
+  "description": "Native Orca companion plugin for Orca DAG: live agent status and tool-call stream, native session resume, status bar progress, and sidebar panel.",
+  "icon": "icon.png",
+  "license": "MIT",
+  "engines": {
+    "orca": ">=1.4.263"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "capabilities": [
+    { "kind": "workspace:read" },
+    { "kind": "agent:read" },
+    { "kind": "agent:launch" },
+    { "kind": "history:read" },
+    { "kind": "notifications:show" },
+    { "kind": "storage:own" },
+    { "kind": "settings:own" }
+  ],
+  "contributes": {
+    "events": [
+      { "on": "agent.status.changed" },
+      { "on": "workspace.changed" },
+      { "on": "workspace.removed" }
+    ],
+    "hooks": [
+      { "event": "agent.tool.after" },
+      { "event": "agent.prompt.before" }
+    ],
+    "statusBarItems": [
+      {
+        "id": "run",
+        "icon": "layers",
+        "text": "Orchestration",
+        "tone": "neutral",
+        "tooltip": "Open Orchestration Panel full tab",
+        "command": "orchestration-panel.openTab"
+      }
+    ],
+    "commands": [
+      {
+        "id": "orchestration-panel.openTab",
+        "title": "Orchestration Panel: Open Full Tab"
+      },
+      {
+        "id": "orchestration-panel.status",
+        "title": "Orchestration Panel: Connection Status"
+      },
+      {
+        "id": "orchestration-panel.reconnect",
+        "title": "Orchestration Panel: Reconnect Viewer"
+      }
+    ],
+    "settings": [
+      {
+        "key": "toolStream",
+        "title": "Stream tool calls",
+        "description": "Forward observed agent tool calls (agent.tool.after) to connected Orca DAG viewers.",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "notify",
+        "title": "Gate and failure notifications",
+        "description": "Show desktop notifications when a Run has a pending gate, permission prompt, or failed worker.",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "maxToolOutputBytes",
+        "title": "Tool output truncation limit (bytes)",
+        "description": "Maximum UTF-8 byte length kept for observed tool inputs and outputs in memory.",
+        "type": "integer",
+        "default": 4096,
+        "minimum": 0,
+        "maximum": 65536
+      }
+    ],
+    "panels": [
+      {
+        "id": "orchestration",
+        "title": "Orchestration Panel",
+        "icon": "layers",
+        "entry": "panel/index.html",
+        "ui": "html"
+      }
+    ]
+  }
+}

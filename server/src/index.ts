@@ -8,6 +8,7 @@ import { createApp, listenLoopback } from "./app";
 import { createSecurityPolicy } from "./security";
 import { describePlanningSetup, setupPlanningWorkspace } from "./planning";
 import { initializeWorkspaceState } from "./workspaceState";
+import { removePluginEndpointFile, writePluginEndpointFile } from "./pluginBridge";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -97,12 +98,14 @@ const runtime = getOrcaRuntime();
 // doesn't.
 const policy = createSecurityPolicy();
 
+let viewerBaseUrl: string | null = process.env.ORCA_DAG_WEB_URL?.trim() || null;
 const embedded = await loadEmbeddedAssets();
-const { app, servingUI } = createApp({
+const { app, servingUI, pluginBridge, pluginToken, outputTails } = createApp({
   workspaceDir: runtime.workspace.dir,
   worktree: runtime.worktree,
   policy,
   embeddedAssets: embedded,
+  getViewerUrl: () => viewerBaseUrl,
 });
 
 // `orca-dag` is meant to be the single command that makes the whole project
@@ -129,6 +132,42 @@ const server = await listenLoopback(app, Number(process.env.PORT ?? 8787));
 for (const line of initializeWorkspaceState(runtime.workspace.dir)) console.log(line);
 const addr = server.address();
 const port = typeof addr === "object" && addr ? addr.port : Number(process.env.PORT ?? 8787);
+if (!viewerBaseUrl) viewerBaseUrl = `http://localhost:${port}`;
+let endpointCreatedDir = false;
+try {
+  const written = writePluginEndpointFile(runtime.workspace.dir, {
+    version: 1,
+    port,
+    pid: process.pid,
+    instanceId: runtime.workspace.instanceId,
+    pluginToken,
+    workspace: runtime.workspace.dir,
+    worktree: runtime.worktree,
+    startedAt: new Date().toISOString(),
+  });
+  endpointCreatedDir = written.createdDir;
+} catch (err) {
+  console.warn(`WARNING: could not publish plugin discovery endpoint: ${String((err as Error)?.message ?? err)}`);
+}
+let cleanedUp = false;
+const cleanupRuntime = () => {
+  if (cleanedUp) return;
+  cleanedUp = true;
+  pluginBridge.close();
+  outputTails.closeAll();
+  removePluginEndpointFile(runtime.workspace.dir, runtime.workspace.instanceId, {
+    removeEmptyDir: endpointCreatedDir,
+  });
+};
+process.once("exit", cleanupRuntime);
+process.once("SIGINT", () => {
+  cleanupRuntime();
+  process.exit(0);
+});
+process.once("SIGTERM", () => {
+  cleanupRuntime();
+  process.exit(0);
+});
 const url = `http://localhost:${port}`;
 console.log(`Orca DAG viewer → ${url} (bound to 127.0.0.1)`);
 console.log(

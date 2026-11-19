@@ -543,9 +543,7 @@ body {
 
 .node-panel__lead-mark:hover,
 .node-panel__lead-clear:hover {
-  
-  background: #f5f3ff;
-  
+  background: var(--bg-subtle);
 }
 
 .node-panel__lead-clear {

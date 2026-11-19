@@ -1,0 +1,353 @@
+.odag-session {
+  display: flex;
+  flex-direction: column;
+  block-size: 100%;
+  min-block-size: 0;
+  gap: 0;
+}
+
+.odag-session__bar {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-block-end: 1px solid var(--border-hairline);
+  background: var(--bg-panel);
+  font-size: var(--text-xs);
+}
+
+.odag-session__select {
+  block-size: 24px;
+  max-inline-size: 100%;
+  padding-inline: 6px;
+  border-radius: 5px;
+  border: 1px solid var(--border-control);
+  background: var(--bg-card);
+  color: var(--fg-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.odag-session__pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border-hairline);
+  background: var(--bg-card);
+  color: var(--fg-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.odag-session__pill--live {
+  border-color: color-mix(in oklab, var(--st-dispatched), transparent 55%);
+  color: var(--st-dispatched);
+}
+
+.odag-session__pill--hook {
+  border-color: color-mix(in oklab, var(--st-completed), transparent 55%);
+  color: var(--st-completed);
+}
+
+.odag-session__bar-actions {
+  margin-inline-start: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.odag-session__raw-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  block-size: 24px;
+  padding-inline: 8px;
+  border-radius: 5px;
+  border: 1px solid var(--border-control);
+  background: var(--bg-card);
+  color: var(--fg-secondary);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.odag-session__raw-btn:hover {
+  color: var(--fg-primary);
+  border-color: var(--fg-tertiary);
+}
+
+.odag-session__scroll {
+  position: relative;
+  flex: 1;
+  min-block-size: 0;
+  overflow-y: auto;
+  padding: 10px 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.odag-session__empty {
+  padding: 20px 12px;
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.odag-session__warn {
+  flex: none;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in oklab, var(--st-dispatched), transparent 65%);
+  background: color-mix(in oklab, var(--st-dispatched), transparent 92%);
+  color: var(--fg-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+}
+
+.odag-session__error {
+  flex: none;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in oklab, var(--st-failed), transparent 60%);
+  color: var(--st-failed);
+  font-size: var(--text-xs);
+}
+
+/* Defer off-screen rendering for long timelines only below the initial fold. */
+.odag-session__deferred {
+  content-visibility: auto;
+  contain-intrinsic-size: auto none auto 52px;
+}
+
+.odag-session__turn {
+  flex: none;
+  border: 1px solid var(--border-hairline);
+  border-radius: 8px;
+  background: var(--bg-card);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.odag-session__turn--user {
+  background: color-mix(in oklab, var(--bg-panel), var(--bg-card) 40%);
+}
+
+.odag-session__turn-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--fg-tertiary);
+}
+
+.odag-session__turn-role {
+  font-weight: 600;
+  color: var(--fg-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.odag-session__turn-text {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--fg-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Native <details>/<summary> tool-call cards (modern-web-guidance: accordion). */
+.odag-tool-card {
+  flex: none;
+  border: 1px solid var(--border-hairline);
+  border-radius: 7px;
+  background: var(--bg-panel);
+  overflow: hidden;
+}
+
+.odag-tool-card--error {
+  border-color: color-mix(in oklab, var(--st-failed), transparent 55%);
+}
+
+.odag-tool-card > summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  cursor: pointer;
+  user-select: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg-primary);
+  min-inline-size: 0;
+}
+
+.odag-tool-card > summary::-webkit-details-marker {
+  display: none;
+}
+
+.odag-tool-card > summary:hover {
+  background: color-mix(in oklab, var(--fg-primary), transparent 95%);
+}
+
+.odag-tool-card__chevron {
+  flex: none;
+  color: var(--fg-tertiary);
+  rotate: -90deg;
+}
+
+.odag-tool-card[open] > summary .odag-tool-card__chevron {
+  rotate: 0deg;
+}
+
+.odag-tool-card__dot {
+  flex: none;
+  inline-size: 7px;
+  block-size: 7px;
+  border-radius: 50%;
+  background: var(--fg-tertiary);
+}
+
+.odag-tool-card__dot--ok {
+  background: var(--st-completed);
+}
+
+.odag-tool-card__dot--error {
+  background: var(--st-failed);
+}
+
+.odag-tool-card__dot--pending {
+  background: var(--st-dispatched);
+}
+
+.odag-tool-card__name {
+  flex: none;
+  font-weight: 600;
+  color: var(--fg-primary);
+}
+
+.odag-tool-card__preview {
+  flex: 1;
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-tertiary);
+}
+
+.odag-tool-card__tag {
+  flex: none;
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--border-hairline);
+  font-size: 10px;
+  color: var(--fg-secondary);
+}
+
+.odag-tool-card__tag--error {
+  border-color: color-mix(in oklab, var(--st-failed), transparent 55%);
+  color: var(--st-failed);
+}
+
+.odag-tool-card__tag--live {
+  border-color: color-mix(in oklab, var(--st-completed), transparent 55%);
+  color: var(--st-completed);
+}
+
+.odag-tool-card__body {
+  border-block-start: 1px solid var(--border-hairline);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-canvas);
+}
+
+.odag-tool-card__label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-tertiary);
+  margin-block-end: 3px;
+}
+
+.odag-tool-card__code {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--border-hairline);
+  background: var(--bg-panel);
+  color: var(--fg-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  max-block-size: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.odag-tool-card__code--error {
+  border-color: color-mix(in oklab, var(--st-failed), transparent 55%);
+  color: var(--st-failed);
+}
+
+/* Progressive enhancement slide animation on <details> content. */
+.odag-tool-card::details-content {
+  interpolate-size: allow-keywords;
+  overflow: clip;
+  contain: layout;
+}
+
+.odag-tool-card:not([open])::details-content {
+  block-size: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .odag-tool-card__chevron {
+    transition: rotate 0.18s ease;
+  }
+
+  .odag-tool-card::details-content {
+    transition: block-size 0.2s ease, content-visibility 0.2s ease;
+    transition-behavior: allow-discrete;
+  }
+}
+
+.odag-session__terminal-fallback {
+  flex: none;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-hairline);
+  background: var(--bg-panel);
+  color: var(--fg-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.odag-session__jump {
+  position: sticky;
+  inset-block-end: 6px;
+  align-self: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-control);
+  background: var(--bg-card);
+  color: var(--fg-primary);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  box-shadow: 0 2px 8px color-mix(in oklab, var(--fg-primary), transparent 85%);
+}

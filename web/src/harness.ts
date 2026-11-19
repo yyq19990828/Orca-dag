@@ -144,7 +144,7 @@ export async function initConfig(): Promise<void> {
   config = hydratedConfig(server, true);
   const migrated: Partial<ViewerConfig> = {};
   if (fetched) {
-    if (!server.defaultHarness && localStorage.getItem(DEFAULT_KEY)) migrated.defaultHarness = config.defaultHarness;
+    if (!server.defaultHarness && safeStorageGet(DEFAULT_KEY)) migrated.defaultHarness = config.defaultHarness;
     if (!server.harnessByTask && Object.keys(config.harnessByTask).length) migrated.harnessByTask = config.harnessByTask;
     if (!server.layout && config.layout) migrated.layout = config.layout;
     if (!server.runId && config.runId) migrated.runId = config.runId;
@@ -162,12 +162,20 @@ export async function initConfig(): Promise<void> {
   }
 }
 
+function safeStorageGet(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
 function hydratedConfig(server: Partial<ViewerConfig>, legacy: boolean): ViewerConfig {
   return {
     defaultOpenCodeUi: isOpenCodeUi(server.defaultOpenCodeUi) ? server.defaultOpenCodeUi : "auto",
     openCodeUiByTask: Object.fromEntries(Object.entries(server.openCodeUiByTask ?? {}).filter(([, value]) => isOpenCodeUi(value))) as Record<string, OpenCodeUi>,
     defaultHarness:
-      asString(server.defaultHarness) || (legacy ? localStorage.getItem(DEFAULT_KEY) : "") || DEFAULTS.defaultHarness,
+      asString(server.defaultHarness) || (legacy ? safeStorageGet(DEFAULT_KEY) : "") || DEFAULTS.defaultHarness,
     harnessByTask: asHarnessMap(server.harnessByTask) ?? (legacy ? readLegacyNodeHarnesses() : {}),
     modelByTask: asHarnessMap(server.modelByTask) ?? {},
     // Phase 5 maps: absent in pre-Phase-5 files → empty (backward-compatible
@@ -187,8 +195,8 @@ function hydratedConfig(server: Partial<ViewerConfig>, legacy: boolean): ViewerC
     // most one lead Task per Run, while old config files simply hydrate empty.
     leadTaskByRun: asHarnessMap(server.leadTaskByRun) ?? {},
     maxConcurrency: asConcurrency(server.maxConcurrency) ?? DEFAULTS.maxConcurrency,
-    layout: asLayout(server.layout) || (legacy ? asLayout(localStorage.getItem(LAYOUT_KEY)) : "") || "",
-    runId: asString(server.runId) || (legacy ? localStorage.getItem(RUN_KEY) : "") || "",
+    layout: asLayout(server.layout) || (legacy ? asLayout(safeStorageGet(LAYOUT_KEY)) : "") || "",
+    runId: asString(server.runId) || (legacy ? safeStorageGet(RUN_KEY) : "") || "",
   };
 }
 

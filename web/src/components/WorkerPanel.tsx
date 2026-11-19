@@ -1,16 +1,21 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { ChevronDown, Crosshair, Square } from "lucide-react";
+import { ChevronDown, Crosshair, RotateCcw, Square } from "lucide-react";
 import {
   abandonWorker,
+  fetchResumePreview,
   fetchWorkerDetail,
   focusWorker,
   releaseWorker,
+  resumeWorkerSession,
   retainWorker,
   stopWorker,
 } from "../api";
 import { useDecisionDialog } from "./DecisionDialog";
+import { useCoordinatorControl } from "./useCoordinatorControl";
 import { useT, type TranslationKey } from "../i18n";
 import type {
+  NativeResumePreviewView,
+  NativeResumeResultView,
   RunStatus,
   WorkerControlReceiptView,
   WorkerDetailView,
@@ -130,7 +135,11 @@ export const WorkerPanel = memo(function WorkerPanel({
     action: WorkerControlReceiptView["action"];
     receipt: WorkerControlReceiptView;
   } | null>(null);
+  const [resumePreview, setResumePreview] = useState<NativeResumePreviewView | null>(null);
+  const [resumePickedSession, setResumePickedSession] = useState<string>("");
+  const [resumeReceipt, setResumeReceipt] = useState<NativeResumeResultView | null>(null);
   const dialog = useDecisionDialog();
+  const withControl = useCoordinatorControl();
   const [terminalFilter, setTerminalFilter] = useState<string>("all");
   const [attentionFilter, setAttentionFilter] = useState<string>("all");
   useEffect(() => {
@@ -144,16 +153,26 @@ export const WorkerPanel = memo(function WorkerPanel({
   const attempts = status?.runId === runId ? status.attempts : [];
 
   const loadDetail = useCallback(
-    async (dispatchId: string) => {
+    async (dispatchId: string, shouldCheckResume = false) => {
       const request = ++generation.current;
       setDetailLoading(true);
       setDetailErr(null);
       setDetail(null);
       setDecision(null);
       setControl(null);
+      setResumePreview(null);
+      setResumePickedSession("");
+      setResumeReceipt(null);
       try {
         const result = await fetchWorkerDetail(runId, dispatchId);
         if (request === generation.current) setDetail(result);
+        if (shouldCheckResume && request === generation.current) {
+          fetchResumePreview(runId, dispatchId)
+            .then((preview) => {
+              if (request === generation.current) setResumePreview(preview);
+            })
+            .catch(() => {});
+        }
       } catch (e) {
         if (request === generation.current) setDetailErr(String((e as Error).message ?? e));
       } finally {
@@ -169,7 +188,42 @@ export const WorkerPanel = memo(function WorkerPanel({
     setOpenDispatch(open ? null : row.dispatchId);
     setDetail(null);
     setDetailErr(null);
-    if (!open && row.dispatchId) void loadDetail(row.dispatchId);
+    setResumePreview(null);
+    setResumePickedSession("");
+    setResumeReceipt(null);
+    const maybeResumable =
+      row.projection?.liveness?.verdict === "exited" &&
+      row.dispatchStatus !== "completed" &&
+      row.workerState !== "succeeded";
+    if (!open && row.dispatchId) void loadDetail(row.dispatchId, maybeResumable);
+  }
+
+  async function runNativeResume(row: WorkerRowView, preview: NativeResumePreviewView) {
+    const sessionId = preview.sessionId ?? (resumePickedSession || null);
+    if (!sessionId) return;
+    const confirmed = await dialog.confirm({
+      title: t("worker.resumeConfirmTitle"),
+      message: t("worker.resumeConfirmMessage", {
+        id: row.dispatchId,
+        harness: preview.harness ?? t("worker.unknown"),
+        session: sessionId,
+      }),
+      confirmLabel: t("worker.resumeConfirm"),
+    });
+    if (!confirmed) return;
+    setBusyId(row.dispatchId);
+    setErr(null);
+    try {
+      const receipt = await withControl(runId, (coordinatorControl) =>
+        resumeWorkerSession(runId, row.dispatchId, { sessionId, coordinatorControl }),
+      );
+      setResumeReceipt(receipt);
+      setResumePreview(null);
+    } catch (e) {
+      setErr(String((e as Error).message ?? e));
+    } finally {
+      setBusyId(null);
+    }
   }
 
   /** Bounded client-side summary of a receipt's archive facts (≤400 chars). */
@@ -845,7 +899,73 @@ export const WorkerPanel = memo(function WorkerPanel({
                     </div>
                   )}
 
+                  {resumeReceipt && resumeReceipt.retriedFrom === row.dispatchId && (
+                    <div className="inbox__body workers__decision" data-testid="resume-receipt">
+                      {t("worker.resumeReceipt", {
+                        dispatch: resumeReceipt.dispatchId,
+                        terminal: resumeReceipt.resumedTerminalId,
+                        session: resumeReceipt.sessionId,
+                      })}
+                    </div>
+                  )}
+
+                  {resumePreview && resumePreview.dispatchId === row.dispatchId && (
+                    <div className="inbox__body" data-testid="resume-preview">
+                      {resumePreview.eligible ? (
+                        <div className="inbox__meta">
+                          {t("worker.resumeReady", {
+                            harness: resumePreview.harness ?? t("worker.unknown"),
+                            session: resumePreview.sessionId ?? "",
+                          })}
+                        </div>
+                      ) : resumePreview.code === "session_id_required" &&
+                        resumePreview.candidateSessions.some((s) => !s.running) ? (
+                        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+                          <label className="inbox__meta" htmlFor={`resume-pick-${row.dispatchId}`}>
+                            {t("worker.resumePickSession")}
+                          </label>
+                          <select
+                            id={`resume-pick-${row.dispatchId}`}
+                            className="workers__source"
+                            value={resumePickedSession}
+                            onChange={(e) => setResumePickedSession(e.target.value)}
+                          >
+                            <option value="">{t("worker.resumePickPlaceholder")}</option>
+                            {resumePreview.candidateSessions
+                              .filter((s) => !s.running)
+                              .map((s) => (
+                                <option key={s.sessionId} value={s.sessionId}>
+                                  {s.title ? `${s.title.slice(0, 40)} · ` : ""}{s.sessionId.slice(0, 16)}
+                                </option>
+                              ))}
+                          </select>
+                        </div>
+                      ) : (
+                        resumePreview.reason && (
+                          <div className="inbox__meta">
+                            {t("worker.resumeUnavailable", { reason: resumePreview.reason })}
+                          </div>
+                        )
+                      )}
+                    </div>
+                  )}
+
                   <div className="gate__actions">
+                    {resumePreview &&
+                      resumePreview.dispatchId === row.dispatchId &&
+                      (resumePreview.eligible ||
+                        (resumePreview.code === "session_id_required" && Boolean(resumePickedSession))) && (
+                        <button
+                          type="button"
+                          className="btn btn--gate btn--ok"
+                          disabled={disabled || busyId === row.dispatchId}
+                          onClick={() => void runNativeResume(row, resumePreview)}
+                          title={t("worker.resumeTitle")}
+                        >
+                          <RotateCcw size={12} aria-hidden="true" />
+                          <span>{t("worker.resumeButton")}</span>
+                        </button>
+                      )}
                     {onOpenOutput && row.dispatchId && (
                       <button
                         type="button"

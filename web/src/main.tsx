@@ -1,9 +1,12 @@
-import React from "react";
+import React, { lazy, Suspense } from "react";
 import ReactDOM from "react-dom/client";
-import App from "./App";
 import { DecisionDialogProvider } from "./components/DecisionDialog";
 import { initSession } from "./api";
+import { isSidebarMode } from "./bridge/orcaBridge";
 import "./styles/ide-workbench.css";
+
+const App = lazy(() => import("./App"));
+const SidebarApp = lazy(() => import("./components/SidebarApp"));
 
 // Fetch the per-process mutation token before the first render, so every
 // mutation control is live (or visibly explained) from the start. Failure is
@@ -14,10 +17,13 @@ initSession()
     /* read-only mode — server unreachable or older backend without /api/session */
   })
   .finally(() => {
+    const sidebar = isSidebarMode();
     ReactDOM.createRoot(document.getElementById("root")!).render(
       <React.StrictMode>
         <DecisionDialogProvider>
-          <App />
+          <Suspense fallback={null}>
+            {sidebar ? <SidebarApp /> : <App />}
+          </Suspense>
         </DecisionDialogProvider>
       </React.StrictMode>,
     );

@@ -8,7 +8,7 @@ Two independent modules in one npm-workspaces repo (`workspaces: [server, web]`)
 
 - **`skill/SKILL.md`** — a published agent skill (frontmatter + prose): a deliberately **thin** project workflow (PRD → technical design → task DAG → viewer). It resolves the correct Orca CLI, loads the runtime-matched guide with `orca skills get orchestration`, and delegates all command syntax and lifecycle rules to that guide — hard-coded command copies drift from the installed runtime, and `scripts/check-skill.mjs` rejects them. No code; edit it like a doc, keep frontmatter intact.
 - **`server/` + `web/`** — the `orca-dag` viewer: an Express API + React Flow SPA that visualizes a Run's DAG and runs a self-driven coordinator loop. Compiles to a single portable binary (`dist/orca-dag`).
-- **`plugin/`** — reserved subdirectory for future Orca Alpha native plugin packaging (`orca-plugin.json`, Host API 1.10 `trusted-worker` + HTML panel + status-bar progress). Formal plugin implementation is intentionally deferred while `web/src/bridge/orcaBridge.ts` and `--orca-*` CSS theme tokens keep the SPA plugin-ready.
+- **`plugin/`** — native Orca companion plugin (`id: "orchestration-panel"`, Host API 1.10 `trusted-worker` + right-sidebar HTML panel + status-bar progress). Connects to local viewers via `0o600` `.orca-dag/endpoint.json` (cleaned up on shutdown and symmetrically removed by `uninstall.ts`), accelerates centralized `OutputTail` SSE + Session tool cards via `agent.status.changed`/`agent.tool.after` (RAM-only, never persisted to `activity.jsonl`), serves `workspace.list`/`agent.listSessions`/`agent.resume` for L1 native session recovery (`server/src/nativeResume.ts`, journaled in `sessions.json` `resumeAttempts`), and proxies the SPA through `web/src/bridge/orcaBridge.ts`. Build dev panel assets with `npm run build:plugin-panel` (`plugin/panel/` is gitignored) and stage a self-contained distribution bundle with `npm run build:plugin` → `dist-plugin/`.
 
 This repo is a thin, heavily-commented wrapper over the `orca` CLI. Every Orca quirk is documented in `server/src/orca.ts` comments — **read them before touching orchestration code.**
 
@@ -20,6 +20,8 @@ npm run dev            # BOTH server (:8787) + web (:5173) via concurrently; vit
 npm run dev:server     # tsx watch src/index.ts (server only)
 npm run dev:web        # vite (web only)
 npm run build          # web only: tsc -b && vite build → web/dist
+npm run build:plugin-panel  # build SPA with VITE_BASE=./ → plugin/panel/ for local Orca dev plugin loading
+npm run build:plugin   # build SPA + esbuild plugin/src/worker.ts → dist-plugin/ (zero-dep Orca plugin bundle)
 npm run build:binary   # web build → embed as base64 in server/src/generated/webAssets.ts → bun --compile → dist/orca-dag
 npm run build:npm      # web build → esbuild the server → dist-npm/ (the publishable `orca-orchestration-launcher` package; Node only, no Bun)
 npm start              # server (tsx) against web/dist on disk; needs `npm run build` first for UI

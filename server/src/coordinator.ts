@@ -6092,3 +6092,39 @@ async function retryWorkerLocked(idOrTask: string): Promise<{
     }
   }
 }
+
+/**
+ * Run a native session-resume `worker-start --terminal` bind under the live
+ * coordinator's lifecycle lock when this viewer is already coordinating `runId`,
+ * and track the resulting Dispatch immediately so the tick loop cannot double-place.
+ */
+export function runResumedBindUnderCoordinator(
+  runId: string,
+  meta: { taskId: string; harness: string; retriedFrom: string; terminalId: string },
+  bind: (from: string) => Promise<StartedWorker>,
+): Promise<StartedWorker> {
+  return withLifecycleMutation(async () => {
+    if (!state.running || state.runId !== runId || !state.coordinatorHandle) {
+      throw new OrcaCliError(
+        "Coordinator stopped or switched Run while resuming the session.",
+        "not_running",
+      );
+    }
+    const started = await bind(state.coordinatorHandle);
+    const attempt = reserveAttempt({ id: meta.taskId }, meta.harness);
+    attempt.dispatchId = started.dispatchId;
+    attempt.handle = started.handle;
+    attempt.agentTerminalHandle = started.handle ?? meta.terminalId;
+    attempt.retriedFrom = meta.retriedFrom;
+    attempt.requested = {
+      agent: meta.harness,
+      model: null,
+      effort: null,
+      worktree: null,
+      terminal: meta.terminalId,
+      on: null,
+    };
+    state.attempts.set(meta.taskId, attempt);
+    return started;
+  });
+}

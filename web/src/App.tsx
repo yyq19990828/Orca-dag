@@ -31,9 +31,9 @@ import {
   Search,
   SlidersHorizontal,
   Sun,
-  Workflow,
   X,
 } from "lucide-react";
+import { DagBrandMark } from "./components/DagBrandMark";
 import { fetchDag, fetchRunStatus, fetchWorkers } from "./api";
 import { ActivityPanel } from "./components/ActivityPanel";
 import { BoardView } from "./components/BoardView";
@@ -49,6 +49,7 @@ import { CommandPalette, ShortcutsDialog, type IdeStageView } from "./components
 import { LanesPanel } from "./components/LanesPanel";
 import { LangToggle } from "./components/LangToggle";
 import { NodePanel } from "./components/NodePanel";
+import { NodeSessionPanel } from "./components/NodeSessionPanel";
 import {
   countActionableOperations,
   countKnownActionableOperations,
@@ -181,10 +182,20 @@ function writeRoute(
   else if (task) params.set("task", task);
   const hash = `#${params.toString()}`;
   if (window.location.hash !== hash) {
-    if (replace) {
-      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${hash}`);
-    } else {
-      window.history.pushState(null, "", `${window.location.pathname}${window.location.search}${hash}`);
+    try {
+      if (replace) {
+        window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${hash}`);
+      } else {
+        window.history.pushState(null, "", `${window.location.pathname}${window.location.search}${hash}`);
+      }
+    } catch {
+      // Sandboxed opaque-origin frames (Orca HTML panels) may disallow History
+      // mutations; setting hash directly still works.
+      try {
+        window.location.hash = hash;
+      } catch {
+        // Ignore in restricted frames.
+      }
     }
   }
 }
@@ -968,16 +979,10 @@ export default function App() {
 
         <div className="odag-brand">
           <span className="odag-brand__mark" aria-hidden="true">
-            <Workflow size={16} />
+            <DagBrandMark size={16} />
           </span>
           <div className="odag-brand__text">
             <strong>{t("topbar.title")}</strong>
-            {readiness?.workspace && (
-              <span title={readiness.workspace}>
-                {readiness.workspace.replace(/[\\/]+$/, "").split(/[\\/]/).at(-1) ||
-                  readiness.workspace}
-              </span>
-            )}
           </div>
         </div>
 
@@ -1949,6 +1954,16 @@ export default function App() {
               coordinatorActive={selectedRunExecuting}
               disabled={execOff}
               disabledReason={readiness?.reason}
+              renderSession={(node, sessionActive) => (
+                <NodeSessionPanel
+                  key={`${runId}:${node.id}:session`}
+                  runId={runId}
+                  task={node}
+                  workerRows={workerRows}
+                  active={sessionActive}
+                  onOpenOutput={openWorkerOutput}
+                />
+              )}
               renderTask={(node) => (
                 <NodePanel
                   key={`${runId}:${node.id}:overview`}

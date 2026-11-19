@@ -121,6 +121,22 @@ export interface OperatorMessageCheckpoint {
   updatedAt: string;
 }
 
+export interface ResumeAttemptCheckpoint {
+  requestId: string;
+  runId: string;
+  taskId: string;
+  originalDispatchId: string;
+  harness: string;
+  sessionId: string;
+  workspaceId: string;
+  resumedTerminalId: string | null;
+  newDispatchId: string | null;
+  state: "prepared" | "resumed_terminal" | "bound" | "unknown" | "refused";
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 interface SessionStoreFile {
   version: typeof STORE_VERSION;
   bindings: ProviderSessionBinding[];
@@ -128,6 +144,7 @@ interface SessionStoreFile {
   mailboxChecks?: MailboxCheckCheckpoint[];
   guidanceSends?: GuidanceSendCheckpoint[];
   operatorMessages?: OperatorMessageCheckpoint[];
+  resumeAttempts?: ResumeAttemptCheckpoint[];
 }
 
 type SessionKey = Pick<ProviderSessionBinding, "runId" | "taskId" | "dispatchId">;
@@ -446,7 +463,7 @@ async function readStore(path: string): Promise<SessionStoreFile> {
   ) {
     throw new Error("session binding store has an unsupported format");
   }
-  if (Object.keys(parsed as Record<string, unknown>).some((key) => !["version", "bindings", "openCodeLaunches", "mailboxChecks", "guidanceSends", "operatorMessages"].includes(key))) {
+  if (Object.keys(parsed as Record<string, unknown>).some((key) => !["version", "bindings", "openCodeLaunches", "mailboxChecks", "guidanceSends", "operatorMessages", "resumeAttempts"].includes(key))) {
     throw new Error("session binding store contains unknown fields");
   }
   const bindings = ((parsed as Record<string, unknown>).bindings as unknown[]).map(validateBinding);
@@ -469,15 +486,74 @@ async function readStore(path: string): Promise<SessionStoreFile> {
   if (inventories.mailboxChecks !== undefined && !Array.isArray(inventories.mailboxChecks)) throw new Error("Invalid mailbox checkpoint inventory");
   if (inventories.guidanceSends !== undefined && !Array.isArray(inventories.guidanceSends)) throw new Error("Invalid guidance checkpoint inventory");
   if (inventories.operatorMessages !== undefined && !Array.isArray(inventories.operatorMessages)) throw new Error("Invalid operator message inventory");
+  if (inventories.resumeAttempts !== undefined && !Array.isArray(inventories.resumeAttempts)) throw new Error("Invalid resume attempt inventory");
   const mailboxChecks = (inventories.mailboxChecks as unknown[] | undefined)?.map(validateMailboxCheck);
   const guidanceSends = (inventories.guidanceSends as unknown[] | undefined)?.map(validateGuidanceSend);
   const operatorMessages = (inventories.operatorMessages as unknown[] | undefined)?.map(validateOperatorMessage);
-  for (const rows of [mailboxChecks, guidanceSends, operatorMessages]) {
+  const resumeAttempts = (inventories.resumeAttempts as unknown[] | undefined)?.map(validateResumeAttempt);
+  for (const rows of [mailboxChecks, guidanceSends, operatorMessages, resumeAttempts]) {
     if (rows && (rows.length > MAX_BINDINGS || new Set(rows.map(row => row.requestId)).size !== rows.length)) throw new Error("Invalid duplicate or oversized critical checkpoint inventory");
   }
   return { version: STORE_VERSION, bindings, ...(openCodeLaunches ? { openCodeLaunches } : {}),
     ...(mailboxChecks ? { mailboxChecks } : {}), ...(guidanceSends ? { guidanceSends } : {}),
-    ...(operatorMessages ? { operatorMessages } : {}) };
+    ...(operatorMessages ? { operatorMessages } : {}),
+    ...(resumeAttempts ? { resumeAttempts } : {}) };
+}
+
+function validateResumeAttempt(value: unknown): ResumeAttemptCheckpoint {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Resume attempt checkpoint must be an object");
+  }
+  const row = value as Record<string, unknown>;
+  const allowed = new Set([
+    "requestId", "runId", "taskId", "originalDispatchId", "harness",
+    "sessionId", "workspaceId", "resumedTerminalId", "newDispatchId",
+    "state", "error", "createdAt", "updatedAt",
+  ]);
+  if (Object.keys(row).some((k) => !allowed.has(k))) {
+    throw new Error("Resume attempt checkpoint contains unknown fields");
+  }
+  assertId(row.requestId, "requestId");
+  assertId(row.runId, "runId");
+  assertId(row.taskId, "taskId");
+  assertId(row.originalDispatchId, "originalDispatchId");
+  if (typeof row.harness !== "string" || !/^[A-Za-z0-9._-]{1,64}$/.test(row.harness)) {
+    throw new Error("Resume attempt harness is invalid");
+  }
+  assertId(row.sessionId, "sessionId");
+  if (typeof row.workspaceId !== "string" || !row.workspaceId.trim() || row.workspaceId.length > 512) {
+    throw new Error("Resume attempt workspaceId is invalid");
+  }
+  if (row.resumedTerminalId !== null && (typeof row.resumedTerminalId !== "string" || !ID_PATTERN.test(row.resumedTerminalId))) {
+    throw new Error("Resume attempt resumedTerminalId is invalid");
+  }
+  if (row.newDispatchId !== null && (typeof row.newDispatchId !== "string" || !ID_PATTERN.test(row.newDispatchId))) {
+    throw new Error("Resume attempt newDispatchId is invalid");
+  }
+  if (typeof row.state !== "string" || !["prepared", "resumed_terminal", "bound", "unknown", "refused"].includes(row.state)) {
+    throw new Error("Resume attempt state is invalid");
+  }
+  if (row.error !== null && typeof row.error !== "string") {
+    throw new Error("Resume attempt error must be string or null");
+  }
+  if (typeof row.createdAt !== "string" || typeof row.updatedAt !== "string") {
+    throw new Error("Resume attempt timestamps must be strings");
+  }
+  return {
+    requestId: row.requestId,
+    runId: row.runId,
+    taskId: row.taskId,
+    originalDispatchId: row.originalDispatchId,
+    harness: row.harness,
+    sessionId: row.sessionId,
+    workspaceId: row.workspaceId,
+    resumedTerminalId: row.resumedTerminalId as string | null,
+    newDispatchId: row.newDispatchId as string | null,
+    state: row.state as ResumeAttemptCheckpoint["state"],
+    error: row.error ? row.error.slice(0, 512) : null,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
 }
 
 async function writeStore(path: string, file: SessionStoreFile): Promise<void> {
@@ -486,21 +562,25 @@ async function writeStore(path: string, file: SessionStoreFile): Promise<void> {
   const completed = (file.mailboxChecks ?? []).filter(row => row.state === "completed").slice(-100);
   const settledGuidance = (file.guidanceSends ?? []).filter(row => row.state === "enqueued" || row.state === "refused").slice(-100);
   const settledOperator = (file.operatorMessages ?? []).filter(row => row.state === "completed" || row.state === "refused").slice(-100);
+  const settledResumes = (file.resumeAttempts ?? []).filter(row => row.state === "bound" || row.state === "refused").slice(-100);
   const keptChecks = new Set(completed.map(row => row.requestId));
   const keptGuidance = new Set(settledGuidance.map(row => row.requestId));
   const keptOperator = new Set(settledOperator.map(row => row.requestId));
+  const keptResumes = new Set(settledResumes.map(row => row.requestId));
   const neededByMailbox = (row: OperatorMessageCheckpoint) => row.operation === "reply" &&
     (file.mailboxChecks ?? []).some(check => check.runId === row.runId && check.pendingQuestionIds.includes(row.target));
   const compact: SessionStoreFile = { ...file,
     ...(file.mailboxChecks ? { mailboxChecks: file.mailboxChecks.filter(row => row.state !== "completed" || keptChecks.has(row.requestId)) } : {}),
     ...(file.guidanceSends ? { guidanceSends: file.guidanceSends.filter(row => !["enqueued", "refused"].includes(row.state) || keptGuidance.has(row.requestId)) } : {}),
-    ...(file.operatorMessages ? { operatorMessages: file.operatorMessages.filter(row => !["completed", "refused"].includes(row.state) || keptOperator.has(row.requestId) || neededByMailbox(row)) } : {}) };
+    ...(file.operatorMessages ? { operatorMessages: file.operatorMessages.filter(row => !["completed", "refused"].includes(row.state) || keptOperator.has(row.requestId) || neededByMailbox(row)) } : {}),
+    ...(file.resumeAttempts ? { resumeAttempts: file.resumeAttempts.filter(row => !["bound", "refused"].includes(row.state) || keptResumes.has(row.requestId)) } : {}) };
   let encoded = `${JSON.stringify(compact, null, 2)}\n`;
   // If payloads fill the store, discard only completed history before failing.
   if (Buffer.byteLength(encoded) > MAX_STORE_BYTES) {
     if (compact.mailboxChecks) compact.mailboxChecks = compact.mailboxChecks.filter(row => row.state !== "completed");
     if (compact.guidanceSends) compact.guidanceSends = compact.guidanceSends.filter(row => !["enqueued", "refused"].includes(row.state));
     if (compact.operatorMessages) compact.operatorMessages = compact.operatorMessages.filter(row => !["completed", "refused"].includes(row.state) || neededByMailbox(row));
+    if (compact.resumeAttempts) compact.resumeAttempts = compact.resumeAttempts.filter(row => !["bound", "refused"].includes(row.state));
     encoded = `${JSON.stringify(compact, null, 2)}\n`;
   }
   if (Buffer.byteLength(encoded) > MAX_STORE_BYTES) throw new Error("session binding store is full");
@@ -726,6 +806,37 @@ export class ProviderSessionStore {
         }
       }
       await writeStore(this.path, { ...file, operatorMessages: [...rows.filter(item => item.requestId !== row.requestId), row] });
+    });
+  }
+
+  async listResumeAttempts(runId?: string): Promise<ResumeAttemptCheckpoint[]> {
+    if (runId !== undefined) assertId(runId, "runId");
+    const file = await readStore(workspaceStateReadPath(this.workspaceDir, SESSIONS_FILE));
+    return (file.resumeAttempts ?? []).filter(row => runId === undefined || row.runId === runId);
+  }
+
+  async recordResumeAttempt(input: ResumeAttemptCheckpoint): Promise<void> {
+    const row = validateResumeAttempt(input);
+    await withFileLock(this.path, async () => {
+      prepareWorkspaceStateFile(this.workspaceDir, SESSIONS_FILE, true);
+      const file = await readStore(this.path);
+      const rows = file.resumeAttempts ?? [];
+      const existing = rows.find(item => item.requestId === row.requestId);
+      if (existing) {
+        if (existing.runId !== row.runId || existing.taskId !== row.taskId ||
+            existing.originalDispatchId !== row.originalDispatchId || existing.sessionId !== row.sessionId ||
+            existing.createdAt !== row.createdAt ||
+            (["bound", "refused"].includes(existing.state) && existing.state !== row.state)) {
+          throw new Error("Resume attempt identity or settled outcome cannot change");
+        }
+      } else {
+        if (rows.length >= MAX_BINDINGS) throw new Error("Resume attempt inventory is full");
+        if (rows.some(item => item.runId === row.runId && item.taskId === row.taskId &&
+            ["prepared", "resumed_terminal", "unknown"].includes(item.state))) {
+          throw new Error("A native resume attempt for this Stage remains unresolved");
+        }
+      }
+      await writeStore(this.path, { ...file, resumeAttempts: [...rows.filter(item => item.requestId !== row.requestId), row] });
     });
   }
 

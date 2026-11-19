@@ -1,0 +1,798 @@
+/*
+ * Streamlined right-sidebar companion UI (`SidebarApp`) for Orca's narrow
+ * sidebar panel (~320-450px). Built on the existing `--bg-*`, `--fg-*`,
+ * `--st-*`, and `--orca-*` theme tokens from `ide-workbench.css`.
+ */
+
+.odag-sb {
+  container-type: inline-size;
+  display: flex;
+  flex-direction: column;
+  block-size: 100dvh;
+  inline-size: 100%;
+  background: var(--bg-canvas);
+  color: var(--fg-primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  overflow: hidden;
+}
+
+/* --- Compact 2-row Header ------------------------------------------------- */
+
+.odag-sb__header {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px 8px;
+  background: var(--bg-panel);
+  border-block-end: 1px solid var(--border-hairline);
+}
+
+.odag-sb__header-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-inline-size: 0;
+}
+
+.odag-sb__run {
+  flex: 1 1 0;
+  min-inline-size: 0;
+}
+
+.odag-sb__run .run-picker,
+.odag-sb__run .doodle-select {
+  inline-size: 100%;
+  max-inline-size: 100%;
+}
+
+/* Compact host for portaled ExecControls primary Run/Stop icon button */
+.odag-sb__exec-host {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.odag-sb__exec-host .workbench-exec-preview,
+.odag-sb__exec-host .exec__running,
+.odag-sb__exec-host .exec__notices,
+.odag-sb__exec-host .exec__notice,
+.odag-sb__exec-host .exec__stop-report {
+  display: none;
+}
+
+.odag-sb__exec-host .exec__live {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+}
+
+.odag-sb__exec-host .btn--icon {
+  block-size: var(--ctrl-h);
+  inline-size: var(--ctrl-h);
+  min-inline-size: var(--ctrl-h);
+  padding: 0;
+}
+
+.odag-sb__exec-host .btn--run {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--accent-fg);
+}
+
+.odag-sb__exec-host .btn--run:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--accent), var(--bg-canvas) 18%);
+  color: var(--accent-fg);
+}
+
+.odag-sb__exec-host .btn--stop-run {
+  background: color-mix(in oklab, var(--st-failed), transparent 84%);
+  border-color: color-mix(in oklab, var(--st-failed), transparent 50%);
+  color: var(--st-failed);
+}
+
+.odag-sb__exec-host .btn--stop-run:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--st-failed), transparent 72%);
+  color: var(--st-failed);
+}
+
+.odag-sb__tab-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  block-size: var(--ctrl-h);
+  padding-inline: 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-control);
+  background: var(--bg-card);
+  color: var(--fg-primary);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.odag-sb__tab-btn:hover {
+  background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 10%);
+  border-color: var(--fg-tertiary);
+  color: var(--fg-primary);
+}
+
+/* Progress strip (native <progress> styled per modern-web-guidance) */
+.odag-sb__progress-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.odag-sb__progress-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-inline-size: 0;
+}
+
+.odag-sb__progress {
+  display: block;
+  flex: 1 1 0;
+  inline-size: 100%;
+  block-size: 4px;
+  appearance: none;
+  border: 0 solid;
+  border-radius: 999px;
+  overflow: clip;
+  background: color-mix(in oklab, var(--fg-primary), transparent 88%);
+  --progress-bar-fill: var(--st-completed);
+}
+
+.odag-sb__progress::-webkit-progress-bar {
+  background: transparent;
+}
+
+.odag-sb__progress::-webkit-progress-value {
+  background: var(--progress-bar-fill);
+  border-radius: 999px;
+  transition: inline-size 0.25s ease;
+}
+
+.odag-sb__progress::-moz-progress-bar {
+  background: var(--progress-bar-fill);
+  border-radius: 999px;
+  transition: inline-size 0.25s ease;
+}
+
+.odag-sb__progress-count {
+  flex: none;
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-secondary);
+}
+
+.odag-sb__filters {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.odag-sb__filters::-webkit-scrollbar {
+  display: none;
+}
+
+.odag-sb__chip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-hairline);
+  background: transparent;
+  color: var(--fg-secondary);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.odag-sb__chip:hover {
+  background: color-mix(in oklab, var(--bg-panel), var(--fg-primary) 10%);
+  border-color: var(--border-control);
+  color: var(--fg-primary);
+}
+
+.odag-sb__chip[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+}
+
+.odag-sb__chip[aria-pressed="true"]:hover {
+  background: color-mix(in oklab, var(--accent), var(--bg-canvas) 16%);
+  color: var(--accent-fg);
+  border-color: transparent;
+}
+
+.odag-sb__dot {
+  display: inline-block;
+  inline-size: 6px;
+  block-size: 6px;
+  border-radius: 999px;
+  flex: none;
+}
+
+/* --- Accessible Single-Row Tablists (Primary + Detail) -------------------- */
+
+.odag-sb__tablist {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  overflow-x: auto;
+  scrollbar-width: none;
+  background: var(--bg-panel);
+  border-block-end: 1px solid var(--border-hairline);
+  padding-inline: 8px;
+  gap: 2px;
+}
+
+.odag-sb__tablist::-webkit-scrollbar {
+  display: none;
+}
+
+.odag-sb__tab {
+  position: relative;
+  flex: 1 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 8px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.odag-sb__tab:hover {
+  background: color-mix(in oklab, var(--bg-panel), var(--fg-primary) 6%);
+  color: var(--fg-primary);
+}
+
+/* Never alter dimensions on selection; draw underline with border so forced-colors keeps it. */
+.odag-sb__tab[aria-selected="true"] {
+  color: var(--fg-primary);
+}
+
+.odag-sb__tab[aria-selected="true"]::after {
+  content: "";
+  position: absolute;
+  inset: auto 8px 0;
+  border-block-end: 2px solid var(--accent);
+}
+
+.odag-sb__tab-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-inline-size: 16px;
+  block-size: 16px;
+  padding-inline: 5px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--fg-primary), transparent 88%);
+  color: var(--fg-secondary);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.odag-sb__tab-badge--warn {
+  background: color-mix(in oklab, var(--st-failed), transparent 82%);
+  color: var(--st-failed);
+}
+
+/* --- Main Scroll Container (Standard + Legacy Scrollbar Styling) ---------- */
+
+.odag-sb__panel {
+  flex: 1 1 0;
+  min-block-size: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.odag-sb__scroll {
+  flex: 1 1 0;
+  min-block-size: 0;
+  overflow-y: auto;
+  padding: 10px 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  --scrollbar-thumb: var(--odag-scroll-thumb-dark);
+  --scrollbar-track: transparent;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+:root[data-theme="light"] .odag-sb__scroll {
+  --scrollbar-thumb: var(--odag-scroll-thumb-light);
+}
+
+@supports not (scrollbar-color: auto) {
+  .odag-sb__scroll {
+    scrollbar-width: auto;
+  }
+  .odag-sb__scroll::-webkit-scrollbar {
+    inline-size: 8px;
+    block-size: 8px;
+  }
+  .odag-sb__scroll::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 999px;
+  }
+  .odag-sb__scroll::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+  }
+}
+
+/* --- Pinned Attention Banner ---------------------------------------------- */
+
+.odag-sb__banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in oklab, var(--st-dispatched), transparent 55%);
+  background: color-mix(in oklab, var(--st-dispatched), transparent 86%);
+  color: var(--st-dispatched);
+  font-size: var(--text-xs);
+}
+
+.odag-sb__banner-btn {
+  flex: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+}
+
+.odag-sb__banner-btn:hover {
+  opacity: 0.85;
+}
+
+.odag-sb__error {
+  flex: none;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in oklab, var(--st-failed), transparent 55%);
+  background: color-mix(in oklab, var(--st-failed), transparent 86%);
+  color: var(--st-failed);
+  font-size: var(--text-xs);
+  word-break: break-word;
+}
+
+/* --- Compact Task Cards --------------------------------------------------- */
+
+.odag-sb__card {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  inline-size: 100%;
+  text-align: start;
+  padding: 9px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-hairline);
+  background: var(--bg-card);
+  color: var(--fg-primary);
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.odag-sb__card:hover {
+  border-color: var(--border-control);
+  background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 6%);
+  color: var(--fg-primary);
+}
+
+.odag-sb__card-top {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-inline-size: 0;
+}
+
+.odag-sb__card-title {
+  flex: 1 1 0;
+  min-inline-size: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.odag-sb__card-harness {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--fg-primary), transparent 88%);
+  color: var(--fg-secondary);
+  font-size: 10px;
+  font-family: var(--font-mono);
+}
+
+.odag-sb__card-sub {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-inline-start: 13px;
+  font-size: var(--text-xs);
+  color: var(--fg-secondary);
+  min-inline-size: 0;
+}
+
+.odag-sb__card-summary {
+  flex: 1 1 0;
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.odag-sb__card-chevron {
+  flex: none;
+  color: var(--fg-tertiary);
+}
+
+/* --- Single-Task Drill-in Detail View ------------------------------------- */
+
+.odag-sb__detail {
+  flex: 1 1 0;
+  min-block-size: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.odag-sb__detail-head {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--bg-panel);
+  border-block-end: 1px solid var(--border-hairline);
+}
+
+.odag-sb__detail-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-inline-size: 0;
+}
+
+.odag-sb__back {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 7px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-control);
+  background: var(--bg-card);
+  color: var(--fg-primary);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.odag-sb__back:hover {
+  background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 10%);
+  border-color: var(--fg-tertiary);
+  color: var(--fg-primary);
+}
+
+.odag-sb__detail-title {
+  flex: 1 1 0;
+  min-inline-size: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.odag-sb__detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.odag-sb__mini-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-control);
+  background: var(--bg-card);
+  color: var(--fg-primary);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.odag-sb__mini-btn:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 10%);
+  border-color: var(--fg-tertiary);
+  color: var(--fg-primary);
+}
+
+.odag-sb__mini-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.odag-sb__mini-btn--primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: transparent;
+  font-weight: 500;
+}
+
+.odag-sb__mini-btn--primary:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--accent), var(--bg-canvas) 16%);
+  border-color: transparent;
+  color: var(--accent-fg);
+}
+
+.odag-sb__mini-btn--danger {
+  background: transparent;
+  color: var(--st-failed);
+  border-color: color-mix(in oklab, var(--st-failed), transparent 45%);
+}
+
+.odag-sb__mini-btn--danger:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--st-failed), transparent 84%);
+  border-color: var(--st-failed);
+  color: var(--st-failed);
+}
+
+.odag-sb__resume-box {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-hairline);
+  background: var(--bg-card);
+  font-size: var(--text-xs);
+}
+
+.odag-sb__select {
+  inline-size: 100%;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-control);
+  background: var(--bg-canvas);
+  color: var(--fg-primary);
+  font-size: var(--text-xs);
+}
+
+.odag-sb__detail-body {
+  flex: 1 1 0;
+  min-block-size: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Let reused WorkerOutputDockView fill detail pane cleanly */
+.odag-sb__detail-body .dock-output {
+  flex: 1 1 0;
+  min-block-size: 0;
+}
+
+/* --- Inbox & Activity Items ----------------------------------------------- */
+
+.odag-sb__section-label {
+  flex: none;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-block-start: 4px;
+}
+
+.odag-sb__item-card {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-hairline);
+  background: var(--bg-card);
+}
+
+.odag-sb__item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: var(--fg-secondary);
+}
+
+.odag-sb__item-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--fg-primary);
+}
+
+.odag-sb__item-body {
+  font-size: var(--text-xs);
+  color: var(--fg-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+
+.odag-sb__reply-row {
+  display: flex;
+  gap: 6px;
+}
+
+.odag-sb__input {
+  flex: 1 1 0;
+  min-inline-size: 0;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-control);
+  background: var(--bg-canvas);
+  color: var(--fg-primary);
+  font-size: var(--text-xs);
+}
+
+.odag-sb__activity-row {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  inline-size: 100%;
+  text-align: start;
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-hairline);
+  background: var(--bg-card);
+  color: var(--fg-primary);
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.odag-sb__activity-row:hover {
+  border-color: var(--border-control);
+  background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 6%);
+  color: var(--fg-primary);
+}
+
+.odag-sb__activity-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--fg-tertiary);
+}
+
+.odag-sb__activity-text {
+  font-size: var(--text-xs);
+  color: var(--fg-secondary);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  word-break: break-word;
+}
+
+/* --- Task Chat Sub-tab ---------------------------------------------------- */
+
+.odag-sb__chat-wrap {
+  flex: 1 1 0;
+  min-block-size: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.odag-sb__chat-composer {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+  border-block-start: 1px solid var(--border-hairline);
+  background: var(--bg-panel);
+}
+
+.odag-sb__msg {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-hairline);
+  background: var(--bg-card);
+  font-size: var(--text-xs);
+}
+
+.odag-sb__msg--out {
+  background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 6%);
+  border-color: var(--border-control);
+}
+
+.odag-sb__msg-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--fg-tertiary);
+  font-size: 10px;
+}
+
+/* --- Empty State ---------------------------------------------------------- */
+
+.odag-sb__empty {
+  flex: none;
+  padding: 24px 12px;
+  text-align: center;
+  font-size: var(--text-xs);
+  color: var(--fg-secondary);
+}
+
+/* --- Size-Aware Container Queries (sidebar width adaptation) -------------- */
+
+.odag-sb__wide-only {
+  display: none;
+}
+
+@container (max-width: 340px) {
+  .odag-sb__header {
+    padding: 8px 8px 6px;
+  }
+  .odag-sb__scroll {
+    padding: 8px 8px 12px;
+  }
+  .odag-sb__tab-btn-label {
+    display: none;
+  }
+  .odag-sb__tab-btn {
+    padding-inline: 6px;
+  }
+}
+
+@container (min-width: 410px) {
+  .odag-sb__wide-only {
+    display: inline;
+  }
+}

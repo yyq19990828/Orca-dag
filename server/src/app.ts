@@ -39,6 +39,7 @@ import {
   describeRuntimeCapabilities,
   FLEET_CAPABILITY_GAP_REASONS,
   newRequestId,
+  openOrcaViewerTab,
   openWorkspaceChangedFiles,
   openWorkspaceFile,
   openWorkspaceFileDiff,
@@ -83,6 +84,7 @@ import {
   noteManualRelease,
   resolvePermissionPromptInboxItems,
   retryWorker,
+  runResumedBindUnderCoordinator,
   sendTaskGuidance,
   startCoordinator,
   stopCoordinator,
@@ -130,6 +132,14 @@ import { RequestLedger } from "./requestLedger";
 import { ProviderSessionStore } from "./providerSessions";
 import { LaunchHistory } from "./launchHistory";
 import { resolveOpenCodeRoute } from "./openCodeRoute";
+import {
+  PluginBridge,
+  createPluginToken,
+  requirePluginToken,
+  type PluginStatusBarSummary,
+} from "./pluginBridge";
+import { OutputTailManager, type OutputTailSource } from "./outputTail";
+import { executeNativeResume, previewNativeResume } from "./nativeResume";
 
 /**
  * The Express app, extracted from index.ts so it can be constructed and tested
@@ -167,6 +177,16 @@ export interface CreateAppOptions {
    * with lanes the same way they inject `readiness`.
    */
   coordinatorStatus?: () => CoordinatorStatusSnapshot;
+  /** Companion Orca plugin bridge, injectable for tests. */
+  pluginBridge?: PluginBridge;
+  /** Dedicated loopback token for `/api/plugin/*`, injectable for tests. */
+  pluginToken?: string;
+  /** Injectable worker-read adapter for OutputTailManager tests. */
+  readWorkerOutputFn?: typeof readWorkerOutput;
+  /** Resolve the local loopback base URL serving the full web UI (for POST /api/open-tab). */
+  getViewerUrl?: () => string | null;
+  /** Injectable Orca browser tab opener for tests. */
+  openViewerTabFn?: typeof openOrcaViewerTab;
 }
 
 /** Turn an Orca CLI failure into a response the UI can explain to the user. */
@@ -212,9 +232,19 @@ function fail(res: express.Response, err: unknown): void {
               code === "session_binding_mismatch" ||
               code === "session_location_unverifiable" ||
               code === "session_location_mismatch" ||
-              code === "resume_not_allowed"
-            ? 409 // Phase 4 safe-retry refusals: the state forbids it, not the request shape
-            : 500;
+              code === "resume_not_allowed" ||
+              code === "resume_unknown" ||
+              code === "resume_session_active" ||
+              code === "resume_failed" ||
+              code === "resume_workspace_missing" ||
+              code === "resume_terminal_lost" ||
+              code === "plugin_not_connected" ||
+              code === "plugin_capability_missing" ||
+              code === "session_id_required"
+            ? 409 // Phase 4 safe-retry & M3 native-resume refusals: the state forbids it, not the request shape
+            : code === "invalid_session_id"
+              ? 400
+              : 500;
   // Orca hands back the exact unblocking command for some refusals — most
   // usefully `run-use --takeover-legacy` for a Run adopted by the 1.4.160
   // migration, which plain `run-use` refuses while it still has live work.
@@ -442,9 +472,21 @@ export function assertWorktreeRemovalPreconditions(
   }
 }
 
-export function createApp(opts: CreateAppOptions): { app: express.Express; servingUI: boolean } {
+export function createApp(opts: CreateAppOptions): {
+  app: express.Express;
+  servingUI: boolean;
+  pluginBridge: PluginBridge;
+  pluginToken: string;
+  outputTails: OutputTailManager;
+} {
   const { workspaceDir, worktree, policy } = opts;
   const readiness = opts.readiness ?? checkReadiness;
+  const pluginBridge = opts.pluginBridge ?? new PluginBridge();
+  const pluginToken = opts.pluginToken ?? createPluginToken();
+  const outputTails = new OutputTailManager({
+    pluginBridge,
+    readOutput: opts.readWorkerOutputFn ?? readWorkerOutput,
+  });
   // Run records have no workspace field. Remember empty Runs created through
   // this viewer until their first Task supplies durable creator-worktree
   // evidence (or the selected Run is persisted in workspace config).
@@ -2092,7 +2134,110 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
             id !== "orchestration.contract.v1" &&
             id !== "orchestration.federation.v1",
         ),
+        plugin: pluginBridge.status(),
       });
+    }),
+  );
+
+  // --- Companion Orca plugin bridge (M1/M2) ---------------------------------
+  // Dedicated `pluginToken` auth (written to `0o600` `.orca-dag/endpoint.json`,
+  // never served via `/api/session`). Tool call payloads stay in bounded RAM
+  // rings only; plugin observations are presentation/wakeup hints, never
+  // Orca Task settlement authority.
+  pluginBridge.setStatusSummaryProvider((): PluginStatusBarSummary | null => {
+    const live = coordinatorStatus();
+    if (!live.running) {
+      return {
+        text: "Orchestration",
+        tone: "neutral",
+        tooltip: "Orca DAG viewer connected (coordinator idle)",
+      };
+    }
+    const active = live.attempts.filter((a) => !a.settled).length;
+    const failed = live.attempts.filter((a) => a.outcome === "failed").length;
+    const pendingInbox = live.inbox.pending.length;
+    const parts: string[] = [];
+    if (active > 0) parts.push(`${active} active`);
+    if (pendingInbox > 0) parts.push(`${pendingInbox} inbox`);
+    if (failed > 0) parts.push(`${failed} failed`);
+    const text = parts.length > 0 ? `DAG · ${parts.join(" · ")}` : "DAG · running";
+    const tone: PluginStatusBarSummary["tone"] =
+      failed > 0 ? "danger" : pendingInbox > 0 ? "warning" : active > 0 ? "accent" : "success";
+    return {
+      text,
+      tone,
+      tooltip: `Orca DAG Run ${live.runId ?? ""} (${text})`.trim(),
+    };
+  });
+
+  const pluginAuth = requirePluginToken(pluginToken);
+
+  app.post("/api/plugin/hello", pluginAuth, (req, res) => {
+    const status = pluginBridge.hello(req.body);
+    res.json({ ok: true, workspaceDir, worktree, status });
+  });
+
+  app.post("/api/plugin/events", pluginAuth, (req, res) => {
+    const accepted = pluginBridge.ingestEvents(req.body);
+    res.json({ ok: true, ...accepted });
+  });
+
+  app.get("/api/plugin/inbox", pluginAuth, async (req, res) => {
+    const waitRaw = req.query.waitMs === undefined ? 10_000 : Number(req.query.waitMs);
+    const waitMs = Number.isFinite(waitRaw) ? Math.max(0, Math.min(15_000, Math.round(waitRaw))) : 10_000;
+    const controller = new AbortController();
+    req.on("close", () => controller.abort());
+    try {
+      const inbox = await pluginBridge.pullInbox(waitMs, controller.signal);
+      if (!res.writableEnded) res.json({ ok: true, ...inbox });
+    } catch (err) {
+      if (!res.writableEnded) fail(res, err);
+    }
+  });
+
+  app.post("/api/plugin/receipts/:commandId", pluginAuth, (req, res) => {
+    const commandId = validateId(req.params.commandId, "command id");
+    if (!commandId) {
+      res.status(400).json({ error: "command id required" });
+      return;
+    }
+    const body = req.body && typeof req.body === "object" && !Array.isArray(req.body)
+      ? (req.body as Record<string, unknown>)
+      : {};
+    const matched = pluginBridge.submitReceipt(commandId, body);
+    res.json({ ok: true, matched });
+  });
+
+  // Open or focus the full Orchestration Panel web UI inside an Orca browser
+  // tab, reusing an existing tab in this worktree when present. Used by the
+  // streamlined right-sidebar plugin panel and the Orca status-bar command.
+  const openTabFn = opts.openViewerTabFn ?? openOrcaViewerTab;
+  const TAB_HASH_RE = /^#[A-Za-z0-9._~:/?&=%-]{0,512}$/;
+  app.post(
+    "/api/open-tab",
+    requireToken(policy),
+    route(async (req, res) => {
+      const rawHash = req.body?.hash;
+      let hash = "";
+      if (rawHash !== undefined && rawHash !== null && rawHash !== "") {
+        if (typeof rawHash !== "string" || !TAB_HASH_RE.test(rawHash) || rawHash.includes("..")) {
+          throw new ValidationError("hash must be a valid relative fragment starting with '#'", "invalid_hash");
+        }
+        hash = rawHash;
+      }
+      let baseUrl = opts.getViewerUrl?.() ?? process.env.ORCA_DAG_WEB_URL?.trim() ?? null;
+      if (!baseUrl) {
+        const host = typeof req.headers.host === "string" ? req.headers.host.trim() : "";
+        if (/^(localhost|127\.0\.0\.1)(:\d{1,5})?$/i.test(host)) {
+          baseUrl = `http://${host}`;
+        }
+      }
+      if (!baseUrl) {
+        res.status(503).json({ error: "Viewer loopback URL is not available.", code: "viewer_url_unavailable" });
+        return;
+      }
+      const result = await openTabFn({ baseUrl, hash, worktree });
+      res.json(result);
     }),
   );
 
@@ -2308,6 +2453,64 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       res.json({ output: await readWorkerOutput(dispatchId, { source: source ?? undefined, cursor: cursor ?? undefined, limit }) });
     }),
   );
+
+  /**
+   * Centralized SSE stream for one worker's output + structured transcript
+   * messages (M2). Multiple UI views (bottom dock Output + right inspector
+   * Session + multiple tabs) share a single server-side cursor poller, woke
+   * immediately by companion-plugin status/tool events when connected.
+   */
+  app.get("/api/workers/:dispatchId/output/stream", async (req, res) => {
+    let dispatchId: string | null;
+    let runId: string | null;
+    let source: OutputTailSource = "auto";
+    try {
+      dispatchId = validateId(req.params.dispatchId, "dispatch id");
+      if (!dispatchId) {
+        res.status(400).json({ error: "dispatch id required" });
+        return;
+      }
+      runId = validateId(req.query.run, "run");
+      if (!runId) throw new ValidationError("run query parameter required", "run_required");
+      const rawSource = validateText(req.query.source, "source", 16);
+      if (rawSource) {
+        if (!["auto", "terminal", "transcript"].includes(rawSource)) {
+          throw new ValidationError(
+            `source must be auto, terminal, or transcript (got "${rawSource}")`,
+            "invalid_source",
+          );
+        }
+        source = rawSource as OutputTailSource;
+      }
+      const evidence = await revalidateWorkerForMutation(dispatchId, runId);
+      if (!evidence.ok) {
+        res.status(evidence.status).json(evidence.body);
+        return;
+      }
+      const terminalId =
+        evidence.detail.terminal?.handle ??
+        evidence.detail.fleet?.agentTerminalHandle ??
+        evidence.detail.terminalResource?.terminalHandle ??
+        null;
+
+      res.status(200);
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("Connection", "keep-alive");
+      res.flushHeaders();
+
+      const unsubscribe = outputTails.subscribe({
+        runId,
+        dispatchId,
+        source,
+        terminalId,
+        res,
+      });
+      req.on("close", () => unsubscribe());
+    } catch (err) {
+      if (!res.headersSent) fail(res, err);
+    }
+  });
 
   // --- Phase 5: mutation-request audit (read-only) --------------------------
   //
@@ -3572,6 +3775,113 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       res.json({ ok: true, ...result });
     }),
   );
+
+  /**
+   * Read-only preflight for L1 native session resume (M3): reports whether the
+   * exited/failed Dispatch can resume its original provider session via the
+   * companion Orca plugin (`agent.resume` + `worker-start --terminal --retry-of`),
+   * or why it must fall back to Safe Retry (e.g. paired remote runtime `--on`).
+   */
+  app.get(
+    "/api/workers/:dispatchId/resume-preview",
+    route(async (req, res) => {
+      const dispatchId = validateId(req.params.dispatchId, "dispatch id");
+      if (!dispatchId) {
+        res.status(400).json({ error: "dispatch id required" });
+        return;
+      }
+      const runId = validateId(req.query.run, "run");
+      if (!runId) throw new ValidationError("run query parameter required", "run_required");
+      const sessionId = validateText(req.query.sessionId, "sessionId", 256);
+      const preview = await previewNativeResume(
+        { runId, dispatchId, sessionId: sessionId ?? null },
+        { pluginBridge, providerSessions },
+      );
+      res.json({ preview });
+    }),
+  );
+
+  /**
+   * Execute L1 native session resume (M3):
+   * - Requires execution enabled, companion plugin with `agent:launch`, local
+   *   or SSH workspace (never paired remote `--on`), verified harness, and a
+   *   non-running exact session ID.
+   * - Journals `ResumeAttemptCheckpoint` BEFORE calling `agent.resume`.
+   * - Uses live coordinator lock when coordinating this Run, or `asCoordinator`
+   *   with explicit `coordinatorControl` confirmation when idle.
+   * - Never falls back automatically to a second fresh worker-start on refusal.
+   */
+  app.post(
+    "/api/workers/:dispatchId/resume",
+    requireToken(policy),
+    route(async (req, res) => {
+      const dispatchId = validateId(req.params.dispatchId, "dispatch id");
+      if (!dispatchId) {
+        res.status(400).json({ error: "dispatch id required" });
+        return;
+      }
+      const runId = validateId(req.body?.runId, "runId");
+      if (!runId) throw new ValidationError("runId is required", "run_required");
+      const sessionId = validateText(req.body?.sessionId, "sessionId", 256);
+      await requireExecutionEnabled();
+
+      const live = coordinatorStatus();
+      if (live.running && live.runId && live.runId !== runId) {
+        throw new OrcaCliError(
+          `Viewer coordinator is running another Run (${live.runId}); stop it before resuming a Stage in ${runId}.`,
+          "coordinator_conflict",
+        );
+      }
+
+      const result = await executeNativeResume(
+        {
+          runId,
+          dispatchId,
+          sessionId: sessionId ?? null,
+          runAsCoordinator: async (meta, fn) => {
+            const current = coordinatorStatus();
+            if (current.running && current.runId === runId) {
+              const started = await runResumedBindUnderCoordinator(
+                runId,
+                meta,
+                fn as (from: string) => Promise<import("./orca").StartedWorker>,
+              );
+              return started as Awaited<ReturnType<typeof fn>>;
+            }
+            return asCoordinator(runId, worktree, fn, req.body?.coordinatorControl);
+          },
+        },
+        {
+          pluginBridge,
+          providerSessions,
+          noteRequest: async (row) => {
+            await requestLedger.record({
+              requestId: row.requestId,
+              operation: "worker-start",
+              runId: row.runId,
+              taskId: row.taskId,
+              dispatchId: row.dispatchId,
+              target: row.taskId ?? row.dispatchId,
+              settledLocally: false,
+              note: "native session resume",
+            }).catch(() => {});
+          },
+        },
+      );
+
+      await recordActivity(
+        createViewerActivity({
+          runId,
+          kind: "dispatch_started",
+          taskId: result.taskId,
+          dispatchId: result.dispatchId,
+          title: "Coordinator resumed a failed stage session",
+          summary: `Native resume of ${result.retriedFrom} (${result.harness} session ${result.sessionId}) on ${result.resumedTerminalId}.`,
+        }),
+      );
+      res.json({ ok: true, ...result });
+    }),
+  );
   /** Create an approval gate only before this Task has ever dispatched. */
   app.post(
     "/api/gates",
@@ -3611,7 +3921,6 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
       res.json({ ok: true, ...result });
     }),
   );
-
 
   /** Resolve a decision gate (human approval) — a Run-scoped mutation. */
   app.post(
@@ -3793,7 +4102,7 @@ export function createApp(opts: CreateAppOptions): { app: express.Express; servi
     }
   }
 
-  return { app, servingUI };
+  return { app, servingUI, pluginBridge, pluginToken, outputTails };
 }
 
 /**
