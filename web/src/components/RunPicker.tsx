@@ -28,6 +28,7 @@ const PAGE_SIZE = 25;
 export interface RunListReadState {
   loaded: boolean;
   error: string | null;
+  count?: number;
 }
 
 export function RunPicker({
@@ -70,8 +71,8 @@ export function RunPicker({
   combinedRef.current = combined;
 
   useEffect(() => {
-    onReadStateChange?.(listRead);
-  }, [listRead, onReadStateChange]);
+    onReadStateChange?.({ ...listRead, count: combined.length });
+  }, [listRead, combined.length, onReadStateChange]);
 
   const load = useCallback(async () => {
     // Polling must not make every slow response obsolete. Keep one read in

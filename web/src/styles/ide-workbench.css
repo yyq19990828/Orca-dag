@@ -366,6 +366,11 @@
     font-variant-numeric: tabular-nums;
   }
 
+  ::selection {
+    background: color-mix(in oklab, var(--accent) 24%, var(--bg-card));
+    color: var(--fg-primary);
+  }
+
   :focus-visible {
     outline: 2px solid var(--focus-ring);
     outline-offset: 2px;
@@ -443,8 +448,12 @@
     box-shadow: var(--bevel-top);
     transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease, opacity 140ms ease;
 
-    &:hover:not(:disabled):not([aria-disabled="true"]) {
+    &:hover:where(:not(:disabled):not([aria-disabled="true"])) {
       background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 6%);
+    }
+
+    &:active:where(:not(:disabled):not([aria-disabled="true"])) {
+      background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 11%);
     }
 
     &:disabled,
@@ -482,21 +491,43 @@
     box-shadow: none;
     color: var(--fg-secondary);
 
-    &:hover:not(:disabled) {
+    &:hover:not(:disabled):not([aria-disabled="true"]) {
       background: color-mix(in oklab, var(--bg-panel), var(--fg-primary) 7%);
+      color: var(--fg-primary);
+    }
+
+    &:active:not(:disabled):not([aria-disabled="true"]) {
+      background: color-mix(in oklab, var(--bg-panel), var(--fg-primary) 12%);
       color: var(--fg-primary);
     }
   }
 
   .odag-btn--primary,
   .btn--ok {
-    background: var(--accent);
+    --odag-btn-bg: var(--accent);
+    background: var(--odag-btn-bg);
     border-color: transparent;
+    box-shadow: none;
     color: var(--accent-fg);
     font-weight: 600;
 
-    &:hover:not(:disabled) {
-      background: color-mix(in oklab, var(--accent), var(--bg-canvas) 18%);
+    @supports (color: contrast-color(black)) {
+      color: var(--orca-primary-foreground, contrast-color(var(--odag-btn-bg)));
+    }
+
+    &:hover:not(:disabled):not([aria-disabled="true"]) {
+      --odag-btn-bg: color-mix(in oklab, var(--accent), var(--bg-canvas) 18%);
+      background: var(--odag-btn-bg);
+    }
+
+    &:active:not(:disabled):not([aria-disabled="true"]) {
+      --odag-btn-bg: color-mix(in oklab, var(--accent), var(--bg-canvas) 26%);
+      background: var(--odag-btn-bg);
+    }
+
+    @media (forced-colors: active) {
+      border-color: ButtonText;
+      color: var(--accent-fg);
     }
   }
 
@@ -506,8 +537,14 @@
     border-color: color-mix(in oklab, var(--st-failed), transparent 55%);
     color: var(--st-failed);
 
-    &:hover:not(:disabled) {
-      background: color-mix(in oklab, var(--st-failed-bg), var(--st-failed) 14%);
+    &:hover:not(:disabled):not([aria-disabled="true"]) {
+      background: color-mix(in oklab, var(--st-failed-bg), var(--st-failed) 10%);
+      color: var(--st-failed);
+    }
+
+    &:active:not(:disabled):not([aria-disabled="true"]) {
+      background: color-mix(in oklab, var(--st-failed-bg), var(--st-failed) 15%);
+      color: var(--st-failed);
     }
   }
 
@@ -533,7 +570,7 @@
     box-shadow: none;
     color: var(--fg-secondary);
 
-    &:hover:not(:disabled) {
+    &:hover:not(:disabled):not([aria-disabled="true"]) {
       color: var(--fg-primary);
     }
   }
@@ -905,6 +942,10 @@
   }
 
   /* Portaled ExecControls inside Topbar */
+  .odag-exec-portal[hidden] {
+    display: none;
+  }
+
   .odag-exec-portal,
   .odag-exec-portal .workbench-exec-actions,
   .odag-exec-portal .exec__live {
@@ -929,19 +970,40 @@
     font-size: var(--text-sm);
     box-shadow: none;
 
-    &:hover:not(:disabled) {
+    &:hover:where(:not(.btn--run):not(.btn--stop-run):not(:disabled):not([aria-disabled="true"])) {
       background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 6%);
+      color: var(--fg-primary);
+    }
+
+    &:active:where(:not(.btn--run):not(.btn--stop-run):not(:disabled):not([aria-disabled="true"])) {
+      background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 11%);
       color: var(--fg-primary);
     }
   }
 
   .odag-exec-portal .btn--run {
-    background: var(--accent);
+    --odag-btn-bg: var(--accent);
+    background: var(--odag-btn-bg);
     border-color: transparent;
+    box-shadow: none;
     color: var(--accent-fg);
 
-    &:hover:not(:disabled) {
-      background: color-mix(in oklab, var(--accent), var(--bg-canvas) 18%);
+    @supports (color: contrast-color(black)) {
+      color: var(--orca-primary-foreground, contrast-color(var(--odag-btn-bg)));
+    }
+
+    &:hover:not(:disabled):not([aria-disabled="true"]) {
+      --odag-btn-bg: color-mix(in oklab, var(--accent), var(--bg-canvas) 18%);
+      background: var(--odag-btn-bg);
+    }
+
+    &:active:not(:disabled):not([aria-disabled="true"]) {
+      --odag-btn-bg: color-mix(in oklab, var(--accent), var(--bg-canvas) 26%);
+      background: var(--odag-btn-bg);
+    }
+
+    @media (forced-colors: active) {
+      border-color: ButtonText;
       color: var(--accent-fg);
     }
   }
@@ -951,8 +1013,13 @@
     border-color: color-mix(in oklab, var(--st-failed), transparent 55%);
     color: var(--st-failed);
 
-    &:hover:not(:disabled) {
-      background: color-mix(in oklab, var(--st-failed-bg), var(--st-failed) 14%);
+    &:hover:not(:disabled):not([aria-disabled="true"]) {
+      background: color-mix(in oklab, var(--st-failed-bg), var(--st-failed) 10%);
+      color: var(--st-failed);
+    }
+
+    &:active:not(:disabled):not([aria-disabled="true"]) {
+      background: color-mix(in oklab, var(--st-failed-bg), var(--st-failed) 15%);
       color: var(--st-failed);
     }
   }
@@ -1176,7 +1243,7 @@
     font-weight: 500;
     text-align: start;
 
-    &:hover:not(:disabled) {
+    &:hover:where(:not(:disabled):not([aria-disabled="true"])) {
       background: color-mix(in oklab, var(--bg-panel), var(--fg-primary) 5%);
       color: var(--fg-primary);
     }
@@ -1185,6 +1252,10 @@
       background: color-mix(in oklab, var(--accent), transparent 90%);
       color: var(--fg-primary);
       font-weight: 600;
+
+      &:hover:not(:disabled) {
+        background: color-mix(in oklab, var(--accent), transparent 85%);
+      }
     }
   }
 
@@ -1223,7 +1294,7 @@
     background: transparent;
     text-align: start;
 
-    &:hover:not(:disabled) {
+    &:hover:where(:not(:disabled):not([aria-disabled="true"])) {
       background: color-mix(in oklab, var(--bg-panel), var(--fg-primary) 5%);
     }
 
@@ -1231,6 +1302,10 @@
       background: var(--bg-card);
       border-color: var(--border-control);
       box-shadow: var(--shadow-card);
+
+      &:hover:not(:disabled) {
+        background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 4%);
+      }
     }
   }
 
@@ -1260,7 +1335,7 @@
     font-size: var(--text-sm);
     font-weight: 500;
 
-    &:hover:not(:disabled) {
+    &:hover:where(:not(:disabled):not([aria-disabled="true"])) {
       background: var(--bg-subtle);
       color: var(--fg-primary);
     }
@@ -1269,6 +1344,10 @@
       background: var(--bg-subtle);
       border-color: var(--border-control);
       color: var(--fg-primary);
+
+      &:hover:not(:disabled) {
+        background: color-mix(in oklab, var(--bg-subtle), var(--fg-primary) 6%);
+      }
     }
   }
 
@@ -1582,7 +1661,7 @@
     font-weight: 500;
     white-space: nowrap;
 
-    &:hover:not(:disabled) {
+    &:hover:where(:not(:disabled):not([aria-disabled="true"])) {
       background: var(--bg-subtle);
       color: var(--fg-primary);
     }
@@ -1592,6 +1671,10 @@
       border-color: color-mix(in oklab, var(--accent), transparent 68%);
       color: var(--fg-primary);
       font-weight: 600;
+
+      &:hover:not(:disabled) {
+        background: color-mix(in oklab, var(--accent), transparent 84%);
+      }
     }
   }
 
@@ -1686,12 +1769,16 @@
     text-align: start;
     outline-offset: -2px;
 
-    &:hover:not(:disabled) {
+    &:hover:where(:not(:disabled):not([aria-disabled="true"])) {
       background: color-mix(in oklab, var(--fg-primary), transparent 95%);
     }
 
     &[aria-expanded="true"] {
       background: color-mix(in oklab, var(--accent), transparent 91%);
+
+      &:hover:not(:disabled) {
+        background: color-mix(in oklab, var(--accent), transparent 86%);
+      }
     }
 
     &.is-actionable {
@@ -2286,7 +2373,7 @@
     font: 500 var(--text-xs)/1.2 var(--font-sans) !important;
     cursor: pointer;
 
-    &:hover:not(:disabled) {
+    &:hover:where(:not(:disabled):not([aria-disabled="true"])) {
       background: var(--bg-subtle);
       color: var(--fg-primary);
       border-color: var(--border-control);
@@ -2296,6 +2383,10 @@
       color: var(--fg-primary);
       border-color: var(--border-control);
       background: var(--bg-subtle);
+
+      &:hover:not(:disabled) {
+        background: color-mix(in oklab, var(--bg-subtle), var(--fg-primary) 6%);
+      }
     }
   }
 
@@ -2307,13 +2398,25 @@
   }
 
   .node-panel__action {
-    min-block-size: 26px !important;
-    padding: 3px 10px !important;
-    border-radius: var(--radius-sm) !important;
-    border: 1px solid var(--border-control) !important;
-    background: var(--bg-card) !important;
-    color: var(--fg-primary) !important;
-    font: 500 var(--text-xs)/1.25 var(--font-sans) !important;
+    min-block-size: 26px;
+    padding: 3px 10px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-control);
+    background: var(--bg-card);
+    color: var(--fg-primary);
+    font: 500 var(--text-xs)/1.25 var(--font-sans);
+
+    &:hover:not(:disabled):not([aria-disabled="true"]) {
+      background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 6%);
+      border-color: var(--fg-secondary);
+      color: var(--fg-primary);
+    }
+
+    &:active:not(:disabled):not([aria-disabled="true"]) {
+      background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 11%);
+      border-color: var(--fg-secondary);
+      color: var(--fg-primary);
+    }
   }
 
   .node-panel__history,
@@ -2765,6 +2868,12 @@
     font-size: var(--text-sm);
   }
 
+  /* Neutralize legacy absolute offset on .empty-run so fallback cards stay centered */
+  .empty-run {
+    position: static;
+    inset: auto;
+  }
+
   /* Monochrome dual-theme overrides for legacy Chat & Action surfaces */
   .chat .chat-message,
   .chat-message--incoming {
@@ -2798,6 +2907,18 @@
     border: 1px solid var(--border-hairline);
   }
 
+  .chat-checkpoint__older {
+    &:hover:not(:disabled):not([aria-disabled="true"]) {
+      background: color-mix(in oklab, var(--bg-subtle), var(--fg-primary) 8%);
+      border-color: var(--border-control);
+    }
+
+    &:active:not(:disabled):not([aria-disabled="true"]) {
+      background: color-mix(in oklab, var(--bg-subtle), var(--fg-primary) 13%);
+      border-color: var(--border-control);
+    }
+  }
+
   .chat-message__reply-context {
     margin: 4px 0 6px;
     padding: 4px 8px;
@@ -2821,14 +2942,30 @@
   }
 
   .chat .chat__compose-toolbar .btn--run {
-    background: var(--accent);
+    --odag-btn-bg: var(--accent);
+    background: var(--odag-btn-bg);
     border-color: transparent;
+    box-shadow: none;
     color: var(--accent-fg);
-  }
 
-  .chat .chat__compose-toolbar .btn--run:hover:not(:disabled) {
-    background: color-mix(in oklab, var(--accent), var(--bg-canvas) 18%);
-    color: var(--accent-fg);
+    @supports (color: contrast-color(black)) {
+      color: var(--orca-primary-foreground, contrast-color(var(--odag-btn-bg)));
+    }
+
+    &:hover:not(:disabled):not([aria-disabled="true"]) {
+      --odag-btn-bg: color-mix(in oklab, var(--accent), var(--bg-canvas) 18%);
+      background: var(--odag-btn-bg);
+    }
+
+    &:active:not(:disabled):not([aria-disabled="true"]) {
+      --odag-btn-bg: color-mix(in oklab, var(--accent), var(--bg-canvas) 26%);
+      background: var(--odag-btn-bg);
+    }
+
+    @media (forced-colors: active) {
+      border-color: ButtonText;
+      color: var(--accent-fg);
+    }
   }
 
   /* Dual-theme surface overrides for legacy sub-panel selectors */

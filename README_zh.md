@@ -1,21 +1,20 @@
-# Orca DAG — skill + viewer
+# Orchestration Panel (`orca-dag`) — 技能 + 查看器 + 原生 Orca 插件
 
 [English](README.md) | 简体中文
 
-> 本项目 fork 自 [ZinkLu/Orca-Orchestration](https://github.com/ZinkLu/Orca-Orchestration)，独立扩展并以 [`orca-orchestration-launcher`](https://www.npmjs.com/package/orca-orchestration-launcher) npm 包发布。
+> 本项目 fork 自 [ZinkLu/Orca-Orchestration](https://github.com/ZinkLu/Orca-Orchestration)，独立扩展并以 [`orca-orchestration-launcher`](https://www.npmjs.com/package/orca-orchestration-launcher) npm 包及原生 Orca 伴生插件（`orchestration-panel`）发布。
 
-Orca DAG 将「与 Agent 对话规划」和「可视化调度与执行」拆分为两个清晰协作的模块：
+**Orchestration Panel**（`orca-dag`）将「Agent 对话规划」与「可视化编排执行」解耦为三个清晰协作的模块：
 
-1. **Skill**（`skill/SKILL.md`）：你的 agent 按 PRD → 技术设计 → Orca 任务 DAG 规划工作，命令遵循与运行时匹配的编排指南。规划仍由你的 agent 负责，viewer 不内嵌 Agent SDK。
-2. **Viewer**（`server/` + `web/`）：查看实时 DAG、配置逐节点启动选择，由内置 coordinator 按依赖派发就绪任务。
-
-![蜡笔风 viewer：全宽 DAG + 默认 harness/最多并行/Run 工具条 + 带每节点 harness 与模型选择的只读节点详情](docs/screenshot.png)
+1. **Skill**（[`skill/SKILL.md`](skill/SKILL.md) · [中文审阅版](docs/SKILL_zh.md)）：你的 Agent 按 PRD → 技术设计 → Orca 任务 DAG 规划工作，命令遵循与运行时匹配的编排指南（`orca skills get orchestration`）。规划留在你的 Agent 内，查看器不内嵌 Agent SDK。
+2. **Viewer 与协调器**（`server/` + `web/`）：深浅双主题、高克制黑白灰四区 IDE 编排工作台，包含实时 DAG 画布、逐节点启动配置、服务端统一 `OutputTail` SSE + 结构化**会话（Session）**工具卡片、L1 原生会话恢复以及内置协调器循环。
+3. **原生 Orca 插件**（`plugin/` → `dist-plugin/`）：自包含原生伴生插件（`orchestration-panel`，Host API 1.10 `trusted-worker`），内置自托管后端服务（**无需手动常驻终端**），提供精简右侧边栏面板（`SidebarApp`）与一键打开/复用完整标签页（`↗ 标签页`），通过 `agent.tool.after` / `agent.status.changed` 实时加速**会话**工具卡片，支持 L1 原生 `agent.resume`，并在 Orca 状态栏展示实时 Run 进度。
 
 ## 前置要求
 
 下文 CLI 示例中的 `orca` 适用于 Orca 管理的终端；Linux 普通终端应使用 `orca-ide`，避免误调用 `/usr/bin/orca` 读屏器。显式覆盖和开发版本遵循[启动解析规则](docs/tutorials/viewer-operations_zh.md#启动参数)。
 
-- **Orca 版本**：**≥ 1.4.160 可浏览，≥ 1.4.205 可执行**（执行需要 supervised-worker 契约；1.4.160–1.4.204 自动进入只读模式）。
+- **Orca 版本**：**≥ 1.4.160 可浏览，≥ 1.4.205 可执行**（1.4.160–1.4.204 自动进入只读模式）；原生 `orchestration-panel` 插件、OMP `--effort`、级联停止 helper 及单次 Worker 权限审批需要 **≥ 1.4.263**。
 - **Orca 状态**：处于运行中（`orca status --json` 结果为 `"ready"`；否则先运行 `orca open`）且已开启实验特性（Settings → Experimental）。
 - **工作区已纳管**：当前项目目录必须已通过 `orca repo add <path>` 或 `orca worktree` 纳入 Orca 纳管。
 - **环境依赖**：Node.js ≥ 20，或独立发布二进制；两种方式都需要可用的 Orca CLI。
@@ -24,6 +23,8 @@ Orca DAG 将「与 Agent 对话规划」和「可视化调度与执行」拆分�
 
 ## 安装与启动
 
+### 方式一：CLI / Web 查看器（`npx orca-orchestration-launcher`）
+
 在 **Orca 管理的项目根目录**用普通 shell 启动。如果从 Orca 终端启动，请采用[清理继承环境的启动方式](docs/tutorials/viewer-operations_zh.md#启动参数)，避免终端身份冲突。
 
 ```bash
@@ -31,9 +32,21 @@ cd ~/any/orca-managed/project
 npx orca-orchestration-launcher
 ```
 
-此命令会为检测到的 coding agent 安装 `orca-dag` skill，初始化 `.orca-dag/` 忽略规则，并在 <http://localhost:8787> 启动 viewer。共享目录与自定义 agent 配置位置见 [skill 安装说明](docs/tutorials/viewer-operations_zh.md#skill-安装与-agent-目录)。规划文档与 viewer 历史保存在本地 `.orca-dag/`。
+此命令会为检测到的 coding agent 安装 `orca-dag` skill，初始化 `.orca-dag/` 忽略规则，并在 <http://localhost:8787> 启动 **Orchestration Panel**。共享目录与自定义 agent 配置位置见 [skill 安装说明](docs/tutorials/viewer-operations_zh.md#skill-安装与-agent-目录)。规划文档与 viewer 历史保存在本地 `.orca-dag/`。
 
 > **无 Node.js 环境？** 可从 [GitHub Releases](https://github.com/yyq19990828/Orca-dag/releases) 下载独立预编译二进制运行。若仅需安装 skill 而无需 viewer：`npx skills add yyq19990828/Orca-dag --skill orca-dag --global`。
+
+### 方式二：自包含原生 Orca 插件（`orchestration-panel`）
+
+在 Orca ≥ **1.4.263** 上可直接构建并加载原生伴生插件——**无需用户手动起前后端终端**：
+
+```bash
+npm install
+npm run build:plugin-panel
+orca-ide plugin dev load ./plugin --json
+```
+
+批准启用后，插件会在未检测到外部 viewer 终端时自动为当前本地工作区拉起隔离的内置回环后端服务（工作区关闭或插件停用时自动回收；若外部 viewer 启动或关闭则无缝发现与故障切换）。点击 Orca 右侧栏的 **Orchestration Panel** 图标即可查看精简侧边栏，点击侧栏顶部 `↗ 标签页` 或状态栏进度即可直达完整工作台标签页。打包独立插件目录见 [`plugin/README.md`](plugin/README.md)。
 
 ## 快速开始
 
@@ -43,28 +56,30 @@ npx orca-orchestration-launcher
    > 使用 orca-dag skill：将“为报表页添加 CSV 导出功能”拆解为任务 DAG。
 
    Agent 编写 `.orca-dag/<timestamp>/{PRD.md,TECH_SPEC.md}`，并返回 Run ID。
-2. **选择与配置：** 在 viewer 选中该 Run，设置默认 harness、受支持的逐节点覆盖及 **Max parallel**。
-3. **运行：** 点击 **「▶ Run with Orca」** 并确认 coordinator 交接；该 Run 的原 coordinator 会被权限隔离。
-4. **观察与决策：** 查看 Activity、Chat 和 worker 结果。处理审批门；跨工作区集成门须在核验实际集成后再确认。
-5. **调整计划：** 任务定义或依赖有变化时，让 agent 在新 Run 重绘，保留旧 Run 作为历史。
+2. **选择与配置：** 在完整 **Orchestration Panel** 标签页（或侧边栏）选中该 Run，设置默认 harness、受支持的逐节点覆盖（模型、effort、worktree 放置/lane）及 **Max parallel**。
+3. **运行：** 点击 **「▶ Run with Orca」**（核对启动预检与账号配额提示）并确认 coordinator 交接；该 Run 的原 coordinator 会被权限隔离。
+4. **观察与决策：** 在**会话（Session）**页签实时查看结构化工具调用卡片，在**消息（Messages）**气泡中与 Worker 交互，在**待处理 / 决策**中处理审批门禁与权限请求，并在需要时对已退出的本地 Worker 使用 **恢复会话（L1 Native Resume）**。
+5. **调整计划：** 任务定义或依赖有变化时，让 Agent 在新 Run 重绘，保留旧 Run 作为历史。
 
 ## 核心特性
 
-- **现代分节式工作台与实时 DAG**：采用深蓝导航与清晰 1px 边框的低噪现代化工作台，实时状态更新（2 秒轮询），懒加载 DAG 画布（支持横向与纵向 dagre 分层布局），集成 Chat 与运维分节，点击节点直接进入对应 Task 的私聊 Messages，并在 Messages 与收件检查旁提供完整的 Task 详情配置页签。
-- **Agent 启动控制**：逐节点选择 harness，受支持的适配器提供模型/effort 覆盖；OpenCode 可选自动、Mini TUI 或完整 TUI。
-- **工作区放置与 Lane**：支持 4 种本地放置及 2 种远程放置；lane 中的任务串行共用隔离工作区，跨工作区汇合需要人工确认集成。
-- **监控与审计**：实时 Activity 事件流（页面隐藏时自动暂停、恢复时刷新重连）、按阶段分组的 Chat、check receipt、worker 干预、后台会话恢复及变更请求审计。
-- **运维与治理**：Run 作用域限定的 worker 操作（输出、释放、保留）、按需工作区清理与原生合并分支安全清理、未派发任务的规范审批门创建，以及有界的工作区 Run 分页。
-- **中英双语原生支持**：顶栏一键无缝切换中英文，语言偏好随浏览器持久化，底层诊断与报错保持英文原文对齐。
+- **双形态体验（完整标签页工作台 + Orca 精简右侧栏）**：
+  - **完整标签页（`App.tsx`）**：支持深浅双主题（自动跟随 Orca 宿主主题）的四区黑白灰 IDE 编排工作台——左侧舰队与门禁导航、中央常驻 React Flow DAG 画布 / 状态泳道 / Run 历史 / 工作区与清理 / 执行与运行时能力、底部可调高坞（`实时事件流`、`Worker 输出`、`变更请求账本`）以及右侧上下文检视面板（`消息`、`会话`、`任务`、`启动配置`）。
+  - **精简右侧栏（`SidebarApp.tsx`）**：专为窄侧栏（`320–450px`）设计的单栏伴生界面——Run 进度条与筛选、3 个核心页签（**任务** / **待处理** / **活动**）、下钻任务详情复用与完整 Web 完全一致的 `ChatPanel` **消息**聊天气泡、**会话**工具卡片与**输出**流，顶部仅保留一个 `↗ 标签页` 入口打开或原地复活完整标签页。
+- **实时会话流与插件 Hook 加速**：服务端统一的 `OutputTail` SSE（`/api/workers/:dispatchId/output/stream`）叠加插件实时推送的 `agent.status.changed` 与只读 `agent.tool.after`（仅内存环形缓冲，绝不污染 `activity.jsonl`），在**会话**页签实时呈现可折叠工具调用卡片。
+- **L1 原生会话恢复**：通过 `GET /api/workers/:dispatchId/resume-preview` 预检可恢复的本机会话，经 `POST /api/workers/:dispatchId/resume` 调用 Orca 原生 `agent.resume` 恢复终端并通过 `worker-start --terminal --retry-of` 重新绑定新 Dispatch，全流程写入 `sessions.json` `resumeAttempts` 保障崩溃可恢复。
+- **Agent 启动控制与预检**：逐节点选择已验证 harness（`claude`、`codex`、`opencode`、`omp`、`antigravity`），支持模型/effort 覆盖（含 Orca ≥ 1.4.263 上的 OMP `--effort`）、OpenCode 自动 / Mini TUI / 完整 TUI 模式以及账号配额预检（`GET /api/accounts`）。
+- **工作区放置与 Lane**：支持 4 种本地放置及 2 种远程放置；lane 中的任务串行共用隔离工作区，跨工作区汇合保留人工集成检查点。
+- **运维、权限与审计**：单次 Worker 权限弹窗审批（`POST /api/workers/:dispatchId/permission`）、未派发任务的规范审批门创建、按需工作区清理与已合并分支安全删除，以及变更前记录的请求审计账本（`.orca-dag/requests.jsonl`）。
+- **中英双语原生支持**：一键无缝切换中英文，语言偏好持久化，底层诊断与报错保留英文原文对齐。
 
 ## 关键安全边界与原则
 
 - **任务定义不可变**：spec、标题与依赖不能原地修改，状态和结果仍可更新。调整定义须新建 Run；不要用 `reset --tasks` 重绘，它会清空所有 Run。
 - **未知不等于死亡**：unknown 或断连的 worker 仍占用并发槽位；不确定性不能授权自动重试、取消或替代启动。
-- **消息、coordinator 权限与恢复**：不同运行时的收件箱与 coordinator 语义不同；遵循已安装的指南。官方公共编排契约为 contract 1（`orchestration.contract.v1`），运行时协议为 3，联盟生命周期结算协议为 3，控制邮件协议为 2；`[orca-dag:merge-inputs-v3]` 是本地 viewer 契约标记。一次性 coordinator 变更拒绝隐式接管（必须携带显式控制确认，否则报 409 `coordinator_control_required`）。StopReason 升级是事件，非可回复提问。`sessions.json` 中的关键恢复账本（`mailboxChecks`、`guidanceSends`、`operatorMessages`）具有权威恢复效力，不能在不支持的旧版读取器间安全热降级。Worker 输出、释放和保留严格限制在选定 Run 范围内。未完成的远程观测（`partialHostErrors`）跨 worker 列表各页汇总保留，绝不因主机错误清除债务。工作树清理使用 `worktree` 参数，保护活跃/主工作区，仅安全删除已合并分支（返回 `preservedBranch` 证据）。详见[编排教程](docs/tutorials/orchestration_zh.md#会遇到的-worker-与收件箱参数)与 [HTTP API](docs/reference/http-api_zh.md#指导消息投递恢复与后续任务生命周期)。
-- **本地控制面**：服务监听 `127.0.0.1`，不启用 CORS，变更请求需要 `X-Orca-Dag-Token`。自定义命令须显式启用。
-- **OMP / Antigravity**：本地 Linux 的 Current 或精确 Existing 要求运行中的 Orca 与解析后的 CLI 均 ≥ **1.4.245**；新建 Git 工作树（`new-child`、`new-top-level`）和工作区 lane 要求两者均 ≥ **1.4.246**。Lane 只共享工作区，不复用 agent 会话。原生 `worker-start --agent` 遵循 Orca 的 Chat/Terminal 设置；模型 selector 原样传递，拒绝非空 effort。详见[放置、输出、Stop 与验证边界](docs/reference/compatibility_zh.md#验证边界与限制说明)。
-- **Native Chat 状态局限**：正在工作的结构化 worker 在 Orca fleet 中仍可能显示 `unverifiable / missing_status`、provider 为空、活动未知。已在 **1.4.245** 的 OMP 上复现；**1.4.246** 源码与函数级复现仍存在该缺口。上游 [PR #34068](https://github.com/stablyai/orca/pull/34068) 截至 **2026-11-03** 仍未合并。缺失状态不证明启动失败，也不授权替代启动；详见[已验证行为与安全处理](docs/tutorials/viewer-operations_zh.md#已知局限)。
+- **消息、coordinator 权限与恢复**：不同运行时的收件箱与 coordinator 语义不同；遵循已安装的指南。官方公共编排契约为 contract 1（`orchestration.contract.v1`），运行时协议为 3，联邦生命周期结算协议为 3，控制邮件协议为 2；`[orca-dag:merge-inputs-v3]` 是本地 viewer 契约标记。一次性 coordinator 变更拒绝隐式接管（必须携带显式控制确认，否则报 409 `coordinator_control_required`）。StopReason 升级是事件，非可回复提问。`sessions.json` 中的关键恢复账本（`mailboxChecks`、`guidanceSends`、`operatorMessages`、`resumeAttempts`）具有权威恢复效力，不能在不支持的旧版读取器间安全热降级。Worker 输出、释放和保留严格限制在选定 Run 范围内。未完成的远程观测（`partialHostErrors`）跨 worker 列表各页汇总保留，绝不因主机错误清除债务。详见[编排教程](docs/tutorials/orchestration_zh.md#会遇到的-worker-与收件箱参数)与 [HTTP API](docs/reference/http-api_zh.md#指导消息投递恢复与后续任务生命周期)。
+- **本地控制面**：服务监听 `127.0.0.1`，不启用 CORS，前端变更需要 `X-Orca-Dag-Token`，插件桥接路由 `/api/plugin/*` 使用独立 `x-orca-plugin-token`（存于 `0o600` `.orca-dag/endpoint.json`）。自定义命令须显式启用。
+- **OMP / Antigravity**：本地 Linux 的 Current 或精确 Existing 要求运行中的 Orca 与解析后的 CLI 均 ≥ **1.4.245**；新建 Git 工作树（`new-child`、`new-top-level`）和工作区 lane 要求两者均 ≥ **1.4.246**。OMP `--effort` 要求运行中 Orca ≥ **1.4.263**；Antigravity 拒绝非空 effort。详见[放置、输出、Stop 与验证边界](docs/reference/compatibility_zh.md#验证边界与限制说明)。
 
 ## 文档导航
 
@@ -72,8 +87,8 @@ npx orca-orchestration-launcher
 
 | 分类 | 文档 |
 | --- | --- |
-| 教程 | [规划任务 DAG](docs/tutorials/orchestration_zh.md) · [操作 viewer](docs/tutorials/viewer-operations_zh.md) · [工作树隔离](docs/tutorials/worktree-isolation_zh.md) |
-| 参考 | [兼容性](docs/reference/compatibility_zh.md) · [功能](docs/reference/viewer-features_zh.md) · [架构](docs/reference/architecture_zh.md) · [HTTP API 与安全](docs/reference/http-api_zh.md) |
+| 教程 | [规划任务 DAG](docs/tutorials/orchestration_zh.md) · [操作 viewer](docs/tutorials/viewer-operations_zh.md) · [工作树隔离](docs/tutorials/worktree-isolation_zh.md) · [Orca 插件指南](plugin/README.md) |
+| 参考 | [兼容性](docs/reference/compatibility_zh.md) · [功能](docs/reference/viewer-features_zh.md) · [架构](docs/reference/architecture_zh.md) · [HTTP API 与安全](docs/reference/http-api_zh.md) · [技能中文审阅版](docs/SKILL_zh.md) |
 | 开发 | [构建、验证与发布](docs/development_zh.md) · [UI 布局](docs/ui-layout_zh.md) |
 
 ## 卸载
@@ -82,14 +97,16 @@ npx orca-orchestration-launcher
 npx orca-orchestration-launcher uninstall   # 可选加 --dry-run 预览清理清单，或加 --purge 清除状态
 ```
 
-卸载会移除已安装的 skill、解除符号链接、安全关闭残留的 coordinator 终端并清理 `.gitignore` 规则。规划文档与 Orca 历史记录始终保留。
+卸载会移除已安装的 skill、解除符号链接、安全关闭残留的 coordinator 终端、清理失效的 `.orca-dag/endpoint.json` 及受管 `.gitignore` 规则。规划文档与 Orca 历史记录始终保留。
 
 ## 常用开发者命令
 
 ```bash
-npm install            # 安装依赖
-npm run check          # skill 校验、类型检查、测试与 Web 构建
-npm run dev            # 联调前后端（:5173 / :8787）
+npm install                # 安装依赖
+npm run check              # skill 校验、类型检查、测试与 Web 构建
+npm run dev                # 联调前后端（:5173 / :8787）
+npm run build:plugin-panel # 构建插件侧边栏 SPA 与内置后端到 plugin/ 供 Orca 开发加载
+npm run build:plugin       # 构建零依赖原生插件产物到 dist-plugin/
 ```
 
-打包、OIDC 发版和显式 `verify:live` 验证见[开发指南](docs/development_zh.md)。真实验证会启动 Codex worker 并消耗 provider 用量，不属于 `npm run check`。
+打包、OIDC 发版和显式 `verify:live` 验证见[开发指南](docs/development_zh.md)。真实验证会启动真实 worker 并消耗 provider 用量，不属于 `npm run check`。

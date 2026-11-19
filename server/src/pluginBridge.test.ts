@@ -434,6 +434,7 @@ describe("openOrcaViewerTab and POST /api/open-tab", () => {
       baseUrl: "http://localhost:8787",
       hash: "#section=chat&task=task_1",
       worktree: "path:/tmp/ws",
+      isOriginAliveFn: async () => true,
       runOrcaFn: (async (args: string[]) => {
         calls.push(args);
         if (args[0] === "tab" && args[1] === "list") {
@@ -458,6 +459,38 @@ describe("openOrcaViewerTab and POST /api/open-tab", () => {
       ["tab", "list", "--worktree", "path:/tmp/ws"],
       ["goto", "--page", "page_existing_1", "--url", "http://localhost:5173/#section=chat&task=task_1"],
       ["tab", "switch", "--page", "page_existing_1", "--focus"],
+    ]);
+
+    // When a previous tab's port is no longer alive (e.g. closed dev terminal),
+    // revive that same tab in-place onto our live embedded viewer URL.
+    const reviveCalls: string[][] = [];
+    const revived = await openOrcaViewerTab({
+      baseUrl: "http://localhost:43210",
+      worktree: "path:/tmp/ws",
+      isOriginAliveFn: async () => false,
+      runOrcaFn: (async (args: string[]) => {
+        reviveCalls.push(args);
+        if (args[0] === "tab" && args[1] === "list") {
+          return {
+            tabs: [
+              {
+                browserPageId: "page_dead_1",
+                url: "http://localhost:5173/",
+                title: "Orchestration Panel",
+              },
+            ],
+          };
+        }
+        return {};
+      }) as typeof import("./orca").runOrca,
+    });
+    assert.equal(revived.ok, true);
+    assert.equal(revived.reused, true);
+    assert.equal(revived.url, "http://localhost:43210/");
+    assert.deepEqual(reviveCalls, [
+      ["tab", "list", "--worktree", "path:/tmp/ws"],
+      ["goto", "--page", "page_dead_1", "--url", "http://localhost:43210/"],
+      ["tab", "switch", "--page", "page_dead_1", "--focus"],
     ]);
 
     const createCalls: string[][] = [];

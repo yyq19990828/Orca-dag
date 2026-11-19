@@ -76,7 +76,7 @@ if (!existsSync(join(panelOutDir, "index.html"))) {
   throw new Error(`vite build produced no ${join(panelOutDir, "index.html")}`);
 }
 
-// 3. Bundle the trusted-worker entrypoint (zero runtime dependencies) ---------
+// 3. Bundle the trusted-worker entrypoint and embedded backend server ---------
 const esbuildBin = join(
   root,
   "node_modules",
@@ -91,6 +91,22 @@ run(esbuildBin, [
   "--format=esm",
   "--legal-comments=none",
   `--outfile=${join(outDir, "worker.mjs")}`,
+]);
+
+// Bundle the local orchestration server right inside `dist-plugin/server/` so
+// the plugin starts its own isolated backend automatically when no external
+// viewer terminal is running (`ORCA_DAG_WEB_DIR` points to `dist-plugin/panel`).
+mkdirSync(join(outDir, "server"), { recursive: true });
+run(esbuildBin, [
+  join(root, "server", "src", "index.ts"),
+  "--bundle",
+  "--platform=node",
+  "--target=node22",
+  "--format=esm",
+  "--legal-comments=none",
+  "--external:./generated/webAssets",
+  `--banner:js=import{createRequire as __cr}from "node:module";const require=__cr(import.meta.url);`,
+  `--outfile=${join(outDir, "server", "index.mjs")}`,
 ]);
 
 // 4. Emit production manifest + docs ------------------------------------------

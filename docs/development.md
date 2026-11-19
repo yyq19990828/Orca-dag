@@ -18,10 +18,14 @@ All standard development tasks are managed through npm scripts:
 npm install                                # Install development dependencies
 npm run check                              # Run skill validation, typecheck, tests, and web build (CI check)
 npm run dev                                # Run frontend (:5173) and backend (:8787); Vite proxies /api
+npm run build:plugin-panel                 # Build SPA (plugin/panel/) + embedded server (plugin/server/index.mjs) for Orca dev plugin loading
+npm run build:plugin                       # Stage zero-dep Orca plugin bundle into dist-plugin/
 npm run build:npm                          # Stage publishable npm package into dist-npm/ (Node.js only)
 npm run build:binary                       # Build standalone binary into dist/orca-dag (requires Bun)
 npm run release 1.0.0                      # Tag and push a release; CI handles publishing and binaries
 ```
+
+For native Orca plugin verification (`orca-ide plugin test/validate/inspect/dev load/dev reload`), see [`plugin/README.md`](../plugin/README.md).
 
 ---
 

@@ -1,0 +1,269 @@
+/*
+ * Centered, calm monochrome onboarding empty state shared between the full
+ * workbench (`App.tsx`) and the narrow Orca sidebar (`SidebarApp.tsx`).
+ */
+
+.odag-empty-stage {
+  flex: 1 1 0;
+  min-block-size: 0;
+  inline-size: 100%;
+  display: grid;
+  place-items: center;
+  padding: 28px 24px;
+  overflow-y: auto;
+  background-color: var(--bg-canvas);
+  background-image: radial-gradient(
+    color-mix(in oklab, var(--fg-tertiary), transparent 72%) 1px,
+    transparent 1px
+  );
+  background-size: 20px 20px;
+}
+
+.odag-empty-stage--compact {
+  padding: 20px 14px;
+  background-image: none;
+}
+
+.odag-empty-card {
+  inline-size: 100%;
+  max-inline-size: 500px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 24px;
+  border-radius: 12px;
+  border: 1px solid var(--border-hairline);
+  background: var(--bg-panel);
+  color: var(--fg-primary);
+  box-shadow: var(--shadow-card);
+}
+
+.odag-empty-stage--compact .odag-empty-card {
+  max-inline-size: 420px;
+  gap: 14px;
+  padding: 16px 14px;
+  box-shadow: none;
+}
+
+.odag-empty-card__head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 8px;
+}
+
+.odag-empty-card__emblem {
+  display: inline-grid;
+  place-items: center;
+  inline-size: 46px;
+  block-size: 46px;
+  margin-block-end: 2px;
+  border-radius: 12px;
+  border: 1px solid var(--border-control);
+  background: var(--bg-elevated);
+  color: var(--fg-primary);
+}
+
+.odag-empty-stage--compact .odag-empty-card__emblem {
+  inline-size: 38px;
+  block-size: 38px;
+  border-radius: 10px;
+}
+
+.odag-empty-card__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--fg-primary);
+  text-wrap: balance;
+}
+
+.odag-empty-stage--compact .odag-empty-card__title {
+  font-size: var(--text-md, 14px);
+}
+
+.odag-empty-card__desc {
+  margin: 0;
+  max-inline-size: 44ch;
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  color: var(--fg-secondary);
+  text-wrap: pretty;
+}
+
+.odag-empty-stage--compact .odag-empty-card__desc {
+  font-size: var(--text-xs);
+}
+
+.odag-empty-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.odag-empty-step {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md, 8px);
+  border: 1px solid var(--border-hairline);
+  background: var(--bg-card);
+}
+
+.odag-empty-stage--compact .odag-empty-step {
+  padding: 9px 10px;
+}
+
+.odag-empty-step__label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--fg-secondary);
+}
+
+.odag-empty-step__badge {
+  margin-inline-start: auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--fg-primary), transparent 90%);
+  color: var(--fg-primary);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.odag-empty-snippet {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px 7px 10px;
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid var(--border-hairline);
+  background: var(--bg-canvas);
+  min-inline-size: 0;
+}
+
+.odag-empty-snippet > code {
+  flex: 1 1 0;
+  min-inline-size: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--fg-primary);
+  overflow-wrap: break-word;
+  word-break: normal;
+  user-select: all;
+}
+
+.odag-empty-stage--compact .odag-empty-snippet > code {
+  font-size: 11px;
+}
+
+/* --- Accessible Copy Button (modern-web-guidance: copy-button) ------------ */
+
+.odag-copy {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+}
+
+.odag-copy-btn {
+  display: inline-grid;
+  place-items: center;
+  min-inline-size: 28px;
+  min-block-size: 28px;
+  padding: 0;
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid var(--border-control);
+  background: var(--bg-card);
+  color: var(--fg-secondary);
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.odag-copy-btn:hover {
+  background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 10%);
+  border-color: var(--fg-tertiary);
+  color: var(--fg-primary);
+}
+
+.odag-copy-btn:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--accent));
+  outline-offset: 2px;
+}
+
+.odag-copy-btn__icon-check {
+  display: none;
+}
+
+.odag-copy-btn[data-copied] {
+  border-color: color-mix(in oklab, var(--st-completed), transparent 45%);
+  color: var(--st-completed);
+}
+
+.odag-copy-btn[data-copied] .odag-copy-btn__icon-copy {
+  display: none;
+}
+
+.odag-copy-btn[data-copied] .odag-copy-btn__icon-check {
+  display: block;
+}
+
+.odag-copy-btn[data-failed] {
+  border-color: color-mix(in oklab, var(--st-failed), transparent 45%);
+  color: var(--st-failed);
+}
+
+/* Confirmation bubble stays in the accessibility tree; hide via opacity only. */
+.odag-copy-tip {
+  position: absolute;
+  inset-block-end: calc(100% + 6px);
+  inset-inline-end: 0;
+  padding: 3px 7px;
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid var(--border-control);
+  background: var(--bg-elevated);
+  color: var(--fg-primary);
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(3px);
+  transition: opacity 140ms ease, transform 140ms ease;
+  box-shadow: var(--shadow-card);
+  z-index: 20;
+}
+
+.odag-copy-btn[data-copied] + .odag-copy-tip,
+.odag-copy-btn[data-failed] + .odag-copy-tip {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .odag-copy-tip {
+    transform: none;
+    transition: opacity 140ms ease;
+  }
+}
+
+.odag-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding-block-start: 2px;
+}
+
+.odag-empty-actions .odag-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}

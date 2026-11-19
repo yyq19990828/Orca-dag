@@ -13,7 +13,6 @@ import {
   Crosshair,
   ExternalLink,
   RotateCcw,
-  Send,
 } from "lucide-react";
 import {
   acknowledgeStopEvent,
@@ -28,7 +27,6 @@ import {
   replyToMessage,
   resolveGate,
   resumeWorkerSession,
-  sendTaskMessage,
 } from "../api";
 import { openActivityStream } from "../bridge/orcaBridge";
 import {
@@ -52,22 +50,24 @@ import type {
   WorkerRowView,
 } from "../types";
 import { usePageVisible } from "../visibility";
+import { ChatPanel } from "./ChatPanel";
 import { useDecisionDialog } from "./DecisionDialog";
+import { EmptyRunState } from "./EmptyRunState";
 import { ExecControls } from "./ExecControls";
 import { HarnessAvatar } from "./HarnessAvatar";
 import { NodeSessionPanel } from "./NodeSessionPanel";
-import { RunPicker } from "./RunPicker";
+import { RunPicker, type RunListReadState } from "./RunPicker";
 import { StatusGlyph, isGatePending, statusTokenVars } from "./statusUi";
 import { useCoordinatorControl } from "./useCoordinatorControl";
 import { WorkerOutputDockView } from "./WorkerOutputDockView";
 import "./sidebar-app.css";
 
 type SidebarTab = "tasks" | "inbox" | "activity";
-type DetailTab = "session" | "output" | "chat";
+type DetailTab = "messages" | "session" | "output";
 type TaskFilter = "all" | "dispatched" | "blocked" | "failed" | "completed";
 
 const PRIMARY_TABS: readonly SidebarTab[] = ["tasks", "inbox", "activity"];
-const DETAIL_TABS: readonly DetailTab[] = ["session", "output", "chat"];
+const DETAIL_TABS: readonly DetailTab[] = ["messages", "session", "output"];
 
 function formatShortTime(iso: string): string {
   try {
@@ -116,6 +116,7 @@ export default function SidebarApp() {
   const idPrefix = useId();
 
   const [hydrated, setHydrated] = useState(false);
+  const [runListRead, setRunListRead] = useState<RunListReadState>({ loaded: false, error: null });
   const runId = config.runId ?? "";
   const [dag, setDag] = useState<DagResponse | null>(null);
   const [workers, setWorkers] = useState<WorkerRowView[]>([]);
@@ -127,12 +128,11 @@ export default function SidebarApp() {
   const [tab, setTab] = useState<SidebarTab>("tasks");
   const [filter, setFilter] = useState<TaskFilter>("all");
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
-  const [detailTab, setDetailTab] = useState<DetailTab>("session");
+  const [detailTab, setDetailTab] = useState<DetailTab>("messages");
   const [selectedOutputDispatchId, setSelectedOutputDispatchId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
-  const [chatDraft, setChatDraft] = useState("");
   const [resumePreview, setResumePreview] = useState<NativeResumePreviewView | null>(null);
   const [resumeLoading, setResumeLoading] = useState(false);
   const [resumePickedSession, setResumePickedSession] = useState("");
@@ -365,7 +365,7 @@ export default function SidebarApp() {
     }
   }, []);
 
-  const openTaskDetail = useCallback((taskId: string, initialTab: DetailTab = "session") => {
+  const openTaskDetail = useCallback((taskId: string, initialTab: DetailTab = "messages") => {
     setSelectedTaskId(taskId);
     setDetailTab(initialTab);
     setActionError(null);
@@ -524,27 +524,25 @@ export default function SidebarApp() {
     [refreshAll, runId],
   );
 
-  const handleSendTaskChat = useCallback(async () => {
-    if (!runId || !selectedTask) return;
-    const body = chatDraft.trim();
-    if (!body) return;
-    setBusyKey(`chat:${selectedTask.id}`);
-    setActionError(null);
-    try {
-      await sendTaskMessage(selectedTask.id, body, runId);
-      setChatDraft("");
-      void refreshAll();
-    } catch (e) {
-      setActionError(String((e as Error)?.message ?? e));
-    } finally {
-      setBusyKey(null);
-    }
-  }, [chatDraft, refreshAll, runId, selectedTask]);
+  const effectiveActivity: ActivitySnapshot = useMemo(
+    () =>
+      activity ?? {
+        runId,
+        events: [],
+        presence: [],
+        checks: [],
+        pendingCount: 0,
+        truncated: false,
+        inboxWindow: null,
+        generatedAt: 0,
+      },
+    [activity, runId],
+  );
 
-  const taskChatEvents: ActivityEvent[] = useMemo(() => {
-    if (!selectedTask || !activity) return [];
-    return activity.events.filter((ev) => ev.taskId === selectedTask.id).slice(-60);
-  }, [activity, selectedTask]);
+  const chatTaskSelection = useMemo(
+    () => (selectedTask ? { taskId: selectedTask.id } : null),
+    [selectedTask?.id],
+  );
 
   const recentActivity: ActivityEvent[] = useMemo(() => {
     if (!activity) return [];
@@ -615,9 +613,18 @@ export default function SidebarApp() {
       <header className="odag-sb__header">
         <div className="odag-sb__header-row">
           <div className="odag-sb__run">
-            <RunPicker runId={runId} onPick={pickRun} autoPick={hydrated} />
+            <RunPicker
+              runId={runId}
+              onPick={pickRun}
+              autoPick={hydrated}
+              onReadStateChange={setRunListRead}
+            />
           </div>
-          <div className="odag-sb__exec-host" ref={setExecActionHost} />
+          <div
+            className="odag-sb__exec-host"
+            ref={setExecActionHost}
+            hidden={!runId && !status?.running}
+          />
           <button
             type="button"
             className="odag-sb__tab-btn"
@@ -692,11 +699,11 @@ export default function SidebarApp() {
 
       {/* 2. Either Drill-in Task Detail OR 3-Tab Main Surface */}
       {!runId ? (
-        <div className="odag-sb__scroll">
-          <div className="odag-sb__empty">
-            {readiness === null && !hydrated ? t("sb.noRun") : t("sb.noRun")}
-          </div>
-        </div>
+        <EmptyRunState
+          compact
+          hasRuns={(runListRead.count ?? 0) > 0}
+          cli={readiness?.cli ?? "orca"}
+        />
       ) : selectedTask ? (
         <section className="odag-sb__detail" aria-label={selectedTask.label || selectedTask.id}>
           <div className="odag-sb__detail-head">
@@ -816,19 +823,19 @@ export default function SidebarApp() {
             )}
           </div>
 
-          {/* Detail Sub-Tabs: Session / Output / Chat */}
+          {/* Detail Sub-Tabs: Messages / Session / Output (aligned with full workbench naming) */}
           <div
             className="odag-sb__tablist"
             role="tablist"
-            aria-label={t("sb.detailTabsAria")}
+            aria-label={t("chat.view.label")}
             {...({ focusgroup: "tablist nomemory" } as Record<string, string>)}
             onKeyDown={(e) => handleTablistKeyDown(e, DETAIL_TABS, detailTab, setDetailTab)}
           >
             {(
               [
-                { id: "session", label: t("sb.detailSession") },
+                { id: "messages", label: t("chat.view.messages") },
+                { id: "session", label: t("ide.inspector.tabSession") },
                 { id: "output", label: t("sb.detailOutput") },
-                { id: "chat", label: t("sb.detailChat") },
               ] as const
             ).map((item) => {
               const selected = detailTab === item.id;
@@ -855,6 +862,33 @@ export default function SidebarApp() {
             role="tabpanel"
             aria-labelledby={`${idPrefix}-dtab-${detailTab}`}
           >
+            {detailTab === "messages" && (
+              <div className="odag-inspector--compact-chat odag-sb__chat-host">
+                <ChatPanel
+                  embeddedMessagesOnly
+                  active={visible && detailTab === "messages"}
+                  runId={runId}
+                  snapshot={effectiveActivity}
+                  tasks={nodes}
+                  taskSelection={chatTaskSelection}
+                  leadTaskId={config.leadTaskByRun[runId] ?? null}
+                  onSelectTask={(id) => {
+                    if (id) openTaskDetail(id, "messages");
+                  }}
+                  onSelectWorker={(dispatchId) => {
+                    setSelectedOutputDispatchId(dispatchId);
+                    setDetailTab("output");
+                  }}
+                  onResolved={() => {
+                    void refreshAll();
+                  }}
+                  coordinatorActive={Boolean(status?.running && status.runId === runId)}
+                  disabled={readiness !== null && !readiness.executionEnabled}
+                  disabledReason={readiness?.reason}
+                  renderTask={() => null}
+                />
+              </div>
+            )}
             {detailTab === "session" && (
               <NodeSessionPanel
                 runId={runId}
@@ -876,53 +910,6 @@ export default function SidebarApp() {
                 onSelectDispatchId={setSelectedOutputDispatchId}
                 active={visible && detailTab === "output"}
               />
-            )}
-            {detailTab === "chat" && (
-              <div className="odag-sb__chat-wrap">
-                <div className="odag-sb__scroll">
-                  {taskChatEvents.length === 0 ? (
-                    <div className="odag-sb__empty">{t("sb.chatEmpty")}</div>
-                  ) : (
-                    taskChatEvents.map((ev) => (
-                      <div
-                        key={ev.id}
-                        className={`odag-sb__msg${
-                          ev.direction === "coordinator_to_agent" ? " odag-sb__msg--out" : ""
-                        }`}
-                      >
-                        <div className="odag-sb__msg-meta">
-                          <span>{ev.actor.label}</span>
-                          <span>{formatShortTime(ev.createdAt)}</span>
-                        </div>
-                        <div>{ev.summary || ev.title}</div>
-                      </div>
-                    ))
-                  )}
-                </div>
-                <form
-                  className="odag-sb__chat-composer"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    void handleSendTaskChat();
-                  }}
-                >
-                  <input
-                    className="odag-sb__input"
-                    value={chatDraft}
-                    onChange={(e) => setChatDraft(e.target.value)}
-                    placeholder={t("sb.chatPlaceholder")}
-                    disabled={busyKey === `chat:${selectedTask.id}`}
-                  />
-                  <button
-                    type="submit"
-                    className="odag-sb__mini-btn odag-sb__mini-btn--primary"
-                    disabled={!chatDraft.trim() || busyKey === `chat:${selectedTask.id}`}
-                    aria-label={t("sb.send")}
-                  >
-                    <Send size={12} aria-hidden="true" />
-                  </button>
-                </form>
-              </div>
             )}
           </div>
         </section>
@@ -1012,7 +999,7 @@ export default function SidebarApp() {
                         key={node.id}
                         type="button"
                         className="odag-sb__card"
-                        onClick={() => openTaskDetail(node.id, "session")}
+                        onClick={() => openTaskDetail(node.id, "messages")}
                       >
                         <div className="odag-sb__card-top">
                           <span style={{ color: tokens.fg, display: "inline-flex" }}>

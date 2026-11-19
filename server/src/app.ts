@@ -183,6 +183,8 @@ export interface CreateAppOptions {
   pluginToken?: string;
   /** Injectable worker-read adapter for OutputTailManager tests. */
   readWorkerOutputFn?: typeof readWorkerOutput;
+  /** Embedded or explicit SPA directory override (e.g. plugin-managed viewer serving plugin/panel). */
+  webDistDir?: string | null;
   /** Resolve the local loopback base URL serving the full web UI (for POST /api/open-tab). */
   getViewerUrl?: () => string | null;
   /** Injectable Orca browser tab opener for tests. */
@@ -4094,8 +4096,9 @@ export function createApp(opts: CreateAppOptions): {
     // BUNDLE, since app.ts is inlined into index.mjs), and at server/src/app.ts
     // in a checkout — "..",".." resolves onto <root>/web/dist in both.
     const here = dirname(fileURLToPath(import.meta.url));
-    const distDir = join(here, "..", "..", "web", "dist");
-    if (existsSync(distDir)) {
+    const explicitWebDir = opts.webDistDir?.trim() || process.env.ORCA_DAG_WEB_DIR?.trim() || "";
+    const distDir = explicitWebDir || join(here, "..", "..", "web", "dist");
+    if (existsSync(join(distDir, "index.html"))) {
       app.use(express.static(distDir));
       app.get("*", (_req, res) => res.sendFile(join(distDir, "index.html")));
       servingUI = true;

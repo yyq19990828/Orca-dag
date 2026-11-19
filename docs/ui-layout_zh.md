@@ -1,8 +1,30 @@
-# 浅色双区编排工作台布局
+# Orchestration Panel 双形态 UI 布局设计
 
 [English](ui-layout.md) | 简体中文 · [文档导航](README_zh.md)
 
-## 目标与决策
+## 当前架构：四区黑白灰 IDE 工作台 + Orca 精简右侧边栏
+
+**Orchestration Panel**（`web/src/main.tsx`）基于同一套前端代码，按 `?view=sidebar` 呈现两种互补形态：
+
+1. **完整标签页工作台（`App.tsx`、`styles/ide-workbench.css`）**——支持深浅双主题（黑白灰 Zinc / Obsidian 配色，自动跟随 Orca 宿主主题并支持手动切换）的四区 IDE 工作台：
+   - **顶部栏**：分叉汇聚 DAG 品牌图标（`DagBrandMark`）+ **Orchestration Panel** 标题、Run 选择器、Run 健康徽标、连接状态、全局命令面板（`⌘/Ctrl+K`）、快捷键指南、深浅色切换、语言切换（`中 / EN`）与主执行控制（`Run` / `Stop`）。
+   - **A 区（左侧导航与实时舰队）**：实时舰队（Fleet）、决策门禁（Gates）、协调器状态卡以及 5 个舞台视图切换（`拓扑画布`、`状态泳道`、`Run 历史账本`、`工作区与清理`、`执行与运行时能力`）。
+   - **B 区（中央主舞台）**：常驻懒加载 React Flow DAG 画布（支持 LR/TB 分层布局、缩略图、父子链开关、流式列表切换）或对应运维视图。
+   - **C 区（底部可调高坞）**：`实时事件流`、`Worker 输出`（基于 `OutputTail` SSE 的 `WorkerOutputDockView`）与 `变更请求账本`。
+   - **D 区（右侧可调宽上下文检视面板）**：审批门检视（`GateInspector`）或紧凑模式 `ChatPanel`（`.odag-inspector--compact-chat`），包含 4 个同级页签：**消息**（黑白灰聊天气泡 + 头像 + 统一自适应输入框）、**会话**（`NodeSessionPanel` 可折叠实时工具调用卡片）、**任务**（`NodePanel`）与**启动配置**。
+2. **精简右侧边栏伴生面板（`SidebarApp.tsx`、`components/sidebar-app.css`、`?view=sidebar`）**——面向 Orca 原生 `orchestration-panel` 窄侧栏（`320–450px`）设计：
+   - **紧凑双行顶栏**：Run 选择器、传送的 Run/Stop 图标按钮、**唯一**的 `↗ 标签页` 入口（`POST /api/open-tab`，智能复用或原地复活完整标签页）、原生 `<progress>` 进度条及横向状态筛选芯片。
+   - **3 个主导航页签**：**任务**（状态图标、harness 胶囊、最新摘要）、**待处理**（审批门禁、Worker 提问、单次权限审批、停止事件与可恢复失败节点）、**活动**（最近实时动态）。
+   - **单任务下钻详情**：顶部返回栏附带**聚焦终端**与**恢复会话**（L1 原生恢复）快捷按钮，下方 3 个同级页签在视觉风格与命名上与完整 Web 保持完全一致：
+     - **消息**（`chat.view.messages`）：直接复用 `<ChatPanel embeddedMessagesOnly />` 与 `.odag-inspector--compact-chat` 样式，保证聊天气泡、头像、从 Task 历史恢复的初始简报、引用回复、运行态摘要与统一输入栏 100% 一致。
+     - **会话**（`ide.inspector.tabSession`）：挂载 `NodeSessionPanel` 展示实时可折叠工具调用卡片。
+     - **输出**（`sb.detailOutput`）：挂载 `WorkerOutputDockView` 查看原始终端/transcript 流。
+
+---
+
+## 前代浅色双区工作台设计记录（历史参考）
+
+### 目标与决策
 
 帮助操作者依次回答：现在发生了什么、哪些事项需要我决策、涉及哪个任务或执行者、状态由什么证据支持。
 应用采用现代化、苹果风格的浅色双区编排工作台（`workbench.css`、`styles.css`、`chat-dock.css`、`graph-motion.css`），

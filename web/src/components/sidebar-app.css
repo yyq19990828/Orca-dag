@@ -48,6 +48,10 @@
 }
 
 /* Compact host for portaled ExecControls primary Run/Stop icon button */
+.odag-sb__exec-host[hidden] {
+  display: none;
+}
+
 .odag-sb__exec-host {
   display: inline-flex;
   align-items: center;
@@ -77,24 +81,49 @@
 }
 
 .odag-sb__exec-host .btn--run {
-  background: var(--accent);
+  --odag-btn-bg: var(--accent);
+  background: var(--odag-btn-bg);
   border-color: transparent;
+  box-shadow: none;
   color: var(--accent-fg);
 }
 
-.odag-sb__exec-host .btn--run:hover:not(:disabled) {
-  background: color-mix(in oklab, var(--accent), var(--bg-canvas) 18%);
-  color: var(--accent-fg);
+@supports (color: contrast-color(black)) {
+  .odag-sb__exec-host .btn--run {
+    color: var(--orca-primary-foreground, contrast-color(var(--odag-btn-bg)));
+  }
+}
+
+.odag-sb__exec-host .btn--run:hover:not(:disabled):not([aria-disabled="true"]) {
+  --odag-btn-bg: color-mix(in oklab, var(--accent), var(--bg-canvas) 18%);
+  background: var(--odag-btn-bg);
+}
+
+.odag-sb__exec-host .btn--run:active:not(:disabled):not([aria-disabled="true"]) {
+  --odag-btn-bg: color-mix(in oklab, var(--accent), var(--bg-canvas) 26%);
+  background: var(--odag-btn-bg);
+}
+
+@media (forced-colors: active) {
+  .odag-sb__exec-host .btn--run {
+    border-color: ButtonText;
+    color: var(--accent-fg);
+  }
 }
 
 .odag-sb__exec-host .btn--stop-run {
-  background: color-mix(in oklab, var(--st-failed), transparent 84%);
-  border-color: color-mix(in oklab, var(--st-failed), transparent 50%);
+  background: var(--st-failed-bg);
+  border-color: color-mix(in oklab, var(--st-failed), transparent 55%);
   color: var(--st-failed);
 }
 
-.odag-sb__exec-host .btn--stop-run:hover:not(:disabled) {
-  background: color-mix(in oklab, var(--st-failed), transparent 72%);
+.odag-sb__exec-host .btn--stop-run:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: color-mix(in oklab, var(--st-failed-bg), var(--st-failed) 10%);
+  color: var(--st-failed);
+}
+
+.odag-sb__exec-host .btn--stop-run:active:not(:disabled):not([aria-disabled="true"]) {
+  background: color-mix(in oklab, var(--st-failed-bg), var(--st-failed) 15%);
   color: var(--st-failed);
 }
 
@@ -201,22 +230,42 @@
   transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
 }
 
-.odag-sb__chip:hover {
+.odag-sb__chip:hover:where(:not([aria-pressed="true"]):not(:disabled):not([aria-disabled="true"])) {
   background: color-mix(in oklab, var(--bg-panel), var(--fg-primary) 10%);
   border-color: var(--border-control);
   color: var(--fg-primary);
 }
 
 .odag-sb__chip[aria-pressed="true"] {
-  background: var(--accent);
-  color: var(--accent-fg);
-  border-color: var(--accent);
-}
-
-.odag-sb__chip[aria-pressed="true"]:hover {
-  background: color-mix(in oklab, var(--accent), var(--bg-canvas) 16%);
+  --odag-chip-bg: var(--accent);
+  background: var(--odag-chip-bg);
   color: var(--accent-fg);
   border-color: transparent;
+}
+
+@supports (color: contrast-color(black)) {
+  .odag-sb__chip[aria-pressed="true"] {
+    color: var(--orca-primary-foreground, contrast-color(var(--odag-chip-bg)));
+  }
+}
+
+.odag-sb__chip[aria-pressed="true"]:hover:not(:disabled):not([aria-disabled="true"]) {
+  --odag-chip-bg: color-mix(in oklab, var(--accent), var(--bg-canvas) 16%);
+  background: var(--odag-chip-bg);
+  border-color: transparent;
+}
+
+.odag-sb__chip[aria-pressed="true"]:active:not(:disabled):not([aria-disabled="true"]) {
+  --odag-chip-bg: color-mix(in oklab, var(--accent), var(--bg-canvas) 24%);
+  background: var(--odag-chip-bg);
+  border-color: transparent;
+}
+
+@media (forced-colors: active) {
+  .odag-sb__chip[aria-pressed="true"] {
+    border-color: ButtonText;
+    color: var(--accent-fg);
+  }
 }
 
 .odag-sb__dot {
@@ -354,7 +403,7 @@
   padding: 7px 10px;
   border-radius: var(--radius-sm);
   border: 1px solid color-mix(in oklab, var(--st-dispatched), transparent 55%);
-  background: color-mix(in oklab, var(--st-dispatched), transparent 86%);
+  background: var(--st-dispatched-bg);
   color: var(--st-dispatched);
   font-size: var(--text-xs);
 }
@@ -380,7 +429,7 @@
   padding: 8px 10px;
   border-radius: var(--radius-sm);
   border: 1px solid color-mix(in oklab, var(--st-failed), transparent 55%);
-  background: color-mix(in oklab, var(--st-failed), transparent 86%);
+  background: var(--st-failed-bg);
   color: var(--st-failed);
   font-size: var(--text-xs);
   word-break: break-word;
@@ -542,38 +591,71 @@
   transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
 }
 
-.odag-sb__mini-btn:hover:not(:disabled) {
+.odag-sb__mini-btn:hover:where(:not(.odag-sb__mini-btn--primary):not(.odag-sb__mini-btn--danger):not(:disabled):not([aria-disabled="true"])) {
   background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 10%);
   border-color: var(--fg-tertiary);
   color: var(--fg-primary);
 }
 
-.odag-sb__mini-btn:disabled {
+.odag-sb__mini-btn:active:where(:not(.odag-sb__mini-btn--primary):not(.odag-sb__mini-btn--danger):not(:disabled):not([aria-disabled="true"])) {
+  background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 15%);
+  border-color: var(--fg-tertiary);
+  color: var(--fg-primary);
+}
+
+.odag-sb__mini-btn:disabled,
+.odag-sb__mini-btn[aria-disabled="true"] {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
 .odag-sb__mini-btn--primary {
-  background: var(--accent);
+  --odag-btn-bg: var(--accent);
+  background: var(--odag-btn-bg);
   color: var(--accent-fg);
   border-color: transparent;
   font-weight: 500;
 }
 
-.odag-sb__mini-btn--primary:hover:not(:disabled) {
-  background: color-mix(in oklab, var(--accent), var(--bg-canvas) 16%);
+@supports (color: contrast-color(black)) {
+  .odag-sb__mini-btn--primary {
+    color: var(--orca-primary-foreground, contrast-color(var(--odag-btn-bg)));
+  }
+}
+
+.odag-sb__mini-btn--primary:hover:not(:disabled):not([aria-disabled="true"]) {
+  --odag-btn-bg: color-mix(in oklab, var(--accent), var(--bg-canvas) 16%);
+  background: var(--odag-btn-bg);
   border-color: transparent;
-  color: var(--accent-fg);
+}
+
+.odag-sb__mini-btn--primary:active:not(:disabled):not([aria-disabled="true"]) {
+  --odag-btn-bg: color-mix(in oklab, var(--accent), var(--bg-canvas) 24%);
+  background: var(--odag-btn-bg);
+  border-color: transparent;
+}
+
+@media (forced-colors: active) {
+  .odag-sb__mini-btn--primary {
+    border-color: ButtonText;
+    color: var(--accent-fg);
+  }
 }
 
 .odag-sb__mini-btn--danger {
-  background: transparent;
+  background: var(--st-failed-bg);
   color: var(--st-failed);
-  border-color: color-mix(in oklab, var(--st-failed), transparent 45%);
+  border-color: color-mix(in oklab, var(--st-failed), transparent 55%);
 }
 
-.odag-sb__mini-btn--danger:hover:not(:disabled) {
-  background: color-mix(in oklab, var(--st-failed), transparent 84%);
+.odag-sb__mini-btn--danger:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: color-mix(in oklab, var(--st-failed-bg), var(--st-failed) 10%);
+  border-color: var(--st-failed);
+  color: var(--st-failed);
+}
+
+.odag-sb__mini-btn--danger:active:not(:disabled):not([aria-disabled="true"]) {
+  background: color-mix(in oklab, var(--st-failed-bg), var(--st-failed) 15%);
   border-color: var(--st-failed);
   color: var(--st-failed);
 }
@@ -717,47 +799,22 @@
   word-break: break-word;
 }
 
-/* --- Task Chat Sub-tab ---------------------------------------------------- */
+/* --- Embedded ChatPanel Host (inherits .odag-inspector--compact-chat) ----- */
 
-.odag-sb__chat-wrap {
+.odag-sb__chat-host {
   flex: 1 1 0;
   min-block-size: 0;
+  min-inline-size: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
-.odag-sb__chat-composer {
-  flex: none;
-  display: flex;
-  gap: 6px;
-  padding: 8px 12px;
-  border-block-start: 1px solid var(--border-hairline);
-  background: var(--bg-panel);
-}
-
-.odag-sb__msg {
-  flex: none;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 7px 9px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-hairline);
-  background: var(--bg-card);
-  font-size: var(--text-xs);
-}
-
-.odag-sb__msg--out {
-  background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 6%);
-  border-color: var(--border-control);
-}
-
-.odag-sb__msg-meta {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  color: var(--fg-tertiary);
-  font-size: 10px;
+.odag-sb__chat-host > .chat-container {
+  flex: 1 1 0;
+  min-block-size: 0;
+  min-inline-size: 0;
+  block-size: 100%;
 }
 
 /* --- Empty State ---------------------------------------------------------- */

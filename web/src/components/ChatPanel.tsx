@@ -234,6 +234,7 @@ export const ChatPanel = memo(function ChatPanel({
   active = true,
   disabled = false,
   disabledReason,
+  embeddedMessagesOnly = false,
 }: {
   runId: string;
   snapshot: ActivitySnapshot;
@@ -254,6 +255,8 @@ export const ChatPanel = memo(function ChatPanel({
   active?: boolean;
   disabled?: boolean;
   disabledReason?: string | null;
+  /** Render only the selected task's message timeline & composer (used by the compact Orca sidebar). */
+  embeddedMessagesOnly?: boolean;
 }) {
   // Priority chips and message timestamps come from the shared formatters in
   // format.ts, which read the language non-reactively (no hooks there by
@@ -368,14 +371,15 @@ export const ChatPanel = memo(function ChatPanel({
     setMobileConversationOpen(true);
   }, [active, groupSelection, setGroupSelectedId, setChatView, setThreadView, setMobileConversationOpen]);
   const selected = conversations.find((conversation) => conversation.id === selectedId) ?? null;
-  const effectiveThreadView =
-    selected?.taskId && threadView === "checks"
+  const effectiveThreadView = embeddedMessagesOnly
+    ? "messages"
+    : selected?.taskId && threadView === "checks"
       ? "messages"
       : !selected?.taskId && (threadView === "session" || threadView === "task" || threadView === "config")
         ? "messages"
         : threadView;
-  const timelineActive = active && (!compact || mobileConversationOpen) && effectiveThreadView === "messages";
-  const sessionActive = active && (!compact || mobileConversationOpen) && effectiveThreadView === "session";
+  const timelineActive = active && (embeddedMessagesOnly || !compact || mobileConversationOpen) && effectiveThreadView === "messages";
+  const sessionActive = active && !embeddedMessagesOnly && (!compact || mobileConversationOpen) && effectiveThreadView === "session";
   const [threadQuery, setThreadQuery] = useScopedChatState(runId, "");
   const query = threadQuery.trim().toLocaleLowerCase();
   const filteredConversations = conversations.filter((conversation) =>
@@ -668,7 +672,8 @@ export const ChatPanel = memo(function ChatPanel({
 
   return (
     <div className="chat-container" ref={chatContainerRef}>
-    <section className="chat" data-mobile-view={mobileConversationOpen ? "conversation" : "list"} aria-label={t("chat.aria.section")}>
+    <section className="chat" data-mobile-view={embeddedMessagesOnly || mobileConversationOpen ? "conversation" : "list"} aria-label={t("chat.aria.section")}>
+      {!embeddedMessagesOnly && (
       <aside className="chat__sidebar" ref={sidebarRef} aria-label={t("chat.aria.threadList")}>
         <h2>{t("chat.sidebar.title")}</h2>
         <ToggleGroup.Root
@@ -725,6 +730,7 @@ export const ChatPanel = memo(function ChatPanel({
               </div>
             </div>
       </aside>
+      )}
 
       <Tabs.Root className="chat__conversation" value={effectiveThreadView} onValueChange={(value) => {
         if (value === "task") openTaskDetails();
@@ -747,6 +753,7 @@ export const ChatPanel = memo(function ChatPanel({
         {!selected && <p className="chat__choose-conversation">{t("chat.chooseConversation")}</p>}
         {selected && (
           <>
+            {!embeddedMessagesOnly && (
             <header className="chat__conversation-head">
               {!onCloseInspector && (
                 <button type="button" className="chat__back" onClick={backToConversations} aria-label={t("chat.backToList")}>
@@ -804,6 +811,8 @@ export const ChatPanel = memo(function ChatPanel({
                 )}
               </div>
             </header>
+            )}
+            {!embeddedMessagesOnly && (
             <Tabs.List className="chat__view-tabs odag-tablist" aria-label={t("chat.view.label")}>
               <Tabs.Trigger className="odag-tab" value="messages">{t("chat.view.messages")}</Tabs.Trigger>
               {selected.taskId && renderSession && <Tabs.Trigger className="odag-tab" value="session">{t("ide.inspector.tabSession")}</Tabs.Trigger>}
@@ -816,6 +825,7 @@ export const ChatPanel = memo(function ChatPanel({
                 </Tabs.Trigger>
               )}
             </Tabs.List>
+            )}
             <Tabs.Content className="chat__view chat__view--messages" value="messages" forceMount hidden={effectiveThreadView !== "messages"}>
 
             <div className="chat__timeline">

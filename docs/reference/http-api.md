@@ -56,8 +56,10 @@ All `POST` and `PUT` endpoints require the `X-Orca-Dag-Token` header. `GET` endp
 |---|---|---|
 | `GET` | `/api/session` | Returns `{ token, allowCustomCommands }`. Provides the per-process mutation token to same-origin clients (`Cache-Control: no-store`). |
 | `GET` | `/api/readiness` | Reports the resolved CLI/build version, selected runtime version/state, workspace selector, and execution permission with an actionable disabled reason. |
-| `GET` | `/api/capabilities` | Returns runtime readiness, raw advertisements and recognized orchestration support (public contract 1 via `orchestration.contract.v1`, runtime protocol 3, federation lifecycle settlement protocol 3, control mail protocol 2, and `orchestration.federation-lifecycle-settlement.v1`), including auto-release, keep-open, implicit-Run advertisement, retained bindings, turn-stop reports and immediate ask receipts. Advertising implicit Run support does not enable implicit creation in the viewer. |
-| `GET` | `/api/health` | Basic health check returning the current workspace directory. |
+| `GET` | `/api/capabilities` | Returns runtime readiness, raw advertisements, recognized orchestration support (public contract 1 via `orchestration.contract.v1`, runtime protocol 3, federation lifecycle settlement protocol 3, control mail protocol 2, `orchestration.federation-lifecycle-settlement.v1`, `orchestration.worker-stop-helpers.v1`, `orchestration.peer-mail.v1`, `orchestration.remote-owned-workers.v1`), and live `plugin` connection status (`connected`, `pluginId`, `version`, `hostApiMinor`, `grantedCapabilities`, `lastSeenAt`, `observedAgentCount`). |
+| `GET` | `/api/accounts` | Read-only account & quota summary per harness for preflight launch hints. |
+| `POST` | `/api/open-tab` | `{ hash? }`: Opens or reuses the full **Orchestration Panel** workbench tab in Orca (`orca tab list` / `orca goto` / `orca tab create`). Probes an existing tab's loopback `/api/health` and revives dead/stale-port tabs in-place. |
+| `GET` | `/api/health` | Basic health check returning `{ ok, workspace, worktree }`. |
 
 ---
 
@@ -203,6 +205,10 @@ Omitting `coordinatorControl` or submitting mismatched evidence fails with HTTP 
 | `GET` | `/api/workers?run=<id>` | Fetches typed `WorkerInventory` (`{ workers: OrcaWorkerRow[], partialHostErrors: unknown[] }`) for the Run. Preserves and aggregates `partialHostErrors` across all pages. Missing remote hosts make absence unsuitable for lifecycle decisions; host errors never clear debt or infer exit. |
 | `GET` | `/api/workers/:dispatchId?run=<id>` | Returns detailed durable row and `worker-show` evidence (PTY facts, observation, agent wait status) for a Dispatch. |
 | `GET` | `/api/workers/:dispatchId/output?run=<id>` | Reads bounded worker output pages (`?run=<id>&source=auto\|terminal\|transcript&cursor=&limit=`, limit clamped 1–200). Requires explicit `run` scope. |
+| `GET` | `/api/workers/:dispatchId/output/stream?run=<id>` | Centralized `OutputTailManager` SSE stream (`init`, `delta`, `liveTool`, `status`, `drained`) sharing one upstream `worker-read` poller across subscribers and waking early on companion plugin hook events. |
+| `GET` | `/api/workers/:dispatchId/resume-preview?run=<id>` | Previews L1 native session resume eligibility for an exited local verified worker by combining `.orca-dag/sessions.json` bindings with companion plugin `workspace.list` / `agent.listSessions` discovery. |
+| `POST` | `/api/workers/:dispatchId/resume` | `{ runId, sessionId?, coordinatorControl? }`: Executes L1 native session resume via companion plugin `agent.resume` + `worker-start --terminal --retry-of`, journaled in `.orca-dag/sessions.json` (`resumeAttempts`). |
+| `POST` | `/api/workers/:dispatchId/permission` | `{ runId, promptId, decision: "approve"\|"deny", reason?, coordinatorControl? }`: Answers a single-use worker permission prompt on Orca ≥ 1.4.263 (`orchestration approve` / `deny`). |
 | `POST` | `/api/workers/:dispatchId/stop` | Halts one positively identified active Dispatch with a durable request ID. Returns `502 response_lost` if response verification drops. |
 | `POST` | `/api/workers/:dispatchId/abandon` | Fences orchestration state via `worker-abandon` for positively exited or outcome-unknown attempts. Refused if Orca proves worker is live. |
 | `POST` | `/api/workers/:dispatchId/focus` | Focuses the local worker terminal (`terminal switch`) when positive `agentWait` evidence exists. |
@@ -286,6 +292,19 @@ These records are **recovery authority**, not rotating audit history. Unsupporte
   - `status: "available"`: `models` contains catalog strings matching `^[A-Za-z0-9._-]{1,128}/[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}(?:#[A-Za-z0-9._-]{1,128})?$`. A successful query with no models returns `{ status: "available", models: [], diagnostic: null }`. Non-OpenCode harnesses return `available` with empty `models`.
   - `status: "unavailable"`: Discovery failed (e.g., CLI not found → `"OpenCode CLI was not found"`, 20s timeout → `"OpenCode model discovery timed out after 20 seconds"`, process exit code → `"OpenCode model command failed (exit code <N>)"`, generic failure → `"OpenCode model discovery failed"`). `models` is empty. Stderr and internal process stack traces are never leaked.
 - **Advisory Semantics:** Model discovery is purely advisory for local workspace selection. A failed discovery or empty catalog does not prevent manual model entry, nor does a successful catalog entry guarantee execution-host availability.
+
+---
+
+### Companion Plugin Bridge (`/api/plugin/*`)
+
+Authenticated with a separate per-process `x-orca-plugin-token` header published in `0o600` `<workspace>/.orca-dag/endpoint.json` (never accepted from the browser SPA; the sidebar worker proxy explicitly blocks `/api/plugin/*`):
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/plugin/hello` | Registers the running `orchestration-panel` plugin (`pluginId`, `version`, `hostApiMinor`, `grantedCapabilities`, `workspacePath`, `workspaceId`). |
+| `POST` | `/api/plugin/events` | Ingests bounded batches of `agent.status.changed`, observe-only `agent.tool.after` (RAM-only ring, never persisted to `activity.jsonl`), and `agent.prompt.before` events, waking `OutputTailManager` subscribers. |
+| `GET` | `/api/plugin/inbox` | Long-polls pending viewer-to-plugin commands (`workspace.list`, `agent.listSessions`, `agent.resume`, `notification.show`, `statusBar.update`). |
+| `POST` | `/api/plugin/receipts/:commandId` | Delivers the companion plugin's command result or error receipt for a pending command ID. |
 
 ---
 

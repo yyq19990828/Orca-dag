@@ -52,11 +52,12 @@
 | API 预选模型的 OpenCode 2 完整 TUI | **1.4.222** | 显式指定模型并设置 `ORCA_DAG_OPENCODE_TUI=1`；仅本机 POSIX 当前/已有、非 lane 工作区。实验性功能，默认关闭。 |
 | 自动模式下的 OpenCode 原生模型选择 | **1.4.241** | 声明启动偏好能力；本机 POSIX 当前/已有、非 lane 工作区；无 variant 或 effort。使用独立的 `opencode` agent，由执行主机验证模型及 CLI。 |
 | 原生 OMP / Antigravity（Current / Existing） | **运行时与解析后的 CLI 均为 1.4.245** | 仅本地 Linux 的 Current 或精确 Existing 放置，不能使用 lane。原生 `worker-start --agent omp` / `--agent antigravity`，原样传递 `--model` 或使用已配置默认值，拒绝所有非空 effort。Chat/Terminal 由 Orca 用户设置决定，viewer 不检查或覆盖偏好。下表区分 Terminal TUI 与 OMP Native Chat 证据；另见 [fleet 可观测性局限](../tutorials/viewer-operations_zh.md#已知局限)。 |
-| 原生 OMP / Antigravity（新建工作树与 lanes） | **运行时与解析后的 CLI 均为 1.4.246** | 仅限本地 Linux。支持 `new-child`（需已验证的本地被托管 Git 父工作区）与 `new-top-level`（需精确的仓库 `id:` 或绝对 `path:` Git 仓库；拒绝模糊名称、普通目录、异构主机仓库且不自动 git-init）。工作区 Lane 仅共享工作区：首个 Task 创建或接纳工作区，后续依赖有序 Task 使用精确 Existing；每个 Task 均分配全新的原生 agent 会话与 Dispatch（无通用终端复用，禁止 `--terminal` 或 `--surface` 覆盖）。准入与预览会校验 Lane 种子放置，在旧版本上提前拒绝且不执行变更。所有非空 effort 依然全部拒绝。 |
+| 原生 OMP / Antigravity（新建工作树与 lanes） | **运行时与解析后的 CLI 均为 1.4.246** | 仅限本地 Linux。支持 `new-child`（需已验证的本地被托管 Git 父工作区）与 `new-top-level`（需精确的仓库 `id:` 或绝对 `path:` Git 仓库；拒绝模糊名称、普通目录、异构主机仓库且不自动 git-init）。工作区 Lane 仅共享工作区：首个 Task 创建或接纳工作区，后续依赖有序 Task 使用精确 Existing；每个 Task 均分配全新的原生 agent 会话与 Dispatch（无通用终端复用，禁止 `--terminal` 或 `--surface` 覆盖）。准入与预览会校验 Lane 种子放置，在旧版本上提前拒绝且不执行变更。Antigravity 拒绝非空 effort；OMP 从 Orca **1.4.263** 起支持 `--effort`。 |
+| 原生 `orchestration-panel` 插件、OMP `--effort` 与权限弹窗审批 | **1.4.263** | Host API 1.10 `trusted-worker` 伴生插件（`plugin/` → `dist-plugin/`），内置自托管回环后端服务，实时转发 `agent.status.changed` 与只读 `agent.tool.after` Hook，支持 L1 原生 `agent.resume`、OMP `--effort`、级联停止 helper（`orchestration.worker-stop-helpers.v1`）及单次 Worker 权限审批（`POST /api/workers/:dispatchId/permission`）。 |
 
 ## 有记录的真实运行时验证
 
-**截至 2026-11-03，有记录的真实运行时验证历史如下：**
+**截至 2026-11-19，有记录的真实运行时验证历史如下：**
 
 | Orca app | Agent 版本 | 已验证内容 |
 |---|---|---|
@@ -75,6 +76,7 @@
 | **运行时 + CLI 1.4.247** | **OpenCode 2.2.0 · Mini 与兼容 CLI** | Mini 使用 `openai/gpt-6.1-terra#xhigh`：混合自动确认的提问/完成批次在注入校验读取失败后恢复；消费响应丢失并终止后端后，同一 Run 使用原 UUID、原 Dispatch 恢复；4 个 Task、3 个工作树的集成通过一次精确 marker 提问/回复获取不可变依赖 SHA，保留 Git 祖先关系并独立算出 `51`。另以 Auto 兼容 CLI 启动普通模型 `openai/gpt-6.1-terra` 加独立 `xhigh` effort，两个依赖 Task 成功，两个精确 provider session 均报告 variant `xhigh`。证据：`.orca-dag/20261103T090133-935Z-v3-migration/`。不证明完整 TUI、远程/Windows 或全部历史运行时均已认证。 |
 | **运行时 + CLI 1.4.247** | **OMP Native Chat · 配置默认模型；未重新采集 ACP 进程版本** | 不覆盖 surface 或模型，遵循用户的 Chat 偏好。确认提前 `keepOpen: retained`；结算竞态返回新的实际 Task/Dispatch，并持久记录创建证明；另一次活动发送返回指向该实际 Dispatch 的 `enqueued`。Stop 覆盖新建的后续根任务；隔离 Stop 验收确认前台子进程在 Stop 前仍存活、Stop 后退出，未写出完成文件，结果 `clean: true`、清理债务 0。原生启动模式元组如实保留，包括 `mode` 为 `terminal`、但 detail 明确指向已有 Chat 的复用回执。不证明所有 opaque 模型选择器、Antigravity Chat 或 Orca 运行时重启均已验证。 |
 | **运行时 + CLI 1.4.247** | **Codex CLI 0.166.0** | 真实运行时 Viewer 端到端验证在 Run `run_44b240b8e6ee` 通过（`.orca-dag/20261104T031219975Z-abcd/viewer-codex-verification.json`）：本地 Linux 原生新工作树切换（`canUseNativeCodexFreshWorktree`）驱动 `worker-start --agent codex --model gpt-6.1-terra --effort xhigh`，同时在 `new-child` 与 `new-top-level` 放置下运行，用户默认 Terminal，均在首次尝试时 ready，基准提交为精确的 1bb21a3，产出独立结果 18/42。SIGKILL 强制终止 viewer 进程并重启后，成功恢复原精确两个 Dispatch 与持久提问，无重复派发；提问回复与主动 Keep-open 均成功；作用域 Stop 杀死真实 OS 子进程（观测到 `sleep 90` pid 3461390）并按 `stopped` / `closed_agent_terminal` 记账，Task 保持 blocked（绝不自动合成成功）；子任务正常完成。Native Chat 保持未测状态。旧版或未知运行时保留现有兼容适配器。 |
+| **运行时 + CLI 1.4.263** | **OMP + Codex + Antigravity + OpenCode 2.2.5 (Mini) + `orchestration-panel` 0.1.0** | 全能力真实 Run `run_d866b900898d`（5/5 全部 `completed`，Git 工作树零脏文件）完全由 `local.orchestration-panel` 插件自托管内置服务驱动（零手动常驻终端）：第 1 波次 3 路异构并行（`omp` + `openai-codex/gpt-6.1-sol` + `--effort medium` 含 `OutputTail` transcript SSE；`codex` 实时 `ask` 提问 + `POST /api/messages/:id/reply` + `retainByTask` 保留终端 + 显式 `release` 归档；`antigravity` + `gemini-4-argon-low`）；插件实时转发 `agent.status.changed` 与 `agent.tool.after` Hook 批次；审批门禁 `gate_4aed3d785380` 阻断并经 `POST /api/gates/:id/resolve` 放行第 2 波次；第 2 波次实测 `opencode2` 禁用时的无自动重试安全拒绝（`agent_unconfigured`）后，切换 OpenCode 2.2.5 Mini API-TUI 顺利完成；内置服务重启后无重复派发收编存活的 Codex Dispatch `ctx_f4308eb392be`；第 3 波次完整实测 `POST /api/workers/:id/stop` → `GET /api/workers/:id/resume-preview` → `POST /api/workers/:id/resume`（原生 `agent.resume` + `--terminal --retry-of` 绑定新 Dispatch `ctx_9629a5a467bb` 并记账 `sessions.json` `resumeAttempts`）并最终上报 `worker_done` 完成。 |
 
 ### 验证边界与限制说明
 

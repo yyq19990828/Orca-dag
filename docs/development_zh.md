@@ -17,13 +17,18 @@ npm install
 常用开发与质量保证命令如下：
 
 ```bash
-npm run dev            # 启动本地开发环境：前端 Vite (5173) + 后端 Express (8787)，Vite 自动反向代理 /api
-npm run check          # 全量校验：skill 规范核验 + TypeScript 类型检查 + 单元测试 + Web 生产构建 (CI 必跑)
-npm run test           # 运行服务端与调度逻辑单元测试
-npm run build:npm      # 构建可发布的 npm 包并输出至 dist-npm/ (仅需要 Node.js 环境)
-npm run build:binary   # 构建单文件便携独立二进制至 dist/orca-dag (已内嵌前端，需要 Bun 环境，约 100MB)
-npm run release 1.0.0  # 发版入口：校验代码、生成 git tag 并推送到 GitHub，触发 CI 自动化发布
+npm install                # 安装依赖
+npm run dev                # 启动本地开发环境：前端 Vite (5173) + 后端 Express (8787)，Vite 自动反向代理 /api
+npm run check              # 全量校验：skill 规范核验 + TypeScript 类型检查 + 单元测试 + Web 生产构建 (CI 必跑)
+npm run test               # 运行服务端与调度逻辑单元测试
+npm run build:plugin-panel # 构建插件侧边栏 SPA (plugin/panel/) 与内置自托管后端 (plugin/server/index.mjs)
+npm run build:plugin       # 打包零依赖原生 Orca 插件到 dist-plugin/
+npm run build:npm          # 构建可发布的 npm 包并输出至 dist-npm/ (仅需要 Node.js 环境)
+npm run build:binary       # 构建单文件便携独立二进制至 dist/orca-dag (已内嵌前端，需要 Bun 环境，约 100MB)
+npm run release 1.0.0      # 发版入口：校验代码、生成 git tag 并推送到 GitHub，触发 CI 自动化发布
 ```
+
+原生 Orca 插件的测试、校验与开发加载命令（`orca-ide plugin test/validate/inspect/dev load/dev reload`）见 [`plugin/README.md`](../plugin/README.md)。
 
 ## 真实 Provider 运行验证（verify:live）
 

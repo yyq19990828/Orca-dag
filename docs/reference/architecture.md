@@ -8,12 +8,22 @@ This document details the system architecture, coordination lifecycle, authority
 
 ---
 
-## How It Works
+## How It Works: Two Coordination Models
 
-The system cleanly separates **planning** from **visualization and execution**:
+Orca orchestration and **Orchestration Panel** (`orca-dag`) support **two complementary coordination models**, with explicit authority handoff (`run-use` / `coordinatorControl`) whenever ownership switches:
 
-1. **The planning brain lives outside (`skill/SKILL.md`):** Your existing agent (Claude Code, Kimi, Cursor, etc.) reads the project workflow, resolves the active Orca CLI, consults the runtime-matched orchestration guide (`orca skills get orchestration`), and decomposes requirements into an Orca task DAG. There is no embedded Claude Agent SDK in the viewer.
-2. **The viewer visualizes and coordinates (`server/` + `web/`):** Shipped as the `orca-orchestration-launcher` npm package and standalone binary. It connects to Orca's orchestration state over loopback CLI calls, renders the DAG live, allows per-node harness and placement configuration, and drives a self-contained coordinator loop.
+1. **Model / Agent-as-Coordinator (an AI model selected in Orca):**
+   - Pick an agent/model session in Orca (native chat or terminal agent) to own the Run as its coordinator: it plans the DAG, dispatches ready waves via `worker-start`, responds to worker `ask` questions, sends follow-ups (`send`), and reports back once all tasks settle.
+   - In this mode, **Orchestration Panel** serves as a live read-only observability surface (DAG canvas, Session tool cards, Messages, Audit) and refuses implicit authority takeover unless the operator explicitly confirms a one-off mutation (`coordinatorControl`).
+2. **Human-Driven Coordination (via Orchestration Panel):**
+   - An agent with `skill/SKILL.md` can still help clarify requirements and author the DAG, while the **human operator** drives execution through **Orchestration Panel** (either the self-contained native Orca plugin or standalone viewer).
+   - The operator picks per-node harness, model, effort, and placement/lanes, clicks **Run** so the deterministic coordinator loop dispatches ready waves along dependency edges, and directly resolves decision gates, worker questions, single-use permission prompts, stops/retries, and L1 native session resumes.
+
+The system is built from three cooperating components (without embedding any LLM / Agent SDK inside the viewer):
+
+1. **The planning / agent-coordination workflow (`skill/SKILL.md`):** Your chosen agent reads the project workflow, resolves the active Orca CLI, consults the runtime-matched orchestration guide (`orca skills get orchestration`), writes planning docs and Tasks in the user's conversation language, and either hands off the Run to the human in Orchestration Panel or coordinates it directly in Orca when requested.
+2. **The viewer & deterministic coordinator (`server/` + `web/`):** Shipped as the `orca-orchestration-launcher` npm package, standalone binary, and embedded inside the native Orca plugin. It connects to Orca's orchestration state over loopback CLI calls, renders the dual-theme 4-zone IDE workbench and streamlined sidebar companion, streams centralized `OutputTail` SSE + structured **Session** tool cards, supports L1 native session resume, and drives human-triggered wave execution.
+3. **The native Orca companion plugin (`plugin/` → `dist-plugin/`):** An Orca Host API 1.10 `trusted-worker` plugin (`id: "orchestration-panel"`, `engines.orca: ">=1.4.263"`) that embeds the server (`server/index.mjs`) and SPA (`panel/`). When no external viewer terminal is running for an active local workspace, the worker automatically spawns an isolated loopback backend (`PORT=0`, `NO_OPEN=1`, `ORCA_DAG_WEB_DIR=<panel>`) and cleans it up when the workspace closes or the plugin deactivates; if an external viewer terminal is started or closed, the plugin discovers `.orca-dag/endpoint.json` (`0o600`, symlink-rejected) and fails over transparently. It accelerates `OutputTail` SSE and Session tool cards via `agent.status.changed` and observe-only `agent.tool.after` (RAM-only, never persisted to `activity.jsonl`), answers `workspace.list` / `agent.listSessions` / `agent.resume` for L1 native resume, and opens or revives the full workbench Tab (`POST /api/open-tab`, probing stale ports and reloading in-place via `orca goto`).
 
 ```mermaid
 flowchart TD
@@ -76,7 +86,8 @@ Orca 1.4.226 counts failed `worker-start` invocations along the exact `--retry-o
 - **Stop Events vs Actual Questions:** Native `stopReason` escalations (`finished`, `errored`, `needs-input`, `exited`) are events in `PendingInboxItem.kind === 'stop_event'`, distinct from replyable questions (`kind === 'question'`). Resolution must follow exact Dispatch steering, operator decisions, or authoritative later settlement; the viewer does not fabricate replies or synthesize task success.
 - **Historical launch-mode reads:** Worker detail can restore an immutable follow-up start-mode tuple from the critical journal after Stop or restart. It must match the actual Run, Task and Dispatch, never the requested parent. Missing/unreadable evidence stays unknown; display recovery does not grant mutation authority.
 - **Committed Stage Merge Handshake:** Cross-workspace merges requiring committed Git handoff declare both `[orca-dag:merge-prep]` and `[orca-dag:merge-inputs-v3]`. Native 1.4.247 `ask` has no `--subject` or `--payload` flags (the native subject is fixed to `'Question'`, and `payload.question` contains the entire question text). The worker asks before any Git edit with the entire question text exactly `[orca-dag:merge-inputs-v3]`. The coordinator verifies current merge Task/Dispatch ownership, sender handle, and clean dependencies before replying with immutable commit SHAs from StageGit. Legacy runnable merge specs are refused at plan validation and must replan in a fresh Run.
-- **Critical Recovery & No Hot Downgrade:** `.orca-dag/sessions.json` stores critical recovery journals (`mailboxChecks`, `guidanceSends`, and `operatorMessages`) that serve as recovery authority, not rotating audit logs. Inactive operator reply and group send helpers (`operatorMessages.ts`) checkpoint UUID, body hash, and scope in `operatorMessages` before Orca CLI calls, recovering unknown states via read-only `request-show` (`operator_message_reconciled` on prior completion with different body, `operator_message_unknown` on unresolved). Unsupported older readers throw `session binding store contains unknown fields` on these inventories; active `sessions.json` state cannot safely be hot-downgraded across unsupported readers.
+- **Critical Recovery & No Hot Downgrade:** `.orca-dag/sessions.json` stores critical recovery journals (`mailboxChecks`, `guidanceSends`, `operatorMessages`, and `resumeAttempts`) that serve as recovery authority, not rotating audit logs. Inactive operator reply and group send helpers (`operatorMessages.ts`) checkpoint UUID, body hash, and scope in `operatorMessages` before Orca CLI calls, recovering unknown states via read-only `request-show` (`operator_message_reconciled` on prior completion with different body, `operator_message_unknown` on unresolved). L1 native session resume (`nativeResume.ts`) journals `prepared -> resumed_terminal -> bound | failed | unknown` in `resumeAttempts` so interrupted resumes never launch duplicate sessions. Unsupported older readers throw `session binding store contains unknown fields` on these inventories; active `sessions.json` state cannot safely be hot-downgraded across unsupported readers.
+- **Centralized `OutputTail` SSE & Plugin Hook Bridge:** `server/src/outputTail.ts` shares one upstream `worker-read` poller across SSE subscribers (`/api/workers/:dispatchId/output/stream`) and wakes early on companion plugin `agent.status.changed` / `agent.tool.after` hooks (`server/src/pluginBridge.ts`). Plugin live tool payloads stay in bounded RAM rings only — they are never written to `activity.jsonl` — and are deduplicated against structured transcript blocks by `callId`.
 - **Cleanup Debt & Incomplete Remote Observations:** Reclaimable cleanup debt is rechecked against fresh fleet state on every cycle; external releases clear debt automatically. `listWorkers` returns typed `WorkerInventory` (`{ workers: OrcaWorkerRow[], partialHostErrors: unknown[] }`), preserving and aggregating `partialHostErrors` across all pages. Missing remote hosts make absence unsuitable for lifecycle decisions; host errors never clear debt or infer worker exit. Worktree removal safety queries the global complete fleet (`listWorkers(undefined, { includeRemote: true })`) rather than only the selected Run, ensuring other-Run Native Chat workers absent from terminal-list still protect shared workspaces from accidental teardown.
 - **Helper Custody:** Workers created as helpers within the same Run remain under the custody of their active creator. The viewer verifies exact Dispatch lineage rather than inferring ownership from `parent_id`. Helpers are adopted only after positive creator settlement. Visible active workers consume concurrency admission budget, but external helpers mean **Max parallel is an admission throttle, not a hard runtime-wide cap**.
 - **Terminal Reuse Preconditions:** Automatic terminal reuse requires fresh, exact, connected PTY evidence for the identical agent and workspace. Chat handles do not establish PTY proof. OpenCode, OMP and Antigravity workers are excluded from generic reuse to preserve frontend, fresh-session and model identity.
@@ -136,51 +147,68 @@ skill/
                            Delegates CLI syntax to `orca skills get orchestration`.
 
 server/src/
-  index.ts                 Process entry: CLI arguments, workspace resolution, loopback listener.
-  app.ts                   Express app (createApp): API route definitions and SPA serving.
+  index.ts                 Process entry: CLI arguments, workspace resolution, endpoint.json publish, loopback listener.
+  app.ts                   Express app (createApp): API routes, plugin bridge routes, OutputTail SSE, native resume, SPA serving (`ORCA_DAG_WEB_DIR`).
+  pluginBridge.ts          `0o600` `.orca-dag/endpoint.json` lifecycle, plugin auth (`x-orca-plugin-token`), bounded RAM tool/status rings, command inbox/receipts.
+  outputTail.ts            Centralized `OutputTailManager` SSE multiplexing `worker-read` polling with plugin hook wakeups and `callId` dedup.
+  nativeResume.ts          L1 native session resume preview/execution (`agent.listSessions` + `agent.resume` + `worker-start --terminal --retry-of`) journaled in `sessions.json`.
   activity.ts              Run-scoped event parser and bounded Activity journal.
   requestLedger.ts         Bounded mutation-request audit ledger (.orca-dag/requests.jsonl).
-  providerSessions.ts      Durable sessions.json store with bindings, mailboxChecks, and guidanceSends.
+  providerSessions.ts      Durable sessions.json store with bindings, mailboxChecks, guidanceSends, operatorMessages, and resumeAttempts.
   operatorMessages.ts      Durable operator reply and group send helpers with sessions.json checkpoints.
   taskGuidance.ts          Proactive worker guidance, typed receipts, and read-only recovery.
   stageGit.ts              Git Stage evidence, immutable base commit capture, and merge handshake.
   security.ts              Security enforcement: loopback binding, mutation tokens, input validation.
   coordinator.ts           Self-driven coordinator loop: DAG polling, worker-start, placement, settlement.
-  orca.ts                  Orca CLI wrapper: command invocation, version detection, discovery, gates.
+  orca.ts                  Orca CLI wrapper: command invocation, version detection, discovery, gates, smart `openOrcaViewerTab` reuse/revival.
   orca.test.ts             Unit tests for CLI resolution, readiness gates, and conflict detection.
   runHealth.ts             Run ownership and health diagnostics (viewer-owned / external / unbound).
   config.ts                Workspace configuration persistence (.orca-dag/config.json).
   workspaceState.ts        State file paths, migration from legacy root files, and safety fallbacks.
   skill.ts                 Automated installation of SKILL.md into local agent directories.
   planning.ts              Managed .gitignore block handling for .orca-dag/.
-  uninstall.ts             Uninstallation logic: unlinks skills, closes stale coordinator terminals.
+  uninstall.ts             Uninstallation logic: unlinks skills, removes stale endpoint.json, closes stale coordinator terminals.
   webAssets.ts             Build-time asset loader for embedded frontend and skill assets.
+plugin/
+  orca-plugin.json         Native Orca plugin manifest (`orchestration-panel`, Host API 1.10 `trusted-worker`).
+  icon.png                 Custom fork-join DAG plugin icon.
+  src/worker.ts            Trusted-worker entry: endpoint discovery, auto-managed embedded server failover, API/SSE proxy, hooks, status bar, `agent.resume`.
+  src/protocol.ts          Shared frame/worker request and event contracts (`orca-dag.api`, `orca-dag.activity`, `orca-dag.output`).
 web/src/
-  App.tsx                  Main workbench shell, section navigation, URL hash routing, 2s polling loop, execution state guards.
+  main.tsx                 Surface dispatcher: lazy-loads `SidebarApp` (`?view=sidebar`) or full workbench `App`.
+  App.tsx                  4-zone dual-theme monochrome IDE workbench shell, URL hash routing, 2s polling loop, execution state guards.
+  bridge/orcaBridge.ts     Dual-mode transport: direct HTTP/EventSource in Tab vs Orca plugin frame RPC/push in Sidebar.
   components/
+    SidebarApp.tsx         Streamlined right-sidebar companion (`Tasks` / `Pending` / `Live`), reusing `ChatPanel` (`embeddedMessagesOnly`), `NodeSessionPanel`, and `WorkerOutputDockView`.
+    NodeSessionPanel.tsx   Real-time collapsible tool-call cards & turn stream driven by `OutputTail` SSE + plugin live hooks.
+    DagBrandMark.tsx       Custom fork-join DAG brand emblem.
     DagView.tsx            Lazy-loaded React Flow DAG canvas, 280x120 node rendering, scoped status dot animation, static edges.
     ExecControls.tsx       Portaled execution action group (header) and execution settings panel (Settings section).
-    NodePanel.tsx          Task configuration and detail panel: spec preview, lead-stage toggle, locked preferences, placement, gate creation (rendered in Chat Task tab).
+    NodePanel.tsx          Task configuration and detail panel: spec preview, lead-stage toggle, locked preferences, placement, gate creation.
     PlacementEditor.tsx    Placement editor: 4 local modes, 2 remote modes, creation metadata.
     LanesPanel.tsx         Workspace lanes management: runtime state, diffs, and worktree removal.
     ActivityPanel.tsx      Real-time event timeline (single shared SSE), filters, technical evidence inspection.
-    ChatPanel.tsx          Shared Run group / Task-private messages, explicit @Task sends, mobile list/detail navigation.
+    ChatPanel.tsx          Shared Run group / Task-private messages, explicit @Task sends, embedded timeline mode for Sidebar.
     MailboxChecks.tsx      Separate bounded check evidence, delivery/replay groups, and raw receipt details.
     HarnessAvatar.tsx      Local official harness marks, source/license notices, and neutral unknown fallback.
     useScopedChatState.ts  Scoped drafts and receipts; shared per-Task busy/unknown guards across chat views.
     GatePanel.tsx          Approval gate buttons and cross-lane integration gates.
+    GateInspector.tsx      Contextual right-side Gate inspector.
     RunPicker.tsx          Workspace-scoped Run selector, pagination cursor, and exact Run lookup.
-    WorkerPanel.tsx        Fleet view: liveness, output reader, search, download, stop/abandon/focus.
+    WorkerPanel.tsx        Fleet view: liveness, output reader, L1 native Resume controls, search, download, stop/abandon/focus.
+    WorkerOutputDockView.tsx Bottom-dock & sidebar raw output viewer over `OutputTail` SSE.
     RequestAuditPanel.tsx  Mutation request audit table with live request-show receipts.
   harness.ts               Reactive state store for preferences, hydrating from /api/config.
   placement.ts             Client-side placement grammar and lane preflight validation.
   layout.ts                Dagre layered layouts (LR/TB, 280x120 nodes).
   types.ts / api.ts        Frontend data contracts and API client.
-  workbench.css            Sectional workbench layout, 7-app dock navigation, header, operational sections, and responsive breakpoints.
-  chat-dock.css            Persistent right chat dock, message bubbles, thread navigation, and composer layout.
-  graph-motion.css         Task node styling (280x120), static edges, and scoped executing dot motion guards.
+  styles/ide-workbench.css 4-zone dual-theme (Light/Dark) monochrome IDE workbench styles & compact chat styling.
+  components/sidebar-app.css Streamlined sidebar layout, container queries, and dark/light contrast tokens.
+  components/node-session.css Collapsible Session tool cards and timeline styles.
 
 scripts/
+  build-plugin-panel.mjs   Builds SPA (`VITE_BASE=./`) into `plugin/panel/` and bundles embedded server into `plugin/server/index.mjs`.
+  build-plugin.mjs         Stages self-contained zero-dep Orca plugin distribution bundle into `dist-plugin/`.
   build-binary.mjs         Bundles Vite web assets + server into a standalone Bun binary.
   build-npm.mjs            Builds web assets and compiles server with esbuild for npm package.
   build-all-binaries.sh    Cross-compiles standalone binaries for all supported platforms.

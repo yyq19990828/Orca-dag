@@ -11,8 +11,11 @@
 //    (such as `agent.resume` in M3).
 // 4. Keep `orchestration-panel.probe` & `orchestration-panel.status` available
 //    for diagnostics and sidebar HTML panel integration.
+import { spawn, type ChildProcess } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { lstat, readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { OrcaWorkerApi } from 'orca/worker'
 import type {
   ActivitySubscribeRequest,
@@ -34,6 +37,66 @@ const FLUSH_DEBOUNCE_MS = 100
 const INBOX_WAIT_MS = 10_000
 /** Orca caps panels.post at 256 KiB; stay comfortably below it. */
 const MAX_PANEL_POST_BYTES = 220 * 1024
+const MANAGED_START_TIMEOUT_MS = 8_000
+const MANAGED_POLL_INTERVAL_MS = 80
+
+interface BundledAssets {
+  serverEntry: string
+  panelDir: string | null
+}
+
+function resolveBundledAssets(): BundledAssets | null {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url))
+    for (const root of [here, dirname(here)]) {
+      const serverEntry = join(root, 'server', 'index.mjs')
+      if (existsSync(serverEntry)) {
+        const panelDir = join(root, 'panel')
+        return {
+          serverEntry,
+          panelDir: existsSync(join(panelDir, 'index.html')) ? panelDir : null,
+        }
+      }
+    }
+  } catch {
+    // Non-file URL or test environment without bundled server.
+  }
+  return null
+}
+
+interface ManagedServerEntry {
+  child: ChildProcess
+  workspacePath: string
+  startedAt: number
+  exited: boolean
+  lastStderr: string
+}
+
+function buildManagedServerEnv(workspacePath: string, panelDir: string | null): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env }
+  for (const key of Object.keys(env)) {
+    if (
+      key === 'PORT' ||
+      key === 'ORCA_DAG_WEB_URL' ||
+      key === 'ORCA_TERMINAL_HANDLE' ||
+      key === 'ORCA_PANE_KEY' ||
+      key === 'ORCA_TAB_ID' ||
+      key === 'ORCA_AGENT_PANE' ||
+      key.startsWith('ORCA_AGENT_LAUNCH') ||
+      key.startsWith('ORCA_AGENT_HOOK_') ||
+      key === 'ORCA_OPENCODE_AGENT'
+    ) {
+      delete env[key]
+    }
+  }
+  env.WORKSPACE_DIR = workspacePath
+  env.PORT = '0'
+  env.NO_OPEN = '1'
+  env.ORCA_DAG_NO_SKILL = '1'
+  env.ORCA_DAG_NO_WORKSPACE_INIT = '1'
+  if (panelDir) env.ORCA_DAG_WEB_DIR = panelDir
+  return env
+}
 
 interface EndpointFile {
   version: 1
@@ -176,9 +239,12 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   let disposed = false
   const connections = new Map<string, ViewerConnection>()
+  const managedServers = new Map<string, ManagedServerEntry>()
+  const startingServers = new Map<string, Promise<ViewerConnection | null>>()
   const activityStreams = new Map<string, AbortController>()
   const outputStreams = new Map<string, AbortController>()
   let focusedWorkspaceId: string | null = null
+  const bundledAssets = resolveBundledAssets()
 
   const state: RingState = {
     activatedAt: Date.now(),
@@ -563,10 +629,102 @@ export default function activate(orca: OrcaWorkerApi): void {
     void discoverViewers()
   })
 
+  function stopManagedServer(workspacePath: string): void {
+    const entry = managedServers.get(workspacePath)
+    if (!entry) return
+    managedServers.delete(workspacePath)
+    if (!entry.exited && entry.child.pid) {
+      try {
+        entry.child.kill('SIGTERM')
+      } catch {
+        // Already exited.
+      }
+    }
+  }
+
+  async function ensureManagedViewer(
+    workspacePath: string,
+    workspaceListId: string | null,
+  ): Promise<ViewerConnection | null> {
+    if (disposed || !bundledAssets) return null
+    const already = connections.get(workspacePath)
+    if (already?.connected) return already
+
+    // Check once more if an external viewer is already live on disk.
+    const existingEp = await readLocalEndpoint(workspacePath)
+    if (existingEp) {
+      await connectViewer(workspacePath, workspaceListId, existingEp)
+      const connected = connections.get(workspacePath)
+      if (connected?.connected) return connected
+    }
+
+    const inFlight = startingServers.get(workspacePath)
+    if (inFlight) return await inFlight
+
+    const promise = (async (): Promise<ViewerConnection | null> => {
+      if (disposed) return null
+      // Clean up any stale exited child reference first.
+      const prev = managedServers.get(workspacePath)
+      if (prev && !prev.exited) {
+        stopManagedServer(workspacePath)
+      }
+
+      orca.log(`starting embedded viewer server for ${workspacePath}`)
+      const child = spawn(process.execPath, [bundledAssets.serverEntry], {
+        cwd: workspacePath,
+        env: buildManagedServerEnv(workspacePath, bundledAssets.panelDir),
+        stdio: ['ignore', 'ignore', 'pipe'],
+      })
+      const entry: ManagedServerEntry = {
+        child,
+        workspacePath,
+        startedAt: Date.now(),
+        exited: false,
+        lastStderr: '',
+      }
+      managedServers.set(workspacePath, entry)
+      child.stderr?.on('data', (chunk: Buffer) => {
+        entry.lastStderr = (entry.lastStderr + chunk.toString('utf8')).slice(-512)
+      })
+      child.once('exit', (code, signal) => {
+        entry.exited = true
+        if (managedServers.get(workspacePath) === entry) {
+          managedServers.delete(workspacePath)
+        }
+        if (!disposed) {
+          orca.log(
+            `embedded viewer exited for ${workspacePath} (code=${String(code)}, signal=${String(signal)})${
+              entry.lastStderr.trim() ? `: ${entry.lastStderr.trim()}` : ''
+            }`,
+          )
+        }
+      })
+
+      const deadline = Date.now() + MANAGED_START_TIMEOUT_MS
+      while (!disposed && !entry.exited && Date.now() < deadline) {
+        const ep = await readLocalEndpoint(workspacePath)
+        if (ep && ep.pid === child.pid) {
+          await connectViewer(workspacePath, workspaceListId, ep)
+          const conn = connections.get(workspacePath)
+          if (conn?.connected) return conn
+        }
+        await new Promise((r) => setTimeout(r, MANAGED_POLL_INTERVAL_MS))
+      }
+      if (!entry.exited) stopManagedServer(workspacePath)
+      return null
+    })().finally(() => {
+      startingServers.delete(workspacePath)
+    })
+
+    startingServers.set(workspacePath, promise)
+    return await promise
+  }
+
   orca.events.on('workspace.removed', (payload) => {
     state.workspaceCount += 1
-    if (payload.path && connections.has(payload.path)) {
-      disconnectViewer(payload.path)
+    if (payload.path) {
+      if (connections.has(payload.path)) disconnectViewer(payload.path)
+      stopManagedServer(payload.path)
     }
     orca.log(`workspace.removed ${payload.workspaceId}`)
   })
@@ -674,6 +832,11 @@ export default function activate(orca: OrcaWorkerApi): void {
     pluginApi: orca.api,
     grantedCapabilities: [...orca.grantedCapabilities],
     viewers: connectionSummary(),
+    managedServers: [...managedServers.values()].map((m) => ({
+      workspacePath: m.workspacePath,
+      pid: m.child.pid ?? null,
+      startedAt: m.startedAt,
+    })),
     counts: {
       status: state.statusCount,
       tools: state.toolCount,
@@ -785,11 +948,34 @@ export default function activate(orca: OrcaWorkerApi): void {
   async function resolveActiveViewer(): Promise<ViewerConnection | null> {
     if (connections.size === 0) await discoverViewers()
     const live = [...connections.values()].filter((c) => c.connected)
-    if (live.length === 0) return null
     if (focusedWorkspaceId) {
-      const match = live.find((c) => c.workspaceListId === focusedWorkspaceId)
-      if (match) return match
+      const focusedMatch = live.find((c) => c.workspaceListId === focusedWorkspaceId)
+      if (focusedMatch) return focusedMatch
     }
+
+    // Self-contained fallback: automatically start an isolated embedded viewer
+    // server for the focused (or first local) Orca workspace when no external
+    // viewer terminal is running for it.
+    if (bundledAssets && orca.host.has('workspace.list')) {
+      try {
+        if (!focusedWorkspaceId && orca.host.has('workspace.readContext')) {
+          const ctx = await orca.host.call('workspace.readContext', {}).catch(() => null)
+          if (ctx?.workspaceId) focusedWorkspaceId = ctx.workspaceId
+        }
+        const { workspaces } = await orca.host.call('workspace.list', {})
+        const locals = workspaces.filter((ws) => (ws.hostId === 'local' || ws.hostId === null) && Boolean(ws.path))
+        const target =
+          (focusedWorkspaceId && locals.find((ws) => ws.id === focusedWorkspaceId)) ||
+          (live.length === 0 ? locals[0] : undefined)
+        if (target) {
+          const started = await ensureManagedViewer(target.path, target.id)
+          if (started) return started
+        }
+      } catch {
+        // Fall through to any other connected viewer below.
+      }
+    }
+
     return live[0] ?? null
   }
 
@@ -926,14 +1112,14 @@ export default function activate(orca: OrcaWorkerApi): void {
       }
     }
 
-    const execute = async (forceTokenRefresh: boolean): Promise<BridgeApiResponse> => {
+    const execute = async (target: ViewerConnection, forceTokenRefresh: boolean): Promise<BridgeApiResponse> => {
       const headers: Record<string, string> = {}
       if (method !== 'GET') {
         headers['content-type'] = 'application/json'
-        const token = await ensureMutationToken(conn, forceTokenRefresh)
+        const token = await ensureMutationToken(target, forceTokenRefresh)
         if (token) headers['x-orca-dag-token'] = token
       }
-      const res = await fetch(`http://127.0.0.1:${conn.endpoint.port}${url}`, {
+      const res = await fetch(`http://127.0.0.1:${target.endpoint.port}${url}`, {
         method,
         headers,
         body: method !== 'GET' && req.body !== undefined ? JSON.stringify(req.body) : undefined,
@@ -953,12 +1139,26 @@ export default function activate(orca: OrcaWorkerApi): void {
     }
 
     try {
-      const first = await execute(false)
+      const first = await execute(conn, false)
       if (method !== 'GET' && first.status === 403 && first.body.code === 'invalid_token') {
-        return await execute(true)
+        return await execute(conn, true)
       }
       return first
     } catch (err) {
+      // If an external viewer terminal just closed, drop the dead endpoint and
+      // fail over seamlessly to the plugin's own embedded viewer server.
+      const causeCode = (err as { cause?: { code?: string } })?.cause?.code
+      if (!ctx.signal.aborted) {
+        disconnectViewer(conn.workspacePath)
+        const recovered = await resolveActiveViewer()
+        if (recovered && (method === 'GET' || causeCode === 'ECONNREFUSED')) {
+          try {
+            return await execute(recovered, false)
+          } catch {
+            // Fall through to structured 502 error.
+          }
+        }
+      }
       return {
         status: 502,
         ok: false,
@@ -1052,6 +1252,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     for (const c of outputStreams.values()) c.abort()
     outputStreams.clear()
     for (const key of [...connections.keys()]) disconnectViewer(key)
+    for (const path of [...managedServers.keys()]) stopManagedServer(path)
   }
 
   orca.log('orchestration-panel worker activated')

@@ -37,23 +37,23 @@ body {
 }
 
 .conn--ok {
-  color: #58ab6b;
-  border-color: #bfe4c7;
-  background: #eef8f0;
+  color: var(--st-completed);
+  border-color: color-mix(in oklab, var(--st-completed), transparent 55%);
+  background: var(--st-completed-bg);
 }
 
 .conn--bad {
-  color: var(--coral);
-  border-color: #f6c7c1;
-  background: var(--blush-wash);
+  color: var(--st-failed);
+  border-color: color-mix(in oklab, var(--st-failed), transparent 55%);
+  background: var(--st-failed-bg);
 }
 
 /* reachable but view-only (readiness gate): steady amber, no alarm */
 
 .conn--warn {
-  color: #b37f16;
-  border-color: #eedeb4;
-  background: #fdf4e1;
+  color: var(--st-dispatched);
+  border-color: color-mix(in oklab, var(--st-dispatched), transparent 55%);
+  background: var(--st-dispatched-bg);
 }
 
 @media (max-width: 620px) {
@@ -243,7 +243,7 @@ body {
 .gate__badge {
   font-family: var(--font-display);
   font-size: 14px;
-  color: #7b5cb8;
+  color: var(--st-blocked);
   letter-spacing: 0.5px;
   margin-bottom: 7px;
 }
@@ -352,9 +352,9 @@ body {
 }
 
 .decision-dialog--danger .decision-dialog__mark {
-  color: #b5483e;
-  background: #fdf0ee;
-  border-color: var(--coral);
+  color: var(--st-failed);
+  background: var(--st-failed-bg);
+  border-color: color-mix(in oklab, var(--st-failed), transparent 55%);
 }
 
 .decision-dialog__message {
@@ -383,13 +383,11 @@ body {
   width: 100%;
   min-height: 42px;
   padding: 9px 12px;
-  color: var(--ink);
-  background: rgba(255, 255, 255, 0.72);
-  border: 1px solid var(--line-strong);
+  color: var(--fg-primary, var(--ink));
+  background: var(--bg-panel, var(--paper));
+  border: 1px solid var(--border-control, var(--line-strong));
   border-radius: 6px;
-  outline: none;
   font: 14px var(--font-body);
-  
 }
 
 .decision-dialog__field input:focus {
@@ -495,22 +493,22 @@ body {
   gap: 10px;
   margin: 0 0 15px;
   padding: 9px 10px;
-  border: 1px solid rgba(81, 71, 184, 0.42);
+  border: 1px solid color-mix(in oklab, var(--st-blocked), transparent 55%);
   border-radius: 6px;
-  background: rgba(239, 237, 255, 0.72);
+  background: var(--st-blocked-bg);
 }
 
 .node-panel__lead-state {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  color: #5147b8;
+  color: var(--st-blocked);
   font-family: var(--font-display);
   font-size: 14px;
 }
 
 .node-panel__lead-state > span:first-child {
-  color: #d49b23;
+  color: var(--st-dispatched);
   font-size: 18px;
   line-height: 0.9;
 }
@@ -530,10 +528,10 @@ body {
 
 .node-panel__lead-mark,
 .node-panel__lead-clear {
-  border: 1px solid #5147b8;
+  border: 1px solid color-mix(in oklab, var(--st-blocked), transparent 50%);
   border-radius: 6px;
   background: var(--paper);
-  color: #5147b8;
+  color: var(--st-blocked);
   cursor: pointer;
   font-family: var(--font-display);
   font-size: 14px;
@@ -561,22 +559,22 @@ body {
   margin: -5px 0 13px;
   padding: 7px 9px;
   border-radius: 6px;
-  background: rgba(240, 185, 78, 0.15);
+  background: var(--st-dispatched-bg);
   color: var(--ink-soft);
   font-size: 14px;
   line-height: 1.45;
 }
 
 .node-panel__history--warn {
-  background: rgba(234, 107, 94, 0.12);
-  color: #a44338;
+  background: var(--st-failed-bg);
+  color: var(--st-failed);
 }
 
 .node-panel__lock {
   margin-top: -5px;
-  background: rgba(81, 71, 184, 0.1);
-  border: 1px solid rgba(81, 71, 184, 0.25);
-  color: #5147b8;
+  background: var(--st-blocked-bg);
+  border: 1px solid color-mix(in oklab, var(--st-blocked), transparent 55%);
+  color: var(--st-blocked);
   font-family: var(--font-body);
 }
 
@@ -750,7 +748,7 @@ body {
 }
 
 .chat__conversation-title span {
-  color: #5147b8;
+  color: var(--st-blocked);
   font-size: var(--chat-note-size);
 }
 
@@ -797,13 +795,13 @@ body {
 
 .chat-message--incoming {
   align-self: flex-start;
-  background: #fff;
+  background: var(--bg-card, var(--paper));
 }
 
 .chat-message--outgoing {
   align-self: flex-end;
   background: var(--sky-wash);
-  border-color: rgba(62, 123, 166, 0.38);
+  border-color: var(--border-control);
   border-radius: 6px;
 }
 
@@ -812,8 +810,8 @@ body {
 }
 
 .chat-message--worker_done.chat-message--success {
-  border-color: rgba(62, 154, 85, 0.34);
-  background: rgba(235, 247, 238, 0.72);
+  border-color: color-mix(in oklab, var(--st-completed), transparent 55%);
+  background: var(--st-completed-bg);
 }
 
 .chat-message--worker_done.chat-message--error {
@@ -869,7 +867,7 @@ body {
 
 .chat-message__waiting {
   margin-left: 7px;
-  color: #a44338;
+  color: var(--st-failed);
 }
 
 .chat-message__details {
@@ -1406,7 +1404,7 @@ body {
   resize: vertical;
   padding: 12px 14px;
   color: var(--ink);
-  background: #fff;
+  background: var(--bg-card, var(--paper));
   border: 1px solid var(--line-strong);
   border-radius: 6px;
   font: inherit;
@@ -1440,8 +1438,8 @@ body {
 }
 
 .chat ::selection {
-  color: var(--ink);
-  background: color-mix(in srgb, var(--sky) 40%, var(--paper));
+  color: var(--fg-primary, var(--ink));
+  background: color-mix(in oklab, var(--accent) 24%, var(--bg-card));
 }
 
 .chat__composer-idle {
@@ -1453,24 +1451,24 @@ body {
 
 .chat__error {
   margin-bottom: 6px;
-  color: #a44338;
+  color: var(--st-failed);
   font-size: var(--chat-note-size);
   line-height: 1.6;
 }
 
 .chat-message--group {
-  border-color: rgba(62, 123, 166, 0.55);
+  border-color: var(--border-control);
   border-style: double;
   border-width: 1px;
-  background: rgba(214, 233, 245, 0.5);
+  background: var(--bg-elevated, var(--paper-2));
 }
 
 .chat-message__audience {
   padding: 1px 5px;
   border-radius: 6px;
-  color: var(--chat-link-color);
-  background: rgba(123, 183, 224, 0.24);
-  border: 1px solid rgba(62, 123, 166, 0.45);
+  color: var(--fg-primary, var(--ink));
+  background: var(--bg-subtle, var(--paper-3));
+  border: 1px solid var(--border-hairline, var(--line));
   max-width: 100%;
   font-size: 0.875rem;
   overflow-wrap: anywhere;
@@ -1513,17 +1511,16 @@ body {
 }
 
 .node-panel__custom:focus {
-  outline: none;
   border-color: var(--sky);
-  
 }
 
 .node-panel__custom:disabled,
 .node-panel input:disabled {
   opacity: 1;
   cursor: not-allowed;
-  background: #efede6;
-  border-color: var(--line-strong);
+  color: var(--fg-secondary, var(--ink-soft));
+  background: var(--bg-subtle, var(--paper-3));
+  border-color: var(--border-hairline, var(--line-strong));
 }
 
 .node-panel__hint {
@@ -1685,7 +1682,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 
 .node-panel__relation--ready {
-  color: #3e9a55;
+  color: var(--st-completed);
   font-weight: 500;
 }
 
@@ -2138,8 +2135,9 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 
 .inbox__debt {
-  border-color: var(--line-strong);
-  background: #f6f4ee;
+  border-color: var(--border-control, var(--line-strong));
+  background: var(--bg-subtle, var(--paper-3));
+  color: var(--fg-primary, var(--ink));
 }
 
 .inbox__debt::after {
@@ -2197,13 +2195,12 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   font: inherit;
   font-size: 14px;
   color: var(--ink);
-  background: #fff;
+  background: var(--bg-card, var(--paper));
   border: 1px solid var(--line-strong);
   border-radius: 6px;
 }
 
 .inbox__input:focus {
-  outline: none;
   border-color: var(--sky);
 }
 
@@ -2219,14 +2216,14 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   padding: 2px 8px;
   font-family: var(--font-display);
   font-size: 14px;
-  color: #3e9a55;
-  background: #ebf7ee;
-  border: 1px solid var(--meadow);
+  color: var(--st-completed);
+  background: var(--st-completed-bg);
+  border: 1px solid color-mix(in oklab, var(--st-completed), transparent 55%);
   border-radius: 6px;
 }
 
 .exec__done {
-  color: #3e9a55;
+  color: var(--st-completed);
 }
 
 .exec__done .exec__pulse {
@@ -2248,9 +2245,9 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 
 .exec__stop-report--warn {
-  color: #c23b2e;
-  border-color: var(--coral);
-  background: #fdf0ee;
+  color: var(--st-failed);
+  border-color: color-mix(in oklab, var(--st-failed), transparent 55%);
+  background: var(--st-failed-bg);
 }
 
 .exec__stop-unknowns {
@@ -2298,16 +2295,16 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 /* Exit is a liveness observation, not evidence of failure. */
 
 .workers__liveness[data-verdict="live"] {
-  color: #3e9a55;
+  color: var(--st-completed);
 }
 
 .workers__liveness[data-verdict="exited"] {
-  color: #52647a;
+  color: var(--fg-secondary);
 }
 
 .workers__liveness[data-verdict="unverifiable"],
 .workers__liveness:not([data-verdict]) {
-  color: #8a857a;
+  color: var(--st-pending);
 }
 
 .workers__detail {
@@ -2321,8 +2318,9 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  background: #faf8f0;
-  border: 1px solid #e6e1d2;
+  color: var(--fg-primary, var(--ink));
+  background: var(--bg-panel, var(--paper-2));
+  border: 1px solid var(--border-control, var(--line-strong));
   border-radius: 8px;
   padding: 8px;
   margin: 0;
@@ -2331,15 +2329,15 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 
 .workers__warn {
-  color: var(--mustard, #b37f16);
+  color: var(--st-dispatched);
 }
 
 .workers__source {
   font: inherit;
   font-size: 14px;
-  color: #6b6557;
-  background: #faf8f0;
-  border: 1px solid #e6e1d2;
+  color: var(--fg-secondary, var(--ink-soft));
+  background: var(--bg-panel, var(--paper-2));
+  border: 1px solid var(--border-control, var(--line-strong));
   border-radius: 8px;
   padding: 2px 6px;
 }
@@ -2369,7 +2367,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
    fit. */
 
 .workers__qualified {
-  color: #3e9a55;
+  color: var(--st-completed);
 }
 
 .workers__qualified .inbox__meta {
@@ -2388,7 +2386,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 
 .workers__raw {
   font-size: 14px;
-  color: #6b6557;
+  color: var(--fg-secondary, var(--ink-soft));
 }
 
 .workers__raw summary {
@@ -2399,8 +2397,9 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 .workers__rawpre {
   max-height: 240px;
   overflow: auto;
-  background: #faf8f0;
-  border: 1px solid #e6e1d2;
+  color: var(--fg-primary, var(--ink));
+  background: var(--bg-panel, var(--paper-2));
+  border: 1px solid var(--border-control, var(--line-strong));
   border-radius: 8px;
   padding: 8px;
   margin: 4px 0 0;
@@ -2439,21 +2438,21 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 
 .runhealth__chip--ok {
-  color: #3e9a55;
-  border-color: #bfe4c7;
-  background: #eef8f0;
+  color: var(--st-completed);
+  border-color: color-mix(in oklab, var(--st-completed), transparent 55%);
+  background: var(--st-completed-bg);
 }
 
 .runhealth__chip--warn {
-  color: #b37f16;
-  border-color: #eedeb4;
-  background: #fdf4e1;
+  color: var(--st-dispatched);
+  border-color: color-mix(in oklab, var(--st-dispatched), transparent 55%);
+  background: var(--st-dispatched-bg);
 }
 
 .runhealth__chip--bad {
-  color: var(--coral);
-  border-color: #f6c7c1;
-  background: var(--blush-wash);
+  color: var(--st-failed);
+  border-color: color-mix(in oklab, var(--st-failed), transparent 55%);
+  background: var(--st-failed-bg);
 }
 
 .runhealth__flag {
@@ -2462,8 +2461,14 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   line-height: 1;
   padding: 2px 6px;
   border-radius: 9px;
-  background: var(--coral);
-  color: #fff;
+  background: var(--st-failed);
+  color: var(--bg-canvas);
+}
+
+@supports (color: contrast-color(black)) {
+  .runhealth__flag {
+    color: contrast-color(var(--st-failed));
+  }
 }
 
 .runhealth__info-dot {
@@ -2534,7 +2539,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 
 .runhealth__warning--warning {
-  color: #b37f16;
+  color: var(--st-dispatched);
 }
 
 .runhealth__warning--info {
@@ -2568,7 +2573,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 
 .runhealth__removed-warning {
-  color: #b37f16;
+  color: var(--st-dispatched);
 }
 
 .runhealth__removed button {
@@ -2715,9 +2720,9 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
   align-items: baseline;
   margin: 0 0 10px;
   padding: 9px 12px;
-  color: #8a4a12;
-  background: rgba(240, 185, 78, 0.14);
-  border: 1px solid rgba(179, 127, 22, 0.45);
+  color: var(--st-dispatched);
+  background: var(--st-dispatched-bg);
+  border: 1px solid color-mix(in oklab, var(--st-dispatched), transparent 55%);
   border-radius: 6px;
   font-size: var(--chat-note-size);
   line-height: 1.45;
@@ -2765,19 +2770,19 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 
 .chat-message__priority {
-  color: #8a4a12;
-  background: rgba(240, 185, 78, 0.22);
-  border: 1px solid rgba(179, 127, 22, 0.45);
+  color: var(--st-dispatched);
+  background: var(--st-dispatched-bg);
+  border: 1px solid color-mix(in oklab, var(--st-dispatched), transparent 55%);
 }
 
 .chat-message--urgent {
-  border-color: rgba(179, 127, 22, 0.55);
+  border-color: color-mix(in oklab, var(--st-dispatched), transparent 45%);
 }
 
 .chat-message__read {
-  color: #a44338;
-  background: #fdf0ee;
-  border: 1px solid rgba(194, 59, 46, 0.35);
+  color: var(--st-failed);
+  background: var(--st-failed-bg);
+  border: 1px solid color-mix(in oklab, var(--st-failed), transparent 55%);
 }
 
 .chat-message__provenance {
@@ -2846,9 +2851,9 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 .workers__search {
   font: inherit;
   font-size: 14px;
-  color: var(--ink, #4a4754);
-  background: #faf8f0;
-  border: 1px solid #e6e1d2;
+  color: var(--fg-primary, var(--ink));
+  background: var(--bg-panel, var(--paper-2));
+  border: 1px solid var(--border-control, var(--line-strong));
   border-radius: 8px;
   padding: 2px 8px;
   width: 100%;
@@ -3001,9 +3006,9 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 
 .lanes__state[data-state="creating"] {
-  color: #b37f16;
-  border-color: #eedeb4;
-  background: #fdf4e1;
+  color: var(--st-dispatched);
+  border-color: color-mix(in oklab, var(--st-dispatched), transparent 55%);
+  background: var(--st-dispatched-bg);
 }
 
 .lanes__state[data-state="active"] {
@@ -3013,28 +3018,28 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 
 .lanes__state[data-state="integration_required"] {
-  color: #7b5cb8;
-  border-color: var(--lilac);
-  background: #f2edfb;
+  color: var(--st-blocked);
+  border-color: color-mix(in oklab, var(--st-blocked), transparent 55%);
+  background: var(--st-blocked-bg);
 }
 
 .lanes__state[data-state="settled"] {
-  color: #3e9a55;
-  border-color: #bfe4c7;
-  background: #eef8f0;
+  color: var(--st-completed);
+  border-color: color-mix(in oklab, var(--st-completed), transparent 55%);
+  background: var(--st-completed-bg);
 }
 
 .lanes__state[data-state="unverifiable"] {
-  color: var(--coral);
-  border-color: var(--coral);
+  color: var(--st-failed);
+  border-color: color-mix(in oklab, var(--st-failed), transparent 55%);
   border-style: solid;
-  background: #fdece9;
+  background: var(--st-failed-bg);
 }
 
 .lanes__state[data-state="removal_blocked"] {
-  color: #c23b2e;
-  border-color: var(--coral);
-  background: #fdece9;
+  color: var(--st-failed);
+  border-color: color-mix(in oklab, var(--st-failed), transparent 55%);
+  background: var(--st-failed-bg);
 }
 
 .lanes__state[data-state="removed"] {
@@ -3064,9 +3069,9 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 
 .lanes__warning {
-  color: #b3540e;
-  background: #fdf1e3;
-  border: 1px solid #eedeb4;
+  color: var(--st-dispatched);
+  background: var(--st-dispatched-bg);
+  border: 1px solid color-mix(in oklab, var(--st-dispatched), transparent 55%);
   border-radius: 6px;
   padding: 5px 9px;
   font-size: 14px;
@@ -3106,9 +3111,7 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 
 .runpick__exact-input:focus {
-  outline: none;
   border-color: var(--sky);
-  
 }
 
 .runpick__exact-input::placeholder {
@@ -3120,8 +3123,8 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
    `integrated` does and does NOT assert. */
 
 .gate--integration {
-  background: #f2edfb;
-  border-color: var(--lilac);
+  background: var(--st-blocked-bg);
+  border-color: color-mix(in oklab, var(--st-blocked), transparent 55%);
 }
 
 .gate__explain {
@@ -3165,15 +3168,15 @@ body:has(.node-panel__group--agent .doodle-select--open) .doodle-select__opt-hin
 }
 
 .node-panel__relation--ready {
-  color: #327342;
+  color: var(--st-completed);
 }
 
 .conn--ok {
-  color: #387946;
+  color: var(--st-completed);
 }
 
 .conn--warn {
-  color: #87600d;
+  color: var(--st-dispatched);
 }
 
 .node-panel__field {
@@ -3190,7 +3193,7 @@ html { font-size: 16px; }
 
 body { line-height: 1.5; caret-color: var(--sky); }
 
-::selection { background: #cce3ff; color: var(--ink); }
+::selection { background: color-mix(in oklab, var(--accent) 24%, var(--bg-card)); color: var(--fg-primary, var(--ink)); }
 
 :focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
 

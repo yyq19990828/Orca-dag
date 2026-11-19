@@ -67,6 +67,19 @@
   font-variant-numeric: tabular-nums;
 }
 
+@supports (color: contrast-color(black)) {
+  .ops-attention__count {
+    color: var(--orca-primary-foreground, contrast-color(var(--accent, #09090b)));
+  }
+}
+
+@media (forced-colors: active) {
+  .ops-attention__count {
+    border-color: ButtonText;
+    color: var(--accent-fg);
+  }
+}
+
 .ops-attention__count--clear {
   color: var(--st-completed);
   background: var(--st-completed-bg);
@@ -146,9 +159,16 @@
   transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
 }
 
-.ops-attention__action:hover,
-.ops-attention__more-button:hover {
+.ops-attention__action:hover:not(:disabled),
+.ops-attention__more-button:hover:not(:disabled) {
   background: color-mix(in oklab, var(--bg-subtle), var(--fg-primary) 8%);
+  color: var(--fg-primary);
+}
+
+.ops-attention__action:active:not(:disabled),
+.ops-attention__more-button:active:not(:disabled) {
+  background: color-mix(in oklab, var(--bg-subtle), var(--fg-primary) 13%);
+  color: var(--fg-primary);
 }
 
 .ops-attention__action:focus-visible,

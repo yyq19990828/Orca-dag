@@ -1,8 +1,32 @@
-# Light two-area orchestration workbench layout
+# Orchestration Panel Dual-Surface UI Layout
 
 English | [简体中文](ui-layout_zh.md) · [Documentation](README.md)
 
-## Goal and decisions
+## Current Architecture: Dual-Surface IDE Workbench + Compact Orca Sidebar
+
+**Orchestration Panel** (`web/src/main.tsx`) renders two tailored surfaces from one SPA codebase depending on `?view=sidebar`:
+
+1. **Full Workbench Tab (`App.tsx`, `styles/ide-workbench.css`)** — Dual-theme (Light & Dark monochrome Zinc/Obsidian palette following Orca's host theme with manual override) 4-zone IDE workbench:
+   - **Top Header**: Fork-join DAG emblem (`DagBrandMark`) + **Orchestration Panel** title, Run Picker, Run Health badge, Connection indicator, Command Palette (`⌘/Ctrl+K`), Keyboard Shortcuts, Theme toggle, Language toggle (`中 / EN`), and primary `Run` / `Stop` controls.
+   - **Zone A (Left Sidebar Explorer)**: Live Fleet list, Decision Gates list, Coordinator status card, and stage view navigation (`DAG Canvas`, `Status Board`, `Run History`, `Workspaces & Cleanup`, `Execution & Capabilities`).
+   - **Zone B (Center Stage)**: Persistent lazy-loaded React Flow DAG canvas (LR/TB Dagre layout, minimap, parent-lineage toggle, flow-list toggle) or operational views.
+   - **Zone C (Resizable Bottom Dock)**: `Activity Stream`, `Worker Output` (`WorkerOutputDockView` over `OutputTail` SSE), and `Request Ledger`.
+   - **Zone D (Resizable Right Contextual Inspector)**: Gate Inspector (`GateInspector`) or compact `ChatPanel` (`.odag-inspector--compact-chat`) with 4 sibling tabs: **Messages** (monochrome chat bubbles + avatars + unified auto-growing composer), **Session** (`NodeSessionPanel` collapsible live tool cards), **Task** (`NodePanel`), and **Config**.
+2. **Right-Sidebar Companion (`SidebarApp.tsx`, `components/sidebar-app.css`, `?view=sidebar`)** — Streamlined narrow-panel (`320–450px`) surface hosted natively inside Orca's `orchestration-panel` plugin:
+   - **Compact 2-Row Header**: Run Picker, portaled Run/Stop icon button, a **single** `↗ Tab` button (`POST /api/open-tab`, opening or reviving the full Tab in-place), native `<progress>` bar, and horizontal status filter chips.
+   - **3 Flat Primary Tabs**: **Tasks** (compact cards with status glyph, harness badge, and live summary), **Pending** (Gates, worker questions, permission prompts, stop events, and resumable failed workers), and **Live** (recent Run activity rows).
+   - **Single-Task Drill-in Detail**: Back bar with **Focus terminal** and **Resume** (L1 native resume) actions, plus 3 sibling tabs aligned in naming and visual style with the full workbench:
+     - **Messages** (`chat.view.messages`): embeds `<ChatPanel embeddedMessagesOnly />` inside `.odag-inspector--compact-chat`, guaranteeing 100% identical chat bubbles, avatars, recovered briefs, reply quotes, status summary, and unified composer.
+     - **Session** (`ide.inspector.tabSession`): mounts `NodeSessionPanel` for live collapsible tool-call cards.
+     - **Output** (`sb.detailOutput`): mounts `WorkerOutputDockView` for raw terminal/transcript tailing.
+
+---
+
+## Previous Two-Area Workbench Notes (Historical Reference)
+
+English | [简体中文](ui-layout_zh.md) · [Documentation](README.md)
+
+### Goal and decisions
 
 Help an operator answer, in order: what is happening, what needs my decision,
 which task or worker is involved, and what evidence supports the state.

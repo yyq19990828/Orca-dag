@@ -75,7 +75,14 @@
   cursor: pointer;
 }
 
-.odag-session__raw-btn:hover {
+.odag-session__raw-btn:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 6%);
+  color: var(--fg-primary);
+  border-color: var(--fg-tertiary);
+}
+
+.odag-session__raw-btn:active:not(:disabled) {
+  background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 11%);
   color: var(--fg-primary);
   border-color: var(--fg-tertiary);
 }
@@ -350,4 +357,12 @@
   font-size: var(--text-xs);
   cursor: pointer;
   box-shadow: 0 2px 8px color-mix(in oklab, var(--fg-primary), transparent 85%);
+}
+
+.odag-session__jump:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 6%);
+}
+
+.odag-session__jump:active:not(:disabled) {
+  background: color-mix(in oklab, var(--bg-card), var(--fg-primary) 11%);
 }

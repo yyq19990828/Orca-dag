@@ -49,7 +49,9 @@ viewer 作为一个具有直接控制 Orca 运行时能力的管理面进程，�
 |---|---|---|---|
 | `GET` | `/api/session` | 无 | 获取当前进程的 mutation token 以及自定义命令启用状态（响应头包含 `Cache-Control: no-store`）。 |
 | `GET` | `/api/readiness` | 无 | 获取 CLI 及其构建版本、目标运行时版本/状态、工作区信息及执行权限；不可执行时附上恢复原因。 |
-| `GET` | `/api/capabilities` | 无 | 返回运行时就绪状态、原始能力声明及识别后的编排支持状态（公共契约 1 即 `orchestration.contract.v1`、运行时协议 3、联盟生命周期结算协议 3、控制邮件协议 2，以及 `orchestration.federation-lifecycle-settlement.v1`）；包括自动释放、keep-open、隐式 Run 能力声明、保留绑定、turn-stop 报告和立即返回的 ask 回执。能力声明不会让 viewer 隐式创建 Run。 |
+| `GET` | `/api/capabilities` | 无 | 返回运行时就绪状态、原始能力声明、识别后的编排支持状态（含 1.4.263 的 `orchestration.worker-stop-helpers.v1`、`orchestration.peer-mail.v1`、`orchestration.remote-owned-workers.v1`），以及原生伴生插件 `plugin` 连接状态。 |
+| `GET` | `/api/accounts` | 无 | 只读查询各 harness 的订阅/登录状态与配额使用率，供启动前预检提示。 |
+| `POST` | `/api/open-tab` | `{ hash?: string }` | 在 Orca 中打开或复用完整 **Orchestration Panel** 工作台标签页；若已有标签页指向已关闭端口，则自动探测 `/api/health` 并原地 `orca goto` 复活。 |
 | `GET` | `/api/run-health?run=<id>` | `run` (查询参数): Run ID | 返回归属状态（`viewer_coordinator / viewer_coordinator_other_run / external_coordinator / unbound / unverifiable`）、coordinator 句柄、按来源划分的计数、警告与可空的 `health.removedWork` 摘要。 |
 | `GET` | `/api/dag?run=<id>` | `run`: Run ID | 获取指定 Run 的完整 DAG 结构，包括 `{ runId, nodes, edges, hierarchy, gates, readyWave, readiness, generatedAt }`。 |
 | `GET` | `/api/runs` | 无 | 列出任务创建者身份严格匹配当前工作区（携带 `::${workspaceDir}@@` 标记）的 Run 列表，外加当前/已配置的空 Run。 |
@@ -100,6 +102,10 @@ viewer 作为一个具有直接控制 Orca 运行时能力的管理面进程，�
 | `POST` | `/api/session-bindings/:dispatchId/probe` | `{ runId: string }` | 按需向 provider 探测该 Dispatch 已绑定的 session 状态；结果仅为观测数据，绝不作为 Task 结算依据。 |
 | `POST` | `/api/workers/:dispatchId/resolve-blocked` | `{ runId, result, acknowledgeUnknownProvider: true, coordinatorControl? }` | 将人工核对结果写入已退出 worker 对应的受阻任务，使任务落定；原 Dispatch 保持失败状态。未在当前活跃调度下时需要 `coordinatorControl`。 |
 | `GET` | `/api/workers/:dispatchId/output?run=<id>` | `?run=<id>&source=auto/terminal/transcript&cursor=&limit=` | 分页获取指定 worker 的有界输出日志（限制 1–200），必须显式提供 `run` 作用域。 |
+| `GET` | `/api/workers/:dispatchId/output/stream?run=<id>` | `run`: Run ID | 服务端统一 `OutputTailManager` SSE 流（`init`、`delta`、`liveTool`、`status`、`drained`），复用单条上游 `worker-read` 轮询并由伴生插件 Hook 提前唤醒。 |
+| `GET` | `/api/workers/:dispatchId/resume-preview?run=<id>` | `run`: Run ID | 预检已退出本机已验证 worker 的 L1 原生会话恢复资格（结合 `sessions.json` 绑定与插件 `workspace.list`/`agent.listSessions` 发现）。 |
+| `POST` | `/api/workers/:dispatchId/resume` | `{ runId, sessionId?, coordinatorControl? }` | 通过伴生插件调用 Orca 原生 `agent.resume` 并经 `worker-start --terminal --retry-of` 绑定新 Dispatch，全流程写入 `sessions.json` `resumeAttempts`。 |
+| `POST` | `/api/workers/:dispatchId/permission` | `{ runId, promptId, decision: "approve"\|"deny", reason?, coordinatorControl? }` | 在 Orca ≥ 1.4.263 上对挂起的 Worker 权限弹窗进行单次放行或拒绝（`orchestration approve` / `deny`）。 |
 | `POST` | `/api/workers/:dispatchId/stop` | `:dispatchId`: Dispatch ID | 停止一个经正面证实存活的 Dispatch。操作前重新读取 `worker-show` 并记录请求 ID；若通信丢失返回 `502 response_lost` 与请求 ID。 |
 | `POST` | `/api/workers/:dispatchId/abandon` | `:dispatchId`: Dispatch ID | 针对已退出或结果未知的尝试调用 `worker-abandon` 隔离编排权限；若 Orca 能证明 worker 仍存活则以 `abandon_refused` 拒绝。 |
 | `POST` | `/api/workers/:dispatchId/focus` | `:dispatchId`: Dispatch ID | 聚焦到本地 worker 所在的终端（`terminal switch`）；必须具备新鲜的 `agentWait` 证据，否则禁用。 |
@@ -119,7 +125,18 @@ viewer 作为一个具有直接控制 Orca 运行时能力的管理面进程，�
 | `GET` | `/api/environments/:envId/projects` | `:envId`: 环境标识符 | 获取远程环境上可见的项目分组列表。 |
 | `GET` | `/api/config` | 无 | 读取当前工作区的偏好配置（`.orca-dag/config.json`）。 |
 | `PUT` | `/api/config` | 合并配置对象 | 合并并更新当前工作区的偏好配置。 |
-| `GET` | `/api/health` | 无 | 基础服务健康检查接口，返回工作区物理路径。 |
+| `GET` | `/api/health` | 无 | 基础服务健康检查接口，返回 `{ ok, workspace, worktree }`。 |
+
+### 原生伴生插件桥接路由（`/api/plugin/*`）
+
+以下路由仅接受存于 `0o600` `<workspace>/.orca-dag/endpoint.json` 中的独立进程级令牌 `x-orca-plugin-token`（浏览器 SPA 与侧边栏代理禁止访问 `/api/plugin/*`）：
+
+| 方法 | 路由路径 | 参数与请求体说明 | 功能语义与行为规范 |
+|---|---|---|---|
+| `POST` | `/api/plugin/hello` | `{ pluginId, version, hostApiMinor, grantedCapabilities, workspacePath, workspaceId }` | 注册运行中的 `orchestration-panel` 伴生插件并刷新连接心跳。 |
+| `POST` | `/api/plugin/events` | `{ events: [...] }` | 接收有界批量的 `agent.status.changed`、只读 `agent.tool.after`（仅存内存环形缓冲，绝不落盘 `activity.jsonl`）与 `agent.prompt.before`，并唤醒 `OutputTailManager`。 |
+| `GET` | `/api/plugin/inbox` | 无 | 长轮询待执行的 viewer → plugin 指令（`workspace.list`、`agent.listSessions`、`agent.resume`、`notification.show`、`statusBar.update`）。 |
+| `POST` | `/api/plugin/receipts/:commandId` | `{ ok, result?, error? }` | 回传对应指令 ID 的执行结果或错误回执。 |
 
 ### 指导消息投递、恢复与后续任务生命周期
 

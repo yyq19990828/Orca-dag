@@ -6388,10 +6388,20 @@ interface OrcaBrowserTabRow {
   id?: string;
   url?: string;
   title?: string;
+  loadError?: string | null;
 }
 
 function isLoopbackHost(hostname: string): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
+}
+
+async function isLoopbackOriginAlive(origin: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${origin}/api/health`, { signal: AbortSignal.timeout(400) });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -6399,16 +6409,19 @@ function isLoopbackHost(hostname: string): boolean {
  *
  * Reuses an existing tab in the same worktree whose URL matches this viewer
  * origin (or an already-open local dev tab titled "Orchestration Panel") rather
- * than spawning duplicates. When a `hash` deep-link is supplied, navigates the
- * reused tab to that hash before focusing it.
+ * than spawning duplicates. If a previous Orchestration Panel tab points at a
+ * dead port (e.g. a closed dev terminal or earlier embedded-server port), it
+ * navigates that tab to the current live `baseUrl` in-place.
  */
 export async function openOrcaViewerTab(opts: {
   baseUrl: string;
   hash?: string;
   worktree?: string;
   runOrcaFn?: typeof runOrca;
+  isOriginAliveFn?: (origin: string) => Promise<boolean>;
 }): Promise<OpenViewerTabResult> {
   const execOrca = opts.runOrcaFn ?? runOrca;
+  const checkOriginAlive = opts.isOriginAliveFn ?? isLoopbackOriginAlive;
   const targetOrigin = new URL(opts.baseUrl).origin;
   const targetPort = new URL(opts.baseUrl).port;
   const normalizedBase = opts.baseUrl.replace(/\/+$/, "");
@@ -6429,8 +6442,8 @@ export async function openOrcaViewerTab(opts: {
     }
   }
 
-  const findExisting = (): { pageId: string; origin: string; url: string } | null => {
-    let fallbackDevMatch: { pageId: string; origin: string; url: string } | null = null;
+  const findExisting = (): { pageId: string; origin: string; url: string; sameOrigin: boolean; loadError: boolean } | null => {
+    let fallbackMatch: { pageId: string; origin: string; url: string; sameOrigin: boolean; loadError: boolean } | null = null;
     for (const tab of tabs) {
       const pageId =
         (typeof tab.browserPageId === "string" && tab.browserPageId) ||
@@ -6445,21 +6458,31 @@ export async function openOrcaViewerTab(opts: {
         continue;
       }
       if (!isLoopbackHost(parsed.hostname)) continue;
+      const hasErr = Boolean(tab.loadError);
       if (parsed.origin === targetOrigin || (targetPort && parsed.port === targetPort)) {
-        return { pageId, origin: parsed.origin, url: tab.url };
+        return { pageId, origin: parsed.origin, url: tab.url, sameOrigin: true, loadError: hasErr };
       }
       const title = typeof tab.title === "string" ? tab.title.trim() : "";
-      if (!fallbackDevMatch && (title === "Orchestration Panel" || title === "Orca DAG Viewer")) {
-        fallbackDevMatch = { pageId, origin: parsed.origin, url: tab.url };
+      if (!fallbackMatch && (title === "Orchestration Panel" || title === "Orca DAG Viewer")) {
+        fallbackMatch = { pageId, origin: parsed.origin, url: tab.url, sameOrigin: false, loadError: hasErr };
       }
     }
-    return fallbackDevMatch;
+    return fallbackMatch;
   };
 
   const existing = findExisting();
   if (existing) {
-    const targetUrl = hash ? `${existing.origin}/${hash}` : existing.url;
-    if (hash && existing.url !== targetUrl) {
+    let activeOrigin = existing.origin;
+    let forceNavigate = false;
+    if (!existing.sameOrigin) {
+      const alive = !existing.loadError && (await checkOriginAlive(existing.origin));
+      if (!alive) {
+        activeOrigin = normalizedBase;
+        forceNavigate = true;
+      }
+    }
+    const targetUrl = hash ? `${activeOrigin}/${hash}` : forceNavigate ? defaultUrl : existing.url;
+    if (forceNavigate || (hash && existing.url !== targetUrl)) {
       try {
         await execOrca(["goto", "--page", existing.pageId, "--url", targetUrl]);
       } catch {

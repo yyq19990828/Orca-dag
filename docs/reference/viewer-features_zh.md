@@ -6,9 +6,12 @@
 
 本参考文档对 orca-dag viewer 的核心特性进行分类梳理，涵盖界面呈现、执行调度、多 agent 与模型支持、工作树隔离、监控审计及双语本地化规范。关于逐步操作流程请参考[操作教程](../tutorials/viewer-operations_zh.md)，底层版本门槛请参考[兼容性矩阵](compatibility_zh.md)。
 
-## 分节式工作台与 DAG 可视化
+## 双形态工作台、原生插件与 DAG 可视化
 
-- **现代分节式工作台**：采用深蓝导航与清晰 1px 边框（`#dbe2ea`、`#d8e1eb`）的低噪现代化工作台（`workbench.css`、`styles.css`），配合本地系统无衬线字体，完全取代旧有纸张与蜡笔手绘风格及 SVG 湍流滤镜。
+- **完整标签页工作台（四区双主题 IDE 布局）**：高克制黑白灰深浅双主题 IDE 工作台（`styles/ide-workbench.css`，自动跟随 Orca 宿主主题并支持手动切换），配备自定义分叉汇聚 DAG 品牌图标（`DagBrandMark`）、左侧实时舰队与决策门禁导航、中央常驻 React Flow DAG 画布 / 状态泳道 / Run 历史账本 / 工作区与清理 / 执行与运行时能力、底部可调高坞（`实时事件流`、`Worker 输出`、`变更请求账本`）及右侧上下文检视面板（`消息`、`会话`、`任务`、`启动配置`）。
+- **精简右侧边栏伴生面板（`orchestration-panel` 内置 `SidebarApp`）**：原生 Orca 伴生插件面板（`?view=sidebar`，`320–450px`），内嵌自托管后端服务（`plugin/server/index.mjs`，无需用户手动开启前后端终端）。提供紧凑 Run 进度条与状态筛选、3 个主标签（**任务** / **待处理** / **活动**），任务下钻详情复用与完整工作台完全一致的 `ChatPanel` **消息**聊天气泡、**会话**工具卡片与**输出**流，顶部保留唯一 `↗ 标签页` 入口（`POST /api/open-tab`）打开或原地复活完整标签页。
+- **实时会话工具卡片（`NodeSessionPanel`）**：由服务端统一 `OutputTail` SSE（`/api/workers/:dispatchId/output/stream`）与插件实时 `agent.tool.after` / `agent.status.changed` Hook（仅存内存并按 `callId` 去重）共同驱动，在侧边栏与完整标签页的**会话**页签中实时展示可折叠工具调用卡片与对话轮次。
+- **L1 原生会话恢复**：通过 `GET /api/workers/:dispatchId/resume-preview` 预检已退出本机已验证 Worker 的可恢复会话，经 `POST /api/workers/:dispatchId/resume` 调用 Orca 原生 `agent.resume` 恢复原终端并以 `worker-start --terminal --retry-of` 绑定新 Dispatch，全流程写入 `sessions.json` `resumeAttempts`。
 - **状态感知配色与 Harness 徽章**：节点具有固定尺寸（280×120px，标题 16px，数据 14px），按 `pending / ready / dispatched / completed / failed / blocked` 映射专属颜色，并在节点右上角明确标注其绑定的执行 harness。轮询周期为 2 秒。
 - **DAG 画布懒加载**：`DagView` 在首次进入“任务”图视图时才进行动态懒加载（`React.lazy`），并在挂载后常驻内存，大幅降低首屏渲染负载与内存消耗。
 - **布局即时切换**：视图面板按任务状态、连线、布局分组，提供六类状态计数、连线示例、父子连线开关，以及横向分层（LR）和纵向分层（TB，基于 dagre / Sugiyama）；**重新布局**重置手动拖拽的位置。布局选择保存至工作区配置，旧力导配置迁移为横向，不改变执行设置。
@@ -48,7 +51,8 @@
   - `claude` 通过 `worker-start --model` 传递模型；
   - 本地 POSIX Codex 在当前/已有工作区、运行中的 Orca ≥ 1.4.217 时使用原生模型启动；新建子工作树与新建顶层工作树在本地 Linux、Orca ≥ 1.4.247、CLI ≥ 1.4.247 且 Codex CLI ≥ 0.166.0 时切换至原生启动（`canUseNativeCodexFreshWorktree`），并在 Run `run_44b240b8e6ee` 中完成真实端到端验证。旧版/未知运行时及非 Linux 环境保留预启动绑定路径，远程与 Windows 使用原生路径。详见[Codex 启动边界](../tutorials/viewer-operations_zh.md#codex-原生启动与兼容路径)。
   - **OMP / Antigravity**：自由文本形式的完整 selector，原样作为单个原生 `--model` 参数传递，或省略以使用已配置默认模型。Current 或精确 Existing 放置要求运行中的 Orca 与解析后的 CLI 均 ≥ 1.4.245。创建新建 Git 工作树（`new-child`、`new-top-level`）或任何工作区 Lane 则要求运行中的 Orca 与解析后的 CLI 均 ≥ 1.4.246。仅限本地 Linux；远程环境、macOS 与 Windows 均被拒绝。新建 child 放置必须具有明确正向识别的本地被托管 Git 父工作区；新建 top-level 放置要求精确的仓库标识符（`id:...` 或绝对路径 `path:/...`）指向已验证的本地 Git 仓库（拒绝模糊名称、普通目录、异构主机仓库且不自动 git-init）。工作区 Lane 仅共享工作区：首个 Task 创建或接纳工作区，后续依赖有序 Task 复用精确 Existing。每个 Task 均分配全新的原生 agent 会话与 Dispatch（绝不进行通用终端复用、禁止 `--terminal` 或 `--surface` 覆盖，拒绝后绝不回退）。原生 `worker-start --agent` 严格遵循用户的 Orca Chat/Terminal 设置，viewer 不检查或覆盖偏好。保留 1.4.245 的 Terminal TUI 与 OMP Native Chat 验证基线；1.4.246 上的真实端到端 Run `run_67072641a11a` 验证了 OMP 用户默认 Chat 与 Antigravity 用户默认 Terminal 在 4 条 Lane 下的串行工作区交接（共 8 个 Task、全新原生会话、零清理债务、setup `skip` 与配置默认模型）。不代表已实测新放置下的活动 Stop/重启、Antigravity Chat、Orca 运行时重启、setup `run`/`inherit` 或显式模型新放置。所有非空 effort 均被拒绝，即使同时指定模型。
-- **推理力度（Effort）**：`claude`、`codex` 可选择各自支持的力度，且必须同时设置模型；清空模型会清空 effort。原生启动传递 `--effort`，兼容预启动 Codex 则在启动命令中设置。OMP/Antigravity 拒绝所有非空 effort，即使同时指定模型；已保存的不支持值保持可见并提供明确清除入口，清空模型不会静默删除它们。
+- **推理力度（Effort）**：`claude`、`codex` 以及在运行中 Orca ≥ **1.4.263** 上的 `omp` 均可配合模型选择推理力度。原生启动传递 `--effort`，兼容预启动 Codex 则在启动命令中设置。Antigravity（以及 Orca < 1.4.263 上的 OMP）拒绝所有非空 effort；已保存的不支持值保持可见并提供明确清除入口，清空模型不会静默删除它们。
+- **单次 Worker 权限弹窗审批（Orca ≥ 1.4.263）**：挂起的 Worker 权限请求会在聊天消息、待办聚焦与侧边栏**待处理**中就地展示，在 Orca 设置开启协调器权限审批后可通过 `POST /api/workers/:dispatchId/permission` 执行单次**允许一次**（`approve`）或**拒绝**（`deny`）。
 - **OpenCode 启动模式与原生路由边界**：
   - **自动模式（默认）**：未指定模型且 Orca ≥ 1.4.220 时使用原生 `opencode2`；纯净显式模型（不含 `#variant`、不带 effort、非 lane、非 Windows、当前/已有放置、非 TUI 模式）在运行中 Orca ≥ 1.4.241+ 上使用独立的 Orca 原生 `opencode` 启动器。本地目录发现仅具建议性，不代表执行宿主真实可用。
   - **兼容路径保留**：显式 Mini TUI、Full TUI、模型变体（`#variant`）、推理力度（effort）、lanes、新建工作树（new child/top-level）及远程放置均保留各自适配器与兼容路径。

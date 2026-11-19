@@ -34,6 +34,7 @@ import {
   X,
 } from "lucide-react";
 import { DagBrandMark } from "./components/DagBrandMark";
+import { EmptyRunState } from "./components/EmptyRunState";
 import { fetchDag, fetchRunStatus, fetchWorkers } from "./api";
 import { ActivityPanel } from "./components/ActivityPanel";
 import { BoardView } from "./components/BoardView";
@@ -750,6 +751,16 @@ export default function App() {
     }
   }, [route.view, dockTab, dockOpen, operationFocus, visibleDag, workerRows, runStatus]);
 
+  // Collapse the bottom dock automatically when no Run is selected so the
+  // empty state stays uncluttered without a duplicate "Pick a Run" pane.
+  useEffect(() => {
+    if (!runId) {
+      setDockOpen(false);
+    }
+  }, [runId]);
+
+  const effectiveInspectorOpen = Boolean(runId) && inspectorOpen;
+
   const startedTaskIds = useMemo(
     () => new Set(runId ? startedByRun.current.get(runId) ?? [] : []),
     [runId, startedRevision],
@@ -1033,12 +1044,14 @@ export default function App() {
             gap: 6,
           }}
         >
-          <div className="odag-exec-portal">
+          <div className="odag-exec-portal" hidden={!runId && !runStatus?.running}>
             <span ref={setActionHost} style={{ display: "contents" }} />
             <span ref={setLaunchHost} style={{ display: "contents" }} />
           </div>
 
-          <span className="odag-topbar__sep odag-hide-narrow" aria-hidden="true" />
+          {(runId || runStatus?.running) && (
+            <span className="odag-topbar__sep odag-hide-narrow" aria-hidden="true" />
+          )}
 
           <button
             type="button"
@@ -1084,21 +1097,23 @@ export default function App() {
             <HelpCircle size={16} aria-hidden="true" />
           </button>
 
-          <button
-            type="button"
-            className="odag-btn odag-btn--icon"
-            aria-pressed={inspectorOpen}
-            aria-expanded={inspectorOpen}
-            aria-label={t("ide.inspector.toggle")}
-            title={t("ide.inspector.toggle")}
-            onClick={() => setInspectorOpen((v) => !v)}
-          >
-            {inspectorOpen ? (
-              <PanelRightClose size={16} className="odag-panel-icon" aria-hidden="true" />
-            ) : (
-              <PanelRightOpen size={16} className="odag-panel-icon" aria-hidden="true" />
-            )}
-          </button>
+          {runId && (
+            <button
+              type="button"
+              className="odag-btn odag-btn--icon"
+              aria-pressed={effectiveInspectorOpen}
+              aria-expanded={effectiveInspectorOpen}
+              aria-label={t("ide.inspector.toggle")}
+              title={t("ide.inspector.toggle")}
+              onClick={() => setInspectorOpen((v) => !v)}
+            >
+              {effectiveInspectorOpen ? (
+                <PanelRightClose size={16} className="odag-panel-icon" aria-hidden="true" />
+              ) : (
+                <PanelRightOpen size={16} className="odag-panel-icon" aria-hidden="true" />
+              )}
+            </button>
+          )}
         </div>
       </header>
 
@@ -1216,55 +1231,102 @@ export default function App() {
             </button>
           </nav>
 
-          {/* Coordinator Status Card */}
-          <button
-            type="button"
-            className="odag-coord-box"
-            title={t("ide.coord.hint")}
-            onClick={() => openCoordinatorView("scheduler")}
-            style={{
-              borderColor:
-                !route.task && !route.gate && (dockOpen && dockTab === "scheduler")
-                  ? "var(--accent)"
-                  : undefined,
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
-              <span className="mono" style={{ fontSize: "var(--text-xs)", fontWeight: 600, color: "var(--fg-tertiary)" }}>
-                {t("ide.coord.header")}
-              </span>
-              <span
-                className="mono"
+          {/* Coordinator Status Card & Live Fleet (shown once a Run is selected) */}
+          {runId ? (
+            <>
+              <button
+                type="button"
+                className="odag-coord-box"
+                title={t("ide.coord.hint")}
+                onClick={() => openCoordinatorView("scheduler")}
                 style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 5,
-                  fontSize: "var(--text-xs)",
-                  color: selectedRunExecuting ? "var(--st-completed)" : "var(--fg-secondary)",
+                  borderColor:
+                    !route.task && !route.gate && (dockOpen && dockTab === "scheduler")
+                      ? "var(--accent)"
+                      : undefined,
                 }}
               >
-                <span
-                  className={`odag-pulse-dot${selectedRunExecuting ? " odag-pulse-dot--live" : ""}`}
-                  style={{
-                    background: selectedRunExecuting ? "var(--st-completed)" : "var(--fg-tertiary)",
-                  }}
-                />
-                {coordPhaseLabel}
-              </span>
-            </div>
-            <div className="mono truncate" style={{ fontSize: "var(--text-xs)", color: "var(--fg-secondary)" }}>
-              {coordHandle ? `${t("ide.coord.bound")} · ${coordHandle}` : t("ide.coord.hint")}
-            </div>
-          </button>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+                  <span className="mono" style={{ fontSize: "var(--text-xs)", fontWeight: 600, color: "var(--fg-tertiary)" }}>
+                    {t("ide.coord.header")}
+                  </span>
+                  <span
+                    className="mono"
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 5,
+                      fontSize: "var(--text-xs)",
+                      color: selectedRunExecuting ? "var(--st-completed)" : "var(--fg-secondary)",
+                    }}
+                  >
+                    <span
+                      className={`odag-pulse-dot${selectedRunExecuting ? " odag-pulse-dot--live" : ""}`}
+                      style={{
+                        background: selectedRunExecuting ? "var(--st-completed)" : "var(--fg-tertiary)",
+                      }}
+                    />
+                    {coordPhaseLabel}
+                  </span>
+                </div>
+                <div className="mono truncate" style={{ fontSize: "var(--text-xs)", color: "var(--fg-secondary)" }}>
+                  {coordHandle ? `${t("ide.coord.bound")} · ${coordHandle}` : t("ide.coord.hint")}
+                </div>
+              </button>
 
-          {/* Live Fleet & Gates List */}
-          <div className="odag-fleet-list odag-scroll">
-            {visibleDag.gates.length > 0 && (
-              <>
+              {/* Live Fleet & Gates List */}
+              <div className="odag-fleet-list odag-scroll">
+                {visibleDag.gates.length > 0 && (
+                  <>
+                    <div
+                      className="mono"
+                      style={{
+                        padding: "4px 6px 2px",
+                        fontSize: "var(--text-xs)",
+                        fontWeight: 600,
+                        color: "var(--fg-tertiary)",
+                        display: "flex",
+                        justifyContent: "space-between",
+                      }}
+                    >
+                      <span>{t("ide.fleet.gatesHeader")}</span>
+                      <span>{visibleDag.gates.length}</span>
+                    </div>
+                    {visibleDag.gates.map((gate) => {
+                      const pending = isGatePending(gate);
+                      return (
+                        <button
+                          key={gate.id}
+                          type="button"
+                          className={`odag-fleet-row${route.gate === gate.id ? " is-selected" : ""}`}
+                          onClick={() => selectGate(gate.id)}
+                        >
+                          <Diamond
+                            size={14}
+                            style={{
+                              color: pending ? "var(--st-blocked)" : "var(--st-completed)",
+                              flex: "none",
+                            }}
+                            aria-hidden="true"
+                          />
+                          <div style={{ flex: 1, minInlineSize: 0 }}>
+                            <div className="truncate" style={{ fontSize: "var(--text-sm)", fontWeight: 500 }}>
+                              {gate.question || gate.id}
+                            </div>
+                            <div className="mono truncate" style={{ fontSize: "var(--text-xs)", color: "var(--fg-tertiary)" }}>
+                              {gate.id}
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </>
+                )}
+
                 <div
                   className="mono"
                   style={{
-                    padding: "4px 6px 2px",
+                    padding: "6px 6px 2px",
                     fontSize: "var(--text-xs)",
                     fontWeight: 600,
                     color: "var(--fg-tertiary)",
@@ -1272,81 +1334,49 @@ export default function App() {
                     justifyContent: "space-between",
                   }}
                 >
-                  <span>{t("ide.fleet.gatesHeader")}</span>
-                  <span>{visibleDag.gates.length}</span>
+                  <span>{t("ide.fleet.header")}</span>
+                  <span>{visibleDag.nodes.length}</span>
                 </div>
-                {visibleDag.gates.map((gate) => {
-                  const pending = isGatePending(gate);
+
+                {visibleDag.nodes.map((node) => {
+                  const wm = workerMetaByTask.get(node.id);
+                  const harness = wm?.harness ?? effectiveHarness(node.id);
+                  const ws = wm?.workspace ?? config.laneByTask[node.id] ?? "current";
+                  const isSelected = route.task === node.id && !route.gate;
                   return (
                     <button
-                      key={gate.id}
+                      key={node.id}
                       type="button"
-                      className={`odag-fleet-row${route.gate === gate.id ? " is-selected" : ""}`}
-                      onClick={() => selectGate(gate.id)}
+                      className={`odag-fleet-row${isSelected ? " is-selected" : ""}`}
+                      onClick={() => selectTask(node.id)}
                     >
-                      <Diamond
-                        size={14}
-                        style={{
-                          color: pending ? "var(--st-blocked)" : "var(--st-completed)",
-                          flex: "none",
-                        }}
-                        aria-hidden="true"
-                      />
+                      <HarnessAvatar harness={harness} size={20} />
                       <div style={{ flex: 1, minInlineSize: 0 }}>
                         <div className="truncate" style={{ fontSize: "var(--text-sm)", fontWeight: 500 }}>
-                          {gate.question || gate.id}
+                          {node.label}
                         </div>
                         <div className="mono truncate" style={{ fontSize: "var(--text-xs)", color: "var(--fg-tertiary)" }}>
-                          {gate.id}
+                          {harness} · {ws}
                         </div>
                       </div>
+                      <StatusGlyph status={node.status} size={13} />
                     </button>
                   );
                 })}
-              </>
-            )}
-
+              </div>
+            </>
+          ) : (
             <div
               className="mono"
               style={{
-                padding: "6px 6px 2px",
+                padding: "12px 10px",
                 fontSize: "var(--text-xs)",
-                fontWeight: 600,
                 color: "var(--fg-tertiary)",
-                display: "flex",
-                justifyContent: "space-between",
               }}
             >
-              <span>{t("ide.fleet.header")}</span>
-              <span>{visibleDag.nodes.length}</span>
+              {t("empty.sidebarNoActiveRun")}
             </div>
-
-            {visibleDag.nodes.map((node) => {
-              const wm = workerMetaByTask.get(node.id);
-              const harness = wm?.harness ?? effectiveHarness(node.id);
-              const ws = wm?.workspace ?? config.laneByTask[node.id] ?? "current";
-              const isSelected = route.task === node.id && !route.gate;
-              return (
-                <button
-                  key={node.id}
-                  type="button"
-                  className={`odag-fleet-row${isSelected ? " is-selected" : ""}`}
-                  onClick={() => selectTask(node.id)}
-                >
-                  <HarnessAvatar harness={harness} size={20} />
-                  <div style={{ flex: 1, minInlineSize: 0 }}>
-                    <div className="truncate" style={{ fontSize: "var(--text-sm)", fontWeight: 500 }}>
-                      {node.label}
-                    </div>
-                    <div className="mono truncate" style={{ fontSize: "var(--text-xs)", color: "var(--fg-tertiary)" }}>
-                      {harness} · {ws}
-                    </div>
-                  </div>
-                  <StatusGlyph status={node.status} size={13} />
-                </button>
-              );
-            })}
-          </div>
+          )}
         </aside>
 
         {/* Zone B: Center Stage + Bottom Activity Dock */}
@@ -1468,17 +1498,17 @@ export default function App() {
           <div style={{ flex: 1, minBlockSize: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
             {/* Empty / Loading / Error Read States when no DAG snapshot */}
             {!hasDagSnapshot && route.view !== "runs" && route.view !== "settings" && (
-              <div
-                className="odag-scroll"
-                style={{
-                  flex: 1,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  padding: 24,
-                }}
-              >
-                {waitingForData || readError ? (
+              waitingForData || readError ? (
+                <div
+                  className="odag-scroll"
+                  style={{
+                    flex: 1,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    padding: 24,
+                  }}
+                >
                   <section className="dag-read-state" aria-labelledby="dag-read-title">
                     <h2 id="dag-read-title">
                       {readError
@@ -1516,16 +1546,15 @@ export default function App() {
                       </>
                     )}
                   </section>
-                ) : (
-                  <div className="empty-run" style={{ maxInlineSize: 480, textAlign: "center" }}>
-                    <p className="empty-run__title">{t("empty.pickRunTitle")}</p>
-                    <p className="empty-run__body">
-                      {t("empty.pickRunBody")} <code>orca orchestration run-create</code>{" "}
-                      {t("empty.pickRunBodyTail")}
-                    </p>
-                  </div>
-                )}
-              </div>
+                </div>
+              ) : (
+                <EmptyRunState
+                  hasRuns={(runListRead.count ?? 0) > 0}
+                  cli={readiness?.cli ?? "orca"}
+                  onOpenRuns={() => switchView("runs")}
+                  onOpenSettings={() => switchView("settings")}
+                />
+              )
             )}
 
             {/* View 1: 2D DAG Canvas (retained in DOM once mounted for this Run) */}
@@ -1873,7 +1902,7 @@ export default function App() {
           id="odag-inspector"
           ref={inspectorRef}
           className={`odag-inspector odag-inspector--compact-chat${
-            inspectorOpen ? "" : " odag-inspector--closed"
+            effectiveInspectorOpen ? "" : " odag-inspector--closed"
           }`}
           style={
             {
@@ -1881,8 +1910,8 @@ export default function App() {
             } as React.CSSProperties
           }
           aria-label={t("ide.inspector.toggle")}
-          aria-hidden={!inspectorOpen}
-          {...(!inspectorOpen ? ({ inert: "" } as Record<string, string>) : undefined)}
+          aria-hidden={!effectiveInspectorOpen}
+          {...(!effectiveInspectorOpen ? ({ inert: "" } as Record<string, string>) : undefined)}
         >
           <div
             className="odag-inspector__resize"
@@ -1940,7 +1969,7 @@ export default function App() {
             }}
           >
             <ChatPanel
-              active={inspectorOpen && showChatPanel}
+              active={effectiveInspectorOpen && showChatPanel}
               runId={runId}
               snapshot={activitySnapshot}
               tasks={visibleDag.nodes}
