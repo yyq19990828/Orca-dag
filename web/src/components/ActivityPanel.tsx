@@ -200,14 +200,10 @@ export const ActivityPanel = memo(function ActivityPanel({
         onOpen: () => {
           if (alive && activeToken) setTransport("live");
         },
-        onSnapshot: (raw) => {
+        onSnapshot: (next) => {
           if (!alive || !activeToken) return;
-          if (raw && typeof raw === "object") {
-            applySnapshot(raw as ActivitySnapshot);
-            setTransport("live");
-          } else {
-            setError(t("activity.streamError"));
-          }
+          applySnapshot(next);
+          setTransport("live");
         },
         onError: () => {
           if (!alive || !activeToken) return;
@@ -235,7 +231,7 @@ export const ActivityPanel = memo(function ActivityPanel({
       document.removeEventListener("visibilitychange", onHide);
       stop();
     };
-  }, [applySnapshot, onPendingCount, onSnapshot, refresh, runId, t]);
+  }, [applySnapshot, onPendingCount, onSnapshot, refresh, runId]);
 
   const normalizedQuery = query.trim().toLowerCase();
 

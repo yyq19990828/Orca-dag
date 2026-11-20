@@ -274,10 +274,8 @@ export default function SidebarApp() {
       .catch(() => {});
     const close = openActivityStream(runId, {
       onOpen: () => {},
-      onSnapshot: (raw) => {
-        if (!cancelled && raw && typeof raw === "object") {
-          setActivity(raw as ActivitySnapshot);
-        }
+      onSnapshot: (snapshot) => {
+        if (!cancelled) setActivity(snapshot);
       },
       onError: () => {},
     });

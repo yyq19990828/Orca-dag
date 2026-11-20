@@ -724,7 +724,6 @@ const zh: Dict = {
   "activity.transport.polling": "轮询中",
   "activity.truncated": "仅显示最近 500 条编排消息。",
   "activity.historyWarning": "⚠ 历史可能不完整：全局 Orca 收件箱窗口已满（{observed}/{limit} 行），因此本 Run 较早的消息可能缺失。",
-  "activity.streamError": "动态流返回了无法解析的更新。",
   "activity.lead": "★ 主导",
   "activity.unread": "未读",
   "activity.unreadTitle": "Orca 收件箱中的持久化未读标记",

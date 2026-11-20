@@ -767,7 +767,6 @@ const en = {
   "activity.transport.polling": "Polling",
   "activity.truncated": "Showing the latest 500 orchestration messages.",
   "activity.historyWarning": "⚠ History may be incomplete: the global Orca inbox window is full ({observed} of {limit} rows), so older messages for this Run may be missing.",
-  "activity.streamError": "Activity stream returned an unreadable update.",
   "activity.lead": "★ Lead",
   "activity.unread": "Unread",
   "activity.unreadTitle": "Durable unread marker in the Orca inbox",

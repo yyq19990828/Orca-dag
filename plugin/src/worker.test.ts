@@ -1,3 +1,4 @@
+import { EventEmitter, once } from 'node:events'
 import { createServer } from 'node:http'
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -127,6 +128,16 @@ test('connects to local viewer endpoint, proxies GET/POST with mutation token, a
   let seenPostToken: string | null = null
   let inboxDelivered = false
   const seenUrls: string[] = []
+  const activitySnapshot = {
+    runId: 'run_test',
+    events: [],
+    presence: [],
+    checks: [],
+    pendingCount: 0,
+    truncated: false,
+    inboxWindow: null,
+    generatedAt: 42,
+  }
 
   const server = createServer((req, res) => {
     const url = req.url ?? '/'
@@ -190,6 +201,12 @@ test('connects to local viewer endpoint, proxies GET/POST with mutation token, a
         res.end(JSON.stringify({ runs: [{ id: 'run_test' }] }))
         return
       }
+      if (url === '/api/activity/stream?run=run_test' && req.method === 'GET') {
+        res.setHeader('content-type', 'text/event-stream')
+        res.end(`event: error\ndata: {"error":"task-list temporarily unavailable"}\n\n` +
+          `id: 42\ndata: ${JSON.stringify(activitySnapshot)}\n\n`)
+        return
+      }
       if (url === '/api/echo' && req.method === 'POST') {
         seenPostToken = String(req.headers['x-orca-dag-token'] ?? '')
         res.end(JSON.stringify({ echoed: body }))
@@ -249,7 +266,24 @@ test('connects to local viewer endpoint, proxies GET/POST with mutation token, a
       },
     })
 
-    const worker = await mountWorker(main, { host })
+    const activity = new EventEmitter()
+    const worker = await mountWorker({
+      ...main,
+      default(orca: Parameters<typeof main.default>[0]) {
+        main.default({
+          ...orca,
+          panels: {
+            ...orca.panels,
+            post(event, payload, options) {
+              orca.panels.post(event, payload, options)
+              if (event === 'orca-dag.activity' && payload && typeof payload === 'object' && 'runId' in payload) {
+                activity.emit('snapshot')
+              }
+            },
+          },
+        })
+      },
+    }, { host })
     try {
       // Wait for discovery + inbox command execution to settle.
       for (let i = 0; i < 40 && (!seenHello || receipts.size < 2); i++) {
@@ -271,6 +305,16 @@ test('connects to local viewer endpoint, proxies GET/POST with mutation token, a
       assert.equal(getRes.ok, true)
       assert.equal(getRes.status, 200)
       assert.deepEqual(getRes.body, { runs: [{ id: 'run_test' }] })
+
+      // A failed activity read is not a snapshot and must not cut off recovery.
+      await Promise.all([
+        once(activity, 'snapshot', { signal: AbortSignal.timeout(5_000) }),
+        worker.request('orca-dag.activity.subscribe', { runId: 'run_test' }, { panel: 'orchestration' }),
+      ])
+      assert.deepEqual(
+        worker.posts.filter(post => post.event === 'orca-dag.activity').map(post => post.payload),
+        [activitySnapshot],
+      )
 
       const postRes = await worker.request('orca-dag.api', {
         method: 'POST',

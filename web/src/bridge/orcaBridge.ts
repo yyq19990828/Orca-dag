@@ -13,6 +13,8 @@
  * and host locale / `--orca-*` theme variables.
  */
 
+import type { ActivitySnapshot } from "../types";
+
 type OrcaDisposable = (() => void) | { dispose: () => void } | void;
 
 interface OrcaPluginBridgeResponse {
@@ -154,6 +156,26 @@ export function openPluginOutputStream(
   };
 }
 
+// A bad object or a frame for another Run must not replace the last snapshot.
+function isActivitySnapshot(value: unknown, runId: string): value is ActivitySnapshot {
+  if (!value || typeof value !== "object") return false;
+  const snapshot = value as Partial<ActivitySnapshot>;
+  const { inboxWindow } = snapshot;
+  return (
+    snapshot.runId === runId &&
+    Array.isArray(snapshot.events) &&
+    Array.isArray(snapshot.presence) &&
+    Array.isArray(snapshot.checks) &&
+    typeof snapshot.pendingCount === "number" &&
+    typeof snapshot.truncated === "boolean" &&
+    typeof snapshot.generatedAt === "number" &&
+    (inboxWindow === null ||
+      (typeof inboxWindow?.limit === "number" &&
+        typeof inboxWindow.observed === "number" &&
+        typeof inboxWindow.saturated === "boolean"))
+  );
+}
+
 /**
  * Subscribe to live Run activity updates:
  * - Standalone mode: opens `EventSource('/api/activity/stream?run=...')`
@@ -163,7 +185,7 @@ export function openActivityStream(
   runId: string,
   handlers: {
     onOpen: () => void;
-    onSnapshot: (rawData: unknown) => void;
+    onSnapshot: (snapshot: ActivitySnapshot) => void;
     onError: () => void;
   },
 ): () => void {
@@ -171,8 +193,7 @@ export function openActivityStream(
     const host = getOrcaGlobal()!;
     let closed = false;
     const listener = (payload: unknown) => {
-      if (closed) return;
-      handlers.onSnapshot(payload);
+      if (!closed && isActivitySnapshot(payload, runId)) handlers.onSnapshot(payload);
     };
     const subPlugin = host.plugin?.on?.("orca-dag.activity", listener);
     const subFrame = !subPlugin ? host.on?.("orca-dag.activity", listener) : undefined;
@@ -196,7 +217,8 @@ export function openActivityStream(
   source.onopen = () => handlers.onOpen();
   source.onmessage = (message) => {
     try {
-      handlers.onSnapshot(JSON.parse(message.data));
+      const payload: unknown = JSON.parse(message.data);
+      if (isActivitySnapshot(payload, runId)) handlers.onSnapshot(payload);
     } catch {
       handlers.onError();
     }

@@ -987,8 +987,10 @@ export default function activate(orca: OrcaWorkerApi): void {
     const controller = new AbortController()
     activityStreams.set(key, controller)
     const url = `http://127.0.0.1:${conn.endpoint.port}/api/activity/stream?run=${encodeURIComponent(runId)}`
-    void consumeSse(url, AbortSignal.any([conn.abort.signal, controller.signal]), (_event, data) => {
-      safePostToPanel(key, 'orca-dag.activity', data)
+    void consumeSse(url, AbortSignal.any([conn.abort.signal, controller.signal]), (event, data) => {
+      // Like EventSource.onmessage, forward only snapshots. A named error
+      // reports a failed read; the same stream can still deliver the next snapshot.
+      if (event === 'message') safePostToPanel(key, 'orca-dag.activity', data)
     })
       .catch(() => {})
       .finally(() => {
