@@ -2305,8 +2305,6 @@
   }
 
   .odag-inspector--compact-chat .chat .chat__compose-row {
-    display: flex;
-    flex-direction: column;
     gap: 6px;
     padding: 8px 10px;
     border-radius: 10px;

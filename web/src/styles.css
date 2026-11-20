@@ -1392,8 +1392,7 @@ body {
 
 .chat__compose-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
 }
 
