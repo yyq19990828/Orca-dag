@@ -35,7 +35,7 @@ npx orca-orchestration-launcher
 
 This installs the `orca-dag` skill for detected coding agents, initializes a managed `.orca-dag/` ignore rule, and opens **Orchestration Panel**. Use the local URL printed at startup (default: <http://localhost:8787>). Shared-agent and relocated-home rules are covered in [skill installation](docs/tutorials/viewer-operations.md#skill-installation-and-agent-homes). Planning documents and viewer history stay local in `.orca-dag/`; viewer discovery is not workspace data.
 
-> **No Node.js?** Download a standalone binary from [GitHub Releases](https://github.com/yyq19990828/Orca-dag/releases). For skill-only use without the viewer: `npx skills add yyq19990828/Orca-dag --skill orca-dag --global`.
+> **No Node.js?** Download a standalone binary from [GitHub Releases](https://github.com/yyq19990828/orca-orchestration-launcher/releases). For skill-only use without the viewer: `npx skills add yyq19990828/orca-orchestration-launcher --skill orca-dag --global`.
 
 ### Option 2 — Self-Contained Native Orca Plugin (`orchestration-panel`)
 

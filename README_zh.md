@@ -34,7 +34,7 @@ npx orca-orchestration-launcher
 
 此命令会为检测到的 coding agent 安装 `orca-dag` skill，初始化 `.orca-dag/` 忽略规则，并打开 **Orchestration Panel**。请使用启动时输出的本机 URL（默认 <http://localhost:8787>）。共享目录与自定义 agent 配置位置见 [skill 安装说明](docs/tutorials/viewer-operations_zh.md#skill-安装与-agent-目录)。规划文档与 viewer 历史保存在本地 `.orca-dag/`；viewer 的发现信息不属于工作区数据。
 
-> **无 Node.js 环境？** 可从 [GitHub Releases](https://github.com/yyq19990828/Orca-dag/releases) 下载独立预编译二进制运行。若仅需安装 skill 而无需 viewer：`npx skills add yyq19990828/Orca-dag --skill orca-dag --global`。
+> **无 Node.js 环境？** 可从 [GitHub Releases](https://github.com/yyq19990828/orca-orchestration-launcher/releases) 下载独立预编译二进制运行。若仅需安装 skill 而无需 viewer：`npx skills add yyq19990828/orca-orchestration-launcher --skill orca-dag --global`。
 
 ### 方式二：自包含原生 Orca 插件（`orchestration-panel`）
 

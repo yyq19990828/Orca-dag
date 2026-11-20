@@ -45,7 +45,7 @@ CLI 自动选择顺序为：`ORCA_CLI_COMMAND` → 设置了 `ORCA_DEV_REPO_ROOT
 
 内容未变时保留 mtime；配置路径、skill 目录或 skill 文件的符号链接均不会被跟随。旧版 Codex/OpenCode 或自定义配置目录内的单文件安装，仅在新位置不存在时迁移；有额外文件或链接的目录原样保留。安装发现与卸载使用相同解析器。
 
-独立二进制安装示例：`tar xzf orca-dag-darwin-arm64.tar.gz && sudo mv orca-dag /usr/local/bin/ && orca-dag`。若只安装 skill、不启动 viewer，可使用 `npx skills add yyq19990828/Orca-dag --skill orca-dag --global`；该方式不初始化项目，规划前仍须确认 `.orca-dag/` 已被忽略。
+独立二进制安装示例：`tar xzf orca-dag-darwin-arm64.tar.gz && sudo mv orca-dag /usr/local/bin/ && orca-dag`。若只安装 skill、不启动 viewer，可使用 `npx skills add yyq19990828/orca-orchestration-launcher --skill orca-dag --global`；该方式不初始化项目，规划前仍须确认 `.orca-dag/` 已被忽略。
 
 ## 点击 Run 之前先看懂界面
 

@@ -45,7 +45,7 @@ orca plugin install {{PLUGIN_REPO}}@v{{VERSION}} --json
 To teach Claude Code, Codex, OpenCode, or Orca agents how to turn requirements into PRDs, technical specs, and runnable task DAGs before opening the panel:
 
 ```bash
-npx skills add yyq19990828/Orca-dag --skill orca-dag
+npx skills add yyq19990828/orca-orchestration-launcher --skill orca-dag
 ```
 
 ## Commands & Settings
@@ -85,8 +85,8 @@ Orchestration Panel declares `execution: "trusted-worker"` (`pluginApi: 1`) and 
 
 ## Source Code & Issues
 
-`{{PLUGIN_REPO}}` is the automated distribution repository staged from **[yyq19990828/Orca-dag](https://github.com/yyq19990828/Orca-dag)** (`v{{VERSION}}`).
+`{{PLUGIN_REPO}}` is the automated distribution repository staged from **[yyq19990828/orca-orchestration-launcher](https://github.com/yyq19990828/orca-orchestration-launcher)** (`v{{VERSION}}`).
 
 - Full TypeScript source for the companion worker lives in [`src/`](./src) alongside the bundled `worker.mjs`.
-- Full source for the backend server, React Flow workbench SPA, and `orca-dag` CLI lives in [yyq19990828/Orca-dag](https://github.com/yyq19990828/Orca-dag).
-- Bug reports, feature requests, and pull requests: <https://github.com/yyq19990828/Orca-dag/issues>.
+- Full source for the backend server, React Flow workbench SPA, and `orca-dag` CLI lives in [yyq19990828/orca-orchestration-launcher](https://github.com/yyq19990828/orca-orchestration-launcher).
+- Bug reports, feature requests, and pull requests: <https://github.com/yyq19990828/orca-orchestration-launcher/issues>.

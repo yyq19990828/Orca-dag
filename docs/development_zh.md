@@ -84,13 +84,13 @@ bash scripts/build-all-binaries.sh
 3. 在 npmjs.com 后台建立 Trusted Publisher 信任关联：
    - 打开 **orca-orchestration-launcher → Settings → Trusted publishing → GitHub Actions**；
    - 填写 Organization/User: `yyq19990828`；
-   - 填写 Repository: `Orca-dag`；
+   - 填写 Repository: `orca-orchestration-launcher`；
    - 填写 Workflow filename: `release.yml`；
    - Environment 留空；
    - 权限勾选允许 **npm publish**。
    - *（可选命令行方式）*：使用 npm ≥ 11.15.0 执行：
      ```bash
-     npm trust github orca-orchestration-launcher --repo yyq19990828/Orca-dag --file release.yml --allow-publish
+     npm trust github orca-orchestration-launcher --repo yyq19990828/orca-orchestration-launcher --file release.yml --allow-publish
      npm trust list orca-orchestration-launcher
      ```
 4. 确保包含了 OIDC 权限声明（`id-token: write`）的 `.github/workflows/release.yml` 已经合并推送到 GitHub `main` 主分支。
@@ -127,15 +127,15 @@ gh run rerun <run-id> --failed
 
 推送稳定版本标签 `vX.Y.Z`（或通过 `workflow_dispatch` 手动触发 `release.yml`）时，`.github/workflows/release.yml` 中的 `plugin` job 会执行 `scripts/build-plugin.mjs` 构建自包含插件目录 `dist-plugin/`（并将 [plugin/DIST_README.md](../plugin/DIST_README.md) 渲染为独立仓库的 `README.md`），再自动同步到独立插件仓库并打上同版本标签。
 
-由于 `yyq19990828/Orca-dag` 是 GitHub Fork，而 Orca 官方社区插件爬虫会直接忽略 Fork 仓库，独立插件仓库需满足以下一次性准备：
+由于 `yyq19990828/orca-orchestration-launcher` 是 GitHub Fork，而 Orca 官方社区插件爬虫会直接忽略 Fork 仓库，独立插件仓库需满足以下一次性准备：
 
 1. 在 GitHub 创建一个**公开且非 Fork** 的仓库：`yyq19990828/orchestration-panel`。
 2. 为该仓库添加 `orca-plugin` Topic（用于自动收录进 `stablyai/orca-community-plugins`）：
    ```bash
    gh repo edit yyq19990828/orchestration-panel --add-topic orca-plugin
    ```
-3. 为 `Orca-dag` 的发布工作流授予 `yyq19990828/orchestration-panel` 的写权限（二选一）：
-   - **推荐（最小权限）**：为 `yyq19990828/orchestration-panel` 添加允许写入的 SSH Deploy Key，并将私钥存为 `yyq19990828/Orca-dag` 的 Actions Secret `ORCA_PLUGIN_DEPLOY_KEY`。
+3. 为 `orca-orchestration-launcher` 的发布工作流授予 `yyq19990828/orchestration-panel` 的写权限（二选一）：
+   - **推荐（最小权限）**：为 `yyq19990828/orchestration-panel` 添加允许写入的 SSH Deploy Key，并将私钥存为 `yyq19990828/orca-orchestration-launcher` 的 Actions Secret `ORCA_PLUGIN_DEPLOY_KEY`。
    - **备选**：创建一个仅授权 `yyq19990828/orchestration-panel` 仓库 **Contents: Read and write** 权限的 Fine-Grained PAT，存为 Actions Secret `ORCA_PLUGIN_PUSH_TOKEN`。
    *（如需更换目标仓库名，可额外配置 Actions Variable `ORCA_PLUGIN_REPO` 覆盖。）*
    - 若以上密钥均未配置，`plugin` job 仍会完成打包与 `orca-plugin-dist` 工件上传，并在 Job Summary 提示配置指引，不会阻塞 npm 与二进制发版。

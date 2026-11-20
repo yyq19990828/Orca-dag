@@ -104,14 +104,14 @@ npm requires a package to exist before configuring trusted publishers. For the i
 3. **Configure Trusted Publishing on npmjs.com:**
    - Navigate to **`orca-orchestration-launcher` → Settings → Trusted publishing → GitHub Actions**.
    - Set **Owner:** `yyq19990828`
-   - Set **Repository:** `Orca-dag`
+   - Set **Repository:** `orca-orchestration-launcher`
    - Set **Workflow filename:** `release.yml`
    - Set **Environment:** *(leave blank)*
    - Check **Allow npm publish**.
 
    *Alternative (npm ≥ 11.15.0 CLI):*
    ```bash
-   npm trust github orca-orchestration-launcher --repo yyq19990828/Orca-dag --file release.yml --allow-publish
+   npm trust github orca-orchestration-launcher --repo yyq19990828/orca-orchestration-launcher --file release.yml --allow-publish
    npm trust list orca-orchestration-launcher
    ```
 
@@ -150,15 +150,15 @@ The rerun checks out the same tag and publishes that tagged tree. Do not cut a n
 
 Pushing a stable `vX.Y.Z` tag (or running `release.yml` manually via `workflow_dispatch`) also runs the `plugin` job in `.github/workflows/release.yml`, which builds `dist-plugin/` (`scripts/build-plugin.mjs`, rendering `plugin/DIST_README.md` to `dist-plugin/README.md`) and syncs + tags the standalone plugin distribution repository.
 
-Because `yyq19990828/Orca-dag` is a GitHub fork and Orca's automated Community Plugins crawler ignores forks, the plugin must live in a separate **public, non-fork** repository:
+Because `yyq19990828/orca-orchestration-launcher` is a GitHub fork and Orca's automated Community Plugins crawler ignores forks, the plugin must live in a separate **public, non-fork** repository:
 
 1. Create a public, non-fork GitHub repository: `yyq19990828/orchestration-panel`.
 2. Add the `orca-plugin` topic so Orca's community indexer discovers tagged releases:
    ```bash
    gh repo edit yyq19990828/orchestration-panel --add-topic orca-plugin
    ```
-3. Grant `Orca-dag`'s release workflow write access to `yyq19990828/orchestration-panel` using either credential:
-   - **Recommended:** add a write-enabled SSH Deploy Key on `yyq19990828/orchestration-panel` and store its private key in `yyq19990828/Orca-dag` → **Settings → Secrets and variables → Actions** as Secret `ORCA_PLUGIN_DEPLOY_KEY`.
+3. Grant `orca-orchestration-launcher`'s release workflow write access to `yyq19990828/orchestration-panel` using either credential:
+   - **Recommended:** add a write-enabled SSH Deploy Key on `yyq19990828/orchestration-panel` and store its private key in `yyq19990828/orca-orchestration-launcher` → **Settings → Secrets and variables → Actions** as Secret `ORCA_PLUGIN_DEPLOY_KEY`.
    - **Alternative:** create a Fine-Grained PAT scoped to `yyq19990828/orchestration-panel` with **Contents: Read and write** and store it as Secret `ORCA_PLUGIN_PUSH_TOKEN`.
    *(Optionally set Actions Variable `ORCA_PLUGIN_REPO` to override the target `owner/repo`.)*
    - If neither secret is set, the `plugin` job still builds/uploads the `orca-plugin-dist` artifact and skips pushing cleanly without blocking npm or binary releases.
