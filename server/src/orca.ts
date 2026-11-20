@@ -5965,13 +5965,17 @@ export interface ModelDiscoveryResult {
   scope: "local-workspace";
 }
 
-export async function listModels(harness: string): Promise<ModelDiscoveryResult> {
+export async function listModels(
+  harness: string,
+  opts?: { timeoutMs?: number },
+): Promise<ModelDiscoveryResult> {
+  const timeoutMs = opts?.timeoutMs ?? 20_000;
   if (harness === "omp") {
     try {
       const { stdout } = await pExecFile("omp", ["models", "--json"], {
         cwd: currentWorkspace().dir,
         shell: false,
-        timeout: 20_000,
+        timeout: timeoutMs,
         maxBuffer: 16 * 1024 * 1024,
       });
       const parsed = JSON.parse(stdout) as { models?: unknown[] };
@@ -6015,7 +6019,7 @@ export async function listModels(harness: string): Promise<ModelDiscoveryResult>
   try {
     const { stdout } = await pExecFile("opencode", ["models"], {
       cwd: currentWorkspace().dir,
-      timeout: 20000,
+      timeout: timeoutMs,
     });
     const models = stdout
       .split("\n")

@@ -477,9 +477,9 @@ describe("advisory OpenCode model discovery", () => {
       assert.equal(missing.status, "unavailable");
       assert.equal(missing.diagnostic, "OpenCode CLI was not found");
       process.env.PATH = `${bin}${delimiter}${originalPath ?? ""}`;
-      writeFileSync(executable, "#!/bin/sh\nsleep 21\n");
+      writeFileSync(executable, "#!/bin/sh\nsleep 5\n");
       chmodSync(executable, 0o755);
-      const timedOut = await listModels("opencode");
+      const timedOut = await listModels("opencode", { timeoutMs: 250 });
       assert.equal(timedOut.status, "unavailable");
       assert.deepEqual(timedOut.models, []);
       assert.equal(timedOut.diagnostic, "OpenCode model discovery timed out after 20 seconds");
@@ -2972,6 +2972,20 @@ describe("showWorkerDetail (Phase 2, fake CLI)", () => {
         ctx_wrong_id: workerShowReceipt({ dispatchId: "ctx_other", runId: "run_count", taskId: "task_count", failureCount: 9 }),
         ctx_wrong_run: workerShowReceipt({ dispatchId: "ctx_wrong_run", runId: "run_other", taskId: "task_count", failureCount: 9 }),
         ctx_wrong_task: workerShowReceipt({ dispatchId: "ctx_wrong_task", runId: "run_count", taskId: "task_other", failureCount: 9 }),
+        ctx_conflict_run: {
+          ...workerShowReceipt({ dispatchId: "ctx_conflict_run", runId: "run_count", taskId: "task_count", failureCount: 1 }),
+          projection: {
+            ...(workerShowReceipt({ dispatchId: "ctx_conflict_run", runId: "run_count", taskId: "task_count", failureCount: 1 }).projection as Record<string, unknown>),
+            runId: "run_other",
+          },
+        },
+        ctx_conflict_task: {
+          ...workerShowReceipt({ dispatchId: "ctx_conflict_task", runId: "run_count", taskId: "task_count", failureCount: 1 }),
+          projection: {
+            ...(workerShowReceipt({ dispatchId: "ctx_conflict_task", runId: "run_count", taskId: "task_count", failureCount: 1 }).projection as Record<string, unknown>),
+            taskId: "task_other",
+          },
+        },
       },
     });
 
@@ -2985,10 +2999,20 @@ describe("showWorkerDetail (Phase 2, fake CLI)", () => {
     for (const id of ["ctx_count_missing", "ctx_count_null", "ctx_count_negative", "ctx_count_fractional"]) {
       assert.equal((await showWorkerDetail(id))?.dispatch?.failureCount, null, `${id} stays unknown`);
     }
-    const wrongId = await showWorkerDetail("ctx_wrong_id");
+    await assert.rejects(
+      showWorkerDetail("ctx_wrong_id"),
+      (err: unknown) => err instanceof OrcaCliError && err.code === "invalid_worker_reply",
+    );
+    await assert.rejects(
+      showWorkerDetail("ctx_conflict_run"),
+      (err: unknown) => err instanceof OrcaCliError && err.code === "invalid_worker_reply",
+    );
+    await assert.rejects(
+      showWorkerDetail("ctx_conflict_task"),
+      (err: unknown) => err instanceof OrcaCliError && err.code === "invalid_worker_reply",
+    );
     const wrongRun = await showWorkerDetail("ctx_wrong_run");
     const wrongTask = await showWorkerDetail("ctx_wrong_task");
-    assert.notEqual(wrongId?.dispatch?.id, wrongId?.dispatchId);
     assert.notEqual(wrongRun?.dispatch?.runId, "run_count");
     assert.notEqual(wrongTask?.dispatch?.taskId, "task_count");
   });
