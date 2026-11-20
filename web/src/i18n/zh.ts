@@ -1350,8 +1350,6 @@ const zh: Dict = {
   "session.stateLive": "实时",
   "session.stateDrained": "已结束",
   "session.toolCount": "{n} 次工具调用",
-  "session.pluginHookBadge": "插件加速",
-  "session.pluginHookTitle": "正通过 orchestration-panel 插件实时接收本机工具调用，先于 transcript 轮询呈现。",
   "session.openRawOutput": "原始输出",
   "session.timelineAria": "Worker 会话时间线",
   "session.dispatchPrompt": "派发提示词",

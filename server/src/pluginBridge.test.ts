@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { once } from "node:events";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { get as httpGet, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import type { Response } from "express";
 import { createApp, listenLoopback } from "./app";
 import { createSecurityPolicy } from "./security";
 import {
@@ -15,73 +16,35 @@ import {
   removePluginEndpointFile,
   writePluginEndpointFile,
 } from "./pluginBridge";
-import { OutputTailManager } from "./outputTail";
-import { WORKSPACE_ENDPOINT_FILE } from "./workspaceState";
-import { openOrcaViewerTab, type WorkerOutputReceipt } from "./orca";
-
-function makeFakeSseResponse(): {
-  res: Response;
-  frames: Array<{ event: string; data: unknown }>;
-  close: () => void;
-} {
-  const frames: Array<{ event: string; data: unknown }> = [];
-  let buf = "";
-  const state = { writableEnded: false, destroyed: false };
-  const res = {
-    get writableEnded() { return state.writableEnded; },
-    get destroyed() { return state.destroyed; },
-    write(chunk: string) {
-      buf += chunk;
-      let idx = buf.indexOf("\n\n");
-      while (idx >= 0) {
-        const block = buf.slice(0, idx);
-        buf = buf.slice(idx + 2);
-        let event = "message";
-        let dataStr = "";
-        for (const line of block.split("\n")) {
-          if (line.startsWith("event: ")) event = line.slice(7).trim();
-          else if (line.startsWith("data: ")) dataStr += line.slice(6);
-        }
-        if (dataStr) {
-          frames.push({ event, data: JSON.parse(dataStr) });
-        }
-        idx = buf.indexOf("\n\n");
-      }
-      return true;
-    },
-    end() {
-      state.writableEnded = true;
-    },
-  } as unknown as Response;
-  return {
-    res,
-    frames,
-    close: () => {
-      state.writableEnded = true;
-      state.destroyed = true;
-    },
-  };
-}
+import { pluginEndpointPath, pluginRequestToken, readPluginEndpointFile, signPluginReply } from "../../plugin/src/endpoint";
+import { openOrcaViewerTab } from "./orca";
 
 describe("PluginBridge & endpoint discovery (M1)", () => {
-  it("writes 0o600 endpoint.json, rejects symlinks, and removes only matching instanceId", () => {
+  it("uses a private registry, rejects symlinks, and removes only its own instance", (t) => {
     const dir = mkdtempSync(join(tmpdir(), "odag-plugin-ep-"));
+    const homeVar = process.platform === "win32" ? "USERPROFILE" : "HOME";
+    const previousHome = process.env[homeVar];
+    process.env[homeVar] = dir;
+    t.after(() => {
+      if (previousHome === undefined) delete process.env[homeVar];
+      else process.env[homeVar] = previousHome;
+    });
     try {
       const token = createPluginToken();
-      const { path: written, createdDir } = writePluginEndpointFile(dir, {
-        version: 1,
+      const written = writePluginEndpointFile(dir, {
+        version: 2,
         port: 8787,
         pid: process.pid,
         instanceId: "inst-a",
         pluginToken: token,
-        workspace: dir,
-        worktree: `path:${dir}`,
-        startedAt: new Date().toISOString(),
+        workspace: realpathSync(dir),
       });
-      assert.equal(written, join(dir, WORKSPACE_ENDPOINT_FILE));
-      assert.equal(createdDir, true);
-      const mode = lstatSync(written).mode & 0o777;
-      assert.equal(mode, 0o600);
+      assert.equal(written, pluginEndpointPath(dir));
+      assert.equal(existsSync(join(dir, ".orca-dag")), false);
+      if (process.platform !== "win32") {
+        assert.equal(lstatSync(dirname(written)).mode & 0o777, 0o700);
+        assert.equal(lstatSync(written).mode & 0o777, 0o600);
+      }
       const parsed = JSON.parse(readFileSync(written, "utf8")) as { instanceId: string; pluginToken: string };
       assert.equal(parsed.instanceId, "inst-a");
       assert.equal(parsed.pluginToken, token);
@@ -90,26 +53,20 @@ describe("PluginBridge & endpoint discovery (M1)", () => {
       assert.equal(removePluginEndpointFile(dir, "inst-other"), false);
       assert.equal(existsSync(written), true);
 
-      // Matching instanceId removes cleanly (and prunes empty created dir when requested).
-      assert.equal(removePluginEndpointFile(dir, "inst-a", { removeEmptyDir: createdDir }), true);
+      assert.equal(removePluginEndpointFile(dir, "inst-a"), true);
       assert.equal(existsSync(written), false);
-      assert.equal(existsSync(join(dir, ".orca-dag")), false);
-
-      // Re-create .orca-dag for symlink refusal test.
-      mkdirSync(join(dir, ".orca-dag"));
       const outside = join(dir, "outside.json");
       writeFileSync(outside, "untouched");
       symlinkSync(outside, written);
+      assert.equal(readPluginEndpointFile(dir), null);
       assert.throws(() =>
         writePluginEndpointFile(dir, {
-          version: 1,
+          version: 2,
           port: 8787,
           pid: process.pid,
           instanceId: "inst-b",
           pluginToken: token,
-          workspace: dir,
-          worktree: `path:${dir}`,
-          startedAt: new Date().toISOString(),
+          workspace: realpathSync(dir),
         }),
       );
       assert.equal(readFileSync(outside, "utf8"), "untouched");
@@ -118,7 +75,7 @@ describe("PluginBridge & endpoint discovery (M1)", () => {
     }
   });
 
-  it("tracks hello, bounded tool/status ingestion, wake events, inbox delivery, and receipts", async () => {
+  it("tracks hello, wakes scoped readers, and delivers inbox commands with receipts", async () => {
     const bridge = new PluginBridge();
     bridge.setStatusSummaryProvider(() => ({
       text: "DAG · 1 active",
@@ -141,33 +98,12 @@ describe("PluginBridge & endpoint discovery (M1)", () => {
     const off = bridge.onWake((evt) => wakes.push(`${evt.kind}:${evt.terminalId}`));
 
     const ingested = bridge.ingestEvents({
-      statusEvents: [
-        { terminalId: "term_1", state: "working", sessionId: "sess_1", workspaceListId: "identity:wt2:local:1" },
-      ],
-      toolEvents: [
-        {
-          terminalId: "term_1",
-          agent: "codex",
-          tool: "exec",
-          callId: "call_1",
-          inputPreview: "x".repeat(20_000),
-          inputTruncated: true,
-          outputPreview: "ok",
-          outputTruncated: false,
-        },
-      ],
+      statusEvents: [{ terminalId: "term_1" }],
+      toolEvents: [{ terminalId: "term_1" }],
     });
     assert.equal(ingested.acceptedStatus, 1);
     assert.equal(ingested.acceptedTools, 1);
     assert.deepEqual(wakes, ["status:term_1", "tool:term_1"]);
-
-    const agent = bridge.getObservedAgent("term_1");
-    assert.equal(agent?.sessionId, "sess_1");
-    assert.equal(agent?.workspaceListId, "identity:wt2:local:1");
-
-    const tools = bridge.getLiveTools("term_1");
-    assert.equal(tools.length, 1);
-    assert.ok(tools[0].inputPreview.length <= 8_192);
 
     // Command + inbox + receipt round-trip
     bridge.enqueueNotification("Gate pending", "Approve deploy?");
@@ -190,8 +126,28 @@ describe("PluginBridge & endpoint discovery (M1)", () => {
     assert.equal(bridge.status().connected, false);
   });
 
-  it("enforces pluginToken on /api/plugin/* routes and removes stale endpoint.json on uninstall", async () => {
+  it("does not deliver an expired command to a reconnecting companion", async () => {
+    const bridge = new PluginBridge();
+    bridge.hello({});
+    try {
+      await assert.rejects(bridge.enqueueCommand("agent.resume", { sessionId: "expired" }, 1), /timed out/);
+      assert.deepEqual((await bridge.pullInbox(0)).commands, []);
+    } finally {
+      bridge.close();
+    }
+  });
+
+  it("restricts HTTP to loopback hosts, signs plugin replies, and uninstalls private discovery", async (t) => {
     const dir = mkdtempSync(join(tmpdir(), "odag-plugin-http-"));
+    const fakeHome = join(dir, "fake-home");
+    mkdirSync(fakeHome);
+    const homeVar = process.platform === "win32" ? "USERPROFILE" : "HOME";
+    const previousHome = process.env[homeVar];
+    process.env[homeVar] = fakeHome;
+    t.after(() => {
+      if (previousHome === undefined) delete process.env[homeVar];
+      else process.env[homeVar] = previousHome;
+    });
     const pluginToken = createPluginToken();
     const { app, pluginBridge, outputTails } = createApp({
       workspaceDir: dir,
@@ -203,6 +159,17 @@ describe("PluginBridge & endpoint discovery (M1)", () => {
     const port = (server.address() as AddressInfo).port;
     const base = `http://127.0.0.1:${port}`;
     try {
+      const [rejectedHost] = await once(
+        httpGet(`${base}/api/session`, { headers: { Host: "not-a-viewer.invalid" } }), "response",
+      ) as [IncomingMessage];
+      rejectedHost.resume();
+      assert.equal(rejectedHost.statusCode, 403);
+      const session = await fetch(`${base}/api/session`);
+      assert.equal(session.status, 200);
+      assert.equal(session.headers.get("content-security-policy"), "frame-ancestors 'none'");
+      assert.equal(session.headers.get("x-frame-options"), "DENY");
+      await session.body?.cancel();
+
       // Missing/bad token must be refused with 403.
       const unauth = await fetch(`${base}/api/plugin/hello`, {
         method: "POST",
@@ -212,9 +179,11 @@ describe("PluginBridge & endpoint discovery (M1)", () => {
       assert.equal(unauth.status, 403);
 
       // Exact plugin token authenticates hello + events + inbox.
+      const nonce = "a".repeat(22);
+      const headers = { "x-orca-plugin-token": pluginRequestToken(pluginToken), "x-orca-plugin-nonce": nonce };
       const hello = await fetch(`${base}/api/plugin/hello`, {
         method: "POST",
-        headers: { "content-type": "application/json", "x-orca-plugin-token": pluginToken },
+        headers: { "content-type": "application/json", ...headers },
         body: JSON.stringify({
           pluginId: "orchestration-panel",
           version: "0.1.0",
@@ -223,34 +192,32 @@ describe("PluginBridge & endpoint discovery (M1)", () => {
         }),
       });
       assert.equal(hello.status, 200);
-      const helloJson = (await hello.json()) as { ok: boolean; status: { connected: boolean } };
+      const helloBody = await hello.text();
+      assert.equal(hello.headers.get("x-orca-plugin-proof"), signPluginReply(pluginToken, "hello", nonce, helloBody));
+      const helloJson = JSON.parse(helloBody) as { ok: boolean; status: { connected: boolean } };
       assert.equal(helloJson.ok, true);
       assert.equal(helloJson.status.connected, true);
 
       const inbox = await fetch(`${base}/api/plugin/inbox?waitMs=0`, {
-        headers: { "x-orca-plugin-token": pluginToken },
+        headers,
       });
       assert.equal(inbox.status, 200);
-      const inboxJson = (await inbox.json()) as { ok: boolean; statusBar: { text: string } | null };
+      const inboxBody = await inbox.text();
+      assert.equal(inbox.headers.get("x-orca-plugin-proof"), signPluginReply(pluginToken, "inbox", nonce, inboxBody));
+      const inboxJson = JSON.parse(inboxBody) as { ok: boolean; statusBar: { text: string } | null };
       assert.equal(inboxJson.ok, true);
       assert.equal(inboxJson.statusBar?.text, "Orchestration");
 
-      // Uninstall removes stale endpoint.json even without --purge (respecting
-      // --dry-run), tested in a child process with isolated HOME & CLI so tests
-      // never touch the developer's HOME or live Orca terminals.
-      const { path: ep } = writePluginEndpointFile(dir, {
-        version: 1,
+      // Use an isolated HOME so uninstall never touches user files.
+      const ep = writePluginEndpointFile(dir, {
+        version: 2,
         port,
         pid: process.pid,
         instanceId: "inst-uninstall",
         pluginToken,
-        workspace: dir,
-        worktree: `path:${dir}`,
-        startedAt: new Date().toISOString(),
+        workspace: realpathSync(dir),
       });
       assert.equal(existsSync(ep), true);
-      const fakeHome = join(dir, "fake-home");
-      mkdirSync(fakeHome);
       const entry = fileURLToPath(new URL("./index.ts", import.meta.url));
       const loader = import.meta.resolve("tsx");
       const env: NodeJS.ProcessEnv = { ...process.env };
@@ -261,7 +228,7 @@ describe("PluginBridge & endpoint discovery (M1)", () => {
       }
       const childEnv: NodeJS.ProcessEnv = {
         ...env,
-        HOME: fakeHome,
+        [homeVar]: fakeHome,
         WORKSPACE_DIR: dir,
         ORCA_CLI_COMMAND: JSON.stringify(process.execPath),
         NO_OPEN: "1",
@@ -270,14 +237,14 @@ describe("PluginBridge & endpoint discovery (M1)", () => {
         cwd: dir, env: childEnv, encoding: "utf8", timeout: 15_000,
       });
       assert.equal(dry.status, 0, `${dry.stdout}\n${dry.stderr}`);
-      assert.match(dry.stdout, /would remove.*endpoint\.json/);
+      assert.match(dry.stdout, /would remove.*private plugin discovery endpoint/);
       assert.equal(existsSync(ep), true);
 
       const real = spawnSync(process.execPath, ["--import", loader, entry, "uninstall"], {
         cwd: dir, env: childEnv, encoding: "utf8", timeout: 15_000,
       });
       assert.equal(real.status, 0, `${real.stdout}\n${real.stderr}`);
-      assert.match(real.stdout, /removed.*endpoint\.json/);
+      assert.match(real.stdout, /removed.*private plugin discovery endpoint/);
       assert.equal(existsSync(ep), false);
     } finally {
       pluginBridge.close();
@@ -285,145 +252,6 @@ describe("PluginBridge & endpoint discovery (M1)", () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       rmSync(dir, { recursive: true, force: true });
     }
-  });
-});
-
-describe("OutputTailManager (M2)", () => {
-  it("shares one upstream poller across subscribers, streams plugin liveTool, deduplicates by callId, and drains on exit", async () => {
-    const bridge = new PluginBridge();
-    bridge.hello({ pluginId: "orchestration-panel", version: "0.1.0", hostApiMinor: 10, grantedCapabilities: [] });
-
-    let readCalls = 0;
-    const pages: WorkerOutputReceipt[] = [
-      {
-        dispatchId: "ctx_1",
-        source: "transcript",
-        cursor: "c1",
-        lines: ["[assistant] Starting"],
-        messages: [
-          {
-            id: "m1",
-            role: "assistant",
-            timestamp: 1000,
-            source: "transcript",
-            blocks: [{ type: "text", text: "Starting" }],
-          },
-        ],
-        contentComplete: false,
-        clipped: false,
-        warnings: [],
-        sourceChanged: false,
-        status: { worker: "running", terminal: "running", liveness: "live" },
-      },
-      {
-        dispatchId: "ctx_1",
-        source: "transcript",
-        cursor: "c2",
-        lines: ["[assistant] [tool exec] {\"cmd\":\"ls\"}"],
-        messages: [
-          {
-            id: "m2",
-            role: "assistant",
-            timestamp: 2000,
-            source: "transcript",
-            blocks: [
-              { type: "tool-call", name: "exec", input: "{\"cmd\":\"ls\"}", callId: "call_live_1" },
-              { type: "tool-result", output: "README.md", isError: false, callId: "call_live_1" },
-            ],
-          },
-        ],
-        contentComplete: false,
-        clipped: false,
-        warnings: [],
-        sourceChanged: false,
-        status: { worker: "succeeded", terminal: "exited", liveness: "exited" },
-      },
-      {
-        dispatchId: "ctx_1",
-        source: "transcript",
-        cursor: "c2",
-        lines: [],
-        messages: [],
-        contentComplete: true,
-        clipped: false,
-        warnings: [],
-        sourceChanged: false,
-        status: { worker: "succeeded", terminal: "exited", liveness: "exited" },
-      },
-    ];
-
-    const tails = new OutputTailManager({
-      pluginBridge: bridge,
-      readOutput: async () => {
-        const idx = Math.min(readCalls, pages.length - 1);
-        readCalls += 1;
-        return pages[idx];
-      },
-    });
-
-    const sub1 = makeFakeSseResponse();
-    const sub2 = makeFakeSseResponse();
-    const unsub1 = tails.subscribe({
-      runId: "run_1",
-      dispatchId: "ctx_1",
-      source: "auto",
-      terminalId: "term_live_1",
-      res: sub1.res,
-    });
-    const unsub2 = tails.subscribe({
-      runId: "run_1",
-      dispatchId: "ctx_1",
-      source: "auto",
-      terminalId: "term_live_1",
-      res: sub2.res,
-    });
-
-    // Wait for initial poll — BOTH subscribers share the exact 1 read call.
-    await new Promise((r) => setTimeout(r, 60));
-    assert.equal(readCalls, 1);
-    assert.equal(sub1.frames[0]?.event, "init");
-    assert.equal(sub2.frames[0]?.event, "init");
-
-    // Companion plugin fires agent.tool.after → immediate liveTool frame + wakeup poll!
-    bridge.ingestEvents({
-      toolEvents: [
-        {
-          terminalId: "term_live_1",
-          agent: "codex",
-          tool: "exec",
-          callId: "call_live_1",
-          inputPreview: "{\"cmd\":\"ls\"}",
-          outputPreview: "README.md",
-        },
-      ],
-    });
-    assert.equal(sub1.frames.some((f) => f.event === "liveTool"), true);
-    assert.equal(sub2.frames.some((f) => f.event === "liveTool"), true);
-
-    // Debounced wakeup poll fetches page 2 (containing call_live_1), and next poll drains!
-    await new Promise((r) => setTimeout(r, 250));
-    assert.ok(readCalls >= 2);
-    assert.equal(sub1.frames.some((f) => f.event === "append"), true);
-
-    // A late subscriber gets an init snapshot with call_live_1 already deduplicated out of liveTools.
-    const sub3 = makeFakeSseResponse();
-    const unsub3 = tails.subscribe({
-      runId: "run_1",
-      dispatchId: "ctx_1",
-      source: "auto",
-      terminalId: "term_live_1",
-      res: sub3.res,
-    });
-    const init3 = sub3.frames.find((f) => f.event === "init")?.data as { liveTools: unknown[]; output: WorkerOutputReceipt };
-    assert.ok(init3);
-    assert.equal(init3.liveTools.length, 0);
-    assert.equal(init3.output.messages?.length, 2);
-
-    unsub1();
-    unsub2();
-    unsub3();
-    tails.closeAll();
-    bridge.close();
   });
 });
 

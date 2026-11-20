@@ -1,31 +1,12 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { renameSync, unlinkSync, writeFileSync } from "node:fs";
 import type { RequestHandler } from "express";
-import {
-  prepareWorkspaceRuntimeFile,
-  WORKSPACE_DATA_DIR,
-  WORKSPACE_ENDPOINT_FILE,
-} from "./workspaceState";
+import { checkPluginEndpointFile, pluginEndpointPath, readPluginEndpointFile, type PluginEndpointRecord } from "../../plugin/src/endpoint";
 
 /** Companion plugin connection expires if no hello/event/inbox arrives within this window. */
 const PLUGIN_CONNECTED_TTL_MS = 25_000;
-const MAX_TERMINALS_TRACKED = 64;
-const MAX_TOOLS_PER_TERMINAL = 120;
-const MAX_PREVIEW_CHARS = 8_192;
 const MAX_PENDING_NOTIFICATIONS = 20;
 const MAX_PENDING_COMMANDS = 16;
-
-export interface PluginEndpointRecord {
-  version: 1;
-  port: number;
-  pid: number;
-  instanceId: string;
-  pluginToken: string;
-  workspace: string;
-  worktree: string;
-  startedAt: string;
-}
 
 export interface PluginStatusSnapshot {
   connected: boolean;
@@ -35,33 +16,6 @@ export interface PluginStatusSnapshot {
   grantedCapabilities: string[];
   transport: "loopback-http" | null;
   lastSeenAt: string | null;
-  observedAgentCount: number;
-}
-
-export interface PluginObservedAgent {
-  terminalId: string;
-  workspaceId: string | null;
-  workspaceListId: string | null;
-  paneKey: string | null;
-  agent: string | null;
-  title: string | null;
-  state: string | null;
-  sessionId: string | null;
-  updatedAt: number;
-}
-
-export interface PluginLiveToolEvent {
-  id: string;
-  observedAt: number;
-  agent: string;
-  workspaceId: string | null;
-  terminalId: string;
-  tool: string;
-  callId: string | null;
-  inputPreview: string;
-  inputTruncated: boolean;
-  outputPreview: string;
-  outputTruncated: boolean;
 }
 
 export interface PluginStatusBarSummary {
@@ -78,15 +32,12 @@ export interface PluginNotificationItem {
 
 export interface PluginCommandEnvelope {
   id: string;
-  kind: "agent.resume" | "agents.list" | "agent.listSessions" | "workspace.list";
+  kind: "agent.resume" | "agent.listSessions" | "workspace.list";
   params: Record<string, unknown>;
   createdAt: number;
 }
 
-export type PluginWakeEvent =
-  | { kind: "status"; terminalId: string; state: string | null; sessionId: string | null }
-  | { kind: "tool"; terminalId: string; event: PluginLiveToolEvent }
-  | { kind: "prompt"; terminalId: string };
+export type PluginWakeEvent = { kind: "status" | "tool" | "prompt"; terminalId: string };
 
 export function createPluginToken(): string {
   return randomBytes(24).toString("base64url");
@@ -100,9 +51,8 @@ function tokenMatches(expected: string, provided: string): boolean {
 }
 
 /**
- * Auth middleware for companion-plugin loopback endpoints. Uses a dedicated
- * per-process token written to `0o600` `.orca-dag/endpoint.json`, separate from
- * the web UI's `/api/session` mutation token.
+ * Auth middleware for companion-plugin loopback endpoints. The request token
+ * is derived from the private discovery key, never used to sign viewer replies.
  */
 export function requirePluginToken(expectedToken: string): RequestHandler {
   return (req, res, next) => {
@@ -119,25 +69,20 @@ export function requirePluginToken(expectedToken: string): RequestHandler {
 }
 
 /**
- * Atomically publish this viewer's loopback endpoint for the companion plugin.
- * Must be called ONLY after `listenLoopback` acquires its port. Never writes
- * through symlinks.
+ * Atomically publish the viewer in the user's private registry after it binds
+ * its port. The workspace is never a source of companion trust.
  */
 export function writePluginEndpointFile(
   workspaceDir: string,
   record: PluginEndpointRecord,
-): { path: string; createdDir: boolean } {
-  const dirExisted = existsSync(join(workspaceDir, WORKSPACE_DATA_DIR));
-  const target = prepareWorkspaceRuntimeFile(workspaceDir, WORKSPACE_ENDPOINT_FILE, true);
+): string {
+  const target = pluginEndpointPath(workspaceDir, true);
   const tmp = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600, flag: "wx" });
   try {
-    // Re-verify target is not a symlink before replacing.
+    // Do not replace a linked or non-private record.
     try {
-      const st = lstatSync(target);
-      if (!st.isFile() || st.isSymbolicLink()) {
-        throw new Error(`${target} must be a regular file; left untouched`);
-      }
+      checkPluginEndpointFile(target);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
@@ -146,37 +91,17 @@ export function writePluginEndpointFile(
     try { unlinkSync(tmp); } catch {}
     throw err;
   }
-  return { path: target, createdDir: !dirExisted };
+  return target;
 }
 
-/**
- * Remove `.orca-dag/endpoint.json` on clean exit, ONLY if it still belongs to
- * this viewer `instanceId` (so a stopping instance never deletes a newer one).
- * When `removeEmptyDir` is true (this process created `.orca-dag/` solely for
- * the ephemeral endpoint file), also removes the directory via non-recursive
- * `rmdirSync` if and only if it is completely empty.
- */
+/** Remove only the record for this instance, never another viewer's record. */
 export function removePluginEndpointFile(
   workspaceDir: string,
   instanceId: string,
-  opts: { removeEmptyDir?: boolean } = {},
 ): boolean {
   try {
-    const target = prepareWorkspaceRuntimeFile(workspaceDir, WORKSPACE_ENDPOINT_FILE, false);
-    const st = lstatSync(target);
-    if (!st.isFile() || st.isSymbolicLink()) return false;
-    const raw = JSON.parse(readFileSync(target, "utf8")) as { instanceId?: unknown };
-    if (raw?.instanceId !== instanceId) return false;
-    unlinkSync(target);
-    if (opts.removeEmptyDir) {
-      try {
-        const dir = join(workspaceDir, WORKSPACE_DATA_DIR);
-        const dirStat = lstatSync(dir);
-        if (dirStat.isDirectory() && !dirStat.isSymbolicLink()) rmdirSync(dir);
-      } catch {
-        // Non-empty (user wrote config/plans) or gone — leave untouched.
-      }
-    }
+    if (readPluginEndpointFile(workspaceDir)?.instanceId !== instanceId) return false;
+    unlinkSync(pluginEndpointPath(workspaceDir));
     return true;
   } catch {
     return false;
@@ -190,19 +115,11 @@ function boundedString(value: unknown, max: number): string | null {
   return trimmed.slice(0, max);
 }
 
-function boundedText(value: unknown, max: number): string {
-  if (typeof value !== "string") return "";
-  return value.length > max ? value.slice(0, max) : value;
-}
-
 /**
  * In-memory companion plugin bridge (M1).
  *
- * Security & authority boundaries:
- * - Tool inputs/outputs are kept strictly in bounded RAM rings and NEVER
- *   persisted to `.orca-dag/activity.jsonl` or any other durable store.
- * - Plugin status/tool events are presentation & wakeup hints ONLY — never
- *   Orca Task settlement or terminal custody authority.
+ * Agent event batches contain terminal IDs only. They may wake a scoped
+ * worker-read; they never prove Task settlement, session identity or custody.
  */
 export class PluginBridge {
   private pluginId: string | null = null;
@@ -211,8 +128,6 @@ export class PluginBridge {
   private grantedCapabilities: string[] = [];
   private lastSeenMs = 0;
 
-  private readonly agentsByTerminal = new Map<string, PluginObservedAgent>();
-  private readonly toolsByTerminal = new Map<string, PluginLiveToolEvent[]>();
   private readonly wakeListeners = new Set<(event: PluginWakeEvent) => void>();
 
   private readonly pendingNotifications: PluginNotificationItem[] = [];
@@ -288,7 +203,6 @@ export class PluginBridge {
       grantedCapabilities: [...this.grantedCapabilities],
       transport: this.lastSeenMs > 0 ? "loopback-http" : null,
       lastSeenAt: this.lastSeenMs > 0 ? new Date(this.lastSeenMs).toISOString() : null,
-      observedAgentCount: this.agentsByTerminal.size,
     };
   }
 
@@ -300,139 +214,25 @@ export class PluginBridge {
     let acceptedStatus = 0;
     let acceptedTools = 0;
     let acceptedPrompts = 0;
-    const now = Date.now();
-
-    if (Array.isArray(rec.statusEvents)) {
-      for (const raw of rec.statusEvents.slice(0, 100)) {
+    const batches = [
+      { kind: "status", rows: rec.statusEvents },
+      { kind: "tool", rows: rec.toolEvents },
+      { kind: "prompt", rows: rec.promptEvents },
+    ] as const;
+    for (const { kind, rows } of batches) {
+      if (!Array.isArray(rows)) continue;
+      for (const raw of rows.slice(0, 100)) {
         if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
-        const item = raw as Record<string, unknown>;
-        const terminalId = boundedString(item.terminalId, 128);
-        if (!terminalId) continue;
-        const prev = this.agentsByTerminal.get(terminalId);
-        const updated: PluginObservedAgent = {
-          terminalId,
-          workspaceId: boundedString(item.workspaceId, 512) ?? prev?.workspaceId ?? null,
-          workspaceListId: boundedString(item.workspaceListId, 256) ?? prev?.workspaceListId ?? null,
-          paneKey: boundedString(item.paneKey, 256) ?? prev?.paneKey ?? null,
-          agent: boundedString(item.agent, 64) ?? prev?.agent ?? null,
-          title: boundedString(item.title, 256) ?? prev?.title ?? null,
-          state: boundedString(item.state, 32) ?? prev?.state ?? null,
-          sessionId: boundedString(item.sessionId, 256) ?? prev?.sessionId ?? null,
-          updatedAt: typeof item.observedAt === "number" && Number.isFinite(item.observedAt) ? item.observedAt : now,
-        };
-        this.recordAgent(updated);
-        acceptedStatus += 1;
-        this.emitWake({
-          kind: "status",
-          terminalId,
-          state: updated.state,
-          sessionId: updated.sessionId,
-        });
-      }
-    }
-
-    if (Array.isArray(rec.agents)) {
-      for (const raw of rec.agents.slice(0, 100)) {
-        if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
-        const item = raw as Record<string, unknown>;
-        const terminalId = boundedString(item.terminalId, 128);
-        if (!terminalId) continue;
-        const prev = this.agentsByTerminal.get(terminalId);
-        this.recordAgent({
-          terminalId,
-          workspaceId: boundedString(item.workspaceId, 512) ?? prev?.workspaceId ?? null,
-          workspaceListId: boundedString(item.workspaceListId, 256) ?? prev?.workspaceListId ?? null,
-          paneKey: boundedString(item.paneKey, 256) ?? prev?.paneKey ?? null,
-          agent: boundedString(item.agent, 64) ?? prev?.agent ?? null,
-          title: boundedString(item.title, 256) ?? prev?.title ?? null,
-          state: boundedString(item.state, 32) ?? prev?.state ?? null,
-          sessionId: boundedString(item.sessionId, 256) ?? prev?.sessionId ?? null,
-          updatedAt: now,
-        });
-      }
-    }
-
-    if (Array.isArray(rec.toolEvents)) {
-      for (const raw of rec.toolEvents.slice(0, 100)) {
-        if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
-        const item = raw as Record<string, unknown>;
-        const terminalId = boundedString(item.terminalId, 128);
-        const tool = boundedString(item.tool, 128);
-        if (!terminalId || !tool) continue;
-        const event: PluginLiveToolEvent = {
-          id: boundedString(item.id, 128) ?? `ptool_${randomUUID()}`,
-          observedAt:
-            typeof item.observedAt === "number" && Number.isFinite(item.observedAt) ? item.observedAt : now,
-          agent: boundedString(item.agent, 64) ?? "unknown",
-          workspaceId: boundedString(item.workspaceId, 512),
-          terminalId,
-          tool,
-          callId: boundedString(item.callId, 128),
-          inputPreview: boundedText(item.inputPreview, MAX_PREVIEW_CHARS),
-          inputTruncated: Boolean(item.inputTruncated),
-          outputPreview: boundedText(item.outputPreview, MAX_PREVIEW_CHARS),
-          outputTruncated: Boolean(item.outputTruncated),
-        };
-        this.recordTool(event);
-        acceptedTools += 1;
-        this.emitWake({ kind: "tool", terminalId, event });
-      }
-    }
-
-    if (Array.isArray(rec.promptEvents)) {
-      for (const raw of rec.promptEvents.slice(0, 50)) {
-        if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
-        const item = raw as Record<string, unknown>;
-        const terminalId = boundedString(item.terminalId, 128);
-        if (!terminalId) continue;
-        acceptedPrompts += 1;
-        this.emitWake({ kind: "prompt", terminalId });
+        const terminalId = (raw as Record<string, unknown>).terminalId;
+        if (typeof terminalId !== "string" || !terminalId || terminalId.length > 128) continue;
+        if (kind === "status") acceptedStatus++;
+        else if (kind === "tool") acceptedTools++;
+        else acceptedPrompts++;
+        this.emitWake({ kind, terminalId });
       }
     }
 
     return { acceptedStatus, acceptedTools, acceptedPrompts };
-  }
-
-  private recordAgent(agent: PluginObservedAgent): void {
-    this.agentsByTerminal.delete(agent.terminalId);
-    this.agentsByTerminal.set(agent.terminalId, agent);
-    while (this.agentsByTerminal.size > MAX_TERMINALS_TRACKED) {
-      const oldest = this.agentsByTerminal.keys().next().value;
-      if (oldest === undefined) break;
-      this.agentsByTerminal.delete(oldest);
-    }
-  }
-
-  private recordTool(event: PluginLiveToolEvent): void {
-    let list = this.toolsByTerminal.get(event.terminalId);
-    if (!list) {
-      list = [];
-      this.toolsByTerminal.set(event.terminalId, list);
-      while (this.toolsByTerminal.size > MAX_TERMINALS_TRACKED) {
-        const oldest = this.toolsByTerminal.keys().next().value;
-        if (oldest === undefined) break;
-        this.toolsByTerminal.delete(oldest);
-      }
-    }
-    // Deduplicate retries of the same live tool event id / callId.
-    const dupIdx = event.callId
-      ? list.findIndex((existing) => existing.callId === event.callId)
-      : list.findIndex((existing) => existing.id === event.id);
-    if (dupIdx >= 0) list[dupIdx] = event;
-    else {
-      list.push(event);
-      if (list.length > MAX_TOOLS_PER_TERMINAL) {
-        list.splice(0, list.length - MAX_TOOLS_PER_TERMINAL);
-      }
-    }
-  }
-
-  getObservedAgent(terminalId: string): PluginObservedAgent | null {
-    return this.agentsByTerminal.get(terminalId) ?? null;
-  }
-
-  getLiveTools(terminalId: string): PluginLiveToolEvent[] {
-    return (this.toolsByTerminal.get(terminalId) ?? []).slice();
   }
 
   enqueueNotification(title: string, body?: string): void {
@@ -461,7 +261,7 @@ export class PluginBridge {
     if (this.closed || !this.status().connected) {
       return Promise.reject(new Error("Companion Orca plugin is not connected."));
     }
-    if (this.pendingCommands.length >= MAX_PENDING_COMMANDS) {
+    if (this.receiptWaiters.size >= MAX_PENDING_COMMANDS) {
       return Promise.reject(new Error("Companion plugin command queue is full."));
     }
     const id = `pcmd_${randomUUID()}`;
@@ -470,6 +270,10 @@ export class PluginBridge {
     const promise = new Promise<Record<string, unknown>>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.receiptWaiters.delete(id);
+        // If not yet delivered, do not let an expired command land later.
+        // After delivery the host may already have applied it.
+        const pending = this.pendingCommands.indexOf(envelope);
+        if (pending !== -1) this.pendingCommands.splice(pending, 1);
         reject(new Error(`Companion plugin command ${kind} timed out after ${timeoutMs}ms.`));
       }, timeoutMs);
       this.receiptWaiters.set(id, { resolve, reject, timer });
@@ -532,6 +336,7 @@ export class PluginBridge {
       });
     }
 
+    if (this.closed || signal?.aborted) return { commands: [], notifications: [], statusBar: null };
     const commands = this.pendingCommands.splice(0, this.pendingCommands.length);
     const notifications = this.pendingNotifications.splice(0, this.pendingNotifications.length);
     const { summary, changed } = readStatus();

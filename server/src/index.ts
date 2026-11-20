@@ -133,19 +133,15 @@ for (const line of initializeWorkspaceState(runtime.workspace.dir)) console.log(
 const addr = server.address();
 const port = typeof addr === "object" && addr ? addr.port : Number(process.env.PORT ?? 8787);
 if (!viewerBaseUrl) viewerBaseUrl = `http://localhost:${port}`;
-let endpointCreatedDir = false;
 try {
-  const written = writePluginEndpointFile(runtime.workspace.dir, {
-    version: 1,
+  writePluginEndpointFile(runtime.workspace.dir, {
+    version: 2,
     port,
     pid: process.pid,
     instanceId: runtime.workspace.instanceId,
     pluginToken,
     workspace: runtime.workspace.dir,
-    worktree: runtime.worktree,
-    startedAt: new Date().toISOString(),
   });
-  endpointCreatedDir = written.createdDir;
 } catch (err) {
   console.warn(`WARNING: could not publish plugin discovery endpoint: ${String((err as Error)?.message ?? err)}`);
 }
@@ -155,9 +151,7 @@ const cleanupRuntime = () => {
   cleanedUp = true;
   pluginBridge.close();
   outputTails.closeAll();
-  removePluginEndpointFile(runtime.workspace.dir, runtime.workspace.instanceId, {
-    removeEmptyDir: endpointCreatedDir,
-  });
+  removePluginEndpointFile(runtime.workspace.dir, runtime.workspace.instanceId);
 };
 process.once("exit", cleanupRuntime);
 process.once("SIGINT", () => {

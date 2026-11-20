@@ -1,32 +1,25 @@
 import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { constants as fsConstants, realpathSync } from "node:fs";
 import { open, readdir, lstat, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import type { WorkerOutputReceipt, WorkerTranscriptBlock, WorkerTranscriptMessage } from "./orca";
 
 const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$/;
+const ROLLOUT_NAME_PREFIX = /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}$/;
 const MAX_SEARCH_DEPTH = 5;
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_TOTAL_CHARS = 160_000;
 const MAX_BLOCK_CHARS = 16_000;
 const MAX_LINES = 10_000;
 const MAX_MESSAGES = 1_000;
-const OTHER_DISPATCH_RE = /\bctx_[A-Za-z0-9_-]{4,64}\b/g;
+const DISPATCH_HEADER = "You are working inside Orca, a multi-agent IDE. You are a dispatched worker.";
+const DISPATCH_LEAD = "Please carry out this task from my Orca coordinator by following the brief I pasted below.";
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function hasExactMarker(text: string, id: string): boolean {
-  if (!id) return false;
-  return new RegExp(`(?<![A-Za-z0-9_-])${escapeRegExp(id)}(?![A-Za-z0-9_-])`).test(text);
 }
 
 function resolveCodexHome(override?: string): string {
@@ -67,21 +60,46 @@ function extractTextParts(content: unknown): string {
   return parts.join("\n");
 }
 
-function isBootstrapBoilerplateUserMessage(text: string): boolean {
-  const trimmed = text.trimStart();
-  return (
-    trimmed.startsWith("# AGENTS.md instructions for ") ||
-    trimmed.startsWith("<environment_context>") ||
-    trimmed.startsWith("<permissions instructions>") ||
-    trimmed.startsWith("<skills_instructions>")
-  );
+function singleTextPart(content: unknown, type: string): string | null {
+  if (!Array.isArray(content) || content.length !== 1) return null;
+  const part = asRecord(content[0]);
+  return part.type === type && typeof part.text === "string" ? part.text.trim() : null;
 }
 
-function isDifferentDispatchPreamble(text: string, expectedDispatchId: string): boolean {
-  if (!text.includes("You are working inside Orca")) return false;
-  const matches: string[] = text.match(OTHER_DISPATCH_RE) ?? [];
-  if (matches.length === 0) return false;
-  return !matches.includes(expectedDispatchId);
+function isExactDispatchPreamble(text: string, taskId: string, dispatchId: string): boolean {
+  if (!text.startsWith(DISPATCH_HEADER) && !text.startsWith(DISPATCH_LEAD)) return false;
+  // buildDispatchPreamble writes the Task identity in the header and the
+  // Dispatch identity in its lifecycle recipes. The authored task body (or
+  // another user's prose mentioning the IDs) must never supply that evidence.
+  const taskBoundary = /\r?\n=== TASK ===(?:\r?\n|$)/.exec(text);
+  if (!taskBoundary) return false;
+  const lines = text.slice(0, taskBoundary.index).split(/\r?\n/);
+  const header = lines[0] !== DISPATCH_LEAD ? 0 : lines[1] === "" ? 2 : 1;
+  if (!/^(?:Your coordinator's (?:terminal handle|Orca session ID)|You are coordinated from .+\. Your coordinator's address here) is: \S+$/.test(lines[header + 1] ?? "")) return false;
+  if (lines[header] !== DISPATCH_HEADER || lines[header + 2] !== `Your task ID is: ${taskId}`) return false;
+  const commands = lines.indexOf("=== CLI COMMANDS ===", header + 3);
+  if (commands < 0 || lines[commands + 1] !== "" || lines[commands + 2] !== "```sh") return false;
+  const end = lines.indexOf("```", commands + 3);
+  if (end < 0 || lines[end + 2] !== "=== AFTER YOU SEND worker_done ===") return false;
+
+  let sender: string | undefined;
+  let escalation = false;
+  let done = false;
+  const identity = `--task-id ${taskId} --dispatch-id ${dispatchId}`;
+  for (let i = commands + 3; i < end; i++) {
+    const recipe = /^  (orca(?:-dev|-ide)? orchestration send --from \S+) --type (escalation|worker_done) (.+)$/.exec(lines[i]);
+    if (!recipe) continue;
+    if (sender !== undefined && sender !== recipe[1]) return false;
+    sender = recipe[1];
+    if (recipe[2] === "escalation") {
+      if (escalation || recipe[3] !== `--subject "Blocked: <reason>" --body "<details>" ${identity}`) return false;
+      escalation = true;
+    } else {
+      if (done || recipe[3] !== `--subject "<short status>" --body "<3-sentence summary: what you did, what you found, what's left>" ${identity} --outcome succeeded`) return false;
+      done = true;
+    }
+  }
+  return escalation && done;
 }
 
 /**
@@ -93,13 +111,11 @@ export async function findCodexSessionFile(
   codexHomeOverride?: string,
 ): Promise<string | null> {
   if (!SAFE_SESSION_ID.test(sessionId)) return null;
-  const sessionsDir = join(resolveCodexHome(codexHomeOverride), "sessions");
-  try {
-    const info = await lstat(sessionsDir);
-    if (!info.isDirectory() || info.isSymbolicLink()) return null;
-  } catch {
-    return null;
-  }
+  const home = await realpath(resolveCodexHome(codexHomeOverride)).catch(() => null);
+  if (!home) return null;
+  const sessionsDir = join(home, "sessions");
+  const info = await lstat(sessionsDir).catch(() => null);
+  if (!info?.isDirectory()) return null;
 
   const exactName = `${sessionId}.jsonl`;
   const suffix = `-${sessionId}.jsonl`;
@@ -107,26 +123,28 @@ export async function findCodexSessionFile(
 
   async function walk(dir: string, depth: number): Promise<void> {
     if (depth > MAX_SEARCH_DEPTH || matches.length > 1) return;
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
+    const entries = await readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
       if (matches.length > 1) return;
       if (entry.isSymbolicLink()) continue;
       const fullPath = join(dir, entry.name);
       if (entry.isDirectory()) {
         await walk(fullPath, depth + 1);
-      } else if (entry.isFile() && (entry.name === exactName || entry.name.endsWith(suffix))) {
+      } else if (entry.isFile() && (entry.name === exactName ||
+          (entry.name.endsWith(suffix) && ROLLOUT_NAME_PREFIX.test(entry.name.slice(0, -suffix.length))))) {
         matches.push(fullPath);
       }
     }
   }
 
-  await walk(sessionsDir, 0);
-  return matches.length === 1 ? matches[0] : null;
+  try {
+    await walk(sessionsDir, 0);
+    // An unreadable subtree or a redirected path cannot establish one exact
+    // file. The path below the canonical home must not traverse a symlink.
+    return matches.length === 1 && await realpath(matches[0]) === matches[0] ? matches[0] : null;
+  } catch {
+    return null;
+  }
 }
 
 interface ParsedRawItem {
@@ -134,7 +152,6 @@ interface ParsedRawItem {
   role: "user" | "assistant" | "tool";
   timestamp: number | null;
   model: string | null;
-  textForMatch?: string;
   blocks: WorkerTranscriptBlock[];
   lines: string[];
 }
@@ -143,6 +160,7 @@ export interface ParsedCodexSessionResult {
   lines: string[];
   structured: Array<{ startLine: number; message: WorkerTranscriptMessage }>;
   clipped: boolean;
+  scopeEnded: boolean;
 }
 
 /**
@@ -158,14 +176,21 @@ export function parseCodexSessionJsonl(
     taskId: string;
     sessionId: string;
     workspace: string;
-    normalizeWorkspace?: (p: string) => string;
+    normalizeWorkspace?: (p: string) => string | null;
   },
 ): ParsedCodexSessionResult | null {
+  if (!SAFE_SESSION_ID.test(opts.sessionId) || !opts.taskId || !opts.dispatchId || !isAbsolute(opts.workspace)) return null;
   const norm = opts.normalizeWorkspace ?? ((p: string) => resolve(p));
   const expectedWorkspace = norm(opts.workspace);
+  if (!expectedWorkspace) return null;
   const rawLines = raw.split(/\r?\n/);
 
   let metaVerified = false;
+  let currentWorkspace: string | null = expectedWorkspace;
+  let launchText: string | null = null;
+  let launchTurnId: unknown;
+  let launchEchoPending = false;
+  let scopeEnded = false;
   let currentModel: string | null = null;
   const items: ParsedRawItem[] = [];
   let clipped = false;
@@ -179,14 +204,18 @@ export function parseCodexSessionJsonl(
     return out;
   };
 
-  for (const line of rawLines) {
+  for (let lineIndex = 0; lineIndex < rawLines.length; lineIndex++) {
+    const line = rawLines[lineIndex];
     if (!line.trim()) continue;
     let obj: Record<string, unknown>;
     try {
       obj = asRecord(JSON.parse(line));
     } catch {
-      // Ignore a trailing half-written line while Codex is actively flushing.
-      continue;
+      // Only a trailing, unterminated record can be a write in progress. A
+      // hole in the middle could hide a user prompt or conflicting identity.
+      if (lineIndex !== rawLines.length - 1) return null;
+      clipped = true;
+      break;
     }
 
     const type = obj.type;
@@ -194,28 +223,48 @@ export function parseCodexSessionJsonl(
     const ts = parseTimestampMs(obj.timestamp);
 
     if (type === "session_meta") {
-      const sid = typeof payload.session_id === "string"
-        ? payload.session_id
-        : typeof payload.id === "string"
-          ? payload.id
-          : null;
-      const cwd = typeof payload.cwd === "string" ? payload.cwd : null;
-      if (sid === opts.sessionId && cwd && norm(cwd) === expectedWorkspace) {
-        metaVerified = true;
+      const { id, session_id: sessionId, cwd } = payload;
+      if (metaVerified || (id === undefined && sessionId === undefined) ||
+          (id !== undefined && id !== opts.sessionId) || (sessionId !== undefined && sessionId !== opts.sessionId) ||
+          typeof cwd !== "string" || !isAbsolute(cwd) || norm(cwd) !== expectedWorkspace) return null;
+      metaVerified = true;
+      continue;
+    }
+
+    if (!metaVerified || typeof type !== "string") return null;
+
+    if (type === "event_msg") {
+      if (payload.type === "thread_settings_applied") {
+        const settings = asRecord(payload.thread_settings);
+        if (typeof settings.model === "string" && settings.model.trim()) currentModel = settings.model.trim();
+      }
+      if (launchText !== null && !scopeEnded) {
+        const item = asRecord(payload.item);
+        if (payload.type === "task_started" || payload.type === "turn_started") {
+          // A new provider turn does not inherit Dispatch ownership.
+          scopeEnded = true;
+        } else if (payload.type === "user_message" || (payload.type === "item_completed" && item.type === "UserMessage")) {
+          // Codex mirrors the submitted response_item as an event before
+          // assistant output. No other user event is a proven continuation.
+          const echo = payload.type === "user_message"
+            ? typeof payload.message === "string" ? payload.message.trim() : null
+            : singleTextPart(item.content, "text");
+          if (!launchEchoPending || echo !== launchText ||
+              (typeof launchTurnId === "string" && typeof payload.turn_id === "string" && payload.turn_id !== launchTurnId)) {
+            scopeEnded = true;
+          }
+          launchEchoPending = false;
+        }
       }
       continue;
     }
 
-    if (type === "event_msg" && payload.type === "thread_settings_applied") {
-      const settings = asRecord(payload.thread_settings);
-      if (typeof settings.model === "string" && settings.model.trim()) {
-        currentModel = settings.model.trim();
+    if (type === "turn_context") {
+      if (typeof payload.model === "string" && payload.model.trim()) currentModel = payload.model.trim();
+      if (payload.cwd !== undefined) {
+        currentWorkspace = typeof payload.cwd === "string" && isAbsolute(payload.cwd) ? norm(payload.cwd) : null;
+        if (launchText !== null && currentWorkspace !== expectedWorkspace) scopeEnded = true;
       }
-      continue;
-    }
-
-    if (type === "turn_context" && typeof payload.model === "string" && payload.model.trim()) {
-      currentModel = payload.model.trim();
       continue;
     }
 
@@ -224,20 +273,42 @@ export function parseCodexSessionJsonl(
     const pType = payload.type;
     const id = typeof payload.id === "string" ? payload.id : null;
 
+    if (pType === "message" && payload.role === "user") {
+      const text = singleTextPart(payload.content, "input_text");
+      if (text !== null && isExactDispatchPreamble(text, opts.taskId, opts.dispatchId)) {
+        // Even an exact preamble is ambiguous if it was submitted twice.
+        if (launchText !== null || currentWorkspace !== expectedWorkspace) return null;
+        launchText = text;
+        launchTurnId = asRecord(payload.internal_chat_message_metadata_passthrough).turn_id;
+        launchEchoPending = true;
+        items.push({
+          id,
+          role: "user",
+          timestamp: ts,
+          model: null,
+          blocks: [{ type: "text", text }],
+          lines: [`[user] ${text}`],
+        });
+      } else if (launchText !== null) {
+        // Empty, image-only, and context-looking messages are boundaries too.
+        scopeEnded = true;
+      }
+      continue;
+    }
+    if (launchText === null || scopeEnded) continue;
+    launchEchoPending = false;
+
     if (pType === "message") {
-      const role = payload.role;
-      if (role !== "user" && role !== "assistant") continue;
+      if (payload.role !== "assistant") continue;
       const fullText = extractTextParts(payload.content).trim();
       if (!fullText) continue;
-      if (role === "user" && isBootstrapBoilerplateUserMessage(fullText)) continue;
       items.push({
         id,
-        role,
+        role: "assistant",
         timestamp: ts,
-        model: role === "assistant" ? currentModel : null,
-        textForMatch: role === "user" ? fullText : undefined,
+        model: currentModel,
         blocks: [{ type: "text", text: fullText }],
-        lines: [`[${role}] ${fullText}`],
+        lines: [`[assistant] ${fullText}`],
       });
       continue;
     }
@@ -279,42 +350,11 @@ export function parseCodexSessionJsonl(
     }
   }
 
-  if (!metaVerified) return null;
-
-  // Scope turns to the exact Dispatch prompt boundary.
-  let startIdx = items.findIndex(
-    (item) => item.role === "user" && typeof item.textForMatch === "string" && hasExactMarker(item.textForMatch, opts.dispatchId),
-  );
-  if (startIdx < 0) {
-    // Refuse to guess if another Dispatch owns this session.
-    const hasForeignDispatch = items.some(
-      (item) => item.role === "user" && typeof item.textForMatch === "string" && isDifferentDispatchPreamble(item.textForMatch, opts.dispatchId),
-    );
-    if (hasForeignDispatch) return null;
-    startIdx = items.findIndex(
-      (item) => item.role === "user" && typeof item.textForMatch === "string" && hasExactMarker(item.textForMatch, opts.taskId),
-    );
-    if (startIdx < 0) return null;
-  }
-
-  let endIdx = items.length;
-  for (let i = startIdx + 1; i < items.length; i++) {
-    const item = items[i];
-    if (
-      item.role === "user" &&
-      typeof item.textForMatch === "string" &&
-      isDifferentDispatchPreamble(item.textForMatch, opts.dispatchId)
-    ) {
-      endIdx = i;
-      break;
-    }
-  }
-
-  const scoped = items.slice(startIdx, endIdx);
+  if (launchText === null) return null;
   const lines: string[] = [];
   const structured: Array<{ startLine: number; message: WorkerTranscriptMessage }> = [];
 
-  for (const item of scoped) {
+  for (const item of items) {
     if (budget <= 0 || lines.length >= MAX_LINES) {
       clipped = true;
       break;
@@ -354,16 +394,19 @@ export function parseCodexSessionJsonl(
     }
   }
 
-  return { lines, structured, clipped };
+  return { lines, structured, clipped, scopeEnded };
 }
 
 async function readFileBounded(filePath: string): Promise<{ text: string; fileClipped: boolean } | null> {
-  const info = await lstat(filePath).catch(() => null);
-  if (!info || !info.isFile() || info.isSymbolicLink()) return null;
-  const fh = await open(filePath, "r").catch(() => null);
+  const before = await lstat(filePath, { bigint: true }).catch(() => null);
+  if (!before?.isFile()) return null;
+  const fh = await open(filePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK).catch(() => null);
   if (!fh) return null;
   try {
-    const toRead = Math.min(info.size, MAX_FILE_BYTES);
+    const info = await fh.stat({ bigint: true });
+    if (!info.isFile() || info.dev !== before.dev || info.ino !== before.ino) return null;
+    const fileClipped = info.size > BigInt(MAX_FILE_BYTES);
+    const toRead = fileClipped ? MAX_FILE_BYTES : Number(info.size);
     const buf = Buffer.allocUnsafe(toRead);
     let offset = 0;
     while (offset < toRead) {
@@ -371,7 +414,13 @@ async function readFileBounded(filePath: string): Promise<{ text: string; fileCl
       if (bytesRead <= 0) break;
       offset += bytesRead;
     }
-    return { text: buf.subarray(0, offset).toString("utf8"), fileClipped: info.size > MAX_FILE_BYTES };
+    const after = await lstat(filePath, { bigint: true });
+    if (offset !== toRead || !after.isFile() || after.dev !== info.dev || after.ino !== info.ino ||
+        after.size < info.size || (after.size === info.size && after.mtimeNs !== info.mtimeNs) ||
+        await realpath(filePath) !== filePath) return null;
+    return { text: buf.toString("utf8"), fileClipped };
+  } catch {
+    return null;
   } finally {
     await fh.close().catch(() => {});
   }
@@ -392,17 +441,13 @@ export async function readBoundCodexSessionOutput(opts: {
   status?: WorkerOutputReceipt["status"];
   codexHome?: string;
 }): Promise<WorkerOutputReceipt | null> {
+  if (!isAbsolute(opts.workspace)) return null;
+  const resolvedWorkspace = await realpath(opts.workspace).catch(() => null);
+  if (!resolvedWorkspace) return null;
   const filePath = await findCodexSessionFile(opts.sessionId, opts.codexHome);
   if (!filePath) return null;
   const file = await readFileBounded(filePath);
   if (!file) return null;
-
-  let resolvedWorkspace = resolve(opts.workspace);
-  try {
-    resolvedWorkspace = await realpath(opts.workspace);
-  } catch {
-    // Keep normalized path if workspace moved.
-  }
 
   const parsed = parseCodexSessionJsonl(file.text, {
     dispatchId: opts.dispatchId,
@@ -410,10 +455,11 @@ export async function readBoundCodexSessionOutput(opts: {
     sessionId: opts.sessionId,
     workspace: resolvedWorkspace,
     normalizeWorkspace: (p: string) => {
+      if (p === resolvedWorkspace) return p;
       try {
         return realpathSync(p);
       } catch {
-        return resolve(p);
+        return null;
       }
     },
   });
@@ -456,12 +502,13 @@ export async function readBoundCodexSessionOutput(opts: {
     cursor: `${prefix}${endOffset}:${prefixHash(lines, endOffset)}`,
     lines: page,
     messages: pageMessages,
-    contentComplete: !clipped && exited,
+    contentComplete: !clipped && !parsed.scopeEnded && exited,
     clipped,
     sourceChanged,
     warnings: [
       "Local Codex session transcript (Orca worker-read reported session_not_reported).",
       ...(budgetClipped ? ["Codex session output reached the viewer read budget; this page is not a complete transcript."] : []),
+      ...(parsed.scopeEnded ? ["Later session output is not proven to belong to this Dispatch; only the initial Dispatch turn is shown."] : []),
     ],
     ...(opts.status ? { status: opts.status } : {}),
   };

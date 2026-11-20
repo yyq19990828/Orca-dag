@@ -327,8 +327,8 @@ if (args[0] === "orchestration" && args[1] === "worker-stop") {
 if (args[0] === "orchestration" && (args[1] === "approve" || args[1] === "deny")) {
   out.result = {
     dispatchId: args[args.indexOf("--dispatch") + 1],
-    promptId: args[args.indexOf("--prompt") + 1],
-    decision: args[1],
+    approvalId: args[args.indexOf("--prompt") + 1],
+    decision: args[1] === "approve" ? "allow" : "deny",
   };
 }
 if (args[0] === "account" && args[1] === "list") {
@@ -1192,6 +1192,12 @@ describe("readWorkerOutput", () => {
     assert.equal(old.sourceExact, undefined);
     assert.equal(old.archived, undefined);
   });
+  it("rejects output that names another Dispatch", async () => {
+    useRuntime({ workspace: root });
+    writeScript({ workerRead: { result: { dispatchId: "ctx_other", source: "terminal", terminal: { tail: ["other output"] } } } });
+    await assert.rejects(readWorkerOutput("ctx_requested", { source: "terminal" }), { code: "invalid_worker_reply" });
+  });
+
   it("renders typed transcript messages without losing continuation or clipping evidence", async () => {
     useRuntime({ workspace: root });
     writeScript({
@@ -4186,6 +4192,9 @@ describe("Orca 1.4.263 orchestration upgrades", () => {
       extractPermissionPrompt({ approvalId: "perm_123", allowSupported: true }),
       { id: "perm_123", allowSupported: true },
     );
+    const approval = { approvalId: "perm_123", state: "open", worker: { dispatchId: "ctx_1" }, allowedActions: ["deny"] };
+    assert.deepEqual(extractPermissionPrompt({ dispatchId: "ctx_1", approval }), { id: "perm_123", allowSupported: false });
+    assert.equal(extractPermissionPrompt({ dispatchId: "ctx_other", approval }), null);
     assert.equal(extractPermissionPrompt({ stopReason: "lost" }), null);
   });
 

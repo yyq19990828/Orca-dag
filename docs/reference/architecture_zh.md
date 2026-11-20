@@ -51,10 +51,12 @@ sequenceDiagram
 典型人工主导推进流程如下：
 
 1. **规划阶段**：用户在自己的编码 agent（如 Claude Code、Codex、Antigravity 等）中交流需求。agent 加载 `orca-dag` skill，使用与用户对话一致的语言创建 Run（`orca orchestration run-create`），并使用 `task-create --deps …` 将工作项和依赖关系写入 Orca 编排状态。
-2. **可视化与插件阶段**：可通过 `npx orca-orchestration-launcher` 启动本地服务，或直接加载自包含原生 Orca 伴生插件（`orchestration-panel`，Host API 1.10 `trusted-worker`）。插件内置服务端（`server/index.mjs`）与前端（`panel/`）：当当前本地工作区未启动外部 viewer 终端时自动拉起隔离的回环服务（`PORT=0`、`NO_OPEN=1`、`ORCA_DAG_WEB_DIR`），工作区关闭或插件停用时自动回收；若外部 viewer 启动或关闭则通过 `0o600` `.orca-dag/endpoint.json` 无缝发现与故障切换。插件还通过 `agent.status.changed` 与只读 `agent.tool.after`（仅内存环形缓冲，不写入 `activity.jsonl`）加速服务端 `OutputTail` SSE 与**会话（Session）**工具卡片，并通过 `workspace.list` / `agent.listSessions` / `agent.resume` 支持 L1 原生会话恢复。
+2. **可视化与插件阶段**：可通过 `npx orca-orchestration-launcher` 启动本地服务，或直接加载自包含原生 Orca 伴生插件（`orchestration-panel`，Host API 1.10 `trusted-worker`）。插件内置服务端（`server/index.mjs`）与前端（`panel/`）：当当前本地工作区未启动外部 viewer 终端时自动拉起隔离的回环服务（`PORT=0`、`NO_OPEN=1`、`ORCA_DAG_WEB_DIR`），工作区关闭或插件停用时自动回收。插件通过用户私有注册表发现外部 viewer；外部 viewer 关闭后切回内置后端。`agent.status.changed` 以及只读的 `agent.tool.after`、`agent.prompt.before` 仅以终端 ID 唤醒匹配的会话记录读取。插件还通过 `workspace.list` / `agent.listSessions` / `agent.resume` 支持 L1 原生会话恢复。
 3. **执行准备**：在完整标签页（或侧边栏）中为各任务节点指定 harness（或使用全局默认 harness）、设置模型、effort 与 "Max parallel" 并发上限，然后点击 **「▶ Run with Orca」**。
 4. **自驱动协调循环**：viewer 将自身专用终端绑定为该 Run 的 coordinator（获取写入调度权限），循环扫描所有 `ready` 状态的任务，通过 `orca orchestration worker-start --task <id> --agent <harness>` 并行启动 worker。Worker 执行完成后发送 `worker_done`，Orca 自动更新状态并解锁下游依赖。任务落定后，终端根据规则释放、复用或保留。
 5. **重绘与迭代**：Orca 不提供修改单任务定义或依赖的原语。若需调整计划，返回 agent 对话中重新生成 DAG。
+
+查看器将 v2 发现记录发布到 `~/.orca-dag-viewers/<规范化工作区路径的 SHA-256>.json`（POSIX 下目录权限 `0700`，文件权限 `0600`）。端口与签名密钥是私有运行时元数据，绝不属于工作区数据。可信插件派生 HTTP 桥接令牌，并验证 hello/inbox 响应签名；浏览器和操作者通过 [viewer API](http-api_zh.md#连接受信任的-viewer) 访问。旧版工作区端点文件不再用于发现，卸载时会将其移除。
 
 ## Run / Task / Dispatch 三层模型
 
@@ -81,10 +83,12 @@ Orca 1.4.226 沿确切的 `--retry-of` 链累计启动失败的 `worker-start`�
 - **Stop 事件与真实提问语义分离**：原生 `stopReason` 升级（`finished`, `errored`, `needs-input`, `exited`）作为事件记录在 `PendingInboxItem.kind === 'stop_event'` 中，与可回复提问（`kind === 'question'`）严格区分。其落定必须遵循精确 Dispatch 引导、操作员决断或权威结算，绝不伪造回复或合成成功。
 - **历史启动模式读取**：Stop 或重启后，worker 详情可从关键账本恢复不可变的后续启动模式元组。必须匹配实际 Run、Task 与 Dispatch，不能误用请求目标父任务。证据缺失或不可读时仍为未知；展示证据恢复不授予变更权限。
 - **已提交 Stage 合并握手**：要求跨工作区已提交代码交接的合并点必须同时声明 `[orca-dag:merge-prep]` 与 `[orca-dag:merge-inputs-v3]`。原生 1.4.247 `ask` 不提供 `--subject` 与 `--payload` 参数（原生 subject 固定为 `'Question'`，`payload.question` 包含完整提问文本）。worker 必须在任何 Git 修改前，发起提问文本严格且仅为 `[orca-dag:merge-inputs-v3]` 的提问。coordinator 在校验当前合并 Task/Dispatch 归属、发送方句柄及干净依赖后，通过 StageGit 返回不可变 commit SHA 回执。缺乏 V3 标记的旧可运行合并 spec 在建图校验时会被直接拒绝，须新建 Run 重新规划。
-- **关键状态恢复与热降级防线**：`.orca-dag/sessions.json` 持久化关键恢复账本（`mailboxChecks`、`guidanceSends`、`operatorMessages` 与 `resumeAttempts`），作为故障恢复依据而非滚动审计日志。非活跃操作员提问回复与群发消息助手（`operatorMessages.ts`）在调用 Orca CLI 前在 `operatorMessages` 落盘，通过只读 `request-show` 调和未知结果（先前以不同内容完成报 `operator_message_reconciled`，未解决报 `operator_message_unknown`）。L1 原生会话恢复（`nativeResume.ts`）在 `resumeAttempts` 中按 `prepared -> resumed_terminal -> bound | failed | unknown` 落盘，确保中断恢复绝不产生重复会话。不支持新字段的旧版读取器会直接报错（`session binding store contains unknown fields`）；包含未结算关键账本的 `sessions.json` 无法安全热降级至旧版读取器。
-- **服务端统一 `OutputTail` SSE 与插件 Hook 加速**：`server/src/outputTail.ts` 在所有 SSE 订阅者（`/api/workers/:dispatchId/output/stream`）间复用单个上游 `worker-read` 轮询器，并由伴生插件推送的 `agent.status.changed` / `agent.tool.after` 事件提前唤醒（`server/src/pluginBridge.ts`）。插件实时工具调用仅保存在有界内存环形缓冲中，绝不写入 `activity.jsonl`，并按 `callId` 与结构化 transcript 去重。
+- **关键状态恢复与热降级防线**：`.orca-dag/sessions.json` 保存关键恢复账本（`mailboxChecks`、`guidanceSends`、`operatorMessages` 与 `resumeAttempts`），不是滚动审计日志。非活跃 Run 的操作员消息在调用原生接口前先落盘 UUID、内容哈希及作用域，结果未知时按原请求标识执行只读 `request-show`。原生会话恢复记录 `prepared`、`resumed_terminal` 及最终的 `bound`、`refused` 或 `unknown`；结果未知时保持 Task 暂停。升级前先停止独立 viewer 和插件内置后端；恢复账本仍有未决项时不要热降级。
+- **恢复账本并发写入**：共享本地文件系统及 PID 命名空间的独立 viewer 和内置后端会串行执行 `sessions.json` 的读改写。持有者仍活跃或状态不明时，等待超时即拒绝写入，不按锁龄强行接管。下次写入时清理已确认退出的进程留下的锁声明和暂存文件。旧版 viewer 不遵守此锁。
+- **服务端统一 `OutputTail` SSE 与插件 Hook 加速**：`server/src/outputTail.ts` 按 Run、Dispatch 和输出来源，在 SSE 订阅者（`/api/workers/:dispatchId/output/stream`）之间共享上游 `worker-read` 轮询器。`server/src/pluginBridge.ts` 仅使用 Agent 状态、工具和提示词事件的终端 ID 唤醒匹配的轮询，不把事件当作输出或会话身份依据。**会话**卡片来自精确限定范围的原生会话记录；工具输入输出预览和提示词内容不会经过桥接。
 - **清理债务与不完整远程观测**：可回收的清理债务（reclaimable debt）严格根据新鲜的 fleet 记录重新核验，在 viewer 外部完成的 release 同样能抵消旧债务。`listWorkers` 返回有类型的 `WorkerInventory`（`{ workers: OrcaWorkerRow[], partialHostErrors: unknown[] }`），跨页汇总保留 `partialHostErrors`；远端主机缺失代表证据不全，绝不误判为已退出或借此清除债务。工作树移除清理安全判定重新核验全局完整 fleet 列表（`listWorkers(undefined, { includeRemote: true })`）而非仅当前选定 Run，确保未在终端列表中登记的其他 Run Native Chat worker 依然能有效保护共享工作区免遭误删。
 - **Helper 管理与谱系隔离**：同 Run 内的 helper worker 严格归其活动创建者管理。viewer 读取精确的 Dispatch lineage，不将 `parent_id` 视为所有权；仅在证实创建者已落定后方才接管 helper，归属不可读时保持等待。Stop 命令如实报告委派工作，绝不擅自终止它。可见的活动 worker 占用派工预算，但 helper 可在 viewer 外部启动，因此 **Max parallel 不是整个 Orca 运行时的全局硬上限**。
+- **协调权交接限制**：一次性变更要求操作员确认已观察到的协调者句柄和消费代次。当前 Orca `run-use` 不支持传入预期代次，无法跨进程以原子方式比较并更换绑定；不要并发接管同一个 Run。
 - **终端精确复用**：自动终端复用必须具备相同 agent、相同工作区且新鲜、已连接的 PTY 证据。仅凭 Chat handle 不能证明 PTY 存活；OpenCode、OMP、Antigravity 因需保留前端、新会话与模型身份，均不参与通用复用。
 - **作用域限定操作与并发读取共享**：Worker 输出、释放和保留严格限制在选定 Run 范围内（GET 用 `run` 查询参数，变更用 `runId` 请求体）。未限定作用域的请求审计保持可用。DAG、Workers、Activity、Health 的并发 GET 请求共享底层读取，严格按 Run 和参数隔离。页面隐藏时（`document.visibilityState === 'hidden'`）暂停 Activity 事件流连接，重新可见时刷新重连，保留轨道收起期间的未读计数。展示缓存绝不作为最终变更管辖权凭据。
 
@@ -121,11 +125,11 @@ CLI 与工作区在启动时解析一次；执行就绪情况会重新探测，�
 ```text
 skill/SKILL.md            薄项目工作流：PRD → 技术设计 → 任务 DAG → viewer；命令规范委托运行时指南
 server/src/
-  index.ts               进程入口：参数解析、CLI与工作区探测、endpoint.json 发布、skill与.gitignore初始化、回环监听
+  index.ts               进程入口：参数解析、CLI 与工作区探测、发布私有注册记录、skill 与 .gitignore 初始化、回环监听
   app.ts                 Express API 应用路由、插件桥接路由、OutputTail SSE、L1 原生恢复与静态 SPA 托管（`ORCA_DAG_WEB_DIR`）
-  pluginBridge.ts        `0o600` `.orca-dag/endpoint.json` 生命周期、插件鉴权（`x-orca-plugin-token`）、内存环形工具缓冲与命令收件/回执
-  outputTail.ts          服务端统一 `OutputTailManager` SSE：复用 `worker-read` 轮询、插件 Hook 提前唤醒与 `callId` 去重
-  nativeResume.ts        L1 原生会话恢复预检与执行（`agent.listSessions` + `agent.resume` + `worker-start --terminal --retry-of`），记账至 `sessions.json`
+  pluginBridge.ts        插件鉴权（`x-orca-plugin-token`）、hello/inbox 响应签名、终端 ID 唤醒与命令收件/回执
+  outputTail.ts          服务端统一 `OutputTailManager` SSE：复用精确限定范围的 `worker-read` 轮询，并按终端 ID 提前唤醒
+  nativeResume.ts        核验本地工作区和 Provider 的精确会话历史，只打开并绑定新面板，记账至 `sessions.json`
   activity.ts            Run 作用域事件解析与有界 Activity 日志流
   requestLedger.ts       变更请求持久化账本（.orca-dag/requests.jsonl）与 request-show 对账
   providerSessions.ts    持久化 sessions.json 存储：管理会话绑定、mailboxChecks、guidanceSends、operatorMessages 与 resumeAttempts
@@ -141,7 +145,7 @@ server/src/
   workspaceState.ts      统一状态路径管理、旧版根目录文件平滑迁移与只读回退
   skill.ts               将 skill/SKILL.md 自动安装至系统已检测到的所有 coding agent
   planning.ts            管理工作区 .gitignore 中的 .orca-dag/ 忽略规则（兼顾旧版 .orca/ 块）
-  uninstall.ts           实现 orca-dag uninstall：反向卸载 skill、清理失效 endpoint.json 与忽略规则、回收残留终端
+  uninstall.ts           实现 orca-dag uninstall：反向卸载 skill、清理私有注册记录、旧版工作区端点文件与受管忽略规则、回收残留终端
   webAssets.ts           编译期内嵌前端资源与 skill 文件的内存加载器
 plugin/
   orca-plugin.json       原生 Orca 插件清单（`orchestration-panel`，Host API 1.10 `trusted-worker`）
@@ -154,7 +158,7 @@ web/src/
   bridge/orcaBridge.ts   双模式传输层：完整标签页直连 HTTP/SSE，侧边栏通过 Orca 插件帧代理请求与事件推送
   components/
     SidebarApp.tsx       精简右侧栏伴生界面（任务 / 待处理 / 活动），任务详情复用 `ChatPanel`（`embeddedMessagesOnly`）、`NodeSessionPanel` 与 `WorkerOutputDockView`
-    NodeSessionPanel.tsx 实时可折叠工具调用卡片与轮次时间线（由 `OutputTail` SSE + 插件实时 Hook 驱动）
+    NodeSessionPanel.tsx 从 `OutputTail` SSE 的原生会话记录帧生成可折叠工具调用卡片和轮次
     DagBrandMark.tsx     自定义分叉汇聚 DAG 品牌图标
     DagView.tsx          懒加载 React Flow DAG 画布，280x120 节点渲染，受控脉冲动效，静态连线
     ExecControls.tsx     Header 顶栏传送动作组（Run/Stop）与 Settings 分节启动参数配置面板

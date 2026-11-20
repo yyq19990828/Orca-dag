@@ -11,12 +11,12 @@
 viewer 作为一个具有直接控制 Orca 运行时能力的管理面进程，其默认安全策略是严格收紧的：
 
 1. **仅监听本机回环地址**：HTTP 服务严格绑定在 `127.0.0.1`，绝不监听 `0.0.0.0` 或任何外网网卡。局域网内的其他设备无法发起网络访问，亦不提供任何远程直接监听模式。
-2. **完全禁用 CORS 跨域资源共享**：API 响应中绝不返回任何 `Access-Control-*` 响应头，外部第三方网页无法通过脚本跨域读取任何响应内容（包括认证令牌）。
+2. **浏览器访问限制**：不启用 CORS（不返回 `Access-Control-*` 响应头），外部网页无法通过脚本跨域读取响应或令牌。HTTP `Host` 仅接受 `localhost` 或 `127.0.0.1`（两者均可带端口）；查看器不允许嵌入网页框架。
 3. **单进程 Mutation Token 校验**：
-   - 针对所有可能产生副作用的写操作路由（`/api` 下的所有 `POST` 和 `PUT` 请求），客户端必须在请求头中携带 `X-Orca-Dag-Token`。
+   - 常规 viewer API 中 `/api` 下的 `POST` 和 `PUT` 请求需要在请求头中携带 `X-Orca-Dag-Token`。私有插件桥接使用独立凭证。
    - 该 Token 是 viewer 进程每次启动时随机生成的 256 位安全随机字符串。
    - 同源的前端 SPA 应用在加载时通过 `GET /api/session` 获取并缓存该 Token；当服务端重启（Token 更换）后，客户端会自动重新拉取并透明重试一次请求。
-   - 只读请求（`GET` 路由）不需要携带 Token。
+   - 常规 viewer API 的 `GET` 请求不需要携带此令牌。
    - 任何未携带或携带无效 Token 的写请求，在进入具体业务逻辑之前即被直接拒绝并返回 HTTP `403 Forbidden`。
 4. **已验证 Harness 与未验证 Harness 明确拒绝**：
    - 内置选项为 `claude`、`codex`、`opencode`、`omp`、`antigravity`，须遵守各自[有记录的执行范围](compatibility_zh.md)。
@@ -29,6 +29,12 @@ viewer 作为一个具有直接控制 Orca 运行时能力的管理面进程，�
 6. **严密的基础校验与防注入**：
    - 所有输入的 Run ID、Task ID、Gate ID、harness 名称、`provider/model` 路径、并发上限数值等，在 HTTP 边界均经过严格的白名单和格式校验。
    - 后端调用 Orca CLI 时采用已解析的纯 argv 参数列表，执行选项强制设为 `shell: false`，杜绝任何 shell 命令注入风险。
+
+### 连接受信任的 viewer
+
+只使用你为目标工作区启动的 viewer 所输出的本机 URL，或 Orca 为该工作区打开的完整 viewer 标签页中的 URL。先在可信的启动输出或标签页中确认工作区。不要从工作区数据读取 URL 或端口，不要猜测备用端口，也不要为调用 API 读取插件私有注册表。
+
+通过命令行调用时，先验证端口是 `1–65535` 范围内的十进制整数，再构造基址 `http://127.0.0.1:<port>`。从该 viewer 的 `/api/session` 获取令牌，只向同一已确认的 viewer 和工作区发送令牌。使用 curl 时，将 `-q` 作为首个选项以忽略 `.curlrc`，用 `--noproxy '*'` 直连回环地址，且不要开启重定向（`--location` 或 `-L`）。参见[技能中的 API 示例](../SKILL_zh.md)。
 
 ## 就绪探测与只读模式
 
@@ -43,7 +49,7 @@ viewer 作为一个具有直接控制 Orca 运行时能力的管理面进程，�
 
 ## 完整路由清单与语义说明
 
-所有 `POST` / `PUT` 路由均要求携带 `X-Orca-Dag-Token` 请求头；`GET` 路由在回环地址上开放。
+常规 viewer API 中，`POST` / `PUT` 请求需要携带 `X-Orca-Dag-Token`，`GET` 不需要。伴生插件桥接的读写请求均使用独立鉴权机制。
 
 | 方法 | 路由路径 | 参数与请求体说明 | 功能语义与行为规范 |
 |---|---|---|---|
@@ -102,9 +108,9 @@ viewer 作为一个具有直接控制 Orca 运行时能力的管理面进程，�
 | `POST` | `/api/session-bindings/:dispatchId/probe` | `{ runId: string }` | 按需向 provider 探测该 Dispatch 已绑定的 session 状态；结果仅为观测数据，绝不作为 Task 结算依据。 |
 | `POST` | `/api/workers/:dispatchId/resolve-blocked` | `{ runId, result, acknowledgeUnknownProvider: true, coordinatorControl? }` | 将人工核对结果写入已退出 worker 对应的受阻任务，使任务落定；原 Dispatch 保持失败状态。未在当前活跃调度下时需要 `coordinatorControl`。 |
 | `GET` | `/api/workers/:dispatchId/output?run=<id>` | `?run=<id>&source=auto/terminal/transcript&cursor=&limit=` | 分页获取指定 worker 的有界输出日志（限制 1–200），必须显式提供 `run` 作用域。 |
-| `GET` | `/api/workers/:dispatchId/output/stream?run=<id>` | `run`: Run ID | 服务端统一 `OutputTailManager` SSE 流（`init`、`delta`、`liveTool`、`status`、`drained`），复用单条上游 `worker-read` 轮询并由伴生插件 Hook 提前唤醒。 |
-| `GET` | `/api/workers/:dispatchId/resume-preview?run=<id>` | `run`: Run ID | 预检已退出本机已验证 worker 的 L1 原生会话恢复资格（结合 `sessions.json` 绑定与插件 `workspace.list`/`agent.listSessions` 发现）。 |
-| `POST` | `/api/workers/:dispatchId/resume` | `{ runId, sessionId?, coordinatorControl? }` | 通过伴生插件调用 Orca 原生 `agent.resume` 并经 `worker-start --terminal --retry-of` 绑定新 Dispatch，全流程写入 `sessions.json` `resumeAttempts`。 |
+| `GET` | `/api/workers/:dispatchId/output/stream?run=<id>` | `run`（必填），可选 `source=auto/terminal/transcript` | `OutputTailManager` SSE 按 Run、Dispatch 与输出来源共享 `worker-read` 轮询。帧包括 `init`（初始快照）、`reset`（替换快照）、`append`（新增页）及 `streamError`（读取错误）。**会话**工具卡片只来自原生会话记录帧。 |
+| `POST` | `/api/workers/:dispatchId/resume-preview` | `{ runId, sessionId? }` | 需认证的只读预检。Worker 必须已退出，且会话必须精确匹配同一本地工作区、同一 Provider 的历史记录。优先使用已有绑定；仅在没有绑定时才可显式选择会话。已有绑定时不会列出无关候选。工作区 ID 由 Orca 主机提供，不按会话 ID 解析；文件夹项目的 ID 可包含其绝对路径。 |
+| `POST` | `/api/workers/:dispatchId/resume` | `{ runId, sessionId?, coordinatorControl? }` | 重新校验恢复资格，拒绝仍活跃或已有面板的会话。通过伴生插件调用 Orca 原生 `agent.resume` 打开新面板，再由 `worker-start --terminal --retry-of` 绑定新 Dispatch，记入 `.orca-dag/sessions.json` 的 `resumeAttempts`。OMP 和 Antigravity 不支持此路径。 |
 | `POST` | `/api/workers/:dispatchId/permission` | `{ runId, promptId, decision: "approve"\|"deny", reason?, coordinatorControl? }` | 在 Orca ≥ 1.4.263 上对挂起的 Worker 权限弹窗进行单次放行或拒绝（`orchestration approve` / `deny`）。 |
 | `POST` | `/api/workers/:dispatchId/stop` | `:dispatchId`: Dispatch ID | 停止一个经正面证实存活的 Dispatch。操作前重新读取 `worker-show` 并记录请求 ID；若通信丢失返回 `502 response_lost` 与请求 ID。 |
 | `POST` | `/api/workers/:dispatchId/abandon` | `:dispatchId`: Dispatch ID | 针对已退出或结果未知的尝试调用 `worker-abandon` 隔离编排权限；若 Orca 能证明 worker 仍存活则以 `abandon_refused` 拒绝。 |
@@ -129,12 +135,12 @@ viewer 作为一个具有直接控制 Orca 运行时能力的管理面进程，�
 
 ### 原生伴生插件桥接路由（`/api/plugin/*`）
 
-以下路由仅接受存于 `0o600` `<workspace>/.orca-dag/endpoint.json` 中的独立进程级令牌 `x-orca-plugin-token`（浏览器 SPA 与侧边栏代理禁止访问 `/api/plugin/*`）：
+这些路由仅供可信原生插件使用，不面向浏览器或操作者的 API 客户端。侧边栏代理禁止访问 `/api/plugin/*`。查看器将包含端口和签名密钥的 v2 发现记录发布到 `~/.orca-dag-viewers/<规范化工作区路径的 SHA-256>.json`（POSIX 下目录权限 `0700`，文件权限 `0600`），绝不写入工作区。插件使用独立派生的 `x-orca-plugin-token`；`/api/session` 不会返回此令牌或签名密钥。调用 hello 和 inbox 时，插件发送一次性的 `x-orca-plugin-nonce` 挑战值，并通过 `x-orca-plugin-proof` 验证响应签名。
 
 | 方法 | 路由路径 | 参数与请求体说明 | 功能语义与行为规范 |
 |---|---|---|---|
 | `POST` | `/api/plugin/hello` | `{ pluginId, version, hostApiMinor, grantedCapabilities, workspacePath, workspaceId }` | 注册运行中的 `orchestration-panel` 伴生插件并刷新连接心跳。 |
-| `POST` | `/api/plugin/events` | `{ events: [...] }` | 接收有界批量的 `agent.status.changed`、只读 `agent.tool.after`（仅存内存环形缓冲，绝不落盘 `activity.jsonl`）与 `agent.prompt.before`，并唤醒 `OutputTailManager`。 |
+| `POST` | `/api/plugin/events` | `{ events: [...] }` | 接收来自 `agent.status.changed`、`agent.tool.after` 与 `agent.prompt.before` 的有界批量唤醒信号，仅携带终端 ID。它们唤醒匹配的 `worker-read` 轮询，不作为工具预览或提示词内容的输出渠道。 |
 | `GET` | `/api/plugin/inbox` | 无 | 长轮询待执行的 viewer → plugin 指令（`workspace.list`、`agent.listSessions`、`agent.resume`、`notification.show`、`statusBar.update`）。 |
 | `POST` | `/api/plugin/receipts/:commandId` | `{ ok, result?, error? }` | 回传对应指令 ID 的执行结果或错误回执。 |
 

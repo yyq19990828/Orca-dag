@@ -12,6 +12,7 @@ import {
   sendTaskGuidance,
   coordinatorStatus,
   noteManualRelease,
+  recordResumedWorker,
   resetCoordinatorForTests,
   retryWorker,
   shouldPersistCoordinatorCheck,
@@ -23,12 +24,13 @@ import {
   type StartOpts,
   type StopReport,
 } from "./coordinator";
-import { checkReadiness, deriveWorktreeName, initOrcaRuntime, runOrca, workerSupervision, type OrcaReadiness } from "./orca";
+import { checkReadiness, deriveWorktreeName, initOrcaRuntime, parseWorkerStartReceipt, runOrca, workerSupervision, type OrcaReadiness } from "./orca";
 import { createApp, listenLoopback } from "./app";
 import { createSecurityPolicy, type SecurityPolicy } from "./security";
 import { CONFIG_FILE, loadConfig, saveConfig } from "./config";
 import { ProviderSessionStore } from "./providerSessions";
 import { LaunchHistory } from "./launchHistory";
+import { RequestLedger } from "./requestLedger";
 
 /**
  * Phase 3 acceptance coverage: the closed supervised-worker lifecycle.
@@ -772,7 +774,7 @@ describe("guidance custody", () => {
     assert.equal(getState().dispatches.ctx_followup.status, "stopped");
   });
 
-  it("holds unknown follow-up readiness, but still stops the journal-owned root", async () => {
+  it("holds unknown follow-up readiness, but still stops the natively proven root", async () => {
     const runId = "run_guidance_unknown";
     await singleTaskState(runId);
     await startCoordinator(baseOpts(runId));
@@ -810,10 +812,15 @@ describe("guidance custody", () => {
   });
 
   it("does not claim a foreign root when Orca steers guidance to it", async () => {
+    // This escalation belongs to the original Dispatch, not the routed destination.
     const runId = "run_guidance_steered";
     await singleTaskState(runId);
     await startCoordinator(baseOpts(runId, { maxConcurrency: 3 }));
-    await dispatchIdOf("task_aaa");
+    const original = await dispatchIdOf("task_aaa");
+    const event = { ...workerDoneMessage("task_aaa", original, "succeeded", "msg_steered_original"),
+      type: "escalation", payload: JSON.stringify({ dispatchId: original, stopReason: "needs-input" }) };
+    await injectMail([event]);
+    await waitFor(() => coordinatorStatus().inbox.pending.some(item => item.messageId === event.id), "original stop event");
     await mutateState(s => {
       s.tasks.task_foreign = { id: "task_foreign", run_id: runId, status: "dispatched", deps: "[]", dispatch_id: "ctx_steered" };
       s.dispatches.ctx_steered = { id: "ctx_steered", run_id: runId, task_id: "task_foreign",
@@ -823,6 +830,9 @@ describe("guidance custody", () => {
     const receipt = await sendTaskGuidance({ runId, taskId: "task_aaa", subject: "Guidance", body: "Continue" });
     assert.equal(receipt.kind, "follow_up");
     assert.equal(receipt.dispatchId, "ctx_steered");
+    assert.ok(coordinatorStatus().inbox.pending.some(item => item.messageId === event.id));
+    assert.ok((await new ProviderSessionStore(workspace).listMailboxChecks(runId))
+      .every(row => !row.resolvedStopEvents?.[event.id]));
     const report = await stopCoordinator();
     assert.ok(!report.results.some(row => row.target === "ctx_steered"));
     assert.equal(getState().dispatches.ctx_steered.status, "dispatched");
@@ -831,6 +841,48 @@ describe("guidance custody", () => {
     assert.equal(findAttempt("task_foreign"), undefined);
     await stopCoordinator();
   });
+
+  for (const evidence of ["exact", "missing_request", "other_run"] as const) {
+    it(`adopts finalized guidance only with exact native request and worker evidence: ${evidence}`, async () => {
+      const runId = `run_guidance_restart_${evidence}`;
+      const dispatchId = "ctx_follow_up";
+      const requestId = "req_follow_up";
+      const followUpOf = "ctx_original";
+      const taskId = "task_follow_up";
+      const workerRun = evidence === "other_run" ? "run_other" : runId;
+      const timestamp = new Date().toISOString();
+      await singleTaskState(runId);
+      await mutateState(s => {
+        s.tasks.task_aaa.status = "completed";
+        s.tasks[taskId] = { id: taskId, run_id: workerRun, status: "dispatched", deps: "[]", dispatch_id: dispatchId };
+        s.dispatches = { [dispatchId]: { id: dispatchId, run_id: workerRun, task_id: taskId,
+          status: "dispatched", workerState: "ready", terminalState: "active", agentTerminal: "term_follow_up", creatorDispatchId: null } };
+        if (workerRun !== runId) s.runs[workerRun] = { id: workerRun, objective: "Other Run", legacy: 0 };
+        if (evidence !== "missing_request") {
+          s.requests = { [requestId]: { state: "completed", method: "orchestration.send",
+            outcome: { runId, taskId, dispatchId, state: "ready", delivery: "follow_up", followUpOf, mutation: { requestId } } } };
+        }
+      });
+      await new ProviderSessionStore(workspace).recordGuidanceSend({
+        requestId, runId, requestedTaskId: "task_aaa", requestedDispatchId: followUpOf, from: "term_old",
+        state: "follow_up", creationProven: true, createdAt: timestamp, updatedAt: timestamp, error: null,
+        receipt: { kind: "follow_up", runId, taskId, dispatchId, followUpOf, requestId,
+          requestedTaskId: "task_aaa", requestedDispatchId: followUpOf, destinationRunId: null },
+      });
+      await startCoordinator(baseOpts(runId));
+      assert.ok(callsOf("request-show", "--request", requestId).length);
+      assert.equal(findAttempt(taskId)?.dispatchId, evidence === "exact" ? dispatchId : undefined);
+      const report = await stopCoordinator();
+      assert.equal(callsOf("worker-stop", "--dispatch", dispatchId).length, evidence === "exact" ? 1 : 0);
+      if (evidence === "exact") {
+        assert.ok(callsOf("worker-show", "--dispatch", dispatchId).length);
+        assert.equal(getState().dispatches[dispatchId].status, "stopped");
+      } else {
+        assert.equal(getState().dispatches[dispatchId].status, "dispatched");
+        assert.equal(report.results.find(row => row.target === requestId)?.result, "unknown");
+      }
+    });
+  }
 
   it("leaves a foreign supervised root visible but neither adopts nor stops it", async () => {
     const runId = "run_foreign_root";
@@ -847,6 +899,125 @@ describe("guidance custody", () => {
     const report = await stopCoordinator();
     assert.ok(!report.results.some(row => row.target === "ctx_foreign"));
     assert.equal(getState().dispatches.ctx_foreign.status, "dispatched");
+  });
+});
+
+describe("Stop lifecycle boundary", () => {
+  it("shares one Stop and rejects a replacement Start for the entire mailbox wait", async () => {
+    const runId = "run_stopping";
+    const replacement = "run_replacement";
+    const nextDispatch = "ctx_replacement";
+    const startedFile = join(root, "replacement-check-started");
+    const releaseFile = join(root, "replacement-check-release");
+    const previousBarrier = process.env.FAKE_ORCA_CHECK_BARRIER;
+    await singleTaskState(runId);
+    await mutateState(s => {
+      s.runs[replacement] = { id: replacement, objective: "Replacement", legacy: 0 };
+      s.tasks.task_bbb = { id: "task_bbb", run_id: replacement, status: "dispatched", deps: "[]", dispatch_id: nextDispatch };
+      s.dispatches = { [nextDispatch]: { id: nextDispatch, run_id: replacement, task_id: "task_bbb",
+        status: "dispatched", workerState: "ready", terminalState: "active", agentTerminal: "term_replacement" } };
+    });
+    await recordViewerLaunch(replacement, "task_bbb", nextDispatch);
+    await startCoordinator(baseOpts(runId));
+    const oldDispatch = await dispatchIdOf("task_aaa");
+    process.env.FAKE_ORCA_CHECK_BARRIER = JSON.stringify({ startedFile, releaseFile });
+    try {
+      await waitFor(() => existsSync(startedFile) ? true : null, "Run A mailbox wait");
+      const firstStop = stopCoordinator();
+      const secondStop = stopCoordinator();
+      assert.equal(firstStop, secondStop);
+      assert.equal(coordinatorStatus().phase, "stopping");
+      await assert.rejects(startCoordinator(baseOpts(replacement)), { code: "coordinator_conflict" });
+      assert.equal(coordinatorStatus().runId, runId);
+      assert.equal(callsOf("run-use", "--id", replacement).length, 0);
+      writeFileSync(releaseFile, "");
+      const report = await firstStop;
+      assert.equal(await secondStop, report);
+      assert.equal(callsOf("worker-stop", "--dispatch", oldDispatch).length, 1);
+      assert.equal(callsOf("worker-stop", "--dispatch", nextDispatch).length, 0);
+      await startCoordinator(baseOpts(replacement));
+      assert.equal(attempt("task_bbb").dispatchId, nextDispatch);
+      assert.equal(getState().dispatches[nextDispatch].status, "dispatched");
+    } finally {
+      writeFileSync(releaseFile, "");
+      if (previousBarrier === undefined) delete process.env.FAKE_ORCA_CHECK_BARRIER;
+      else process.env.FAKE_ORCA_CHECK_BARRIER = previousBarrier;
+    }
+  });
+
+  it("reports closing a provisional coordinator whose Run binding completes during Stop", async () => {
+    const runId = "run_stop_binding";
+    const startedFile = join(root, "binding-started");
+    const releaseFile = join(root, "binding-release");
+    const wrapper = join(root, "binding-barrier.mjs");
+    await singleTaskState(runId);
+    writeFileSync(wrapper, `
+import { existsSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+const args = process.argv.slice(2);
+if (args[0] === "orchestration" && args[1] === "run-use") {
+  writeFileSync(${JSON.stringify(startedFile)}, "");
+  const deadline = Date.now() + 10_000;
+  while (!existsSync(${JSON.stringify(releaseFile)}) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+}
+process.exit(spawnSync(process.execPath, [${JSON.stringify(fixturePath)}, ...args], { stdio: "inherit" }).status ?? 1);
+`);
+    initOrcaRuntime({ env: { ORCA_CLI_COMMAND: JSON.stringify(process.execPath) + " " + JSON.stringify(wrapper),
+      WORKSPACE_DIR: workspace }, cwd: root });
+    const starting = startCoordinator(baseOpts(runId));
+    try {
+      await waitFor(() => existsSync(startedFile) ? true : null, "provisional binding in flight");
+      const handle = coordinatorTerminal(getState()).handle;
+      assert.equal(coordinatorStatus().coordinatorHandle, null, "binding has not published the provisional handle");
+      const stopping = stopCoordinator();
+      writeFileSync(releaseFile, "");
+      await starting;
+      const report = await stopping;
+      assert.equal(report.results.find(row => row.target === handle)?.result, "closed");
+      assert.equal(coordinatorTerminal(getState()).connected, false);
+      assert.equal(calls("worker-start").length, 0);
+    } finally {
+      writeFileSync(releaseFile, "");
+      await starting.catch(() => {});
+      await stopCoordinator();
+      initOrcaRuntime({ env: { ORCA_CLI_COMMAND: fixturePath, WORKSPACE_DIR: workspace }, cwd: root });
+    }
+  });
+
+  it("stops a same-Run native resume accepted while Stop drains the lifecycle lock", async () => {
+    const runId = "run_stop_during_resume";
+    const taskId = "task_aaa";
+    const dispatchId = "ctx_inflight_resume";
+    const terminalId = "term_inflight_resume";
+    await singleTaskState(runId);
+    await mutateState(s => { s.tasks[taskId].status = "blocked"; });
+    await startCoordinator(baseOpts(runId));
+    let admit!: () => void;
+    let finishBinding!: () => void;
+    const admitted = new Promise<void>(resolve => { admit = resolve; });
+    const binding = new Promise<void>(resolve => { finishBinding = resolve; });
+    const resuming = withLifecycleMutation(async () => {
+      admit();
+      await binding;
+      await mutateState(s => {
+        s.tasks[taskId].status = "dispatched";
+        s.tasks[taskId].dispatch_id = dispatchId;
+        s.dispatches = { [dispatchId]: { id: dispatchId, run_id: runId, task_id: taskId,
+          status: "dispatched", workerState: "ready", terminalState: "active", agentTerminal: terminalId, creatorDispatchId: null } };
+      });
+      const receipt = parseWorkerStartReceipt({ runId, taskId, dispatchId, state: "ready", stage: "ready" }, true);
+      recordResumedWorker(runId, { taskId, terminalId, harness: "claude", retriedFrom: "ctx_prior" },
+        { dispatchId, mode: "supervised", receipt, handle: null, replayed: false, adopted: false });
+    });
+    await admitted;
+    const stopping = stopCoordinator();
+    finishBinding();
+    await resuming;
+    const report = await stopping;
+    assert.equal(report.results.find(row => row.target === dispatchId)?.result, "stopped");
+    assert.equal(callsOf("worker-stop", "--dispatch", dispatchId).length, 1);
   });
 });
 
@@ -1688,6 +1859,65 @@ describe("questions hold the Delivery open", () => {
     assert.ok(checkpoints.some(row => row.resolvedStopEvents?.[event.id]?.dispatchId === dispatchId));
     await stopCoordinator();
   });
+  it("keeps the original event pending after a confirmed redirect to a child Run inbox", async () => {
+    const runId = "run_stop_redirect";
+    await singleTaskState(runId);
+    await startCoordinator(baseOpts(runId));
+    const dispatchId = await dispatchIdOf("task_aaa");
+    const event = { ...workerDoneMessage("task_aaa", dispatchId, "succeeded", "msg_stop_redirect"),
+      type: "escalation", payload: JSON.stringify({ dispatchId, stopReason: "needs-input" }) };
+    await injectMail([event]);
+    await waitFor(() => coordinatorStatus().inbox.pending.some(item => item.messageId === event.id), "original stop event");
+    const requestId = "req_child_redirect";
+    const timestamp = new Date().toISOString();
+    const store = new ProviderSessionStore(workspace);
+    await mutateState(s => {
+      s.requests[requestId] = { state: "completed", method: "orchestration.send",
+        outcome: { mutation: { requestId }, message: { run_id: "run_child", to_handle: "run:run_child" },
+          warnings: [{ code: "recipient_run_bound_redirect", recipient: `dispatch:${dispatchId}` }] } };
+    });
+    await store.recordGuidanceSend({
+      requestId, runId, requestedTaskId: "task_aaa", requestedDispatchId: dispatchId, from: coordinatorTerminal(getState()).handle,
+      state: "prepared", receipt: null, creationProven: false, createdAt: timestamp, updatedAt: timestamp, error: null,
+    });
+    const observed = coordinatorStatus().lastReconciledAt;
+    await waitFor(() => callsOf("request-show", "--request", requestId).length > 0 && coordinatorStatus().lastReconciledAt > observed,
+      "native redirect reconciliation");
+    assert.equal((await store.listGuidanceSends(runId))[0].receipt?.kind, "recipient_run_bound_redirect");
+    assert.ok(coordinatorStatus().inbox.pending.some(item => item.messageId === event.id));
+    assert.ok((await store.listMailboxChecks(runId)).every(row => !row.resolvedStopEvents?.[event.id]));
+  });
+
+  it("recovers only the exact native permission decision and persists it before clearing the message", async () => {
+    const runId = "run_permission_decision";
+    await singleTaskState(runId);
+    await startCoordinator(baseOpts(runId));
+    const dispatchId = await dispatchIdOf("task_aaa");
+    const promptId = "approval_next";
+    const event = { ...workerDoneMessage("task_aaa", dispatchId, "succeeded", "msg_permission"),
+      type: "escalation", payload: JSON.stringify({ taskId: "task_aaa", dispatchId,
+        approval: { approvalId: promptId, state: "open", worker: { dispatchId }, allowedActions: ["allow", "deny"] } }) };
+    const unrelated = { ...event, id: "msg_unrelated_permission", from_handle: "dispatch:ctx_unrelated" };
+    await injectMail([event, unrelated]);
+    await waitFor(() => coordinatorStatus().inbox.pending.filter(item => item.permissionPrompt?.id === promptId).length === 2,
+      "pending permission escalations");
+    const requestId = "req_permission";
+    await new RequestLedger(workspace).record({
+      requestId, operation: "worker-approve", runId, taskId: "task_aaa", dispatchId, target: promptId,
+    });
+    await mutateState(s => {
+      s.requests[requestId] = { state: "completed", method: "orchestration.approvalAnswer",
+        outcome: { approvalId: promptId, dispatchId, decision: "allow", mutation: { requestId } } };
+    });
+    await waitFor(() => !coordinatorStatus().inbox.pending.some(item => item.messageId === event.id) ? true : null,
+      "exact accepted native decision");
+    const rows = await new ProviderSessionStore(workspace).listMailboxChecks(runId);
+    assert.deepEqual(rows.find(row => row.resolvedPermissionPrompts?.[event.id])?.resolvedPermissionPrompts?.[event.id],
+      { dispatchId, promptId, decision: "approve", requestId });
+    assert.ok(coordinatorStatus().inbox.pending.some(item => item.messageId === unrelated.id));
+    assert.equal(calls("reply").length, 0);
+  });
+
   it("resolves a stop event on authoritative later settlement without answering a question", async () => {
     const runId = "run_stop_settlement";
     await singleTaskState(runId);
@@ -3502,6 +3732,58 @@ describe("worker_done acceptance", () => {
     assert.equal(calls("worker-release").length, 0, "a rejected report grants no release authority");
     await stopCoordinator();
   });
+});
+
+describe("native resume recovery custody", () => {
+  for (const scenario of ["bound", "unresolved", "wrong_lineage"] as const) {
+    it(`uses exact native resume evidence on restart: ${scenario}`, async () => {
+      const runId = `run_native_resume_${scenario}`;
+      const taskId = "task_aaa";
+      const requestId = "req_native_resume";
+      const originalDispatchId = "ctx_old";
+      const dispatchId = "ctx_resumed";
+      const resumedTerminalId = "term_resumed";
+      const timestamp = new Date().toISOString();
+      const store = new ProviderSessionStore(workspace);
+      await singleTaskState(runId);
+      await store.recordResumeAttempt({
+        requestId, runId, taskId, originalDispatchId, harness: "claude", sessionId: "session_old",
+        workspaceId: "workspace_exact", resumedTerminalId,
+        newDispatchId: scenario === "unresolved" ? null : dispatchId, state: scenario === "unresolved" ? "unknown" : "bound",
+        error: null, createdAt: timestamp, updatedAt: timestamp,
+      });
+      const publishNativeBinding = () => mutateState(s => {
+        s.tasks[taskId].status = "dispatched";
+        s.tasks[taskId].dispatch_id = dispatchId;
+        s.dispatches = { [dispatchId]: { id: dispatchId, task_id: taskId, run_id: runId, status: "dispatched",
+          workerState: "ready", terminalState: "active", agentTerminal: resumedTerminalId, creatorDispatchId: null } };
+        s.workerShow = { [dispatchId]: { dispatch: { id: dispatchId, taskId, runId, status: "dispatched",
+          retryOfDispatchId: scenario === "wrong_lineage" ? "ctx_unrelated" : originalDispatchId, creatorDispatchId: null },
+          terminal: { handle: resumedTerminalId, connected: true }, worker: { state: "ready" } } };
+        s.requests ??= {};
+        s.requests[requestId] = { state: "completed", method: "orchestration.workerStart",
+          outcome: { runId, taskId, dispatchId, state: "ready", stage: "ready", mutation: { requestId } } };
+      });
+      if (scenario !== "unresolved") await publishNativeBinding();
+      await startCoordinator(baseOpts(runId));
+      if (scenario === "unresolved") {
+        await waitFor(() => coordinatorStatus().phase === "awaiting_input" ? true : null, "unresolved native resume hold");
+        assert.equal(calls("worker-start").length, 0, "automatic dispatch must not replace the unresolved resume");
+        await assert.rejects(retryWorker(originalDispatchId), { code: "resume_unknown" });
+        await publishNativeBinding();
+        await waitFor(() => findAttempt(taskId)?.dispatchId === dispatchId ? true : null, "later exact resume recovery");
+        assert.equal((await store.listResumeAttempts(runId))[0].state, "bound");
+      }
+      const resumed = findAttempt(taskId);
+      assert.equal(resumed?.retriedFrom, scenario === "wrong_lineage" ? undefined : originalDispatchId);
+      assert.equal(calls("worker-start").length, 0);
+      const report = await stopCoordinator();
+      assert.equal(callsOf("worker-stop", "--dispatch", dispatchId).length, scenario === "wrong_lineage" ? 0 : 1);
+      assert.equal(callsOf("worker-stop", "--dispatch", originalDispatchId).length, 0);
+      if (scenario === "wrong_lineage") assert.equal(report.results.find(row => row.target === requestId)?.result, "unknown");
+      else assert.equal(report.results.find(row => row.target === dispatchId)?.result, "stopped");
+    });
+  }
 });
 
 describe("Phase 4: restart projection classes", () => {

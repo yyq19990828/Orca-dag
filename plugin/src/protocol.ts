@@ -1,12 +1,7 @@
 // Shared request/event contract between the Orchestration Panel HTML frame and trusted-worker.
 
 export interface ProbeRequest {
-  action: 'ping' | 'env' | 'inventory' | 'events' | 'resume'
-  port?: number
-  probePath?: string
-  workspaceId?: string
-  agent?: string
-  sessionId?: string
+  action: 'ping' | 'events'
 }
 
 export interface BridgeApiRequest {

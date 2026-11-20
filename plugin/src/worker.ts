@@ -1,22 +1,21 @@
 // Orchestration Panel trusted-worker entry (M1 + M2 companion bridge).
 //
 // Responsibilities:
-// 1. Discover local Orca DAG viewers via `<workspace>/.orca-dag/endpoint.json`
-//    (never following symlinks) and connect over loopback HTTP (`127.0.0.1`).
+// 1. Discover local Orca DAG viewers through the user-private trust registry.
 // 2. Forward live `agent.status.changed`, `agent.tool.after` (observe-only),
 //    and `agent.prompt.before` (observe-only) events to the matching viewer so
 //    its centralized OutputTail wakes immediately and renders local tool calls.
 // 3. Long-poll the viewer's `/api/plugin/inbox` to update Orca's status bar,
 //    deliver gate/failure notifications, and execute approved host commands
 //    (such as `agent.resume` in M3).
-// 4. Keep `orchestration-panel.probe` & `orchestration-panel.status` available
-//    for diagnostics and sidebar HTML panel integration.
+// 4. Report connection status without exposing privileged host diagnostics.
 import { spawn, type ChildProcess } from 'node:child_process'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { lstat, readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { OrcaWorkerApi } from 'orca/worker'
+import { pluginRequestToken, readPluginEndpointFile, signPluginReply, type PluginEndpointRecord } from './endpoint'
 import type {
   ActivitySubscribeRequest,
   BridgeApiRequest,
@@ -29,9 +28,6 @@ import type {
 const PLUGIN_ID = 'orchestration-panel'
 const PLUGIN_VERSION = '0.1.0'
 const MAX_STATUS_EVENTS = 50
-const MAX_TOOL_EVENTS = 50
-const MAX_PROMPT_EVENTS = 20
-const DEFAULT_MAX_TOOL_BYTES = 4096
 const DISCOVERY_INTERVAL_MS = 10_000
 const FLUSH_DEBOUNCE_MS = 100
 const INBOX_WAIT_MS = 10_000
@@ -78,6 +74,10 @@ function buildManagedServerEnv(workspacePath: string, panelDir: string | null): 
     if (
       key === 'PORT' ||
       key === 'ORCA_DAG_WEB_URL' ||
+      key === 'ORCA_DAG_WEB_DIR' ||
+      key === 'ORCA_WORKTREE' ||
+      key === 'ORCA_ENVIRONMENT' ||
+      key === 'ORCA_PAIRING_CODE' ||
       key === 'ORCA_TERMINAL_HANDLE' ||
       key === 'ORCA_PANE_KEY' ||
       key === 'ORCA_TAB_ID' ||
@@ -98,21 +98,39 @@ function buildManagedServerEnv(workspacePath: string, panelDir: string | null): 
   return env
 }
 
-interface EndpointFile {
-  version: 1
-  port: number
-  pid: number
-  instanceId: string
-  pluginToken: string
-  workspace: string
-  worktree?: string
-  startedAt?: string
+function panelApiPath(url: string): boolean {
+  if (!url.startsWith('/api/') || /[\s\\#\u0000-\u001f\u007f]/.test(url)) return false
+  const pathname = url.split('?', 1)[0]
+  try {
+    const segments = pathname.slice(5).split('/').map(decodeURIComponent)
+    return segments.every((segment) => segment && segment !== '.' && segment !== '..' && !/[\s/\\%?#\u0000-\u001f\u007f]/.test(segment)) &&
+      segments[0].toLowerCase() !== 'plugin' &&
+      segments.at(-1)?.toLowerCase() !== 'stream'
+  } catch {
+    return false
+  }
+}
+
+async function verifiedPluginReply(
+  res: Response, key: string, kind: 'hello' | 'inbox', nonce: string,
+): Promise<unknown> {
+  const proof = res.headers.get('x-orca-plugin-proof')
+  if (!res.ok || !proof || !/^[A-Za-z0-9_-]{43}$/.test(proof)) {
+    await res.body?.cancel()
+    throw new Error('Viewer did not provide an authenticated reply')
+  }
+  const body = await res.text()
+  if (!timingSafeEqual(Buffer.from(proof), Buffer.from(signPluginReply(key, kind, nonce, body)))) {
+    throw new Error('Viewer reply did not match this connection')
+  }
+  return JSON.parse(body) as unknown
 }
 
 interface ViewerConnection {
   workspacePath: string
   workspaceListId: string | null
-  endpoint: EndpointFile
+  endpoint: PluginEndpointRecord
+  requestToken: string
   abort: AbortController
   connected: boolean
   lastSyncAt: number
@@ -131,9 +149,6 @@ interface RingState {
   workspaceCount: number
   forwardedBatches: number
   recentStatus: Array<Record<string, unknown>>
-  recentTools: Array<Record<string, unknown>>
-  recentPrompts: Array<Record<string, unknown>>
-  lastWorkspace: Record<string, unknown> | null
 }
 
 let activeShutdown: (() => void) | null = null
@@ -141,97 +156,6 @@ let activeShutdown: (() => void) | null = null
 function pushRing<T>(buf: T[], item: T, max: number): void {
   buf.push(item)
   if (buf.length > max) buf.splice(0, buf.length - max)
-}
-
-function truncateJson(value: unknown, maxBytes: number): { text: string; truncated: boolean } {
-  if (maxBytes <= 0) return { text: '', truncated: value !== undefined }
-  let raw: string
-  try {
-    raw = typeof value === 'string' ? value : JSON.stringify(value) ?? ''
-  } catch {
-    raw = '[unserializable]'
-  }
-  const bytes = Buffer.byteLength(raw, 'utf8')
-  if (bytes <= maxBytes) return { text: raw, truncated: false }
-  let end = Math.min(raw.length, maxBytes)
-  while (end > 0 && Buffer.byteLength(raw.slice(0, end), 'utf8') > maxBytes) {
-    end = Math.floor(end * 0.9)
-  }
-  return { text: raw.slice(0, end), truncated: true }
-}
-
-async function readLocalEndpoint(workspacePath: string): Promise<EndpointFile | null> {
-  const dirPath = join(workspacePath, '.orca-dag')
-  const filePath = join(dirPath, 'endpoint.json')
-  try {
-    const dirStat = await lstat(dirPath)
-    if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) return null
-    const fileStat = await lstat(filePath)
-    if (!fileStat.isFile() || fileStat.isSymbolicLink()) return null
-    const parsed = JSON.parse(await readFile(filePath, 'utf8')) as Partial<EndpointFile>
-    if (
-      parsed.version !== 1 ||
-      typeof parsed.port !== 'number' ||
-      !Number.isInteger(parsed.port) ||
-      parsed.port <= 0 ||
-      parsed.port >= 65536 ||
-      typeof parsed.pluginToken !== 'string' ||
-      parsed.pluginToken.length < 8 ||
-      typeof parsed.instanceId !== 'string' ||
-      !parsed.instanceId ||
-      typeof parsed.workspace !== 'string' ||
-      !parsed.workspace
-    ) {
-      return null
-    }
-    return parsed as EndpointFile
-  } catch {
-    return null
-  }
-}
-
-async function probeEnv(input: ProbeRequest): Promise<Record<string, unknown>> {
-  const result: Record<string, unknown> = {
-    nodeVersion: process.version,
-    pid: process.pid,
-    cwd: process.cwd(),
-  }
-
-  const port = Number.isInteger(input.port) && input.port! > 0 && input.port! < 65536 ? input.port! : 8787
-  try {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 1500)
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: controller.signal })
-      const text = (await res.text()).slice(0, 256)
-      result.s1_loopback = { ok: res.ok, status: res.status, bodyPreview: text }
-    } finally {
-      clearTimeout(timer)
-    }
-  } catch (err) {
-    result.s1_loopback = { ok: false, error: String((err as Error)?.message ?? err) }
-  }
-
-  try {
-    const target = typeof input.probePath === 'string' && input.probePath.length > 0 ? input.probePath : process.cwd()
-    const st = await lstat(target)
-    result.s2_fs = { ok: true, target, isDirectory: st.isDirectory(), isFile: st.isFile() }
-  } catch (err) {
-    result.s2_fs = { ok: false, error: String((err as Error)?.message ?? err) }
-  }
-
-  try {
-    const { execFile } = await import('node:child_process')
-    const { promisify } = await import('node:util')
-    const pExecFile = promisify(execFile)
-    const bin = process.platform === 'linux' ? 'orca-ide' : 'orca'
-    const { stdout } = await pExecFile(bin, ['--version'], { timeout: 3000 })
-    result.s3_spawn = { ok: true, bin, version: String(stdout).trim() }
-  } catch (err) {
-    result.s3_spawn = { ok: false, error: String((err as Error)?.message ?? err) }
-  }
-
-  return result
 }
 
 export default function activate(orca: OrcaWorkerApi): void {
@@ -254,12 +178,8 @@ export default function activate(orca: OrcaWorkerApi): void {
     workspaceCount: 0,
     forwardedBatches: 0,
     recentStatus: [],
-    recentTools: [],
-    recentPrompts: [],
-    lastWorkspace: null,
   }
 
-  let maxToolBytes = DEFAULT_MAX_TOOL_BYTES
   let toolStreamEnabled = true
   let notifyEnabled = true
 
@@ -269,9 +189,6 @@ export default function activate(orca: OrcaWorkerApi): void {
       const { settings } = await orca.host.call('settings.get', {})
       if (typeof settings.toolStream === 'boolean') toolStreamEnabled = settings.toolStream
       if (typeof settings.notify === 'boolean') notifyEnabled = settings.notify
-      if (typeof settings.maxToolOutputBytes === 'number' && Number.isFinite(settings.maxToolOutputBytes)) {
-        maxToolBytes = Math.max(0, Math.min(65536, Math.round(settings.maxToolOutputBytes)))
-      }
     } catch {
       // Keep defaults when settings cannot be read.
     }
@@ -297,7 +214,7 @@ export default function activate(orca: OrcaWorkerApi): void {
   function viewerHeaders(conn: ViewerConnection): Record<string, string> {
     return {
       'content-type': 'application/json',
-      'x-orca-plugin-token': conn.endpoint.pluginToken,
+      'x-orca-plugin-token': conn.requestToken,
     }
   }
 
@@ -323,6 +240,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     body: Record<string, unknown>,
     timeoutMs = 3000,
   ): Promise<boolean> {
+    if (conn.abort.signal.aborted) return false
     const controller = new AbortController()
     const onParentAbort = () => controller.abort()
     conn.abort.signal.addEventListener('abort', onParentAbort, { once: true })
@@ -333,13 +251,10 @@ export default function activate(orca: OrcaWorkerApi): void {
         method: 'POST',
         headers: viewerHeaders(conn),
         body: JSON.stringify(body),
+        redirect: 'error',
         signal: controller.signal,
       })
-      if (res.status === 403) {
-        // Stale token after viewer restart — drop and re-read endpoint.json.
-        disconnectViewer(conn.workspacePath)
-        return false
-      }
+      await res.body?.cancel()
       return res.ok
     } catch {
       return false
@@ -352,9 +267,9 @@ export default function activate(orca: OrcaWorkerApi): void {
   async function flushViewer(conn: ViewerConnection): Promise<void> {
     conn.flushTimer = null
     if (disposed || !conn.connected) return
-    const statusEvents = conn.queuedStatus.splice(0, 100)
-    const toolEvents = conn.queuedTools.splice(0, 100)
-    const promptEvents = conn.queuedPrompts.splice(0, 50)
+    const statusEvents = conn.queuedStatus.splice(0)
+    const toolEvents = conn.queuedTools.splice(0)
+    const promptEvents = conn.queuedPrompts.splice(0)
     if (statusEvents.length === 0 && toolEvents.length === 0 && promptEvents.length === 0) return
     const ok = await postJson(conn, '/api/plugin/events', { statusEvents, toolEvents, promptEvents })
     if (ok) {
@@ -374,22 +289,18 @@ export default function activate(orca: OrcaWorkerApi): void {
   }
 
   function matchingConnections(workspaceId: string | null, workspaceListId?: string | null): ViewerConnection[] {
-    const all = [...connections.values()].filter((c) => c.connected)
-    if (all.length === 0) return []
-    const matched = all.filter((conn) => {
-      if (workspaceListId && conn.workspaceListId === workspaceListId) return true
-      if (workspaceId && (workspaceId === conn.workspacePath || workspaceId.endsWith(`::${conn.workspacePath}`))) {
-        return true
-      }
-      return false
-    })
-    return matched.length > 0 ? matched : workspaceId === null ? all : []
+    return [...connections.values()].filter((conn) => conn.connected && (
+      workspaceListId
+        ? conn.workspaceListId === workspaceListId
+        : workspaceId !== null && (workspaceId === conn.workspaceListId || workspaceId === conn.workspacePath)
+    ))
   }
 
   async function executeInboxCommand(
     conn: ViewerConnection,
     cmd: { id: string; kind: string; params?: Record<string, unknown> },
   ): Promise<void> {
+    if (!conn.connected || conn.abort.signal.aborted) return
     const params = cmd.params ?? {}
     let receipt: Record<string, unknown>
     try {
@@ -403,13 +314,6 @@ export default function activate(orca: OrcaWorkerApi): void {
             sessionId: String(params.sessionId ?? ''),
           })
           receipt = { ok: true, ...res }
-        }
-      } else if (cmd.kind === 'agents.list') {
-        if (!orca.host.has('agents.list')) {
-          receipt = { ok: false, code: 'unsupported', error: 'agents.list unavailable' }
-        } else {
-          const req = typeof params.workspaceId === 'string' ? { workspaceId: params.workspaceId } : {}
-          receipt = { ok: true, ...(await orca.host.call('agents.list', req)) }
         }
       } else if (cmd.kind === 'agent.listSessions') {
         if (!orca.host.has('agent.listSessions')) {
@@ -444,20 +348,18 @@ export default function activate(orca: OrcaWorkerApi): void {
   async function runInboxLoop(conn: ViewerConnection): Promise<void> {
     while (!disposed && conn.connected && !conn.abort.signal.aborted) {
       try {
+        const nonce = randomBytes(16).toString('base64url')
         const res = await fetch(`http://127.0.0.1:${conn.endpoint.port}/api/plugin/inbox?waitMs=${INBOX_WAIT_MS}`, {
-          method: 'GET',
-          headers: { 'x-orca-plugin-token': conn.endpoint.pluginToken },
-          signal: conn.abort.signal,
+          headers: { 'x-orca-plugin-token': conn.requestToken, 'x-orca-plugin-nonce': nonce },
+          redirect: 'error',
+          signal: AbortSignal.any([conn.abort.signal, AbortSignal.timeout(INBOX_WAIT_MS + 5_000)]),
         })
-        if (!res.ok) {
-          disconnectViewer(conn.workspacePath)
-          return
-        }
-        const data = (await res.json()) as {
+        const data = await verifiedPluginReply(res, conn.endpoint.pluginToken, 'inbox', nonce) as {
           commands?: Array<{ id: string; kind: string; params?: Record<string, unknown> }>
           notifications?: Array<{ id: string; title: string; body?: string }>
           statusBar?: { text: string; tone?: 'neutral' | 'accent' | 'success' | 'warning' | 'danger'; tooltip?: string } | null
         }
+        if (conn.abort.signal.aborted) return
         conn.lastSyncAt = Date.now()
         if (data.statusBar) {
           updateStatusBar(data.statusBar)
@@ -479,35 +381,14 @@ export default function activate(orca: OrcaWorkerApi): void {
     }
   }
 
-  async function seedAgents(conn: ViewerConnection): Promise<void> {
-    if (!orca.host.has('agents.list') || !conn.workspaceListId) return
-    try {
-      const { agents } = await orca.host.call('agents.list', { workspaceId: conn.workspaceListId })
-      const rows = agents
-        .filter((a) => typeof a.terminalId === 'string' && a.terminalId)
-        .map((a) => ({
-          terminalId: a.terminalId,
-          workspaceListId: conn.workspaceListId,
-          agent: a.agent,
-          title: a.title,
-          state: a.state,
-          sessionId: a.sessionId ?? null,
-        }))
-      if (rows.length > 0) {
-        await postJson(conn, '/api/plugin/events', { agents: rows })
-      }
-    } catch {
-      // Best-effort initial snapshot.
-    }
-  }
-
-  async function connectViewer(workspacePath: string, workspaceListId: string | null, endpoint: EndpointFile): Promise<void> {
+  async function connectViewer(workspacePath: string, workspaceListId: string | null, endpoint: PluginEndpointRecord): Promise<void> {
     const existing = connections.get(workspacePath)
     if (
       existing &&
       existing.connected &&
       existing.endpoint.instanceId === endpoint.instanceId &&
-      existing.endpoint.port === endpoint.port
+      existing.endpoint.port === endpoint.port &&
+      existing.endpoint.pluginToken === endpoint.pluginToken
     ) {
       existing.workspaceListId = workspaceListId ?? existing.workspaceListId
       return
@@ -518,8 +399,9 @@ export default function activate(orca: OrcaWorkerApi): void {
       workspacePath,
       workspaceListId,
       endpoint,
+      requestToken: pluginRequestToken(endpoint.pluginToken),
       abort: new AbortController(),
-      connected: true,
+      connected: false,
       lastSyncAt: 0,
       mutationToken: null,
       queuedStatus: [],
@@ -529,19 +411,30 @@ export default function activate(orca: OrcaWorkerApi): void {
     }
     connections.set(workspacePath, conn)
 
-    const ok = await postJson(conn, '/api/plugin/hello', {
-      pluginId: PLUGIN_ID,
-      version: PLUGIN_VERSION,
-      hostApiMinor: orca.api.minor,
-      grantedCapabilities: [...orca.grantedCapabilities],
-    })
-    if (!ok || disposed || !conn.connected) {
-      disconnectViewer(workspacePath)
+    try {
+      const nonce = randomBytes(16).toString('base64url')
+      const res = await fetch(`http://127.0.0.1:${endpoint.port}/api/plugin/hello`, {
+        method: 'POST',
+        headers: { ...viewerHeaders(conn), 'x-orca-plugin-nonce': nonce },
+        body: JSON.stringify({
+          pluginId: PLUGIN_ID,
+          version: PLUGIN_VERSION,
+          hostApiMinor: orca.api.minor,
+          grantedCapabilities: [...orca.grantedCapabilities],
+        }),
+        redirect: 'error',
+        signal: AbortSignal.any([conn.abort.signal, AbortSignal.timeout(3_000)]),
+      })
+      const reply = await verifiedPluginReply(res, endpoint.pluginToken, 'hello', nonce) as { ok?: boolean; workspaceDir?: string }
+      if (reply?.ok !== true || reply.workspaceDir !== endpoint.workspace) throw new Error('Viewer workspace mismatch')
+    } catch {
+      if (connections.get(workspacePath) === conn) disconnectViewer(workspacePath)
       return
     }
+    if (disposed || conn.abort.signal.aborted) return
+    conn.connected = true
     conn.lastSyncAt = Date.now()
     orca.log(`connected to viewer at 127.0.0.1:${endpoint.port} (${workspacePath})`)
-    void seedAgents(conn)
     void runInboxLoop(conn)
   }
 
@@ -558,7 +451,7 @@ export default function activate(orca: OrcaWorkerApi): void {
           if (ws.hostId !== 'local' && ws.hostId !== null) continue
           if (!ws.path) continue
           seenPaths.add(ws.path)
-          const endpoint = await readLocalEndpoint(ws.path)
+          const endpoint = readPluginEndpointFile(ws.path)
           if (endpoint) {
             await connectViewer(ws.path, ws.id, endpoint)
           } else if (connections.has(ws.path)) {
@@ -598,19 +491,13 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.events.on('agent.status.changed', (payload) => {
     state.statusCount += 1
     const item = {
-      observedAt: Date.now(),
       workspaceId: payload.workspaceId,
       workspaceListId: payload.workspaceListId ?? null,
-      paneKey: payload.paneKey,
       terminalId: payload.terminalId ?? null,
-      title: payload.title ?? null,
-      state: payload.state,
-      mainAgent: payload.mainAgent ?? null,
-      sessionId: payload.sessionId ?? null,
     }
     pushRing(state.recentStatus, item, MAX_STATUS_EVENTS)
     for (const conn of matchingConnections(payload.workspaceId, payload.workspaceListId ?? null)) {
-      conn.queuedStatus.push(item)
+      if (item.terminalId) pushRing(conn.queuedStatus, { terminalId: item.terminalId }, MAX_STATUS_EVENTS)
       scheduleFlush(conn)
     }
   })
@@ -618,14 +505,6 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.events.on('workspace.changed', (payload) => {
     state.workspaceCount += 1
     focusedWorkspaceId = payload.context?.workspaceId ?? null
-    state.lastWorkspace = payload.context
-      ? {
-          workspaceId: payload.context.workspaceId ?? null,
-          branch: payload.context.branch,
-          displayName: payload.context.displayName,
-          terminalCount: payload.context.terminals.length,
-        }
-      : null
     void discoverViewers()
   })
 
@@ -651,7 +530,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     if (already?.connected) return already
 
     // Check once more if an external viewer is already live on disk.
-    const existingEp = await readLocalEndpoint(workspacePath)
+    const existingEp = readPluginEndpointFile(workspacePath)
     if (existingEp) {
       await connectViewer(workspacePath, workspaceListId, existingEp)
       const connected = connections.get(workspacePath)
@@ -702,7 +581,7 @@ export default function activate(orca: OrcaWorkerApi): void {
 
       const deadline = Date.now() + MANAGED_START_TIMEOUT_MS
       while (!disposed && !entry.exited && Date.now() < deadline) {
-        const ep = await readLocalEndpoint(workspacePath)
+        const ep = readPluginEndpointFile(workspacePath)
         if (ep && ep.pid === child.pid) {
           await connectViewer(workspacePath, workspaceListId, ep)
           const conn = connections.get(workspacePath)
@@ -732,40 +611,36 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.hooks.on('agent.tool.after', (event) => {
     if (!toolStreamEnabled) return
     state.toolCount += 1
-    const inputSnap = truncateJson(event.input, maxToolBytes)
-    const outputSnap = truncateJson(event.output, maxToolBytes)
-    const item = {
-      observedAt: Date.now(),
-      agent: event.agent,
-      workspaceId: event.workspaceId,
-      terminalId: event.terminalId ?? null,
-      tool: event.tool,
-      callId: event.callId ?? null,
-      inputPreview: inputSnap.text,
-      inputTruncated: inputSnap.truncated,
-      outputPreview: outputSnap.text,
-      outputTruncated: outputSnap.truncated,
-    }
-    pushRing(state.recentTools, item, MAX_TOOL_EVENTS)
-    for (const conn of matchingConnections(event.workspaceId, null)) {
-      conn.queuedTools.push(item)
+    const status = latestStatus(event.terminalId, event.workspaceId)
+    const targets = matchingConnections(event.workspaceId, status?.workspaceListId)
+    if (!event.terminalId) return
+    const item = { terminalId: event.terminalId }
+    for (const conn of targets) {
+      pushRing(conn.queuedTools, item, MAX_STATUS_EVENTS)
       scheduleFlush(conn)
     }
   })
 
+  function latestStatus(terminalId: string | undefined, workspaceId?: string | null) {
+    if (!terminalId) return undefined
+    for (let i = state.recentStatus.length - 1; i >= 0; i--) {
+      const status = state.recentStatus[i]
+      if (status.terminalId !== terminalId) continue
+      if (workspaceId !== undefined && status.workspaceId !== workspaceId) return undefined
+      return {
+        workspaceId: typeof status.workspaceId === 'string' ? status.workspaceId : null,
+        workspaceListId: typeof status.workspaceListId === 'string' ? status.workspaceListId : null,
+      }
+    }
+    return undefined
+  }
+
   orca.hooks.on('agent.prompt.before', (event) => {
     state.promptCount += 1
-    const item = {
-      observedAt: Date.now(),
-      agent: event.agent,
-      terminalId: event.terminalId,
-      inputKind: event.inputKind,
-      promptBytes: Buffer.byteLength(event.prompt, 'utf8'),
-    }
-    pushRing(state.recentPrompts, item, MAX_PROMPT_EVENTS)
-    for (const conn of connections.values()) {
-      if (!conn.connected) continue
-      conn.queuedPrompts.push(item)
+    const item = { terminalId: event.terminalId }
+    const status = latestStatus(event.terminalId)
+    for (const conn of matchingConnections(status?.workspaceId ?? null, status?.workspaceListId)) {
+      pushRing(conn.queuedPrompts, item, MAX_STATUS_EVENTS)
       scheduleFlush(conn)
     }
     // Observe-only: returning nothing leaves the prompt untouched.
@@ -808,7 +683,8 @@ export default function activate(orca: OrcaWorkerApi): void {
         method: 'POST',
         headers,
         body: JSON.stringify(hash ? { hash } : {}),
-        signal: AbortSignal.timeout(10_000),
+        redirect: 'error',
+        signal: AbortSignal.any([conn.abort.signal, AbortSignal.timeout(10_000)]),
       })
       const body = (await res.json().catch(() => ({}))) as Record<string, unknown>
       return { status: res.status, ok: res.ok, body }
@@ -875,37 +751,6 @@ export default function activate(orca: OrcaWorkerApi): void {
           },
         }
 
-      case 'env':
-        return await probeEnv(input)
-
-      case 'inventory': {
-        const out: Record<string, unknown> = {}
-        if (orca.host.has('workspace.readContext')) {
-          out.focused = await orca.host.call('workspace.readContext', {}).catch((e: Error) => ({ error: e.message }))
-        }
-        if (orca.host.has('workspace.list')) {
-          out.workspaces = await orca.host
-            .call('workspace.list', { includeStatus: true })
-            .catch((e: Error) => ({ error: e.message }))
-        }
-        if (orca.host.has('agents.list')) {
-          const params = input.workspaceId ? { workspaceId: input.workspaceId } : {}
-          out.agents = await orca.host.call('agents.list', params).catch((e: Error) => ({ error: e.message }))
-        }
-        if (input.workspaceId && orca.host.has('terminal.list')) {
-          out.terminals = await orca.host
-            .call('terminal.list', { workspaceId: input.workspaceId })
-            .catch((e: Error) => ({ error: e.message }))
-        }
-        if (orca.host.has('agent.listSessions')) {
-          const params = input.workspaceId ? { workspaceId: input.workspaceId, limit: 15 } : { limit: 15 }
-          out.sessions = await orca.host
-            .call('agent.listSessions', params)
-            .catch((e: Error) => ({ error: e.message }))
-        }
-        return out
-      }
-
       case 'events':
         return {
           activatedAt: state.activatedAt,
@@ -918,26 +763,7 @@ export default function activate(orca: OrcaWorkerApi): void {
             workspaces: state.workspaceCount,
             forwardedBatches: state.forwardedBatches,
           },
-          lastWorkspace: state.lastWorkspace,
-          recentStatus: state.recentStatus,
-          recentTools: state.recentTools,
-          recentPrompts: state.recentPrompts,
         }
-
-      case 'resume': {
-        if (!input.workspaceId || !input.agent || !input.sessionId) {
-          return { ok: false, error: 'workspaceId, agent, and sessionId are required' }
-        }
-        if (!orca.host.has('agent.resume')) {
-          return { ok: false, error: 'agent.resume is unavailable on this Orca host' }
-        }
-        const res = await orca.host.call('agent.resume', {
-          workspaceId: input.workspaceId,
-          agent: input.agent as Parameters<typeof orca.host.call<'agent.resume'>>[1]['agent'],
-          sessionId: input.sessionId,
-        })
-        return { ok: true, ...res }
-      }
 
       default:
         return { ok: false, error: `unknown action: ${String((input as { action?: unknown }).action)}` }
@@ -946,43 +772,27 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   // --- Panel SPA proxy (`orca-dag.api` + SSE streams) ---
   async function resolveActiveViewer(): Promise<ViewerConnection | null> {
-    if (connections.size === 0) await discoverViewers()
-    const live = [...connections.values()].filter((c) => c.connected)
-    if (focusedWorkspaceId) {
-      const focusedMatch = live.find((c) => c.workspaceListId === focusedWorkspaceId)
-      if (focusedMatch) return focusedMatch
-    }
-
-    // Self-contained fallback: automatically start an isolated embedded viewer
-    // server for the focused (or first local) Orca workspace when no external
-    // viewer terminal is running for it.
-    if (bundledAssets && orca.host.has('workspace.list')) {
-      try {
-        if (!focusedWorkspaceId && orca.host.has('workspace.readContext')) {
-          const ctx = await orca.host.call('workspace.readContext', {}).catch(() => null)
-          if (ctx?.workspaceId) focusedWorkspaceId = ctx.workspaceId
-        }
-        const { workspaces } = await orca.host.call('workspace.list', {})
-        const locals = workspaces.filter((ws) => (ws.hostId === 'local' || ws.hostId === null) && Boolean(ws.path))
-        const target =
-          (focusedWorkspaceId && locals.find((ws) => ws.id === focusedWorkspaceId)) ||
-          (live.length === 0 ? locals[0] : undefined)
-        if (target) {
-          const started = await ensureManagedViewer(target.path, target.id)
-          if (started) return started
-        }
-      } catch {
-        // Fall through to any other connected viewer below.
-      }
-    }
-
-    return live[0] ?? null
+    if (!orca.host.has('workspace.list')) return null
+    await discoverViewers()
+    if (disposed) return null
+    const inventory = await orca.host.call('workspace.list', {}).catch(() => null)
+    if (!inventory) return null
+    const workspaceId = focusedWorkspaceId ?? (orca.host.has('workspace.readContext')
+      ? (await orca.host.call('workspace.readContext', {}).catch(() => null))?.workspaceId
+      : null)
+    const locals = inventory.workspaces.filter((ws) => (ws.hostId === 'local' || ws.hostId === null) && Boolean(ws.path))
+    // No fallback to some other workspace when the focused one is unavailable.
+    const target = workspaceId ? locals.find((ws) => ws.id === workspaceId) : locals.length === 1 ? locals[0] : undefined
+    if (!target) return null
+    const conn = connections.get(target.path)
+    return conn?.connected ? conn : ensureManagedViewer(target.path, target.id)
   }
 
   async function ensureMutationToken(conn: ViewerConnection, forceRefresh = false): Promise<string | null> {
     if (!forceRefresh && conn.mutationToken) return conn.mutationToken
     try {
       const res = await fetch(`http://127.0.0.1:${conn.endpoint.port}/api/session`, {
+        redirect: 'error',
         signal: conn.abort.signal,
       })
       if (!res.ok) return null
@@ -1004,6 +814,7 @@ export default function activate(orca: OrcaWorkerApi): void {
   ): Promise<void> {
     const res = await fetch(url, {
       headers: { accept: 'text/event-stream' },
+      redirect: 'error',
       signal,
     })
     if (!res.ok || !res.body) throw new Error(`SSE HTTP ${res.status}`)
@@ -1092,12 +903,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     const req = (rawInput ?? {}) as Partial<BridgeApiRequest>
     const method = req.method === 'POST' || req.method === 'PUT' ? req.method : 'GET'
     const url = typeof req.url === 'string' ? req.url : ''
-    if (
-      !url.startsWith('/api/') ||
-      url.includes('..') ||
-      /[\r\n\s]/.test(url) ||
-      /^\/api\/plugin([/?#]|$)/.test(url)
-    ) {
+    if (!panelApiPath(url)) {
       return { status: 400, ok: false, body: { error: 'Invalid API path', code: 'invalid_path' } }
     }
     const conn = await resolveActiveViewer()
@@ -1123,7 +929,8 @@ export default function activate(orca: OrcaWorkerApi): void {
         method,
         headers,
         body: method !== 'GET' && req.body !== undefined ? JSON.stringify(req.body) : undefined,
-        signal: ctx.signal,
+        redirect: 'error',
+        signal: AbortSignal.any([target.abort.signal, ctx.signal, AbortSignal.timeout(30_000)]),
       })
       const text = await res.text()
       let body: Record<string, unknown>
@@ -1149,9 +956,9 @@ export default function activate(orca: OrcaWorkerApi): void {
       // fail over seamlessly to the plugin's own embedded viewer server.
       const causeCode = (err as { cause?: { code?: string } })?.cause?.code
       if (!ctx.signal.aborted) {
-        disconnectViewer(conn.workspacePath)
+        if (connections.get(conn.workspacePath) === conn) disconnectViewer(conn.workspacePath)
         const recovered = await resolveActiveViewer()
-        if (recovered && (method === 'GET' || causeCode === 'ECONNREFUSED')) {
+        if (recovered?.workspacePath === conn.workspacePath && (method === 'GET' || causeCode === 'ECONNREFUSED')) {
           try {
             return await execute(recovered, false)
           } catch {
@@ -1180,7 +987,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     const controller = new AbortController()
     activityStreams.set(key, controller)
     const url = `http://127.0.0.1:${conn.endpoint.port}/api/activity/stream?run=${encodeURIComponent(runId)}`
-    void consumeSse(url, controller.signal, (_event, data) => {
+    void consumeSse(url, AbortSignal.any([conn.abort.signal, controller.signal]), (_event, data) => {
       safePostToPanel(key, 'orca-dag.activity', data)
     })
       .catch(() => {})
@@ -1205,18 +1012,19 @@ export default function activate(orca: OrcaWorkerApi): void {
     const source = req.source === 'terminal' || req.source === 'transcript' ? req.source : 'auto'
     if (!subId || !runId || !dispatchId) return { ok: false }
 
-    outputStreams.get(subId)?.abort()
-    outputStreams.delete(subId)
+    const key = `${ctx.panel.id}\0${subId}`
+    outputStreams.get(key)?.abort()
+    outputStreams.delete(key)
 
     const conn = await resolveActiveViewer()
     if (!conn) return { ok: false }
     const controller = new AbortController()
-    outputStreams.set(subId, controller)
+    outputStreams.set(key, controller)
     const params = new URLSearchParams({ run: runId })
     if (source !== 'auto') params.set('source', source)
     const url = `http://127.0.0.1:${conn.endpoint.port}/api/workers/${encodeURIComponent(dispatchId)}/output/stream?${params.toString()}`
     const panelId = ctx.panel.id
-    void consumeSse(url, controller.signal, (event, data) => {
+    void consumeSse(url, AbortSignal.any([conn.abort.signal, controller.signal]), (event, data) => {
       safePostToPanel(panelId, 'orca-dag.output', { subId, event, data })
     })
       .catch((err) => {
@@ -1229,17 +1037,18 @@ export default function activate(orca: OrcaWorkerApi): void {
         }
       })
       .finally(() => {
-        if (outputStreams.get(subId) === controller) outputStreams.delete(subId)
+        if (outputStreams.get(key) === controller) outputStreams.delete(key)
       })
     return { ok: true }
   })
 
-  orca.panels.handle('orca-dag.output.unsubscribe', async (rawInput) => {
+  orca.panels.handle('orca-dag.output.unsubscribe', async (rawInput, ctx) => {
     const req = (rawInput ?? {}) as Partial<OutputUnsubscribeRequest>
     const subId = typeof req.subId === 'string' ? req.subId.trim() : ''
     if (subId) {
-      outputStreams.get(subId)?.abort()
-      outputStreams.delete(subId)
+      const key = `${ctx.panel.id}\0${subId}`
+      outputStreams.get(key)?.abort()
+      outputStreams.delete(key)
     }
     return { ok: true }
   })

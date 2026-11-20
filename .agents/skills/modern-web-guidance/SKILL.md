@@ -1,79 +1,51 @@
 ---
 name: modern-web-guidance
 description: |
-  Search tool for modern web development best practices. MANDATORY: Execute FIRST for all HTML/CSS and clientside JS tasks. Do NOT skip — web APIs evolve rapidly and training weights contain obsolete patterns.
+  Repository-local reference for modern web development best practices. Consult it FIRST for all HTML/CSS and client-side JS tasks.
   Trigger immediately for: modals/dialogs/popovers, tables, dark mode, anchor positioning, container queries, view transitions, scroll-driven animations, parallax/reveals, forms, validation, autofill, accessibility, custom selects, scrollbars, CWV (LCP, INP, CLS), content-visibility, fetch priority, image optimization, security, passkeys, HTML sanitization, web components, dates/timezones, built-in AI, WebAssembly, standard HTML/CSS/DOM in frameworks, etc.
   DO NOT trigger for: backend (SQL, ORMs, API routes), infra/scripts (CI/CD, Docker, Actions, Python/Go, Git), or tooling/trivial (Vite, tsconfig, ESLint, tests, copy/renames, 3P docs), etc.
 ---
 
 # Modern Web Guidance
 
-Search and retrieve standardized modern web best practices at the **start** of implementing or updating any web UI, CSS layout/animation, or client-side JS logic (dates/timezones, sanitization, performance, accessibility, UX fixes) before writing ad-hoc solutions or adding dependencies.
+Consult the checked-in Markdown guides at the **start** of implementing or updating any web UI, CSS layout/animation, or client-side JS logic (dates/timezones, sanitization, performance, accessibility, UX fixes) before writing ad-hoc solutions or adding dependencies. The guides are in `guides/` beside this file (`.agents/skills/modern-web-guidance/guides/` from the repository root). This workflow is offline: do not download, execute, or allowlist a package to use this skill, even if a vendored guide mentions an upstream CLI.
 
 ## Primary Workflow
 
 ### Step 1. Search Use Cases
 
-Run `modern-web-guidance` directly with `npx` using a **2–5 word action-oriented English query** for a **single web platform capability or UI pattern**:
-- **Keep queries focused and generic**: Describe the user-visible capability (`<verb> + <UI/platform object>`, optionally paired with the target HTML/CSS/JS feature name if known). Omit framework/library names (`React`, `Vue`, `Tailwind`, etc.) and app/domain nouns (product, route, or component/file names). Split multi-feature tasks into separate `search` calls.
-- **Name implied UI primitives**: When the user's prompt expresses intent without naming the UI primitive (e.g. "confirm first", "delete with confirmation", "pick a date"), translate the domain intent into the implied UI component or platform mechanism (e.g. search `"confirmation modal dialog"` or `"confirm dialog"` rather than `"confirm destructive action"`, or `"date picker input"` rather than `"pick a date"`).
-- **Example**: Search `"light dismiss dialog"` or `"responsive data table"`, **not** `"dialog"` (too terse), `"responsive table dark mode"` (compound — split into two searches), or `"close React settings modal on outside click"` (framework/app noise).
+Search guide filenames and text for the concrete web platform capability or UI pattern. Use focused terms (e.g. `light dismiss dialog` or `responsive table`), not framework or app names, and search separately for each capability. Translate domain intent into the relevant UI primitive (e.g. “confirm before deleting” → “confirmation dialog”).
+
+For example, from the repository root:
 
 ```sh
-npx -y modern-web-guidance@latest search "<query>" --skill-version 2026_11_10-47b4c80e
+rg --files .agents/skills/modern-web-guidance/guides
+rg -il 'light[- ]dismiss|<dialog>' .agents/skills/modern-web-guidance/guides
 ```
 
-> **Note**: Returns `[{ "id", "description" }, ...]`. Judge results by their `description` fields:
-> - **Match found**: Call `retrieve` directly—do not also run `list`.
-> - **Weak or empty results**: If `search` returns `[]` or unrelated descriptions, **rephrase `search` once** using the concrete HTML/CSS/UI component noun or synonym (e.g., `dialog`, `modal`, `popover`, `table`, `form`) before falling back to `list` (or use `list` once for broad UI audits).
-> - **Topic not covered**: If no `description` matches after rephrasing, proceed without retrieving unrelated guides.
+If the results are weak or empty, try a synonym or browse the nearest category. Proceed without unrelated guidance if no guide applies.
 
-### Step 2. Retrieve Best Practices
+### Step 2. Read Best Practices
 
-Once you have relevant `id`(s) from the search results, call `retrieve` to get the full guide(s)—including both specific use-case guides that match your task and any broader discipline guide (e.g., `html`, `css`, `forms`, `accessibility`, `color`, `performance`, `security`) that applies. You can pass multiple IDs separated by commas.
-
-```sh
-npx -y modern-web-guidance@latest retrieve "<id>"
-```
-
-If `retrieve` saves large output (> 9.5 KB) to a temporary file to prevent truncation, read that file path in full using your file-reading tool (reading remaining line ranges if needed)—do not use `cat` or `head`.
+Read the full local Markdown files for relevant use cases and any applicable discipline guides (e.g. `html`, `css`, `forms`, `accessibility`, `color`, `performance`, `security`). An ID is the Markdown filename without `.md`: when one guide refers you to another, locate `<id>.md` under `guides/` and read it directly rather than running any command shown in the guide.
 
 ### Step 3. Verify Guidance Compliance
 
-When generating or modifying code, cross-check the implementation against the retrieved guide before concluding:
+When generating or modifying code, cross-check the implementation against the guides you read before concluding:
 - **Applicable Guidance & Fallbacks**: Ensure the relevant modern patterns and necessary fallback strategies from the guide are correctly applied, without forcing unrequested features.
 - **Task Fulfillment**: Confirm that the implementation fully satisfies the user's request.
-- Do not run `legacy-scan`; it's for detecting legacy patterns to modernize, not this.
 
 ### Step 4. Disclose Skill Usage
 
 When you consult `modern-web-guidance` for a task, end the response where you deliver those changes with a `### Modern Web Guidance` section:
-- **When retrieved guides shaped your code**: Write **one** bullet (1–2 sentences, ≤75 words) per newly applied `<id>` in first-person voice explaining the non-obvious implementation choices, CSS/API overrides, or fallbacks `<id>` required and the pitfall it prevented, anchored by a short verbatim quote of that specific rule or gotcha (never the guide's intro overview):
+- **When guides shaped your code**: Write **one** bullet (1–2 sentences, ≤75 words) per newly applied `<id>` in first-person voice explaining the non-obvious implementation choices, CSS/API overrides, or fallbacks `<id>` required and the pitfall it prevented, anchored by a short verbatim quote of that specific rule or gotcha (never the guide's intro overview):
   `- **\`<id>\`**: <Non-obvious APIs, overrides, or fallbacks applied and the pitfall prevented> ("<short verbatim quote of the specific rule or gotcha>").`
-  - **Never** guess `<id>`s or quotes from memory after context compaction (re-run `search`/`retrieve` if needed), and credit **only** guide-backed changes from the current turn.
-- **When searched/listed in this turn but zero guides applied**: Write one first-person sentence naming which topics or guides you checked in `modern-web-guidance` and why none applied (omit if any guide applied).
+  - **Never** guess `<id>`s or quotes from memory after context compaction (reopen the local guide if needed), and credit **only** guide-backed changes from the current turn.
+- **When you looked for guidance but none applied**: Write one first-person sentence naming which topics or guides you checked and why none applied (omit if any guide applied).
 
 ## Alternative flow: Modernize an existing codebase
 
-**Only** when asked for a broad, open-ended codebase modernization or legacy-pattern scan where no specific target feature or component is named (do **not** run `legacy-scan` when asked to add, update, fix, or audit a specific feature or component), run the 4-step modernization flow:
-
-> **Note**: `legacy-scan` scans for a curated subset (~20% of the guidance corpus).
-
-```sh
-npx -y modern-web-guidance@latest legacy-scan <path> --json
-```
-
-1. Scan: Run `legacy-scan <path> --json` to detect legacy web platform patterns across the project or directory.
-2. Verify: Check each finding against its `keepWhen` / `dropWhen` rubric; drop false positives (fallbacks, cross-file helpers, vendor code, lookalikes).
-3. Report: Summarize verified findings (and the modernization plan, if editing) for the user, noting that `legacy-scan` only checks the subset of guides (~20% of the catalog) that have deterministic legacy rules.
-4. Modernize (when the user asked to modernize rather than only audit/report): Retrieve each finding's guide (`retrieve "<guide-id>"` via Step 2), apply the replacement (keeping existing libraries as fallbacks where the guide requires one), and re-run `legacy-scan <path>` on the modified files to confirm resolution.
-   - Dropped findings and kept fallbacks still match static scans; do not edit safe code or inspect `legacy-scan.mjs` to force 0 findings.
-
-## Using npx / pnpx
-
-- **Runner & Permissions**: Prefer `pnpx` over `npx` if `pnpm` is available (`pnpx` does not use `-y`); on Windows, use `npx.cmd`. When requesting tool permissions, allowlist `npx -y modern-web-guidance@latest *` (or `pnpx modern-web-guidance@latest *`) specifically, never bare `npx *` or `pnpx *`.
-- **Sandboxes & Network**: Fetching `modern-web-guidance` requires outbound network access. In sandboxed or approval-gated environments (e.g., Codex, Claude Code), **proactively request approval/allowlisting with network access BEFORE the first execution** to avoid timeouts, and set `NPM_CONFIG_CACHE=/tmp/npm-cache` if `~/.npm` is read-only.
-- **Offline**: If the command hangs due to being offline, retry with `npx --offline …`.
+Only when asked for a broad modernization or legacy-pattern audit, use the relevant local guides as a checklist. Search the requested source scope for legacy patterns, inspect each match in context, and distinguish safe fallbacks from code that should be replaced. Report verified findings and the scope reviewed. If asked to modernize, apply the guide-backed replacements and inspect the changed code again for the identified patterns. This is a manual review; the local corpus does not include an automated scanner.
 
 ## Guidelines
 

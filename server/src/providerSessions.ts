@@ -4,9 +4,9 @@ import { homedir } from "node:os";
 import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { lstat, open, readFile, realpath, rename, stat, unlink } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
 import { prepareWorkspaceStateFile, workspaceStateReadPath, WORKSPACE_STATE_FILES } from "./workspaceState";
+import { withSessionJournalLock } from "./providerSessionLock";
 import { validateOpenCodeLaunch, type OpenCodeLaunch } from "./openCode";
 import { validateGroupAudience } from "./security";
 import type { OrcaDelivery, TaskMessageReceipt, NativeLaunchMode } from "./orca";
@@ -85,6 +85,8 @@ export interface MailboxCheckCheckpoint {
   replyRequests?: Record<string, { requestId: string; from: string; bodyHash: string; state: "prepared" | "unknown" | "completed" }>;
   /** Stop events are resolved by exact Dispatch evidence, not a fabricated reply. */
   resolvedStopEvents?: Record<string, { dispatchId: string; evidence: string }>;
+  /** Native single-use prompt decisions are evidence for the exact mailbox message. */
+  resolvedPermissionPrompts?: Record<string, { dispatchId: string; promptId: string; decision: "approve" | "deny"; requestId: string }>;
   createdAt: string;
   updatedAt: string;
   error: string | null;
@@ -281,6 +283,16 @@ function validateMailboxCheck(value: unknown): MailboxCheckCheckpoint {
       if (typeof resolution.evidence !== "string" || !resolution.evidence) throw new Error("Invalid stop event evidence");
     }
   }
+  if (row.resolvedPermissionPrompts !== undefined) {
+    for (const [id, raw] of Object.entries(recordValue(row.resolvedPermissionPrompts, "resolved permission prompts"))) {
+      assertId(id, "permission prompt message id");
+      const resolution = recordValue(raw, "permission prompt resolution");
+      assertId(resolution.dispatchId, "permission prompt dispatchId");
+      assertId(resolution.promptId, "permission prompt promptId");
+      assertId(resolution.requestId, "permission prompt requestId");
+      if (resolution.decision !== "approve" && resolution.decision !== "deny") throw new Error("Invalid permission prompt decision");
+    }
+  }
   if (row.delivery !== null) {
     const delivery = recordValue(row.delivery, "mailbox delivery");
     if (delivery.runId !== row.runId || !Array.isArray(delivery.messages)) throw new Error("Mailbox delivery Run or messages invalid");
@@ -408,7 +420,7 @@ function sameBindingIdentity(
   );
 }
 
-async function withFileLock<T>(path: string, operation: () => Promise<T>): Promise<T> {
+function enqueueWrite<T>(path: string, operation: () => Promise<T>): Promise<T> {
   const previous = fileQueues.get(path) ?? Promise.resolve();
   const current = previous.then(operation, operation);
   const settled = current.then(
@@ -556,7 +568,7 @@ function validateResumeAttempt(value: unknown): ResumeAttemptCheckpoint {
   };
 }
 
-async function writeStore(path: string, file: SessionStoreFile): Promise<void> {
+async function writeStore(path: string, file: SessionStoreFile, temporary: string, assertHeld: () => void): Promise<void> {
   // Only settled history can be discarded. Unresolved checks and every
   // follow-up receipt are recovery authority, not rotating audit history.
   const completed = (file.mailboxChecks ?? []).filter(row => row.state === "completed").slice(-100);
@@ -584,6 +596,7 @@ async function writeStore(path: string, file: SessionStoreFile): Promise<void> {
     encoded = `${JSON.stringify(compact, null, 2)}\n`;
   }
   if (Buffer.byteLength(encoded) > MAX_STORE_BYTES) throw new Error("session binding store is full");
+  assertHeld();
   try {
     const info = await lstat(path);
     if (!info.isFile() || info.isSymbolicLink()) {
@@ -593,17 +606,19 @@ async function writeStore(path: string, file: SessionStoreFile): Promise<void> {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 
-  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  assertHeld();
+  const handle = await open(temporary, "wx", 0o600);
   try {
-    const handle = await open(temporary, "wx", 0o600);
     try {
       await handle.writeFile(encoded, "utf8");
       await handle.sync();
     } finally {
       await handle.close();
     }
+    assertHeld();
     await rename(temporary, path);
   } catch (error) {
+    assertHeld();
     await unlink(temporary).catch(() => {});
     throw error;
   }
@@ -622,6 +637,18 @@ export class ProviderSessionStore {
     this.path = join(resolve(workspaceDir), SESSIONS_FILE);
   }
 
+  private mutate<T>(operation: (file: SessionStoreFile, write: (next: SessionStoreFile) => Promise<void>) => Promise<T>): Promise<T> {
+    return enqueueWrite(this.path, () => {
+      // Create the shared directory and perform only the existing no-clobber
+      // legacy move before acquiring the lock. Read the snapshot only afterward.
+      prepareWorkspaceStateFile(this.workspaceDir, SESSIONS_FILE, true);
+      return withSessionJournalLock(this.path, async ({ temporary, assertHeld }) => {
+        const file = await readStore(this.path);
+        return operation(file, next => writeStore(this.path, next, temporary, assertHeld));
+      });
+    });
+  }
+
   async list(runId?: string): Promise<ProviderSessionBinding[]> {
     if (runId !== undefined) assertId(runId, "runId");
     const { bindings } = await readStore(workspaceStateReadPath(this.workspaceDir, SESSIONS_FILE));
@@ -637,9 +664,7 @@ export class ProviderSessionStore {
   async bind(input: ProviderSessionBindingInput): Promise<ProviderSessionBinding> {
     const normalized = validateInput(input);
     const identity = keyOf(normalized);
-    return withFileLock(this.path, async () => {
-      prepareWorkspaceStateFile(this.workspaceDir, SESSIONS_FILE, true);
-      const file = await readStore(this.path);
+    return this.mutate(async (file, write) => {
       const current = file.bindings.find((binding) => keyOf(binding) === identity);
       if (current) {
         if (!sameBindingIdentity(current, normalized)) {
@@ -656,7 +681,7 @@ export class ProviderSessionStore {
         createdAt: timestamp,
         updatedAt: timestamp,
       });
-      await writeStore(this.path, {
+      await write({
         ...file,
         version: STORE_VERSION,
         bindings: [...file.bindings, binding],
@@ -675,9 +700,7 @@ export class ProviderSessionStore {
   async recordOpenCodeLaunch(input: OpenCodeLaunch): Promise<void> {
     const row = validateOpenCodeLaunch(input);
     assertWorkspace(row.workspace);
-    await withFileLock(this.path, async () => {
-      prepareWorkspaceStateFile(this.workspaceDir, SESSIONS_FILE, true);
-      const file = await readStore(this.path);
+    await this.mutate(async (file, write) => {
       const launches = file.openCodeLaunches ?? [];
       const existing = launches.find(v => v.requestId === row.requestId);
       if (existing) {
@@ -705,7 +728,7 @@ export class ProviderSessionStore {
           throw new Error("An unresolved OpenCode preparation already exists for this Task");
         }
       }
-      await writeStore(this.path, { ...file, openCodeLaunches: [...launches.filter(v => v.requestId !== row.requestId), row] });
+      await write({ ...file, openCodeLaunches: [...launches.filter(v => v.requestId !== row.requestId), row] });
     });
   }
 
@@ -717,9 +740,7 @@ export class ProviderSessionStore {
 
   async recordMailboxCheck(input: MailboxCheckCheckpoint): Promise<void> {
     const row = validateMailboxCheck(input);
-    await withFileLock(this.path, async () => {
-      prepareWorkspaceStateFile(this.workspaceDir, SESSIONS_FILE, true);
-      const file = await readStore(this.path);
+    await this.mutate(async (file, write) => {
       const rows = file.mailboxChecks ?? [];
       const existing = rows.find(item => item.requestId === row.requestId);
       if (existing) {
@@ -729,12 +750,20 @@ export class ProviderSessionStore {
             (existing.delivery && JSON.stringify(existing.delivery) !== JSON.stringify(row.delivery))) {
           throw new Error("Mailbox checkpoint identity or processed evidence cannot change");
         }
+        const resolvedPermissions = row.resolvedPermissionPrompts;
         if (existing.pendingQuestionIds.some(id =>
-          !row.pendingQuestionIds.includes(id) && row.replyRequests?.[id]?.state !== "completed" && !row.resolvedStopEvents?.[id])) {
+          !row.pendingQuestionIds.includes(id) && row.replyRequests?.[id]?.state !== "completed" &&
+          !(row.resolvedStopEvents && Object.hasOwn(row.resolvedStopEvents, id)) &&
+          !(resolvedPermissions && Object.hasOwn(resolvedPermissions, id)))) {
           throw new Error("Pending input cannot be cleared without durable resolution");
         }
         for (const [id, old] of Object.entries(existing.resolvedStopEvents ?? {})) {
           if (JSON.stringify(row.resolvedStopEvents?.[id]) !== JSON.stringify(old)) throw new Error("Stop event resolution cannot change");
+        }
+        for (const [id, old] of Object.entries(existing.resolvedPermissionPrompts ?? {})) {
+          const next = resolvedPermissions && Object.hasOwn(resolvedPermissions, id) ? resolvedPermissions[id] : null;
+          if (!next || next.dispatchId !== old.dispatchId || next.promptId !== old.promptId ||
+              next.decision !== old.decision || next.requestId !== old.requestId) throw new Error("Permission prompt resolution cannot change");
         }
         for (const [id, old] of Object.entries(existing.replyRequests ?? {})) {
           const next = row.replyRequests?.[id];
@@ -742,7 +771,7 @@ export class ProviderSessionStore {
               (old.state === "completed" && next.state !== "completed")) throw new Error("Mailbox reply identity cannot change");
         }
       } else if (rows.length >= MAX_BINDINGS) throw new Error("Mailbox checkpoint inventory is full");
-      await writeStore(this.path, { ...file, mailboxChecks: [...rows.filter(item => item.requestId !== row.requestId), row] });
+      await write({ ...file, mailboxChecks: [...rows.filter(item => item.requestId !== row.requestId), row] });
     });
   }
 
@@ -754,9 +783,7 @@ export class ProviderSessionStore {
 
   async recordGuidanceSend(input: GuidanceSendCheckpoint): Promise<void> {
     const row = validateGuidanceSend(input);
-    await withFileLock(this.path, async () => {
-      prepareWorkspaceStateFile(this.workspaceDir, SESSIONS_FILE, true);
-      const file = await readStore(this.path);
+    await this.mutate(async (file, write) => {
       const rows = file.guidanceSends ?? [];
       const existing = rows.find(item => item.requestId === row.requestId);
       if (existing) {
@@ -774,7 +801,7 @@ export class ProviderSessionStore {
           throw new Error("Guidance checkpoint identity or accepted outcome cannot change");
         }
       } else if (rows.length >= MAX_BINDINGS) throw new Error("Guidance checkpoint inventory is full");
-      await writeStore(this.path, { ...file, guidanceSends: [...rows.filter(item => item.requestId !== row.requestId), row] });
+      await write({ ...file, guidanceSends: [...rows.filter(item => item.requestId !== row.requestId), row] });
     });
   }
 
@@ -786,9 +813,7 @@ export class ProviderSessionStore {
 
   async recordOperatorMessage(input: OperatorMessageCheckpoint): Promise<void> {
     const row = validateOperatorMessage(input);
-    await withFileLock(this.path, async () => {
-      prepareWorkspaceStateFile(this.workspaceDir, SESSIONS_FILE, true);
-      const file = await readStore(this.path);
+    await this.mutate(async (file, write) => {
       const rows = file.operatorMessages ?? [];
       const existing = rows.find(item => item.requestId === row.requestId);
       if (existing) {
@@ -805,7 +830,7 @@ export class ProviderSessionStore {
           throw new Error("An operator message to this target remains unresolved");
         }
       }
-      await writeStore(this.path, { ...file, operatorMessages: [...rows.filter(item => item.requestId !== row.requestId), row] });
+      await write({ ...file, operatorMessages: [...rows.filter(item => item.requestId !== row.requestId), row] });
     });
   }
 
@@ -817,9 +842,7 @@ export class ProviderSessionStore {
 
   async recordResumeAttempt(input: ResumeAttemptCheckpoint): Promise<void> {
     const row = validateResumeAttempt(input);
-    await withFileLock(this.path, async () => {
-      prepareWorkspaceStateFile(this.workspaceDir, SESSIONS_FILE, true);
-      const file = await readStore(this.path);
+    await this.mutate(async (file, write) => {
       const rows = file.resumeAttempts ?? [];
       const existing = rows.find(item => item.requestId === row.requestId);
       if (existing) {
@@ -836,7 +859,7 @@ export class ProviderSessionStore {
           throw new Error("A native resume attempt for this Stage remains unresolved");
         }
       }
-      await writeStore(this.path, { ...file, resumeAttempts: [...rows.filter(item => item.requestId !== row.requestId), row] });
+      await write({ ...file, resumeAttempts: [...rows.filter(item => item.requestId !== row.requestId), row] });
     });
   }
 

@@ -31,6 +31,7 @@ import {
   parseCoordinatorTitle,
   parsePeerCapabilities,
   parseWorkerDonePayload,
+  parseWorkerStartReceipt,
   prepareCodexTerminal,
   readWorkerOutput,
   releaseWorker,
@@ -88,11 +89,11 @@ import { RequestLedger } from "./requestLedger";
 import type { LaneSeedPlacement, PlacementSpec, WorktreeLaneSpec, OpenCodeUi } from "./config";
 import { assertOpenCodeUiPlacement, validateOpenCodeUi } from "./security";
 import { ProviderSessionStore, discoverProviderSession } from "./providerSessions";
-import type { MailboxCheckCheckpoint, GuidanceSendCheckpoint } from "./providerSessions";
+import type { MailboxCheckCheckpoint, GuidanceSendCheckpoint, ResumeAttemptCheckpoint } from "./providerSessions";
 import type { ProviderSessionBinding, ProviderSessionObservation, ProviderSessionStatus } from "./providerSessions";
 import { LaunchHistory } from "./launchHistory";
 import { MERGE_PREP_MARKER, MERGE_INPUTS_V3_MARKER, StageGit, validateStagePlan, isMergeInputsQuestion, buildMergeInputs } from "./stageGit";
-import { performTaskGuidance, recoverTaskGuidance } from "./taskGuidance";
+import { exactWorkerDispatch, performTaskGuidance, recoverTaskGuidance } from "./taskGuidance";
 import { replyReceiptMatches } from "./operatorMessages";
 import { verifyOpenCodeSession, type OpenCodeEvidence } from "./openCode";
 import { readWorkerOwnership, type WorkerCreatorEvidence, type WorkerOwnershipSnapshot } from "./workerOwnership";
@@ -747,6 +748,11 @@ export type CoordinatorPhase =
   | "recovering"
   | "error";
 
+interface VerifiedNativeResume {
+  checkpoint: ResumeAttemptCheckpoint;
+  receipt: WorkerStartReceipt;
+}
+
 interface State {
   running: boolean;
   phase: CoordinatorPhase;
@@ -798,6 +804,8 @@ interface State {
   requestLedger: RequestLedger | null;
   mailboxChecks: Map<string, MailboxCheckCheckpoint>;
   guidanceSends: Map<string, GuidanceSendCheckpoint>;
+  nativeResumes: Map<string, VerifiedNativeResume>;
+  resumeHolds: Map<string, ResumeAttemptCheckpoint>;
   ownedDispatchIds: Set<string>;
   unknownStartRequests: Map<string, string>;
   mailboxNeedsDrain: boolean;
@@ -882,6 +890,8 @@ const state: State = {
   requestLedger: null,
   mailboxChecks: new Map(),
   guidanceSends: new Map(),
+  nativeResumes: new Map(),
+  resumeHolds: new Map(),
   ownedDispatchIds: new Set(),
   unknownStartRequests: new Map(),
   mailboxNeedsDrain: false,
@@ -930,6 +940,8 @@ export function resetCoordinatorForTests(): void {
   state.requestLedger = null;
   state.mailboxChecks = new Map();
   state.guidanceSends = new Map();
+  state.nativeResumes = new Map();
+  state.resumeHolds = new Map();
   state.ownedDispatchIds = new Set();
   state.unknownStartRequests = new Map();
   state.mailboxNeedsDrain = false;
@@ -945,9 +957,20 @@ export function resetCoordinatorForTests(): void {
 }
 
 export function coordinatorStatus() {
+  let recovery = state.recovery;
+  if (recovery && state.resumeHolds.size) {
+    const retryBlocked = [...recovery.retryBlocked];
+    const retryBlockedDetails = [...recovery.retryBlockedDetails];
+    for (const resume of state.resumeHolds.values()) {
+      retryBlocked.push(resume.originalDispatchId);
+      retryBlockedDetails.push({ taskId: resume.taskId, dispatchId: resume.originalDispatchId,
+        reason: `Native resume ${resume.requestId} is unresolved; inspect the exact request before replacing this worker.` });
+    }
+    recovery = { ...recovery, retryBlocked, retryBlockedDetails };
+  }
   return {
     running: state.running,
-    phase: state.phase,
+    phase: stopInFlight ? "stopping" as const : state.phase,
     runId: state.runId,
     coordinatorHandle: state.coordinatorHandle,
     error: state.error,
@@ -1038,7 +1061,7 @@ export function coordinatorStatus() {
     cleanupDebt: [...state.cleanupDebt],
     lastStopReport: state.lastStopReport,
     unownedDispatches: [...state.unownedDispatches],
-    recovery: state.recovery,
+    recovery,
     recoverySessions: state.recoverySessions.map((session) => ({ ...session })),
     /** Workspace-lane projections (worktree-lanes epic): identity + lifecycle. */
     worktreeLanes: laneViews(),
@@ -1069,8 +1092,19 @@ export type CoordinatorStatus = Omit<ReturnType<typeof coordinatorStatus>, "reco
  * was coordinating this Run, so the user's agent terminal will start getting
  * `consumer_fenced` on its own mutations until it runs `run-use` again.
  */
-export function startCoordinator(opts: StartOpts): Promise<void> {
-  return withLifecycleMutation(() => startCoordinatorLocked(opts));
+export async function startCoordinator(opts: StartOpts): Promise<void> {
+  assertCoordinatorNotStopping();
+  return withLifecycleMutation(() => {
+    // A Start queued before Stop must not take over when its lock opens.
+    assertCoordinatorNotStopping();
+    return startCoordinatorLocked(opts);
+  });
+}
+
+function assertCoordinatorNotStopping(): void {
+  if (stopInFlight) {
+    throw new OrcaCliError("Wait for the current coordinator Stop to finish before starting a Run.", "coordinator_conflict");
+  }
 }
 
 async function startCoordinatorLocked(opts: StartOpts): Promise<void> {
@@ -1115,6 +1149,8 @@ async function startCoordinatorLocked(opts: StartOpts): Promise<void> {
   state.requestLedger = new RequestLedger(getOrcaRuntime().workspace.dir);
   state.mailboxChecks = new Map();
   state.guidanceSends = new Map();
+  state.nativeResumes = new Map();
+  state.resumeHolds = new Map();
   state.ownedDispatchIds = new Set();
   state.unknownStartRequests = new Map();
   // Restart may occur immediately after a batch was durably marked done but
@@ -1247,15 +1283,15 @@ async function startCoordinatorLocked(opts: StartOpts): Promise<void> {
     await adoptDeadCoordinatorTerminal(opts.runId);
     const handle = await ensureCoordinatorTerminal(opts.worktree);
     provisionalHandle = handle;
-    // The user may have hit stop while we were creating/binding — if so the
-    // stop already ran with no handle to close, so close it here ourselves.
+    // A Stop queued during startup will collect this late same-generation
+    // handle and report its exact close result.
     if (!state.running) {
-      await closeTerminal(handle);
+      state.coordinatorHandle = handle;
       return;
     }
     await bindRun(opts.runId, handle);
     if (!state.running) {
-      await closeTerminal(handle);
+      state.coordinatorHandle = handle;
       return;
     }
     state.coordinatorHandle = handle;
@@ -1265,14 +1301,12 @@ async function startCoordinatorLocked(opts: StartOpts): Promise<void> {
     // behind, release what is positively settled, and surface what cannot be
     // verified. Only after recovery does the loop enter `running`.
     state.phase = "recovering";
-    await recoverGuidanceSends(opts.runId);
+    await recoverGuidanceSends(opts.runId, false);
     await recoverState(opts);
-    if (!stillMyTurn(myLoop) || state.coordinatorHandle !== handle || state.runId !== opts.runId) {
-      // Stopped while recovering — stopCoordinator already reported.
-      return;
-    }
+    if (!stillMyTurn(myLoop) || state.coordinatorHandle !== handle || state.runId !== opts.runId) return;
     await restoreMailboxChecks(opts.runId);
     await recoverPendingReplies();
+    await recoverPermissionPromptDecisions(opts.runId);
     if (!stillMyTurn(myLoop) || state.coordinatorHandle !== handle || state.runId !== opts.runId) return;
     state.phase = "running";
     // The loop now owns the handle (stop/close flows through the normal
@@ -1282,11 +1316,11 @@ async function startCoordinatorLocked(opts: StartOpts): Promise<void> {
     state.running = false;
     state.phase = "error";
     state.error = String((err as Error).message ?? err);
-    // bindRun refused, startup recovery threw, or stop raced the start: the
-    // provisional pane must not outlive the failed start. `closeTerminal` is
-    // best-effort (the pane may already be gone); clearing the stale handle
-    // keeps the errored projection from naming a terminal nothing owns.
-    if (provisionalHandle) {
+    // Transfer a provisional pane to the same-generation Stop if it is
+    // already waiting, rather than silently swallowing a close refusal.
+    if (stopInFlight && provisionalHandle) {
+      state.coordinatorHandle = provisionalHandle;
+    } else if (provisionalHandle) {
       await closeTerminal(provisionalHandle);
       if (state.coordinatorHandle === provisionalHandle) state.coordinatorHandle = null;
     }
@@ -1784,6 +1818,57 @@ async function refreshRecoverySessions(
   return views;
 }
 
+/** A bound checkpoint is a selector, not proof of a native worker-start. */
+async function recoverNativeResumes(runId: string): Promise<void> {
+  const store = state.providerSessionStore;
+  if (!store) return;
+  const holds = new Map<string, ResumeAttemptCheckpoint>();
+  for (const checkpoint of await store.listResumeAttempts(runId)) {
+    if (checkpoint.state === "refused") continue;
+    const { requestId, taskId, originalDispatchId, resumedTerminalId, newDispatchId } = checkpoint;
+    if (newDispatchId && state.nativeResumes.get(newDispatchId)?.checkpoint.requestId === requestId) continue;
+    holds.set(requestId, checkpoint);
+    if (!resumedTerminalId) continue;
+    const request = await showRequest(requestId);
+    if (request?.requestId !== requestId || request.raw.requestId !== requestId ||
+        request.state !== "completed" || request.raw.method !== "orchestration.workerStart") continue;
+    const receipt = parseWorkerStartReceipt(request.outcome, true);
+    const dispatchId = receipt.dispatchId;
+    if (!receipt.ok || receipt.raw.ok === false || receipt.status !== "ready" ||
+        receipt.raw.runId !== runId || receipt.taskId !== taskId || !dispatchId ||
+        dispatchId === originalDispatchId || (newDispatchId !== null && newDispatchId !== dispatchId) ||
+        (checkpoint.state === "bound" && !newDispatchId) ||
+        (receipt.requestId !== null && receipt.requestId !== requestId)) continue;
+    const mutation = receipt.raw.mutation;
+    if (mutation && typeof mutation === "object" && "requestId" in mutation && mutation.requestId !== requestId) continue;
+    const detail = await showWorkerDetail(dispatchId).catch(() => null);
+    if (!exactWorkerDispatch(detail, runId, taskId, dispatchId) ||
+        detail.dispatch.retryOfDispatchId !== originalDispatchId ||
+        detail.dispatch.creatorDispatchId != null) continue;
+    const terminal = detail.terminal?.handle ?? detail.fleet?.agentTerminalHandle ?? receipt.effective.terminal;
+    if (terminal !== resumedTerminalId) continue;
+    const bound = checkpoint.state === "bound" ? checkpoint : {
+      ...checkpoint, state: "bound" as const, newDispatchId: dispatchId, error: null, updatedAt: new Date().toISOString(),
+    };
+    if (checkpoint.state !== "bound") await store.recordResumeAttempt(bound);
+    state.nativeResumes.set(dispatchId, { checkpoint: bound, receipt });
+    state.ownedDispatchIds.add(dispatchId);
+    holds.delete(requestId);
+  }
+  state.resumeHolds = holds;
+}
+
+function seedNativeResume(attempt: Attempt, resume: VerifiedNativeResume): void {
+  const { checkpoint, receipt } = resume;
+  attempt.harness = checkpoint.harness;
+  attempt.retriedFrom = checkpoint.originalDispatchId;
+  attempt.requested = { agent: checkpoint.harness, model: null, effort: null,
+    worktree: null, terminal: checkpoint.resumedTerminalId, on: null };
+  attempt.agentTerminalHandle = checkpoint.resumedTerminalId;
+  attempt.startReceipts.push(receipt);
+  if (receipt.launchMode !== undefined) attempt.launchMode = receipt.launchMode;
+}
+
 async function recoverState(opts: StartOpts): Promise<void> {
   const runId = opts.runId;
   const generation = coordinatorLoopGeneration;
@@ -1796,13 +1881,12 @@ async function recoverState(opts: StartOpts): Promise<void> {
     new RequestLedger(getOrcaRuntime().workspace.dir).list(),
   ]);
   for (const row of rows) {
+    if (row.runId !== runId) continue;
     const launch = launches.get(row.dispatchId);
     const recordedStart = requests.some(request => request.operation === "worker-start" &&
       request.runId === runId && request.taskId === row.taskId && request.dispatchId === row.dispatchId);
-    const guidance = [...state.guidanceSends.values()].some(request =>
-      request.creationProven && request.receipt?.taskId === row.taskId && request.receipt.dispatchId === row.dispatchId);
     const explicit = opts.resumeBlocked?.dispatchId === row.dispatchId || opts.resumeStoppedDispatchIds?.includes(row.dispatchId);
-    if ((launch?.source === "viewer-launch" && launch.taskId === row.taskId) || recordedStart || guidance || explicit) {
+    if ((launch?.source === "viewer-launch" && launch.taskId === row.taskId) || recordedStart || explicit) {
       state.ownedDispatchIds.add(row.dispatchId);
     }
   }
@@ -1812,6 +1896,7 @@ async function recoverState(opts: StartOpts): Promise<void> {
       state.unknownStartRequests.set(request.requestId, request.taskId);
     }
   }
+  await recoverNativeResumes(runId);
   const ownership = await readWorkerOwnership(runId, tasks, rows, state.workerCreators);
   if (!stillMyTurn(generation) || state.runId !== runId || state.coordinatorHandle !== coordinator) return;
   registerHandedBackOwnership(ownership);
@@ -1865,9 +1950,11 @@ async function recoverState(opts: StartOpts): Promise<void> {
   const activeTaskIds = new Set(
     rows.filter((row) => row.runId === runId && activeDispatch(row)).map((row) => row.taskId),
   );
+  const resumeHeldTasks = new Set([...state.resumeHolds.values()].map(row => row.taskId));
   for (const task of tasks) {
     if (state.delegatedTaskIds.has(task.id)) continue;
     if (task.status !== "blocked" || activeTaskIds.has(task.id)) continue;
+    if (resumeHeldTasks.has(task.id)) continue;
     const stopped = rows.find(
       (row) =>
         row.taskId === task.id &&
@@ -2025,6 +2112,11 @@ async function recoverState(opts: StartOpts): Promise<void> {
    * the projection carries a launch echo — the effective launch preferences.
    */
   const seedFromRow = (attempt: Attempt, row: OrcaWorkerRow): void => {
+    const resumed = state.nativeResumes.get(row.dispatchId);
+    if (resumed) seedNativeResume(attempt, resumed);
+    const guidance = [...state.guidanceSends.values()].find(send =>
+      send.creationProven && send.receipt?.dispatchId === row.dispatchId);
+    if (guidance) attempt.guidanceStartEvidence = guidance.startEvidence;
     const tui = tuiByDispatch.get(row.dispatchId);
     if (tui) {
       attempt.openCodeTui = true;
@@ -2038,7 +2130,7 @@ async function recoverState(opts: StartOpts): Promise<void> {
     }
     attempt.fleetTerminalState = row.terminalState;
     attempt.dispatchStatus = row.dispatchStatus === "unknown" ? null : row.dispatchStatus;
-    attempt.agentTerminalHandle = row.agentTerminalHandle ?? null;
+    attempt.agentTerminalHandle = row.agentTerminalHandle ?? attempt.agentTerminalHandle;
     attempt.liveness = normalizeLiveness(row.projection?.liveness?.verdict ?? null);
     attempt.livenessReason = row.projection?.liveness?.reason ?? null;
     attempt.attention = row.projection?.attention ?? null;
@@ -2311,18 +2403,37 @@ function projectionOutcome(row: OrcaWorkerRow): "succeeded" | "failed" | null {
  * first confirms provider exit, explicitly fences external-process accounting,
  * then cleans up only after Orca positively confirms cancellation settlement.
  */
-export async function stopCoordinator(): Promise<StopReport> {
-  const wasRunning = state.running;
+export function stopCoordinator(): Promise<StopReport> {
+  if (stopInFlight) return stopInFlight;
+  const runId = state.runId;
+  const coordinator = state.coordinatorHandle;
+  const generation = coordinatorLoopGeneration;
   state.running = false;
-  if (wasRunning) state.phase = "stopping";
-  // This stage owns only check preparation, transport and receipt caching; it
-  // never waits for the lifecycle mutex or processes a delivery.
+  state.phase = "stopping";
+  stopInFlight = finishStop(runId, coordinator, generation).finally(() => {
+    stopInFlight = null;
+    if (state.phase === "stopping") state.phase = "idle";
+  });
+  return stopInFlight;
+}
+
+async function finishStop(runId: string | null, coordinator: string | null, generation: number): Promise<StopReport> {
+  // Receipt caching never needs the lifecycle lock. Drain it and mailbox
+  // mutations first: an in-flight Stage reply may still hold the mailbox
+  // lock while waiting for the lifecycle lock.
   await waitForMailboxChecksAtStop();
-  // An in-flight human reply must finish recording its exact outcome before
-  // its attested coordinator terminal can be closed.
   await mailboxMutationChain;
-  await lifecycleMutationChain;
-  if (state.runId && state.providerSessionStore) await recoverGuidanceSends(state.runId);
+  return withLifecycleMutation(() => {
+    if (generation !== coordinatorLoopGeneration) throw new OrcaCliError("Coordinator changed while Stop was draining.", "coordinator_conflict");
+    return stopCoordinatorLocked(runId, coordinator ?? state.coordinatorHandle);
+  });
+}
+
+async function stopCoordinatorLocked(runIdAtStop: string | null, coordinator: string | null): Promise<StopReport> {
+  if (runIdAtStop) {
+    await recoverGuidanceSends(runIdAtStop);
+    await recoverNativeResumes(runIdAtStop);
+  }
   // Empty, unacknowledged checks have no delivery or effects left to process.
   // Persist their actual receipt before retiring them; all batches and ACK
   // receipts remain replayable.
@@ -2339,8 +2450,11 @@ export async function stopCoordinator(): Promise<StopReport> {
     ...state.attempts.values(),
     ...[...state.retryCandidates.values()].map((reservation) => reservation.attempt),
   ];
-  const coordinator = state.coordinatorHandle;
   const results: StopResultEntry[] = [];
+  for (const resume of state.resumeHolds.values()) {
+    results.push({ target: resume.requestId, kind: "supervised", result: "unknown",
+      detail: `Native resume for ${resume.taskId} is not verified; inspect the exact request before replacing or stopping it.` });
+  }
   for (const [requestId, taskId] of state.unknownStartRequests) {
     results.push({ target: requestId, kind: "supervised", result: "unknown",
       detail: `Viewer start for ${taskId} has no resolved Dispatch; inspect its exact request before declaring Stop clean.` });
@@ -2364,12 +2478,12 @@ export async function stopCoordinator(): Promise<StopReport> {
   let stopOwnership: WorkerOwnershipSnapshot | null = null;
   let stopCustodyError: string | null = null;
   const readStopOwnership = async (): Promise<WorkerOwnershipSnapshot | null> => {
-    if (!state.runId) return null;
+    if (!runIdAtStop) return null;
     try {
       const [tasks, workers] = await Promise.all([
-        listTasks(state.runId), listCompleteWorkers(state.runId, { includeRemote: true }),
+        listTasks(runIdAtStop), listCompleteWorkers(runIdAtStop, { includeRemote: true }),
       ]);
-      const snapshot = await readWorkerOwnership(state.runId, tasks, workers, state.workerCreators);
+      const snapshot = await readWorkerOwnership(runIdAtStop, tasks, workers, state.workerCreators);
       registerHandedBackOwnership(snapshot);
       return snapshot;
     } catch (err) {
@@ -2382,10 +2496,24 @@ export async function stopCoordinator(): Promise<StopReport> {
 
   // Phase 5: every worker-stop runs under a durable, ledger-recorded request
   // id — recorded BEFORE the call so an interrupted stop stays inspectable,
-  // and closed with the observed state after. `runIdAtStop` is captured up
-  // front: the state machine starts tearing itself down below.
-  const runIdAtStop = state.runId;
+  // and closed with the observed state after.
+  // These roots may have just been discovered during Stop, without an
+  // in-memory attempt. Every target below came from exact native evidence.
+  const recoveredRoots = new Map<string, string>();
+  for (const [id, resume] of state.nativeResumes) recoveredRoots.set(id, resume.checkpoint.taskId);
+  for (const row of state.guidanceSends.values()) {
+    if (row.creationProven && row.receipt) recoveredRoots.set(row.receipt.dispatchId, row.receipt.taskId);
+  }
   const stopWithAudit = async (taskId: string, dispatchId: string) => {
+    if (!runIdAtStop || !state.ownedDispatchIds.has(dispatchId)) {
+      throw new OrcaCliError("Viewer ownership is unverified; no Stop was sent.", "stop_unknown");
+    }
+    if (recoveredRoots.has(dispatchId)) {
+      const detail = await showWorkerDetail(dispatchId);
+      if (!exactWorkerDispatch(detail, runIdAtStop, taskId, dispatchId)) {
+        throw new OrcaCliError("Exact recovered Dispatch identity is unverified; no Stop was sent.", "stop_unknown");
+      }
+    }
     const requestId = newRequestId();
     const operation = await workerStopOperation(dispatchId);
     await noteRequest({
@@ -2425,23 +2553,22 @@ export async function stopCoordinator(): Promise<StopReport> {
   };
   const attemptedDispatches = new Set<string>();
   const attemptDispatches = new Set(attempts.map(a => a.dispatchId).filter((id): id is string => !!id));
-  for (const row of state.guidanceSends.values()) {
-    const receipt = row.receipt;
-    if (!row.creationProven || !receipt || attemptDispatches.has(receipt.dispatchId) || heldAtStop.has(receipt.dispatchId)) continue;
+  for (const [dispatchId, taskId] of recoveredRoots) {
+    if (attemptDispatches.has(dispatchId) || attemptedDispatches.has(dispatchId) || heldAtStop.has(dispatchId)) continue;
     if (!stopOwnership) {
-      results.push({ target: receipt.dispatchId, kind: "supervised", result: "unknown", detail: "Helper custody could not be refreshed." });
+      results.push({ target: dispatchId, kind: "supervised", result: "unknown", detail: "Helper custody could not be refreshed." });
       continue;
     }
-    attemptedDispatches.add(receipt.dispatchId);
+    attemptedDispatches.add(dispatchId);
     try {
-      const stopped = await stopWithAudit(receipt.taskId, receipt.dispatchId);
+      const stopped = await stopWithAudit(taskId, dispatchId);
       const confirmed = stopped.state === "stopped" || stopped.alreadySettled;
-      results.push({ target: receipt.dispatchId, kind: "supervised",
+      results.push({ target: dispatchId, kind: "supervised",
         result: confirmed ? (stopped.alreadySettled ? "already_settled" : "stopped") : "unknown",
-        detail: confirmed ? "Journal-owned guidance follow-up" : `Guidance follow-up Stop returned ${stopped.state}` });
+        detail: confirmed ? "Recovered native worker custody verified" : `Recovered worker Stop returned ${stopped.state}` });
     } catch (err) {
-      results.push({ target: receipt.dispatchId, kind: "supervised", result: "unknown",
-        detail: `Guidance follow-up Stop failed: ${String((err as Error).message ?? err)}` });
+      results.push({ target: dispatchId, kind: "supervised", result: "unknown",
+        detail: `Recovered worker Stop failed: ${String((err as Error).message ?? err)}` });
     }
   }
 
@@ -2957,6 +3084,7 @@ export function shouldPersistCoordinatorCheck(
 let coordinatorLoopGeneration = 0;
 let mailboxMutationChain: Promise<void> = Promise.resolve();
 let lifecycleMutationChain: Promise<void> = Promise.resolve();
+let stopInFlight: Promise<StopReport> | null = null;
 const inFlightMailboxChecks = new Set<Promise<unknown>>();
 // A normal check waits up to three seconds. Do not let a stuck native
 // transport (whose own deadline may be much longer) hold Stop indefinitely.
@@ -2991,31 +3119,41 @@ function withMailboxMutation<T>(work: () => Promise<T>): Promise<T> {
   return result;
 }
 
-/** Reconcile only the exact journaled send; never synthesize a replacement
- * mutation when request-show is unavailable or its outcome is uncertain. */
-async function recoverGuidanceSends(runId: string): Promise<void> {
+/** Journal rows select requests to inspect; only exact native receipts can
+ * confer custody or resolve a stop event. Cache positive proofs per Run. */
+async function recoverGuidanceSends(runId: string, adopt = true): Promise<void> {
   const store = state.providerSessionStore;
   if (!store) return;
-  let rows = await store.listGuidanceSends(runId);
-  for (const row of rows) {
-    if (row.state !== "prepared" && row.state !== "unknown") continue;
-    try { await recoverTaskGuidance(row, { store }); } catch { /* unresolved remains a capacity/Stop debt */ }
-  }
-  rows = await store.listGuidanceSends(runId);
-  state.guidanceSends = new Map(rows.map(row => [row.requestId, row]));
-  for (const row of rows) {
-    if ((row.state === "enqueued" || row.state === "follow_up") && row.receipt) {
-      await resolveStopEvents(row.requestedDispatchId, `guidance:${row.requestId}`, row.createdAt);
+  for (const journal of await store.listGuidanceSends(runId)) {
+    let row = state.guidanceSends.get(journal.requestId);
+    let detail: WorkerDetailView | null | undefined;
+    let startReceipt: WorkerStartReceipt | undefined;
+    if (!row?.receipt) {
+      row = journal;
+      if (journal.state !== "refused") {
+        try {
+          const recovered = await recoverTaskGuidance(journal, { store });
+          const { result } = recovered;
+          detail = result.createdWorker;
+          startReceipt = result.startReceipt;
+          row = { ...recovered.checkpoint, receipt: result.receipt, creationProven: result.creationProven };
+        } catch {
+          // Even a locally finalized row might not have matching native
+          // authority. Keep debt by request ID, never by its claimed worker.
+          row = { ...journal, state: "unknown", receipt: null, creationProven: false };
+        }
+      }
+      state.guidanceSends.set(row.requestId, row);
     }
-  }
-  for (const row of rows) if (row.creationProven && row.receipt) state.ownedDispatchIds.add(row.receipt.dispatchId);
-  for (const row of rows) {
     const receipt = row.receipt;
     if (!row.creationProven || !receipt) continue;
+    state.ownedDispatchIds.add(receipt.dispatchId);
+    const canAdopt = adopt && state.running && state.runId === runId && state.opts &&
+      !state.attempts.has(receipt.taskId) && !state.delegatedDispatchIds.has(receipt.dispatchId);
+    if (row.state !== "unknown" && !canAdopt) continue;
     try {
-      const detail = await showWorkerDetail(receipt.dispatchId);
-      if (!detail?.dispatch || detail.dispatch.id !== receipt.dispatchId ||
-          detail.dispatch.runId !== runId || detail.dispatch.taskId !== receipt.taskId) continue;
+      detail ??= await showWorkerDetail(receipt.dispatchId);
+      if (!exactWorkerDispatch(detail, runId, receipt.taskId, receipt.dispatchId)) continue;
       const status = detail.dispatch.status;
       const settled = status === "succeeded" || status === "completed" || status === "failed" ||
         status === "stopped" || status === "abandoned";
@@ -3026,24 +3164,38 @@ async function recoverGuidanceSends(runId: string): Promise<void> {
         await store.recordGuidanceSend(resolved);
         state.guidanceSends.set(row.requestId, resolved);
       }
-      if (!state.running || state.runId !== runId || !state.opts || state.attempts.has(receipt.taskId)) continue;
+      if (!canAdopt || !state.running || !state.opts) continue;
       const source = state.attempts.get(row.requestedTaskId);
       const attempt = reserveAttempt({ id: receipt.taskId }, source?.harness ?? state.opts.defaultHarness);
       attempt.adopted = true;
       attempt.dispatchId = receipt.dispatchId;
       attempt.guidanceStartEvidence = row.startEvidence;
-      if (row.startEvidence?.launchMode !== undefined) attempt.launchMode = row.startEvidence.launchMode;
+      if (startReceipt) attempt.startReceipts.push(startReceipt);
       applyAttemptDispatchDetail(attempt, runId, detail);
-      if (settled) settleAttempt(attempt, status === "succeeded" || status === "completed" ? "succeeded" : "failed", "task_status");
+      if (settled) {
+        settleAttempt(attempt, status === "succeeded" || status === "completed" ? "succeeded" : "failed", "task_status");
+        if (detail.fleet) seedInheritedTerminalState(attempt, detail.fleet);
+      }
       state.attempts.set(receipt.taskId, attempt);
-    } catch { /* exact identity remains in the journal for later recovery/Stop */ }
+    } catch { /* keep the proven identity and any outstanding readiness debt */ }
+  }
+}
+
+async function resolveGuidanceStopEvents(runId: string): Promise<void> {
+  if (!state.running || state.runId !== runId || !state.inbox.some(item => item.kind === "stop_event")) return;
+  for (const row of state.guidanceSends.values()) {
+    const receipt = row.receipt;
+    if (row.runId === runId && row.state === "enqueued" && receipt?.kind === "enqueued" &&
+        receipt.dispatchId === row.requestedDispatchId && receipt.taskId === row.requestedTaskId) {
+      await resolveStopEvents(receipt.dispatchId, `guidance:${row.requestId}`, row.createdAt);
+    }
   }
 }
 
 export async function sendTaskGuidance(input: {
   runId: string; taskId: string; subject: string; body: string; threadId?: string;
 }): Promise<TaskMessageReceipt> {
-  return withLifecycleMutation(async () => {
+  const receipt = await withLifecycleMutation(async () => {
     const { runId, taskId } = input;
     const from = state.coordinatorHandle;
     const store = state.providerSessionStore;
@@ -3056,16 +3208,16 @@ export async function sendTaskGuidance(input: {
         !state.running || state.runId !== runId || state.coordinatorHandle !== from) {
       throw new OrcaCliError("The coordinator's current Run binding cannot be verified; inspect the Run before sending", "coordinator_control_required");
     }
-    const wasUnknown = [...state.guidanceSends.values()].some(row =>
-      row.requestedTaskId === taskId && row.requestedDispatchId === state.attempts.get(taskId)?.dispatchId &&
-      (row.state === "prepared" || row.state === "unknown"));
+    const requestedDispatchId = state.attempts.get(taskId)?.dispatchId;
+    const pendingForTarget = (row: GuidanceSendCheckpoint) =>
+      row.requestedTaskId === taskId && row.requestedDispatchId === requestedDispatchId &&
+      (row.state === "prepared" || row.state === "unknown");
+    const wasUnknown = [...state.guidanceSends.values()].some(pendingForTarget);
     await recoverGuidanceSends(runId);
+    if ([...state.guidanceSends.values()].some(pendingForTarget)) {
+      throw new OrcaCliError("A prior guidance request remains unresolved; inspect its request before sending again", "guidance_unknown");
+    }
     if (wasUnknown) {
-      const unresolved = [...state.guidanceSends.values()].some(row =>
-        row.requestedTaskId === taskId && (row.state === "prepared" || row.state === "unknown"));
-      if (unresolved) {
-        throw new OrcaCliError("A prior guidance request remains unresolved; inspect its request before sending again", "guidance_unknown");
-      }
       throw new OrcaCliError("The prior guidance request was reconciled; submit the new guidance again", "guidance_reconciled");
     }
     const attempt = state.attempts.get(taskId);
@@ -3117,12 +3269,6 @@ export async function sendTaskGuidance(input: {
           taskId: row.requestedTaskId, dispatchId: row.requestedDispatchId,
           settledLocally: row.state === "enqueued" || row.state === "follow_up" }),
       });
-      await recoverGuidanceSends(runId);
-      const followUp = state.attempts.get(result.receipt.taskId);
-      if (result.creationProven && result.startReceipt && followUp?.dispatchId === result.receipt.dispatchId) {
-        followUp.startReceipts.push(result.startReceipt);
-        if (result.startReceipt.launchMode !== undefined) followUp.launchMode = result.startReceipt.launchMode;
-      }
       return result.receipt;
     } finally {
       // Even a thrown response may have created a root. Reload the critical
@@ -3130,6 +3276,9 @@ export async function sendTaskGuidance(input: {
       await recoverGuidanceSends(runId);
     }
   });
+  // Do not hold the lifecycle lock while taking the mailbox lock.
+  await withMailboxMutation(() => resolveGuidanceStopEvents(input.runId));
+  return receipt;
 }
 
 async function saveMailbox(row: MailboxCheckCheckpoint, generation = coordinatorLoopGeneration,
@@ -3156,7 +3305,8 @@ function stopEventReason(message: OrcaMessage): string | null {
 async function resolveStopEvents(dispatchId: string, evidence: string, after?: string, onlyMessageId?: string): Promise<void> {
   for (const row of [...state.mailboxChecks.values()]) {
     const matches = (row.delivery?.messages ?? []).filter(message =>
-      row.pendingQuestionIds.includes(message.id) && (!onlyMessageId || message.id === onlyMessageId) && stopEventReason(message) &&
+      message.run_id === row.runId && row.pendingQuestionIds.includes(message.id) &&
+      (!onlyMessageId || message.id === onlyMessageId) && stopEventReason(message) &&
       parseWorkerDonePayload(message)?.dispatchId === dispatchId &&
       (!after || (Number.isFinite(Date.parse(message.created_at)) && Date.parse(message.created_at) <= Date.parse(after))));
     if (!matches.length) continue;
@@ -3199,35 +3349,72 @@ export async function acknowledgeStopEvent(runId: string, messageId: string, dis
   await acknowledgePendingDeliveryIfResolved();
 }
 
-/** Clear pending permission-prompt escalations after an operator approve/deny decision. */
-export async function resolvePermissionPromptInboxItems(runId: string, dispatchId: string, promptId: string): Promise<void> {
-  if (!state.running || state.runId !== runId) return;
-  await withMailboxMutation(async () => {
-    for (const row of [...state.mailboxChecks.values()]) {
-      const matches = (row.delivery?.messages ?? []).filter((message) => {
-        if (!row.pendingQuestionIds.includes(message.id)) return false;
-        let rawPayload: Record<string, unknown> | null = null;
-        try {
-          rawPayload = message.payload ? (JSON.parse(message.payload) as Record<string, unknown>) : null;
-        } catch {
-          rawPayload = null;
-        }
-        const prompt = extractPermissionPrompt(rawPayload);
-        return prompt?.id === promptId && parseWorkerDonePayload(message)?.dispatchId === dispatchId;
-      });
-      if (!matches.length) continue;
-      const ids = new Set(matches.map((m) => m.id));
-      const pendingQuestionIds = row.pendingQuestionIds.filter((id) => !ids.has(id));
-      await saveMailbox({
-        ...row,
-        pendingQuestionIds,
-        state: row.state !== "received" && row.delivery?.deliveryAcknowledged === true && !pendingQuestionIds.length &&
-          row.processedMessageIds.length === row.delivery.messages.length ? "completed" : row.state,
-      });
-      state.inbox = state.inbox.filter((item) => !ids.has(item.messageId));
-    }
-  });
+type PermissionResolution = NonNullable<MailboxCheckCheckpoint["resolvedPermissionPrompts"]>[string];
+
+/** A confirmed native decision clears only its originating prompt. */
+export async function resolvePermissionPromptInboxItems(
+  runId: string, dispatchId: string, promptId: string, decision: "approve" | "deny", requestId: string,
+): Promise<void> {
+  await withMailboxMutation(() => recordPermissionPromptDecision(runId, { dispatchId, promptId, decision, requestId }));
   await acknowledgePendingDeliveryIfResolved();
+}
+
+async function recordPermissionPromptDecision(
+  runId: string, resolution: PermissionResolution, taskId?: string | null,
+): Promise<void> {
+  const { dispatchId, promptId } = resolution;
+  if (!state.running || state.runId !== runId ||
+      !state.inbox.some(item => item.dispatchId === dispatchId && item.permissionPrompt?.id === promptId)) return;
+  const detail = await showWorkerDetail(dispatchId).catch(() => null);
+  const workerTask = detail?.dispatch?.taskId;
+  if (!workerTask || (taskId && workerTask !== taskId) || !exactWorkerDispatch(detail, runId, workerTask, dispatchId)) return;
+  const terminal = detail.terminal?.handle ?? detail.fleet?.agentTerminalHandle;
+  for (const row of [...state.mailboxChecks.values()]) {
+    if (row.runId !== runId) continue;
+    const matches = (row.delivery?.messages ?? []).filter(message => {
+      if (message.run_id !== runId || message.type !== "escalation" || !row.pendingQuestionIds.includes(message.id) ||
+          stopEventReason(message) ||
+          (message.from_handle !== `dispatch:${dispatchId}` && (!terminal || message.from_handle !== terminal))) return false;
+      const payload = parseWorkerDonePayload(message);
+      return payload?.dispatchId === dispatchId && (!payload.taskId || payload.taskId === workerTask) &&
+        extractPermissionPrompt(payload as Record<string, unknown>)?.id === promptId;
+    });
+    if (!matches.length) continue;
+    const ids = new Set(matches.map(message => message.id));
+    const pendingQuestionIds = row.pendingQuestionIds.filter(id => !ids.has(id));
+    const resolvedPermissionPrompts = { ...row.resolvedPermissionPrompts };
+    for (const id of ids) resolvedPermissionPrompts[id] = resolution;
+    await saveMailbox({ ...row, pendingQuestionIds, resolvedPermissionPrompts,
+      state: row.state !== "received" && row.delivery?.deliveryAcknowledged === true && !pendingQuestionIds.length &&
+        row.processedMessageIds.length === row.delivery.messages.length ? "completed" : row.state });
+    state.inbox = state.inbox.filter(item => !ids.has(item.messageId));
+  }
+}
+
+/** Recover the gap between native acceptance and the local mailbox write. */
+async function recoverPermissionPromptDecisions(runId: string): Promise<void> {
+  if (!state.running || state.runId !== runId || !state.requestLedger ||
+      !state.inbox.some(item => item.permissionPrompt)) return;
+  const ledger = await state.requestLedger.list();
+  for (const entry of ledger) {
+    if (entry.runId !== runId || !entry.dispatchId || !entry.taskId || !entry.target ||
+        (entry.operation !== "worker-approve" && entry.operation !== "worker-deny")) continue;
+    const { requestId, dispatchId } = entry;
+    const promptId = entry.target;
+    if (!state.inbox.some(item => item.dispatchId === dispatchId && item.permissionPrompt?.id === promptId)) continue;
+    const request = await showRequest(requestId);
+    if (request?.requestId !== requestId || request.raw.requestId !== requestId ||
+        request.state !== "completed" || request.raw.method !== "orchestration.approvalAnswer") continue;
+    const decision = entry.operation === "worker-approve" ? "approve" : "deny";
+    const outcome = request.outcome;
+    if (!outcome || typeof outcome !== "object") continue;
+    const receipt = outcome as Record<string, unknown>;
+    if (receipt.ok === false || receipt.approvalId !== promptId || receipt.dispatchId !== dispatchId ||
+        receipt.decision !== (decision === "approve" ? "allow" : "deny")) continue;
+    const mutation = receipt.mutation;
+    if (mutation && typeof mutation === "object" && "requestId" in mutation && mutation.requestId !== requestId) continue;
+    await recordPermissionPromptDecision(runId, { dispatchId, promptId, decision, requestId }, entry.taskId);
+  }
 }
 
 function mailboxQuestion(message: OrcaMessage): void {
@@ -3254,7 +3441,8 @@ function mailboxQuestion(message: OrcaMessage): void {
   const stopAttempt = stopReason && payloadDispatchId
     ? [...state.attempts.values()].find(attempt => attempt.dispatchId === payloadDispatchId) : undefined;
   const resolvedDispatchId = relatedAttempt?.dispatchId ?? stopAttempt?.dispatchId ?? payloadDispatchId;
-  const permissionPrompt = !stopReason && resolvedDispatchId ? extractPermissionPrompt(rawPayload) : null;
+  const permissionPrompt = message.type === "escalation" && !stopReason && resolvedDispatchId
+    ? extractPermissionPrompt(rawPayload) : null;
   state.inbox = [...state.inbox.filter(item => item.messageId !== message.id), {
     messageId: message.id, kind: stopReason ? "stop_event" : message.type, from: message.from_handle,
     subject: message.subject, body: message.body, createdAt: message.created_at,
@@ -3345,7 +3533,10 @@ async function loop(myLoop: number): Promise<void> {
     let processingFailed = false;
     try {
       await withMailboxMutation(async () => {
+        if (!stillMyTurn(myLoop)) return;
         await recoverPendingReplies();
+        await recoverPermissionPromptDecisions(state.runId!);
+        await resolveGuidanceStopEvents(state.runId!);
         for (const row of [...state.mailboxChecks.values()]) {
           for (const message of row.delivery?.messages ?? []) {
             if (row.pendingQuestionIds.includes(message.id) && isMergeInputsQuestion(message)) {
@@ -4037,7 +4228,10 @@ async function refreshHelperOwnership(runId: string, tasks: OrcaTask[], rows: Or
  * settled attempts get their ownership decision executed here.
  */
 async function reconcile(): Promise<void> {
-  if (state.runId && state.providerSessionStore) await recoverGuidanceSends(state.runId);
+  if (state.runId) {
+    await recoverGuidanceSends(state.runId);
+    await recoverNativeResumes(state.runId);
+  }
   const opts = state.opts!;
   const runId = state.runId!;
   const generation = coordinatorLoopGeneration;
@@ -4074,6 +4268,24 @@ async function reconcile(): Promise<void> {
   const dependenciesCompleted = (task: OrcaTask) =>
     taskDeps(task).every((id) => byId.get(id)?.status === "completed");
   if (!await refreshHelperOwnership(runId, tasks, workerRows)) return;
+  // A resume can become provable after the first restart pass. Adopt only
+  // the current exact worker, never a replacement or ambiguous sibling.
+  for (const [dispatchId, resumed] of state.nativeResumes) {
+    const task = byId.get(resumed.checkpoint.taskId);
+    if (!task) continue;
+    const current = state.attempts.get(task.id);
+    if ((current && !current.settled) || state.delegatedTaskIds.has(task.id)) continue;
+    const { row, uncertain } = taskDispatchEvidence(task, workerRows, runId);
+    if (!row || row.dispatchId !== dispatchId || uncertain || !activeDispatch(row) ||
+        workerSupervision(row) !== "supervised" || (current && current.dispatchId !== resumed.checkpoint.originalDispatchId)) continue;
+    const attempt = reserveAttempt(task, resumed.checkpoint.harness);
+    attempt.adopted = true;
+    attempt.dispatchId = row.dispatchId;
+    seedNativeResume(attempt, resumed);
+    state.attempts.set(task.id, attempt);
+    await refreshAttemptDispatchDetail(attempt, runId);
+  }
+  const resumeHeldTasks = new Set([...state.resumeHolds.values()].map(row => row.taskId));
   const occupiedTaskIds = new Set(
     workerRows.filter((row) => row.runId === runId && activeDispatch(row)).map((row) => row.taskId),
   );
@@ -4302,7 +4514,7 @@ async function reconcile(): Promise<void> {
         // Stage mode, release the settled terminal first; the later dispatch
         // batch is the only path that may start verified downstream work.
         state.stageGit ? [] : tasks.filter((t) =>
-          t.status === "ready" && dependenciesCompleted(t) &&
+          t.status === "ready" && !resumeHeldTasks.has(t.id) && dependenciesCompleted(t) &&
           gateApprovalByTask.get(t.id) !== false && !occupiedTaskIds.has(t.id)),
       );
     }
@@ -4327,6 +4539,7 @@ async function reconcile(): Promise<void> {
   // An explicitly approved retry stays blocked in Orca until worker-start
   // accepts --retry-of. Reopening it as ready first invalidates that lineage.
   const ready = tasks.filter((t) => dependenciesCompleted(t) &&
+    !resumeHeldTasks.has(t.id) &&
     (t.status === "ready" || (t.status === "blocked" && state.retryOfByTask.has(t.id))));
   const activeAttempts =
     [...state.attempts.values()].filter((a) => !a.settled).length +
@@ -4878,7 +5091,7 @@ async function evaluateCompletionBoundary(tasks: OrcaTask[], gates: Gate[]): Pro
     state.phase = "awaiting_input";
     return;
   }
-  if (state.unknownStartRequests.size) {
+  if (state.unknownStartRequests.size || state.resumeHolds.size) {
     state.phase = "awaiting_input";
     return;
   }
@@ -5934,6 +6147,12 @@ async function retryWorkerLocked(idOrTask: string): Promise<{
   }
   const opts = state.opts;
   const runId = state.runId;
+  await recoverNativeResumes(runId);
+  const hold = [...state.resumeHolds.values()].find(row =>
+    row.taskId === idOrTask || row.originalDispatchId === idOrTask || row.newDispatchId === idOrTask);
+  if (hold) {
+    throw new OrcaCliError(`Native resume ${hold.requestId} is unresolved; inspect the exact request before replacing this worker.`, "resume_unknown");
+  }
 
   // Find the target: by dispatch id (current, receipt-recorded, or retried-from)
   // or directly by task id.
@@ -6087,44 +6306,41 @@ async function retryWorkerLocked(idOrTask: string): Promise<{
     if (result.kind === "failed" || result.kind === "unknown") throw result.error;
     return { taskId: attempt.taskId, dispatchId: result.dispatchId, retriedFrom: retryOf };
   } finally {
-    if (state.retryCandidates.get(attempt.taskId) === reservation && (state.running || state.phase !== "stopping")) {
+    if (state.retryCandidates.get(attempt.taskId) === reservation && !stopInFlight) {
       state.retryCandidates.delete(attempt.taskId);
     }
   }
 }
 
 /**
- * Run a native session-resume `worker-start --terminal` bind under the live
- * coordinator's lifecycle lock when this viewer is already coordinating `runId`,
- * and track the resulting Dispatch immediately so the tick loop cannot double-place.
+ * Adopt a successful native resume while the route holds the lifecycle lock.
+ * Record it before the tick loop can advance or Stop can act.
  */
-export function runResumedBindUnderCoordinator(
+export function recordResumedWorker(
   runId: string,
   meta: { taskId: string; harness: string; retriedFrom: string; terminalId: string },
-  bind: (from: string) => Promise<StartedWorker>,
-): Promise<StartedWorker> {
-  return withLifecycleMutation(async () => {
-    if (!state.running || state.runId !== runId || !state.coordinatorHandle) {
-      throw new OrcaCliError(
-        "Coordinator stopped or switched Run while resuming the session.",
-        "not_running",
-      );
-    }
-    const started = await bind(state.coordinatorHandle);
-    const attempt = reserveAttempt({ id: meta.taskId }, meta.harness);
-    attempt.dispatchId = started.dispatchId;
-    attempt.handle = started.handle;
-    attempt.agentTerminalHandle = started.handle ?? meta.terminalId;
-    attempt.retriedFrom = meta.retriedFrom;
-    attempt.requested = {
-      agent: meta.harness,
-      model: null,
-      effort: null,
-      worktree: null,
-      terminal: meta.terminalId,
-      on: null,
-    };
-    state.attempts.set(meta.taskId, attempt);
-    return started;
-  });
+  started: StartedWorker,
+): void {
+  const receipt = started.receipt;
+  if ((!state.running && !stopInFlight) || state.runId !== runId || !state.coordinatorHandle ||
+      started.mode !== "supervised" || started.adopted || !started.dispatchId ||
+      !receipt?.ok || receipt.status !== "ready" || receipt.raw.runId !== runId ||
+      receipt.taskId !== meta.taskId || receipt.dispatchId !== started.dispatchId) return;
+  const attempt = reserveAttempt({ id: meta.taskId }, meta.harness);
+  attempt.dispatchId = started.dispatchId;
+  attempt.handle = started.handle;
+  attempt.agentTerminalHandle = started.handle ?? meta.terminalId;
+  attempt.retriedFrom = meta.retriedFrom;
+  attempt.startReceipts.push(receipt);
+  if (receipt.launchMode !== undefined) attempt.launchMode = receipt.launchMode;
+  attempt.requested = {
+    agent: meta.harness,
+    model: null,
+    effort: null,
+    worktree: null,
+    terminal: meta.terminalId,
+    on: null,
+  };
+  state.ownedDispatchIds.add(started.dispatchId);
+  state.attempts.set(meta.taskId, attempt);
 }

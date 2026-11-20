@@ -49,11 +49,6 @@
   color: var(--st-dispatched);
 }
 
-.odag-session__pill--hook {
-  border-color: color-mix(in oklab, var(--st-completed), transparent 55%);
-  color: var(--st-completed);
-}
-
 .odag-session__bar-actions {
   margin-inline-start: auto;
   display: inline-flex;
@@ -262,11 +257,6 @@
 .odag-tool-card__tag--error {
   border-color: color-mix(in oklab, var(--st-failed), transparent 55%);
   color: var(--st-failed);
-}
-
-.odag-tool-card__tag--live {
-  border-color: color-mix(in oklab, var(--st-completed), transparent 55%);
-  color: var(--st-completed);
 }
 
 .odag-tool-card__body {

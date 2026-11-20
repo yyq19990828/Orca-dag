@@ -12,9 +12,8 @@ export const WORKSPACE_STATE_FILES = {
 export type WorkspaceStateFile = typeof WORKSPACE_STATE_FILES[keyof typeof WORKSPACE_STATE_FILES];
 
 /**
- * Ephemeral runtime discovery file for the companion Orca plugin. Kept outside
- * `WORKSPACE_STATE_FILES` because it is never migrated from a legacy root
- * layout and holds no user history (safe to remove on ordinary uninstall).
+ * Legacy companion discovery file. Never read or migrate it; only uninstall
+ * may remove it. Current registrations live outside the workspace.
  */
 export const WORKSPACE_ENDPOINT_FILE = ".orca-dag/endpoint.json";
 
@@ -96,22 +95,6 @@ export function prepareWorkspaceStateFile(
   }
   if (forWrite) ensureDirectory(workspace);
   return { path, legacyPath, status: "missing" };
-}
-
-/** Prepare an ephemeral runtime file inside `.orca-dag/` without traversing symlinks. */
-export function prepareWorkspaceRuntimeFile(
-  workspace: string,
-  relativePath: string,
-  forWrite = false,
-): string {
-  assertWorkspaceStateDirectory(workspace);
-  const path = join(workspace, relativePath);
-  const current = info(path);
-  if (current && (!current.isFile() || current.isSymbolicLink())) {
-    throw new Error(`${path} must be a regular file; left untouched`);
-  }
-  if (forWrite) ensureDirectory(workspace);
-  return path;
 }
 
 /** Keep history readable in read-only workspaces; never write the old layout. */

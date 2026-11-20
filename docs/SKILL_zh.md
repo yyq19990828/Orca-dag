@@ -79,11 +79,11 @@ Orca 编排支持**两种协调模式**，请严格尊重用户的选择：
 
 - 每次**新需求或全新的重新规划 Run**，都要新建一个 `.orca-dag/<timestamp>/` 目录。使用文件系统安全的 UTC 毫秒级时间戳：`YYYYMMDD-HHmmss-SSS`（例如 `.orca-dag/20261008-143012-123/`）。独占创建最终目录；若已存在，则换用新时间戳或追加数字后缀。绝不复用其他规划的目录，也绝不覆盖其文档。
 - **所有基于文件的规划中间产物**都放在同一个目录下，包括补充笔记、任务规范草稿或本地 DAG 草稿。不要散落在项目根目录或共享 `docs/` 目录中。本地草稿绝不能替代向 Orca 编排状态的实际写入。
-- 查看器运行时状态共享 `.orca-dag/` 根目录：`config.json`、`activity.jsonl`、`launches.jsonl`、`requests.jsonl`、`sessions.json`，以及服务运行期间的临时 `0o600` `endpoint.json`。除 Provider 会话绑定外，`sessions.json` 还存储关键恢复日志（`mailboxChecks`、`guidanceSends`、`operatorMessages` 与 `resumeAttempts`），它们属于恢复权威依据而非可轮转的普通审计日志。不支持这些字段的旧版读取器遇到时会失败，因此不能跨不兼容读取器直接热降级。查看器会自动迁移旧版根目录 `.orca-dag.*` 文件且不覆盖已有目标文件；升级前请先停止旧版查看器。规划过程中不要手工编辑这些状态文件。卸载操作默认保留这些文件；`--purge` 也仅删除已知状态文件，绝不删除时间戳规划目录或其他用户文件。
+- 查看器运行时状态共享 `.orca-dag/` 根目录：`config.json`、`activity.jsonl`、`launches.jsonl`、`requests.jsonl` 和 `sessions.json`。端点记录绝不属于工作区数据，只存于原生插件专用的用户私有发现注册表，API 客户端不应读取。除 Provider 会话绑定外，`sessions.json` 还存储关键恢复日志（`mailboxChecks`、`guidanceSends`、`operatorMessages` 与 `resumeAttempts`），它们属于恢复权威依据而非可轮转的普通审计日志。不支持这些字段的旧版读取器遇到时会失败，因此不能跨不兼容读取器直接热降级。查看器会自动迁移旧版根目录 `.orca-dag.*` 文件且不覆盖已有目标文件；升级前请先停止旧版查看器。规划过程中不要手工编辑这些状态文件。卸载操作默认保留这些文件；`--purge` 也仅删除已知状态文件，绝不删除时间戳规划目录或其他用户文件。
 - 在同一规划的迭代完善或向现有 Run 追加 Task 期间，持续沿用同一个规划目录。恢复规划时请使用文档中显式记录的路径，而非盲目取最新目录。创建 Run 后，在两份文档中记录其 `run_*` ID，并向用户同时汇报 **Run ID + 规划目录**。
-- `npx orca-orchestration-launcher` 启动时会在工作区的 `.gitignore` 中写入带标记的 `.orca-dag/` 忽略规则并提示。若你仅安装了技能、仅通过插件内置后端运行（`ORCA_DAG_NO_WORKSPACE_INIT=1`）、跳过了工作区初始化或看到了初始化警告，请在写规划文档前确认 `.orca-dag/` 已被忽略；保留用户原有规则，绝不穿透符号链接写入 `.gitignore` 或 `.orca-dag` 目录。若无法设置忽略规则，请明确说明而非默默假定已受保护。
+- `npx orca-orchestration-launcher` 启动时会在工作区的 `.gitignore` 中写入带标记的 `.orca-dag/` 忽略规则并提示。原生插件不会自动修改 `.gitignore`；若项目尚未忽略 `.orca-dag/`，请在使用插件前添加规则。若仅安装了技能、跳过了工作区初始化或看到了初始化警告，也要在写规划文档前确认 `.orca-dag/` 已被忽略。保留用户原有规则，绝不穿透符号链接写入 `.gitignore` 或 `.orca-dag` 目录。若无法设置忽略规则，请明确说明。
 - 规划文档属于**本地被忽略的产物**，不是应提交的源码，切勿 `git add -f` 强制提交。隔离 worktree 不会自动包含这些被忽略文档，因此每个 Task 规范都必须**内嵌** Worker 所需的完整需求、接口与验收标准，不能仅靠引用规划文档路径。可以附上源规划路径以便追溯，但不能作为 Worker 的必需输入。
-- 历史遗留的 `.orca/` 文档不会被自动移动或删除。所有新规划一律使用 `.orca-dag/`。启动会保留旧版受管忽略块；`npx orca-orchestration-launcher uninstall` 会移除已安装的技能、失效的 `endpoint.json`、残留的协调器终端以及两处位置的精确受管忽略块，但**即使带上 `--purge` 也会保留规划文档**。用户手写的忽略规则始终保持原样。
+- 历史遗留的 `.orca/` 文档不会被自动移动或删除。所有新规划一律使用 `.orca-dag/`。启动会保留旧版受管忽略块；`npx orca-orchestration-launcher uninstall` 会移除已安装的技能、当前工作区的私有 viewer 注册记录、旧版 `.orca-dag/endpoint.json`、残留的协调器终端以及两处位置的精确受管忽略块，但**即使带上 `--purge` 也会保留规划文档**。用户手写的忽略规则始终保持原样。
 
 ## 将 DAG 写入 Orca（核心步骤）
 
@@ -109,26 +109,41 @@ Orca 编排支持**两种协调模式**，请严格尊重用户的选择：
 
 确认任务图无误后，向用户汇报 **Run ID 与 `.orca-dag/<timestamp>/` 规划目录**：
 
-- **已安装原生 Orca 插件（`orchestration-panel`，Orca ≥ 1.4.263）**：无需额外开终端——插件自动为当前工作区托管独立的回环后端，新建的 Run 会立即出现在 Orca 右侧边栏（**任务** / **待处理** / **活动**）及完整四区工作台标签页（`↗ 标签页` 或点击状态栏），同时提供基于 `OutputTail` SSE + 插件 Hook 加速的实时**会话**工具卡片，以及针对已退出本机 Worker 的一键 **L1 原生会话恢复**。
+- **已安装原生 Orca 插件（`orchestration-panel`，Orca ≥ 1.4.263）**：无需额外开终端——插件自动为当前工作区托管独立的回环后端，并在 Orca 右侧边栏（**任务** / **待处理** / **活动**）及完整工作台标签页（`↗ 标签页` 或点击状态栏）展示 Run。**会话**工具卡片来自精确限定到该 Worker 的 `worker-read` 会话记录；工具、提示词和状态事件只负责唤醒读取，不转发预览。**L1 原生会话恢复**要求会话精确匹配同一本地工作区、同一 Provider 的历史，且会话未活跃、没有已打开的面板；OMP 和 Antigravity 不支持此路径。
 - **独立 CLI / Web 查看器**：未安装插件时，请提示用户在项目根目录运行：
   ```bash
-  npx orca-orchestration-launcher    # 在项目根目录运行；默认监听 http://localhost:8787 并打开浏览器
+  npx orca-orchestration-launcher    # 在项目根目录运行；输出本机 viewer URL 并打开浏览器
   ```
 
 用户选择该 Run、配置逐节点 Harness / 模型 / effort / 放置策略，然后点击 **“▶ Run with Orca”**。
 
 **若用户要求由你通过后端 API 触发 Orchestration Panel 执行：**
-优先读取 `.orca-dag/endpoint.json` 中的端口（插件内置后端使用动态回环端口并发布在此文件中；独立启动的 viewer 则回退至 `8787`）。启动前先调用只读 `POST /api/launch-preview` 与 `GET /api/accounts` 预检；接口无法从任务散文中推断外部资源是否就绪。
+只使用你为目标工作区启动的 launcher 所输出的本机 viewer URL，或 Orca 为该工作区打开的 viewer URL。获取或发送令牌前，先在启动输出或 Orca 标签页中确认工作区。不要从工作区文件读取 URL 或端口，不要猜测备用端口、读取插件私有注册表或跟随重定向。若无法确认 viewer，请改用 Orca 界面。启动前先调用只读 `POST /api/launch-preview` 与 `GET /api/accounts` 预检；接口无法从任务描述中判断外部资源是否就绪。
 
 ```bash
-PORT=$(python3 -c "import json; print(json.load(open('.orca-dag/endpoint.json'))['port'])" 2>/dev/null || echo 8787)
-TOKEN=$(curl -s "http://127.0.0.1:${PORT}/api/session" | python3 -c "import json,sys;print(json.load(sys.stdin)['token'])")
-curl -s -X POST "http://127.0.0.1:${PORT}/api/run" -H "X-Orca-Dag-Token: $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"runId":"<run_id>","defaultHarness":"codex","maxConcurrency":2}'
+(
+  set -o pipefail
+  PORT='<verified_port>' # 替换为受信任本机 viewer URL 中的端口。
+  if [[ ! $PORT =~ ^[1-9][0-9]{0,4}$ ]] || (( PORT > 65535 )); then
+    printf '%s\n' '请输入 1 到 65535 之间的数字端口。' >&2
+    exit 1
+  fi
+  VIEWER="http://127.0.0.1:${PORT}"
+  TOKEN=$(curl -q --noproxy '*' --fail --silent --show-error "$VIEWER/api/session" |
+    python3 -c '
+import json, re, sys
+token = json.load(sys.stdin)["token"]
+if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
+    sys.exit("Invalid viewer token")
+print(token)
+') || exit 1
+  curl -q --noproxy '*' --fail --silent --show-error "$VIEWER/api/run" \
+    -H "X-Orca-Dag-Token: $TOKEN" -H "Content-Type: application/json" \
+    -d '{"runId":"<run_id>","defaultHarness":"codex","maxConcurrency":2}'
+)
 ```
 
-此后，查看器会把**它自己的独立终端**绑定为该 Run 的协调器并自主推进——并行波次派发、持久化收件恢复、门禁与单次权限弹窗浮现、终端释放/保留——并将实时工具调用与检查回执流入**会话**和**消息**页签。启动失败的 Worker 绝不会自动重试，而是暂停对应 Task 供排查、显式重试或 L1 原生会话恢复（`POST /api/workers/:dispatchId/resume`）。
+此后，查看器会把**它自己的独立终端**绑定为该 Run 的协调器并自主推进——并行波次派发、持久化收件恢复、门禁与单次权限弹窗呈现、终端释放或保留。**会话**页签显示指定 Worker 的会话记录，**消息**页签显示 Worker 消息和检查回执。启动失败不会自动重试；对应 Task 会暂停，等待排查或显式重试。仅当已退出的会话符合上述条件时，才使用 L1 原生会话恢复。
 
 **若用户明确要求由你（选定模型）在 Orca 中亲自担任协调器而非交由查看器调度：**
 严格遵循已加载的 `orchestration` 指南事件唤醒循环（`references/coordinator-loop.md` 与 `references/recovery-and-cleanup.md`）：启动就绪 Worker 后结束本轮，等待 Orca 在来信或任务完成时唤醒你；严禁编写轮询或 watch 脚本（普通 `check` 会偷走邮件导致 Orca 无法唤醒）；始终用 `send` 引导 Worker（不要往终端敲字）；若用户希望保留 Worker 对话继续使用，启动时加 `--keep-open` 或调用 `worker-keep-open`。此时 Orchestration Panel 会自动以只读模式实时展示该 Run，不会干扰你的协调。

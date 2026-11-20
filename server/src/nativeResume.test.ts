@@ -11,6 +11,7 @@ import {
 import {
   OrcaCliError,
   RESPONSE_LOST,
+  type Gate,
   type OrcaTask,
   type OrcaWorkerRow,
   type StartedWorker,
@@ -23,14 +24,19 @@ function makeFixture(
   dir: string,
   overrides: {
     harness?: string;
+    sessionWorkspaceId?: string;
+    terminalWorkspacePath?: string;
+    gates?: Gate[];
     hostKind?: string;
     sessionRunning?: boolean;
     resumeReceipt?: Record<string, unknown>;
     globalWorkers?: OrcaWorkerRow[];
-    startWorkerImpl?: (opts: Parameters<NonNullable<NativeResumeDeps["startSupervisedWorker"]>>[0]) => Promise<StartedWorker>;
+    startWorkerImpl?: (opts: Parameters<NonNullable<NativeResumeDeps["startSupervisedWorker"]>>[0]) => Promise<StartedWorker | null>;
     showRequestImpl?: NativeResumeDeps["showRequest"];
   } = {},
 ) {
+  // Orca returns this path-bearing Host API ID for local folder projects.
+  const workspaceListId = `repo-1::${dir}`;
   const bridge = new PluginBridge();
   bridge.hello({
     pluginId: "orchestration-panel",
@@ -43,7 +49,7 @@ function makeFixture(
       {
         terminalId: "term_old",
         workspaceId: `repo-1::${dir}`,
-        workspaceListId: "identity:wt2:local:ws-1",
+        workspaceListId,
         agent: overrides.harness ?? "codex",
         state: "done",
         sessionId: "sess_exact_1",
@@ -51,6 +57,7 @@ function makeFixture(
     ],
   });
 
+  let resumeCalls = 0;
   // Auto-answer plugin commands queued by nativeResume.
   const autoAnswer = async () => {
     while (bridge.status().connected) {
@@ -59,7 +66,7 @@ function makeFixture(
         if (cmd.kind === "workspace.list") {
           bridge.submitReceipt(cmd.id, {
             ok: true,
-            workspaces: [{ id: "identity:wt2:local:ws-1", path: dir, hostId: "local" }],
+            workspaces: [{ id: workspaceListId, path: dir, hostId: "local" }],
           });
         } else if (cmd.kind === "agent.listSessions") {
           bridge.submitReceipt(cmd.id, {
@@ -67,6 +74,8 @@ function makeFixture(
             sessions: [
               {
                 sessionId: "sess_exact_1",
+                workspaceId: overrides.sessionWorkspaceId ?? workspaceListId,
+                hostId: "local",
                 agent: overrides.harness ?? "codex",
                 title: "Fix build",
                 updatedAt: Date.now(),
@@ -75,6 +84,7 @@ function makeFixture(
             ],
           });
         } else if (cmd.kind === "agent.resume") {
+          resumeCalls++;
           bridge.submitReceipt(
             cmd.id,
             overrides.resumeReceipt ?? { ok: true, terminalId: "term_resumed_1", started: true },
@@ -138,7 +148,7 @@ function makeFixture(
     worker: { state: "failed", stage: "failed", setupState: null, lastError: "lost", createdAt: null, updatedAt: null },
     terminal: {
       handle: "term_old",
-      worktreePath: dir,
+      worktreePath: overrides.terminalWorkspacePath ?? dir,
       branch: "main",
       title: null,
       connected: false,
@@ -180,7 +190,7 @@ function makeFixture(
       partialHostErrors: [],
     }),
     listTasks: async () => [task],
-    listGates: async () => [],
+    listGates: async () => overrides.gates ?? [],
     listTerminals: async () => [
       {
         handle: "term_resumed_1",
@@ -196,7 +206,8 @@ function makeFixture(
     waitForTuiIdle: async () => {},
     startSupervisedWorker: async (opts) => {
       startCalls += 1;
-      if (overrides.startWorkerImpl) return overrides.startWorkerImpl(opts);
+      const override = await overrides.startWorkerImpl?.(opts);
+      if (override) return override;
       assert.equal(opts.terminal, "term_resumed_1");
       assert.equal(opts.retryOf, "ctx_failed_1");
       assert.equal(opts.model, undefined);
@@ -248,6 +259,7 @@ function makeFixture(
     store,
     bridge,
     getStartCalls: () => startCalls,
+    getResumeCalls: () => resumeCalls,
     cleanup: async () => {
       bridge.close();
       await responder.catch(() => {});
@@ -260,16 +272,22 @@ describe("L1 native session resume (M3)", () => {
     const dir = mkdtempSync(join(tmpdir(), "odag-resume-ok-"));
     const fx = makeFixture(dir);
     try {
+      await fx.store.bind({
+        runId: "run_1", taskId: "task_1", dispatchId: "ctx_failed_1",
+        harness: "codex", sessionId: "sess_exact_1", workspace: dir, host: "local:local",
+        source: "provider-evidence",
+      });
       const preview = await previewNativeResume({ runId: "run_1", dispatchId: "ctx_failed_1" }, fx.deps);
       assert.equal(preview.eligible, true);
       assert.equal(preview.sessionId, "sess_exact_1");
-      assert.equal(preview.workspaceId, "identity:wt2:local:ws-1");
+      assert.deepEqual(preview.candidateSessions, []);
+      assert.equal(preview.workspaceId, `repo-1::${dir}`);
 
       const result = await executeNativeResume(
         {
           runId: "run_1",
           dispatchId: "ctx_failed_1",
-          runAsCoordinator: async (_meta, fn) => fn("term_coord_1"),
+          runAsCoordinator: async (fn) => fn("term_coord_1"),
         },
         fx.deps,
       );
@@ -312,27 +330,14 @@ describe("L1 native session resume (M3)", () => {
     }
   });
 
-  it("refuses active sessions and pre-existing panes owned by another Dispatch", async () => {
+  it("refuses active sessions and existing personal panes even without a Dispatch owner", async () => {
     const dir = mkdtempSync(join(tmpdir(), "odag-resume-active-"));
     const fxActive = makeFixture(dir, { sessionRunning: true });
     const fxOwned = makeFixture(dir, {
-      resumeReceipt: { ok: true, terminalId: "term_other_owner", started: false },
-      globalWorkers: [
-        {
-          dispatchId: "ctx_other_live",
-          taskId: "task_other",
-          runId: "run_other",
-          workerState: "running",
-          supervision: "supervised",
-          dispatchStatus: "dispatched",
-          agentTerminalHandle: "term_other_owner",
-          terminalState: "active",
-          projection: null,
-        },
-      ],
+      resumeReceipt: { ok: true, terminalId: "term_personal", started: false },
     });
     try {
-      const p1 = await previewNativeResume({ runId: "run_1", dispatchId: "ctx_failed_1" }, fxActive.deps);
+      const p1 = await previewNativeResume({ runId: "run_1", dispatchId: "ctx_failed_1", sessionId: "sess_exact_1" }, fxActive.deps);
       assert.equal(p1.eligible, false);
       assert.equal(p1.code, "resume_session_active");
 
@@ -342,7 +347,8 @@ describe("L1 native session resume (M3)", () => {
             {
               runId: "run_1",
               dispatchId: "ctx_failed_1",
-              runAsCoordinator: async (_meta, fn) => fn("term_coord_1"),
+              sessionId: "sess_exact_1",
+              runAsCoordinator: async (fn) => fn("term_coord_1"),
             },
             fxOwned.deps,
           ),
@@ -361,11 +367,12 @@ describe("L1 native session resume (M3)", () => {
     let requestState: "absent" | "failed" = "absent";
     const fx = makeFixture(dir, {
       startWorkerImpl: async () => {
+        if (requestState === "failed") return null;
         throw new OrcaCliError("lost reply", RESPONSE_LOST);
       },
       showRequestImpl: async (requestId) =>
         requestState === "failed"
-          ? { requestId, state: "failed", interpretation: "timed out", outcome: null, raw: {} }
+          ? { requestId, state: "failed", interpretation: "timed out", outcome: null, raw: { requestId, method: "orchestration.workerStart" } }
           : null,
     });
     try {
@@ -375,7 +382,8 @@ describe("L1 native session resume (M3)", () => {
             {
               runId: "run_1",
               dispatchId: "ctx_failed_1",
-              runAsCoordinator: async (_meta, fn) => fn("term_coord_1"),
+              sessionId: "sess_exact_1",
+              runAsCoordinator: async (fn) => fn("term_coord_1"),
             },
             fx.deps,
           ),
@@ -390,8 +398,59 @@ describe("L1 native session resume (M3)", () => {
 
       // Once request-show positively reports failed, the checkpoint reconciles cleanly.
       requestState = "failed";
-      const cleared = await previewNativeResume({ runId: "run_1", dispatchId: "ctx_failed_1" }, fx.deps);
+      const cleared = await previewNativeResume({ runId: "run_1", dispatchId: "ctx_failed_1", sessionId: "sess_exact_1" }, fx.deps);
       assert.equal(cleared.eligible, true);
+      const resumed = await executeNativeResume({
+        runId: "run_1", dispatchId: "ctx_failed_1", sessionId: "sess_exact_1",
+        runAsCoordinator: async (fn) => fn("term_coord_1"),
+      }, fx.deps);
+      assert.equal(resumed.dispatchId, "ctx_resumed_2");
+      assert.deepEqual((await fx.store.listResumeAttempts("run_1")).map((row) => row.state), ["refused", "bound"]);
+    } finally {
+      await fx.cleanup();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("requires matching history and coordinator consent before opening a session", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "odag-resume-authority-"));
+    const fx = makeFixture(dir);
+    const other = makeFixture(dir, { sessionWorkspaceId: "identity:wt2:local:other" });
+    const conflict = makeFixture(dir, { terminalWorkspacePath: join(dir, "different-worktree") });
+    const opts = { runId: "run_1", dispatchId: "ctx_failed_1", sessionId: "sess_exact_1" };
+    try {
+      const unauthorized = new OrcaCliError("Control confirmation required", "coordinator_control_required");
+      await assert.rejects(
+        () => executeNativeResume({ ...opts, runAsCoordinator: async () => { throw unauthorized; } }, fx.deps),
+        { code: "coordinator_control_required" },
+      );
+      assert.deepEqual(await fx.store.listResumeAttempts(opts.runId), []);
+      assert.equal(fx.getResumeCalls(), 0);
+      const mismatch = await previewNativeResume(opts, other.deps);
+      assert.equal(mismatch.eligible, false);
+      assert.deepEqual(mismatch.candidateSessions, []);
+      assert.equal(other.getResumeCalls(), 0);
+      const workspaceConflict = await previewNativeResume(opts, conflict.deps);
+      assert.equal(workspaceConflict.code, "resume_workspace_missing");
+      assert.equal(conflict.getResumeCalls(), 0);
+    } finally {
+      await fx.cleanup();
+      await other.cleanup();
+      await conflict.cleanup();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not launch after an explicit gate rejection", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "odag-resume-gate-"));
+    const fx = makeFixture(dir, {
+      gates: [{ id: "gate_rejected", taskId: "task_1", question: "Proceed?", options: ["approve", "reject"], status: "resolved", resolution: "reject", raw: {} }],
+    });
+    try {
+      const preview = await previewNativeResume({ runId: "run_1", dispatchId: "ctx_failed_1", sessionId: "sess_exact_1" }, fx.deps);
+      assert.equal(preview.eligible, false);
+      assert.match(preview.reason ?? "", /approval gate/);
+      assert.equal(fx.getResumeCalls(), 0);
     } finally {
       await fx.cleanup();
       rmSync(dir, { recursive: true, force: true });

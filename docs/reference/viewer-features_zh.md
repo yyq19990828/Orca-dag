@@ -10,8 +10,8 @@
 
 - **完整标签页工作台（四区双主题 IDE 布局）**：高克制黑白灰深浅双主题 IDE 工作台（`styles/ide-workbench.css`，自动跟随 Orca 宿主主题并支持手动切换），配备自定义分叉汇聚 DAG 品牌图标（`DagBrandMark`）、左侧实时舰队与决策门禁导航、中央常驻 React Flow DAG 画布 / 状态泳道 / Run 历史账本 / 工作区与清理 / 执行与运行时能力、底部可调高坞（`实时事件流`、`Worker 输出`、`变更请求账本`）及右侧上下文检视面板（`消息`、`会话`、`任务`、`启动配置`）。
 - **精简右侧边栏伴生面板（`orchestration-panel` 内置 `SidebarApp`）**：原生 Orca 伴生插件面板（`?view=sidebar`，`320–450px`），内嵌自托管后端服务（`plugin/server/index.mjs`，无需用户手动开启前后端终端）。提供紧凑 Run 进度条与状态筛选、3 个主标签（**任务** / **待处理** / **活动**），任务下钻详情复用与完整工作台完全一致的 `ChatPanel` **消息**聊天气泡、**会话**工具卡片与**输出**流，顶部保留唯一 `↗ 标签页` 入口（`POST /api/open-tab`）打开或原地复活完整标签页。
-- **实时会话工具卡片（`NodeSessionPanel`）**：由服务端统一 `OutputTail` SSE（`/api/workers/:dispatchId/output/stream`）与插件实时 `agent.tool.after` / `agent.status.changed` Hook（仅存内存并按 `callId` 去重）共同驱动，在侧边栏与完整标签页的**会话**页签中实时展示可折叠工具调用卡片与对话轮次。
-- **L1 原生会话恢复**：通过 `GET /api/workers/:dispatchId/resume-preview` 预检已退出本机已验证 Worker 的可恢复会话，经 `POST /api/workers/:dispatchId/resume` 调用 Orca 原生 `agent.resume` 恢复原终端并以 `worker-start --terminal --retry-of` 绑定新 Dispatch，全流程写入 `sessions.json` `resumeAttempts`。
+- **实时会话工具卡片（`NodeSessionPanel`）**：侧边栏与完整标签页通过 `OutputTail` SSE（`/api/workers/:dispatchId/output/stream`）读取精确对应 Worker 的原生 `worker-read` 会话记录，生成可折叠的工具调用卡片与对话轮次。Agent 状态、工具和提示词事件仅通过终端 ID 唤醒读取，桥接不传输预览。
+- **L1 原生会话恢复**：需认证的 `POST /api/workers/:dispatchId/resume-preview` 仅作只读预检，核对原本地工作区与同一 Provider 的精确会话历史。有记录的会话绑定时使用该绑定，没有绑定时才可显式选择。`POST /api/workers/:dispatchId/resume` 拒绝活跃会话与已有面板，只会调用 `agent.resume` 打开新面板，再以 `worker-start --terminal --retry-of` 绑定新 Dispatch。恢复过程记入 `sessions.json` 的 `resumeAttempts`。OMP 和 Antigravity 不支持此路径。
 - **状态感知配色与 Harness 徽章**：节点具有固定尺寸（280×120px，标题 16px，数据 14px），按 `pending / ready / dispatched / completed / failed / blocked` 映射专属颜色，并在节点右上角明确标注其绑定的执行 harness。轮询周期为 2 秒。
 - **DAG 画布懒加载**：`DagView` 在首次进入“任务”图视图时才进行动态懒加载（`React.lazy`），并在挂载后常驻内存，大幅降低首屏渲染负载与内存消耗。
 - **布局即时切换**：视图面板按任务状态、连线、布局分组，提供六类状态计数、连线示例、父子连线开关，以及横向分层（LR）和纵向分层（TB，基于 dagre / Sugiyama）；**重新布局**重置手动拖拽的位置。布局选择保存至工作区配置，旧力导配置迁移为横向，不改变执行设置。

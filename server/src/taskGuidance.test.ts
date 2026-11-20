@@ -6,6 +6,12 @@ import type { WorkerDetailView } from "./orca";
 
 const input = { runId: "run_1", taskId: "task_1", dispatchId: "dispatch_1", from: "terminal_1", subject: "Guidance", body: "Do the work" };
 
+async function showFollowUp(id: string): Promise<WorkerDetailView> {
+  const taskId = id === "dispatch_2" ? "task_2" : "task_3";
+  return { dispatchId: id, runId: input.runId, taskId,
+    dispatch: { id, runId: input.runId, taskId, creatorDispatchId: null, followUpOf: input.dispatchId } } as WorkerDetailView;
+}
+
 function memoryStore() {
   const rows: GuidanceSendCheckpoint[] = [];
   const store = {
@@ -43,16 +49,18 @@ describe("durable task guidance", () => {
     const { store, rows } = memoryStore();
     await assert.rejects(performTaskGuidance(input, { store, newRequestId: () => "req_1", send: async () => { throw new Error("lost"); } }));
     assert.equal(rows[0].state, "unknown");
-    const result = await recoverTaskGuidance(rows[0], { store, send: async () => { throw new Error("must not send"); },
+    const { result } = await recoverTaskGuidance(rows[0], { store, send: async () => { throw new Error("must not send"); },
+      showWorker: showFollowUp,
       showRequest: async id => ({ requestId: id, state: "completed", interpretation: null,
-        raw: { method: "orchestration.send" }, outcome: { runId: "run_1", taskId: "task_2", dispatchId: "dispatch_2", state: "ready", delivery: "follow_up", followUpOf: "dispatch_1" } }) });
+        raw: { requestId: id, method: "orchestration.send" }, outcome: { runId: "run_1", taskId: "task_2", dispatchId: "dispatch_2",
+          state: "ready", delivery: "follow_up", followUpOf: "dispatch_1", mutation: { requestId: id } } }) });
     assert.equal(result.creationProven, true);
     assert.equal(rows[0].receipt?.dispatchId, "dispatch_2");
   });
 
   it("holds an unknown follow-up even if native returned its identity", async () => {
     const { store, rows } = memoryStore();
-    await assert.rejects(performTaskGuidance(input, { store, newRequestId: () => "req_1", send: async () => ({
+    await assert.rejects(performTaskGuidance(input, { store, showWorker: showFollowUp, newRequestId: () => "req_1", send: async () => ({
       runId: "run_1", taskId: "task_2", dispatchId: "dispatch_2", state: "outcome_unknown", delivery: "follow_up", followUpOf: "dispatch_1",
     }) }), /unconfirmed/);
     assert.equal(rows[0].state, "unknown");
@@ -79,10 +87,11 @@ describe("durable task guidance", () => {
     const { store, rows } = memoryStore();
     const outcome = { runId: "run_1", taskId: "task_2", dispatchId: "dispatch_2",
       state: "outcome_unknown", delivery: "reopened", followUpOf: "dispatch_1" };
-    await assert.rejects(performTaskGuidance(input, { store, newRequestId: () => "req_unknown", send: async () => outcome }));
-    await assert.rejects(recoverTaskGuidance(rows[0], { store, showRequest: async id => ({
-      requestId: id, state: "completed", interpretation: null, raw: { method: "orchestration.send" }, outcome,
-    }) }), { code: "guidance_unknown" });
+    await assert.rejects(performTaskGuidance(input, { store, showWorker: showFollowUp, newRequestId: () => "req_unknown", send: async () => outcome }));
+    const { checkpoint } = await recoverTaskGuidance(rows[0], { store, showWorker: showFollowUp, showRequest: async id => ({
+      requestId: id, state: "completed", interpretation: null, raw: { requestId: id, method: "orchestration.send" }, outcome,
+    }) });
+    assert.equal(checkpoint.state, "unknown");
     assert.equal(rows[0].receipt?.dispatchId, "dispatch_2");
     assert.equal(rows[0].creationProven, true);
     assert.equal(rows[0].state, "unknown");
@@ -100,11 +109,11 @@ describe("durable task guidance", () => {
 
   it("never replaces an accepted unknown Dispatch with a different replay identity", async () => {
     const { store, rows } = memoryStore();
-    await assert.rejects(performTaskGuidance(input, { store, newRequestId: () => "req_identity",
+    await assert.rejects(performTaskGuidance(input, { store, showWorker: showFollowUp, newRequestId: () => "req_identity",
       send: async () => ({ runId: "run_1", taskId: "task_2", dispatchId: "dispatch_2",
         state: "outcome_unknown", delivery: "follow_up", followUpOf: "dispatch_1" }) }));
-    await assert.rejects(recoverTaskGuidance(rows[0], { store, showRequest: async id => ({
-      requestId: id, state: "completed", interpretation: null, raw: { method: "orchestration.send" },
+    await assert.rejects(recoverTaskGuidance(rows[0], { store, showWorker: showFollowUp, showRequest: async id => ({
+      requestId: id, state: "completed", interpretation: null, raw: { requestId: id, method: "orchestration.send" },
       outcome: { runId: "run_1", taskId: "task_3", dispatchId: "dispatch_3",
         state: "ready", delivery: "follow_up", followUpOf: "dispatch_1" },
     }) }), /conflicts/);
@@ -116,8 +125,8 @@ describe("durable task guidance", () => {
     const outcome = { message: { run_id: "run_child", to_handle: "run:run_child" },
       warnings: [{ code: "recipient_run_bound_redirect", recipient: "dispatch:dispatch_1" }] };
     await assert.rejects(performTaskGuidance(input, { store, newRequestId: () => "req_redirect", send: async () => { throw new Error("lost"); } }));
-    const result = await recoverTaskGuidance(rows[0], { store, showRequest: async id => ({
-      requestId: id, state: "completed", interpretation: null, raw: { method: "orchestration.send" }, outcome,
+    const { result } = await recoverTaskGuidance(rows[0], { store, showRequest: async id => ({
+      requestId: id, state: "completed", interpretation: null, raw: { requestId: id, method: "orchestration.send" }, outcome,
     }), showWorker: async () => { throw new Error("must not adopt or inspect child"); } });
     assert.equal(result.receipt.kind, "recipient_run_bound_redirect");
     assert.equal(result.receipt.runId, "run_1");
@@ -126,5 +135,23 @@ describe("durable task guidance", () => {
     assert.equal(result.creationProven, false);
     await assert.rejects(normalizeTaskMessageReceipt({ ...outcome, warnings: [{ code: "recipient_run_bound_redirect", recipient: "dispatch:other" }] }, input, "req_redirect"));
     await assert.rejects(normalizeTaskMessageReceipt({ message: outcome.message }, input, "req_redirect"));
+  });
+
+  it("does not recover creation from projections or mismatched native lineage", async () => {
+    const outcome = { runId: input.runId, taskId: "task_2", dispatchId: "dispatch_2",
+      state: "ready", delivery: "follow_up", followUpOf: input.dispatchId, mutation: { requestId: "req_1" } };
+    const exact = await showFollowUp("dispatch_2");
+    assert.ok(exact.dispatch);
+    const examples: WorkerDetailView[] = [
+      { ...exact, dispatch: null },
+      { ...exact, dispatch: { ...exact.dispatch, runId: "run_other" } },
+      { ...exact, dispatch: { ...exact.dispatch, taskId: "task_other" } },
+      { ...exact, dispatch: { ...exact.dispatch, id: "dispatch_other" } },
+      { ...exact, dispatch: { ...exact.dispatch, followUpOf: "dispatch_other" } },
+    ];
+    for (const example of examples) {
+      await assert.rejects(normalizeTaskMessageReceipt(outcome, input, "req_1", async () => example), /exact native Dispatch/);
+    }
+    await assert.rejects(normalizeTaskMessageReceipt(outcome, input, "req_other", showFollowUp), /request identity/);
   });
 });

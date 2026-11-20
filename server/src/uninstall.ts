@@ -16,10 +16,10 @@
 // Nothing here throws: uninstalling must not fail halfway and strand the user
 // in a half-removed state.
 
-import { existsSync, lstatSync, rmSync, unlinkSync } from "node:fs";
+import { existsSync, lstatSync, rmSync, rmdirSync, unlinkSync } from "node:fs";
 import type { Stats } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { isSafeSkillPath, resolveAgentSkillDirs, SKILL_NAME } from "./skill";
 import { COORDINATOR_TITLE, closeTerminal, listTerminals, parseCoordinatorTitle } from "./orca";
 import { stageGitStoreDir } from "./stageGit";
@@ -30,6 +30,7 @@ import {
   WORKSPACE_ENDPOINT_FILE,
   WORKSPACE_STATE_FILES,
 } from "./workspaceState";
+import { checkPluginEndpointFile, pluginEndpointPath } from "../../plugin/src/endpoint";
 
 export interface UninstallOptions {
   /** Print what would happen, change nothing. */
@@ -196,8 +197,21 @@ export async function runUninstall(opts: UninstallOptions): Promise<void> {
       log(`${act("failed")}${item.path}: ${String((err as Error)?.message ?? err)}`);
     }
   }
-  // Ephemeral companion-plugin discovery file: contains no user history, so
-  // ordinary uninstall cleans it up symmetrically (never traversing symlinks).
+  try {
+    const endpoint = pluginEndpointPath(opts.workspace);
+    checkPluginEndpointFile(endpoint);
+    if (!opts.dryRun) {
+      unlinkSync(endpoint);
+      try { rmdirSync(dirname(endpoint)); } catch { /* Other viewers may still use it. */ }
+    }
+    log(`${act(opts.dryRun ? "would remove" : "removed")}${endpoint} — private plugin discovery endpoint`);
+    workspaceFiles++;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      log(`${act("skipped")}${String((err as Error).message ?? err)}`);
+    }
+  }
+  // Clean up the old workspace-local discovery file without trusting its contents.
   if (safeStateDir) {
     const endpointPath = join(opts.workspace, WORKSPACE_ENDPOINT_FILE);
     if (existsSync(endpointPath) || isBrokenLink(endpointPath)) {

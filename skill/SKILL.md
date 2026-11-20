@@ -71,11 +71,11 @@ If the CLI rejects `skills get` entirely, stop and report the runtime version �
 
 - For each **new requirement or fresh replanning Run**, create a new `.orca-dag/<timestamp>/` directory. Use a filesystem-safe UTC timestamp with milliseconds: `YYYYMMDD-HHmmss-SSS` (e.g. `.orca-dag/20261008-143012-123/`). Create the final directory exclusively; if it already exists, choose a new timestamp or append a numeric suffix. Never reuse another plan's directory or overwrite its documents.
 - Put **all file-based planning intermediates** in that same directory, including any supplemental notes, task-spec drafts, or local DAG drafts you choose to create. Do not scatter them in the project root or shared `docs/` files. Local drafts never replace the required writes into Orca's orchestration state.
-- Viewer runtime state shares the `.orca-dag/` root: `config.json`, `activity.jsonl`, `launches.jsonl`, `requests.jsonl`, `sessions.json`, and ephemeral `0o600` `endpoint.json` (while a viewer or embedded plugin backend is running). In addition to provider session bindings, `sessions.json` stores critical recovery journals (`mailboxChecks`, `guidanceSends`, `operatorMessages`, and `resumeAttempts`) that serve as recovery authority, not rotating audit logs. Unsupported older readers will fail if encountering these fields, so critical recovery journals cannot safely be hot-downgraded across unsupported readers. The viewer migrates legacy root `.orca-dag.*` files without overwriting existing destinations; stop old viewers before upgrading. Do not hand-edit these state files as part of planning. Uninstall keeps them by default; `--purge` removes only known state files, never timestamp planning directories or other user files.
+- Viewer runtime state shares the `.orca-dag/` root: `config.json`, `activity.jsonl`, `launches.jsonl`, `requests.jsonl`, and `sessions.json`. The endpoint record is never workspace data: it lives in the native plugin's private per-user discovery registry and is not for API clients. In addition to provider session bindings, `sessions.json` stores critical recovery journals (`mailboxChecks`, `guidanceSends`, `operatorMessages`, and `resumeAttempts`) that serve as recovery authority, not rotating audit logs. Unsupported older readers will fail if encountering these fields, so critical recovery journals cannot safely be hot-downgraded across unsupported readers. The viewer migrates legacy root `.orca-dag.*` files without overwriting existing destinations; stop old viewers before upgrading. Do not hand-edit these state files as part of planning. Uninstall keeps them by default; `--purge` removes only known state files, never timestamp planning directories or other user files.
 - Keep the same directory while refining that plan or adding Tasks to its existing Run. When resuming, use its explicitly recorded path, not whichever directory happens to be newest. After creating the Run, record its id in both documents and report the **Run id + planning directory** to the user.
-- `npx orca-orchestration-launcher` adds a marked `.orca-dag/` rule to the workspace's `.gitignore` on startup and announces it. If you installed only the skill, used only the embedded plugin backend (`ORCA_DAG_NO_WORKSPACE_INIT=1`), opted out of workspace initialization, or saw an initialization warning, ensure `.orca-dag/` is ignored before writing documents; preserve existing rules and never write through a symlinked `.gitignore` or `.orca-dag` directory. Explain any inability to set up the ignore rule instead of silently assuming protection.
+- `npx orca-orchestration-launcher` adds a marked `.orca-dag/` rule to the workspace's `.gitignore` on startup and announces it. The native plugin does not edit `.gitignore` automatically: if the project does not already ignore `.orca-dag/`, add the rule before using the plugin. If you installed only the skill, opted out of workspace initialization, or saw an initialization warning, also check that `.orca-dag/` is ignored before writing documents. Preserve existing rules and never write through a symlinked `.gitignore` or `.orca-dag` directory. Explain any inability to set up the ignore rule instead of silently assuming protection.
 - Planning docs are **local, ignored artifacts**, not committed source. Do not force-add them. Isolated worktrees won't automatically contain them: every Task spec must embed the requirements, interfaces, and acceptance criteria its worker needs, rather than relying on a planning-document path. Include the originating planning path for traceability, not as a required worker input.
-- Existing legacy `.orca/` documents are not automatically moved or deleted. All new planning output uses `.orca-dag/`. Startup preserves any legacy managed ignore block; `npx orca-orchestration-launcher uninstall` removes the installed skill, stale `endpoint.json`, orphaned coordinator terminals, and exact managed ignore blocks for either location, but keeps planning documents even with `--purge`. User-authored ignore rules remain untouched.
+- Existing legacy `.orca/` documents are not automatically moved or deleted. All new planning output uses `.orca-dag/`. Startup preserves any legacy managed ignore block; `npx orca-orchestration-launcher uninstall` removes the installed skill, the workspace's private viewer registry entry, any legacy `.orca-dag/endpoint.json`, orphaned coordinator terminals, and exact managed ignore blocks for either location, but keeps planning documents even with `--purge`. User-authored ignore rules remain untouched.
 
 ## Writing the DAG into Orca (the core)
 
@@ -96,26 +96,41 @@ One Run holds one DAG — Orca treats a Run as a namespace and home inbox, so "o
 
 Once the graph is right, report the **Run id + `.orca-dag/<timestamp>/` planning directory** to the user:
 
-- **With the native Orca plugin (`orchestration-panel`, Orca ≥ 1.4.263)**: No extra terminal is needed — the plugin automatically manages an isolated loopback backend per workspace and immediately displays the Run in Orca's right sidebar (**Tasks** / **Pending** / **Live**) and full 4-zone workbench Tab (`↗ Tab` or status bar click), with live **Session** tool-call cards (`OutputTail` SSE + plugin hooks) and one-click **L1 Native Session Resume** for exited local workers.
+- **With the native Orca plugin (`orchestration-panel`, Orca ≥ 1.4.263)**: No extra terminal is needed — the plugin automatically manages an isolated loopback backend per workspace and displays the Run in Orca's right sidebar (**Tasks** / **Pending** / **Live**) and full workbench Tab (`↗ Tab` or status bar click). **Session** cards come from scoped `worker-read` transcripts; tool, prompt and status events only wake the read, without forwarding previews. **L1 Native Session Resume** requires exact session history in the same local workspace and provider, with no active session or existing pane; it is unavailable for OMP and Antigravity.
 - **Standalone CLI / web viewer**: If the plugin is not installed, ask the user to run:
   ```bash
-  npx orca-orchestration-launcher    # run in the project root; serves http://localhost:8787 and opens the browser
+  npx orca-orchestration-launcher    # run in the project root; prints the local viewer URL and opens the browser
   ```
 
 The user picks the Run, chooses per-node harness/model/effort/placement, and clicks **"▶ Run with Orca"**.
 
 **Triggering execution via the backend API (when the user asks you to start the viewer run yourself):**
-Check `.orca-dag/endpoint.json` first (the embedded plugin backend runs on an ephemeral loopback port published there; fall back to `8787` for a standalone viewer). Inspect `POST /api/launch-preview` and `GET /api/accounts` before starting; the API cannot infer external resource readiness from Task prose.
+Use only the local viewer URL printed by a launcher you started for the intended workspace or opened for that workspace by Orca. Confirm the workspace in that startup output or Orca tab before fetching or sending a token. Never obtain a URL or port from workspace files, guess a fallback port, read the private plugin registry, or follow redirects. If you cannot verify the viewer, use the Orca UI instead. Inspect `POST /api/launch-preview` and `GET /api/accounts` before starting; the API cannot infer external resource readiness from Task prose.
 
 ```bash
-PORT=$(python3 -c "import json; print(json.load(open('.orca-dag/endpoint.json'))['port'])" 2>/dev/null || echo 8787)
-TOKEN=$(curl -s "http://127.0.0.1:${PORT}/api/session" | python3 -c "import json,sys;print(json.load(sys.stdin)['token'])")
-curl -s -X POST "http://127.0.0.1:${PORT}/api/run" -H "X-Orca-Dag-Token: $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"runId":"<run_id>","defaultHarness":"codex","maxConcurrency":2}'
+(
+  set -o pipefail
+  PORT='<verified_port>' # Replace with the port from the trusted local viewer URL.
+  if [[ ! $PORT =~ ^[1-9][0-9]{0,4}$ ]] || (( PORT > 65535 )); then
+    printf '%s\n' 'Expected a numeric viewer port from 1 to 65535.' >&2
+    exit 1
+  fi
+  VIEWER="http://127.0.0.1:${PORT}"
+  TOKEN=$(curl -q --noproxy '*' --fail --silent --show-error "$VIEWER/api/session" |
+    python3 -c '
+import json, re, sys
+token = json.load(sys.stdin)["token"]
+if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
+    sys.exit("Invalid viewer token")
+print(token)
+') || exit 1
+  curl -q --noproxy '*' --fail --silent --show-error "$VIEWER/api/run" \
+    -H "X-Orca-Dag-Token: $TOKEN" -H "Content-Type: application/json" \
+    -d '{"runId":"<run_id>","defaultHarness":"codex","maxConcurrency":2}'
+)
 ```
 
-The viewer then binds **its own** terminal as the Run's coordinator and advances the graph autonomously — parallel waves, durable mailbox recovery, gate and single-use permission surfacing, terminal release/retain — while streaming live tool calls and check receipts into the **Session** and **Messages** tabs. Failed worker starts are never auto-retried; they park their Task for inspection, retry, or L1 native session resume (`POST /api/workers/:dispatchId/resume`).
+The viewer then binds **its own** terminal as the Run's coordinator and advances the graph autonomously — parallel waves, durable mailbox recovery, gate and single-use permission surfacing, terminal release/retain. The **Session** tab shows scoped transcript output, and **Messages** shows worker messages and check receipts. Failed worker starts are never auto-retried; they park their Task for inspection or explicit retry. Use L1 native resume only when the exited session meets the eligibility rules above.
 
 **When the user explicitly asks you (the model) to act as coordinator in Orca instead of the viewer:**
 Follow the loaded `orchestration` guide's wake-driven loop (`references/coordinator-loop.md` and `references/recovery-and-cleanup.md`): start ready workers, end your turn so Orca wakes you on mail/completions, never run polling/watch scripts (plain `check` steals mail and prevents wakes), steer via `send` (never terminal keystrokes), and use `--keep-open` or `worker-keep-open` when the user wants to keep using a worker's chat. Orchestration Panel will automatically display your Run live in read-only observability mode without interfering.

@@ -19,10 +19,8 @@ import { execFileSync } from "node:child_process";
 import {
   cpSync,
   existsSync,
-  mkdirSync,
   readdirSync,
   readFileSync,
-  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -33,7 +31,6 @@ const MAX_PLUGIN_FILES = 2_000;
 const MAX_PLUGIN_BYTES = 50 * 1024 * 1024;
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const webDir = join(root, "web");
 const pluginDir = join(root, "plugin");
 const outDir = join(root, "dist-plugin");
 const manifest = JSON.parse(readFileSync(join(pluginDir, "orca-plugin.json"), "utf8"));
@@ -61,22 +58,10 @@ function measureTree(dir) {
   return { files, bytes };
 }
 
-// 1. Reset staging directory --------------------------------------------------
-rmSync(outDir, { recursive: true, force: true });
-mkdirSync(outDir, { recursive: true });
+// 1. Reset staging and build the HTML panel and embedded backend server -------
+run(process.execPath, [join(root, "scripts", "build-plugin-panel.mjs"), "--dist"]);
 
-// 2. Build the HTML sidebar panel SPA with relative asset URLs ----------------
-const panelOutDir = join(outDir, "panel");
-run(
-  process.platform === "win32" ? "npx.cmd" : "npx",
-  ["vite", "build", "--outDir", panelOutDir, "--emptyOutDir"],
-  { cwd: webDir, env: { ...process.env, VITE_BASE: "./" } },
-);
-if (!existsSync(join(panelOutDir, "index.html"))) {
-  throw new Error(`vite build produced no ${join(panelOutDir, "index.html")}`);
-}
-
-// 3. Bundle the trusted-worker entrypoint and embedded backend server ---------
+// 2. Bundle the trusted-worker entrypoint -------------------------------------
 const esbuildBin = join(
   root,
   "node_modules",
@@ -93,23 +78,7 @@ run(esbuildBin, [
   `--outfile=${join(outDir, "worker.mjs")}`,
 ]);
 
-// Bundle the local orchestration server right inside `dist-plugin/server/` so
-// the plugin starts its own isolated backend automatically when no external
-// viewer terminal is running (`ORCA_DAG_WEB_DIR` points to `dist-plugin/panel`).
-mkdirSync(join(outDir, "server"), { recursive: true });
-run(esbuildBin, [
-  join(root, "server", "src", "index.ts"),
-  "--bundle",
-  "--platform=node",
-  "--target=node22",
-  "--format=esm",
-  "--legal-comments=none",
-  "--external:./generated/webAssets",
-  `--banner:js=import{createRequire as __cr}from "node:module";const require=__cr(import.meta.url);`,
-  `--outfile=${join(outDir, "server", "index.mjs")}`,
-]);
-
-// 4. Emit production manifest + docs ------------------------------------------
+// 3. Emit production manifest + docs ------------------------------------------
 const prodManifest = {
   ...manifest,
   version,
@@ -127,7 +96,7 @@ if (existsSync(join(root, "LICENSE"))) {
   cpSync(join(root, "LICENSE"), join(outDir, "LICENSE"));
 }
 
-// 5. Enforce Orca plugin archive size & file-count limits ---------------------
+// 4. Enforce Orca plugin archive size & file-count limits ---------------------
 const { files, bytes } = measureTree(outDir);
 if (files > MAX_PLUGIN_FILES) {
   throw new Error(`dist-plugin has ${files} files, exceeding Orca's ${MAX_PLUGIN_FILES}-file limit.`);

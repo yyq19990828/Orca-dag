@@ -53,7 +53,7 @@
 | 自动模式下的 OpenCode 原生模型选择 | **1.4.241** | 声明启动偏好能力；本机 POSIX 当前/已有、非 lane 工作区；无 variant 或 effort。使用独立的 `opencode` agent，由执行主机验证模型及 CLI。 |
 | 原生 OMP / Antigravity（Current / Existing） | **运行时与解析后的 CLI 均为 1.4.245** | 仅本地 Linux 的 Current 或精确 Existing 放置，不能使用 lane。原生 `worker-start --agent omp` / `--agent antigravity`，原样传递 `--model` 或使用已配置默认值，拒绝所有非空 effort。Chat/Terminal 由 Orca 用户设置决定，viewer 不检查或覆盖偏好。下表区分 Terminal TUI 与 OMP Native Chat 证据；另见 [fleet 可观测性局限](../tutorials/viewer-operations_zh.md#已知局限)。 |
 | 原生 OMP / Antigravity（新建工作树与 lanes） | **运行时与解析后的 CLI 均为 1.4.246** | 仅限本地 Linux。支持 `new-child`（需已验证的本地被托管 Git 父工作区）与 `new-top-level`（需精确的仓库 `id:` 或绝对 `path:` Git 仓库；拒绝模糊名称、普通目录、异构主机仓库且不自动 git-init）。工作区 Lane 仅共享工作区：首个 Task 创建或接纳工作区，后续依赖有序 Task 使用精确 Existing；每个 Task 均分配全新的原生 agent 会话与 Dispatch（无通用终端复用，禁止 `--terminal` 或 `--surface` 覆盖）。准入与预览会校验 Lane 种子放置，在旧版本上提前拒绝且不执行变更。Antigravity 拒绝非空 effort；OMP 从 Orca **1.4.263** 起支持 `--effort`。 |
-| 原生 `orchestration-panel` 插件、OMP `--effort` 与权限弹窗审批 | **1.4.263** | Host API 1.10 `trusted-worker` 伴生插件（`plugin/` → `dist-plugin/`），内置自托管回环后端服务，实时转发 `agent.status.changed` 与只读 `agent.tool.after` Hook，支持 L1 原生 `agent.resume`、OMP `--effort`、级联停止 helper（`orchestration.worker-stop-helpers.v1`）及单次 Worker 权限审批（`POST /api/workers/:dispatchId/permission`）。 |
+| 原生 `orchestration-panel` 插件、OMP `--effort` 与权限弹窗审批 | **1.4.263** | Host API 1.10 `trusted-worker` 伴生插件（`plugin/` → `dist-plugin/`），内置回环后端，并按终端 ID 唤醒指定 Worker 的会话记录读取。支持[符合条件的本机会话的 L1 原生恢复](viewer-features_zh.md#双形态工作台原生插件与-dag-可视化)、OMP `--effort`、级联停止 helper（`orchestration.worker-stop-helpers.v1`）及单次 Worker 权限审批（`POST /api/workers/:dispatchId/permission`）。 |
 
 ## 有记录的真实运行时验证
 

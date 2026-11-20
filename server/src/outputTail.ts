@@ -1,27 +1,17 @@
 import type { Response } from "express";
-import {
-  readWorkerOutput,
-  type WorkerOutputReceipt,
-  type WorkerTranscriptMessage,
-} from "./orca";
-import type { PluginBridge, PluginLiveToolEvent } from "./pluginBridge";
+import { readWorkerOutput, type WorkerOutputReceipt } from "./orca";
+import type { PluginBridge } from "./pluginBridge";
 
 export type OutputTailSource = "auto" | "terminal" | "transcript";
 
-export interface OutputTailSnapshot {
+interface TailFrame {
   output: WorkerOutputReceipt;
   trimmedLines: number;
   trimmedMessages: number;
-  liveTools: PluginLiveToolEvent[];
   streamingState: "live" | "drained";
 }
 
-export interface OutputTailDelta {
-  output: WorkerOutputReceipt;
-  trimmedLines: number;
-  trimmedMessages: number;
-  streamingState: "live" | "drained";
-}
+type TailEvent = "init" | "reset" | "append" | "streamError";
 
 const PAGE_LIMIT = 120;
 const DRAIN_INTERVAL_MS = 250;
@@ -33,48 +23,52 @@ const SUBSCRIBER_GRACE_MS = 10_000;
 const KEEPALIVE_MS = 25_000;
 const MAX_LINES = 5_000;
 const MAX_MESSAGES = 1_000;
-const MAX_LIVE_TOOLS = 120;
+
+interface TailSubscriber {
+  res: Response;
+  onDrain: (() => void) | null;
+  missedOutput: boolean;
+  unsubscribe: () => void;
+}
 
 interface TailEntry {
   key: string;
-  runId: string;
   dispatchId: string;
   source: OutputTailSource;
   terminalId: string | null;
-  subscribers: Set<Response>;
+  subscribers: Set<TailSubscriber>;
   output: WorkerOutputReceipt | null;
   trimmedLines: number;
   trimmedMessages: number;
-  liveTools: PluginLiveToolEvent[];
-  seenCallIds: Set<string>;
   streamingState: "live" | "drained";
   inFlight: boolean;
   pendingWake: boolean;
   idlePolls: number;
-  pollTimer: NodeJS.Timeout | null;
+  poll: { timer: NodeJS.Timeout; dueAt: number } | null;
   graceTimer: NodeJS.Timeout | null;
   keepaliveTimer: NodeJS.Timeout | null;
-  lastError: string | null;
 }
 
-function writeSse(res: Response, event: string, data: unknown): void {
-  if (res.writableEnded || res.destroyed) return;
-  try {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-  } catch {
-    // Closed socket will be cleaned up by its close listener.
-  }
+function sseFrame(event: TailEvent, data: TailFrame | { error: string }): string {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
-function collectCallIds(messages: WorkerTranscriptMessage[] | undefined, into: Set<string>): void {
-  if (!messages) return;
-  for (const msg of messages) {
-    for (const block of msg.blocks) {
-      if ((block.type === "tool-call" || block.type === "tool-result") && block.callId) {
-        into.add(block.callId);
-      }
-    }
-  }
+function tailFrame(entry: TailEntry, output: WorkerOutputReceipt): TailFrame {
+  return {
+    output,
+    trimmedLines: entry.trimmedLines,
+    trimmedMessages: entry.trimmedMessages,
+    streamingState: entry.streamingState,
+  };
+}
+
+/** Append an already bounded page without allocating rows past the tail limit. */
+function appendTail<T>(previous: T[], page: T[], limit: number): T[] {
+  if (page.length === 0) return previous;
+  if (previous.length === 0 || page.length === limit) return page;
+  const merged = previous.slice(Math.max(0, previous.length + page.length - limit));
+  merged.push(...page);
+  return merged;
 }
 
 /**
@@ -83,9 +77,9 @@ function collectCallIds(messages: WorkerTranscriptMessage[] | undefined, into: S
  * One cursor poller per `(runId, dispatchId, source)` fans out incremental
  * lines + structured transcript messages over SSE to any number of connected
  * clients (bottom dock Output + right inspector Session + multiple tabs).
- * When the companion Orca plugin is connected, `agent.status.changed` and
- * `agent.tool.after` wake matching tails immediately and stream local tool
- * calls before the next transcript page lands.
+ * Companion-plugin hooks identify a terminal, not its Run and Dispatch at
+ * event time. They only wake the Dispatch-scoped worker-read poller; on
+ * terminal reuse, no hook content can move between streams.
  */
 export class OutputTailManager {
   private readonly tails = new Map<string, TailEntry>();
@@ -98,15 +92,10 @@ export class OutputTailManager {
     readOutput?: typeof readWorkerOutput;
   } = {}) {
     this.readFn = opts.readOutput ?? readWorkerOutput;
-    this.unsubscribeWake = opts.pluginBridge
-      ? opts.pluginBridge.onWake((evt) => {
-          this.handlePluginWake(evt.terminalId, evt.kind === "tool" ? evt.event : null);
-        })
-      : null;
-    this.pluginBridge = opts.pluginBridge ?? null;
+    this.unsubscribeWake = opts.pluginBridge?.onWake(({ terminalId }) => {
+      this.handlePluginWake(terminalId);
+    }) ?? null;
   }
-
-  private readonly pluginBridge: PluginBridge | null;
 
   subscribe(opts: {
     runId: string;
@@ -115,15 +104,18 @@ export class OutputTailManager {
     terminalId: string | null;
     res: Response;
   }): () => void {
-    const key = `${opts.runId}:${opts.dispatchId}:${opts.source}`;
+    const { res } = opts;
+    if (res.destroyed || res.writableEnded) return () => {};
+    if (this.closed) {
+      res.end();
+      return () => {};
+    }
+    // IDs may contain colons, so serialize the tuple without delimiter aliases.
+    const key = JSON.stringify([opts.runId, opts.dispatchId, opts.source]);
     let entry = this.tails.get(key);
     if (!entry) {
-      const seededTools = opts.terminalId && this.pluginBridge
-        ? this.pluginBridge.getLiveTools(opts.terminalId).slice(-MAX_LIVE_TOOLS)
-        : [];
       entry = {
         key,
-        runId: opts.runId,
         dispatchId: opts.dispatchId,
         source: opts.source,
         terminalId: opts.terminalId,
@@ -131,16 +123,13 @@ export class OutputTailManager {
         output: null,
         trimmedLines: 0,
         trimmedMessages: 0,
-        liveTools: seededTools,
-        seenCallIds: new Set(),
         streamingState: "live",
         inFlight: false,
         pendingWake: false,
         idlePolls: 0,
-        pollTimer: null,
+        poll: null,
         graceTimer: null,
         keepaliveTimer: null,
-        lastError: null,
       };
       this.tails.set(key, entry);
     } else {
@@ -151,81 +140,86 @@ export class OutputTailManager {
       }
     }
 
-    entry.subscribers.add(opts.res);
-    if (!entry.keepaliveTimer) {
-      entry.keepaliveTimer = setInterval(() => {
-        for (const sub of [...entry!.subscribers]) {
-          if (!sub.writableEnded && !sub.destroyed) {
-            try { sub.write(": keepalive\n\n"); } catch {}
-          }
-        }
+    const tail = entry;
+    const sub: TailSubscriber = {
+      res,
+      onDrain: null,
+      missedOutput: false,
+      unsubscribe: () => this.removeSubscriber(tail, sub),
+    };
+    tail.subscribers.add(sub);
+    res.once("close", sub.unsubscribe);
+    if (!tail.keepaliveTimer) {
+      tail.keepaliveTimer = setInterval(() => {
+        for (const subscriber of tail.subscribers) this.writeFrame(tail, subscriber, ": keepalive\n\n");
       }, KEEPALIVE_MS);
     }
 
-    if (entry.output) {
-      const snapshot: OutputTailSnapshot = {
-        output: entry.output,
-        trimmedLines: entry.trimmedLines,
-        trimmedMessages: entry.trimmedMessages,
-        liveTools: entry.liveTools,
-        streamingState: entry.streamingState,
-      };
-      writeSse(opts.res, "init", snapshot);
-      if (entry.streamingState === "drained") {
-        // Re-check once on new subscriber in case late output arrived after drain.
-        this.schedulePoll(entry, 0);
-      }
-    } else if (!entry.inFlight) {
-      this.schedulePoll(entry, 0);
-    }
-
-    return () => {
-      const current = this.tails.get(key);
-      if (!current) return;
-      current.subscribers.delete(opts.res);
-      if (current.subscribers.size === 0) {
-        if (current.pollTimer) {
-          clearTimeout(current.pollTimer);
-          current.pollTimer = null;
-        }
-        if (current.keepaliveTimer) {
-          clearInterval(current.keepaliveTimer);
-          current.keepaliveTimer = null;
-        }
-        current.graceTimer = setTimeout(() => {
-          if (current.subscribers.size === 0) this.disposeEntry(current);
-        }, SUBSCRIBER_GRACE_MS);
-      }
-    };
+    if (tail.output) this.writeFrame(tail, sub, sseFrame("init", tailFrame(tail, tail.output)));
+    // Resume a cached tail after its subscribers left, including a check for
+    // late output after drain.
+    if (!tail.inFlight && !tail.poll) this.schedulePoll(tail, 0);
+    return sub.unsubscribe;
   }
 
-  private handlePluginWake(terminalId: string, toolEvent: PluginLiveToolEvent | null): void {
+  private removeSubscriber(entry: TailEntry, sub: TailSubscriber): void {
+    if (!entry.subscribers.delete(sub)) return;
+    sub.res.off("close", sub.unsubscribe);
+    if (sub.onDrain) sub.res.off("drain", sub.onDrain);
+    if (this.closed || entry.subscribers.size > 0) return;
+    if (entry.poll) {
+      clearTimeout(entry.poll.timer);
+      entry.poll = null;
+    }
+    if (entry.keepaliveTimer) {
+      clearInterval(entry.keepaliveTimer);
+      entry.keepaliveTimer = null;
+    }
+    entry.graceTimer = setTimeout(() => this.disposeEntry(entry), SUBSCRIBER_GRACE_MS);
+  }
+
+  private writeFrame(entry: TailEntry, sub: TailSubscriber, frame: string): void {
+    if (sub.onDrain || sub.res.writableEnded || sub.res.destroyed) return;
+    try {
+      if (sub.res.write(frame)) return;
+    } catch {
+      sub.unsubscribe();
+      sub.res.destroy();
+      return;
+    }
+    if (!entry.subscribers.has(sub)) return;
+
+    // The frame was accepted, but the response buffer is full. Keep at most
+    // one in-flight frame and no per-subscriber queue. Catch up from the shared
+    // bounded snapshot once this client can write again.
+    sub.onDrain = () => {
+      sub.onDrain = null;
+      if (!sub.missedOutput || !entry.output || !entry.subscribers.has(sub)) return;
+      sub.missedOutput = false;
+      this.writeFrame(entry, sub, sseFrame("reset", tailFrame(entry, entry.output)));
+    };
+    sub.res.once("drain", sub.onDrain);
+  }
+
+  private publish(entry: TailEntry, event: TailEvent, data: TailFrame | { error: string }): void {
+    let frame: string | undefined;
+    for (const sub of entry.subscribers) {
+      if (sub.onDrain) {
+        if (event !== "streamError") sub.missedOutput = true;
+        continue;
+      }
+      this.writeFrame(entry, sub, frame ??= sseFrame(event, data));
+    }
+  }
+
+  private handlePluginWake(terminalId: string): void {
     if (this.closed) return;
     for (const entry of this.tails.values()) {
       if (!entry.terminalId || entry.terminalId !== terminalId) continue;
       if (entry.subscribers.size === 0) continue;
 
-      if (toolEvent) {
-        if (!toolEvent.callId || !entry.seenCallIds.has(toolEvent.callId)) {
-          const dupIdx = toolEvent.callId
-            ? entry.liveTools.findIndex((t) => t.callId === toolEvent.callId)
-            : entry.liveTools.findIndex((t) => t.id === toolEvent.id);
-          if (dupIdx >= 0) entry.liveTools[dupIdx] = toolEvent;
-          else {
-            entry.liveTools.push(toolEvent);
-            if (entry.liveTools.length > MAX_LIVE_TOOLS) {
-              entry.liveTools.splice(0, entry.liveTools.length - MAX_LIVE_TOOLS);
-            }
-          }
-          for (const sub of [...entry.subscribers]) {
-            writeSse(sub, "liveTool", toolEvent);
-          }
-        }
-      }
-
-      // Wake the authoritative worker-read poller quickly (debounced).
+      // Terminal events can only change when we poll, never what we send.
       entry.idlePolls = 0;
-      if (entry.streamingState === "drained") entry.streamingState = "live";
       if (entry.inFlight) {
         entry.pendingWake = true;
       } else {
@@ -236,86 +230,75 @@ export class OutputTailManager {
 
   private schedulePoll(entry: TailEntry, delayMs: number): void {
     if (this.closed || entry.subscribers.size === 0) return;
-    if (entry.pollTimer) clearTimeout(entry.pollTimer);
-    entry.pollTimer = setTimeout(() => {
-      entry.pollTimer = null;
+    const dueAt = performance.now() + delayMs;
+    if (entry.poll) {
+      // Coalesce wake bursts without postponing an already scheduled read.
+      if (entry.poll.dueAt <= dueAt) return;
+      clearTimeout(entry.poll.timer);
+    }
+    const timer = setTimeout(() => {
+      entry.poll = null;
       void this.pollOnce(entry);
     }, delayMs);
+    entry.poll = { timer, dueAt };
   }
 
   private async pollOnce(entry: TailEntry): Promise<void> {
     if (this.closed || entry.subscribers.size === 0 || entry.inFlight) return;
     entry.inFlight = true;
     entry.pendingWake = false;
-    const isInitial = entry.output === null;
-    const cursor = entry.output?.cursor ?? undefined;
+    const beforePoll = entry.output;
+    const cursor = beforePoll?.cursor ?? undefined;
 
     try {
-      const page = await this.readFn(entry.dispatchId, {
+      const receipt = await this.readFn(entry.dispatchId, {
         source: entry.source === "auto" ? undefined : entry.source,
         cursor,
         limit: PAGE_LIMIT,
       });
-      if (this.closed || !this.tails.has(entry.key)) return;
-      entry.lastError = null;
+      if (this.closed || this.tails.get(entry.key) !== entry) return;
+      // The route already proved this Dispatch's Run. Never cache or forward a
+      // page that names a different Dispatch, even following a plugin wake.
+      if (receipt.dispatchId !== entry.dispatchId) {
+        throw new Error("worker-read returned output for a different Dispatch");
+      }
 
-      const continues = !isInitial && Boolean(cursor) && !page.sourceChanged;
-      const newLinesCount = page.lines.length;
-      const newMessagesCount = page.messages?.length ?? 0;
-      const exited = page.status?.liveness === "exited";
-      const drained = exited && newLinesCount === 0 && newMessagesCount === 0;
+      const previous = cursor && !receipt.sourceChanged ? beforePoll : null;
+      const newLinesCount = receipt.lines.length;
+      const newMessagesCount = receipt.messages?.length ?? 0;
+      const page = newLinesCount > MAX_LINES || newMessagesCount > MAX_MESSAGES
+        ? {
+            ...receipt,
+            lines: newLinesCount > MAX_LINES ? receipt.lines.slice(-MAX_LINES) : receipt.lines,
+            ...(receipt.messages && newMessagesCount > MAX_MESSAGES
+              ? { messages: receipt.messages.slice(-MAX_MESSAGES) }
+              : {}),
+          }
+        : receipt;
+      entry.trimmedLines = (previous ? entry.trimmedLines : 0) +
+        Math.max(0, (previous?.lines.length ?? 0) + newLinesCount - MAX_LINES);
+      entry.trimmedMessages = (previous ? entry.trimmedMessages : 0) +
+        Math.max(0, (previous?.messages?.length ?? 0) + newMessagesCount - MAX_MESSAGES);
+
+      const wasDrained = entry.streamingState === "drained";
+      const drained = page.status?.liveness === "exited" && newLinesCount === 0 && newMessagesCount === 0;
       entry.streamingState = drained ? "drained" : "live";
 
-      if (!continues) {
-        entry.seenCallIds.clear();
-        collectCallIds(page.messages, entry.seenCallIds);
-        entry.liveTools = entry.liveTools.filter((t) => !t.callId || !entry.seenCallIds.has(t.callId));
-        entry.trimmedLines = 0;
-        entry.trimmedMessages = 0;
+      if (!previous) {
         entry.output = page;
-        const snapshot: OutputTailSnapshot = {
-          output: entry.output,
-          trimmedLines: entry.trimmedLines,
-          trimmedMessages: entry.trimmedMessages,
-          liveTools: entry.liveTools,
-          streamingState: entry.streamingState,
-        };
-        const eventName = isInitial ? "init" : "reset";
-        for (const sub of [...entry.subscribers]) {
-          writeSse(sub, eventName, snapshot);
-        }
+        this.publish(entry, beforePoll ? "reset" : "init", tailFrame(entry, page));
       } else {
-        const prev = entry.output!;
-        const mergedLines = [...prev.lines, ...page.lines];
-        const lineOverflow = Math.max(0, mergedLines.length - MAX_LINES);
-        if (lineOverflow > 0) entry.trimmedLines += lineOverflow;
-
-        let mergedMessages = prev.messages;
-        if (page.messages) {
-          collectCallIds(page.messages, entry.seenCallIds);
-          entry.liveTools = entry.liveTools.filter((t) => !t.callId || !entry.seenCallIds.has(t.callId));
-          const combined = [...(prev.messages ?? []), ...page.messages];
-          const msgOverflow = Math.max(0, combined.length - MAX_MESSAGES);
-          if (msgOverflow > 0) entry.trimmedMessages += msgOverflow;
-          mergedMessages = msgOverflow > 0 ? combined.slice(msgOverflow) : combined;
-        }
-
+        const messages = page.messages?.length
+          ? appendTail(previous.messages ?? [], page.messages, MAX_MESSAGES)
+          : previous.messages ?? page.messages;
         entry.output = {
           ...page,
-          lines: lineOverflow > 0 ? mergedLines.slice(lineOverflow) : mergedLines,
-          ...(mergedMessages !== undefined ? { messages: mergedMessages } : {}),
+          lines: appendTail(previous.lines, page.lines, MAX_LINES),
+          ...(messages !== undefined ? { messages } : {}),
         };
-
-        if (newLinesCount > 0 || newMessagesCount > 0 || drained || page.warnings.join("|") !== prev.warnings.join("|")) {
-          const delta: OutputTailDelta = {
-            output: page,
-            trimmedLines: entry.trimmedLines,
-            trimmedMessages: entry.trimmedMessages,
-            streamingState: entry.streamingState,
-          };
-          for (const sub of [...entry.subscribers]) {
-            writeSse(sub, "append", delta);
-          }
+        if (newLinesCount > 0 || newMessagesCount > 0 || drained || wasDrained ||
+            page.warnings.join("|") !== previous.warnings.join("|")) {
+          this.publish(entry, "append", tailFrame(entry, page));
         }
       }
 
@@ -333,25 +316,22 @@ export class OutputTailManager {
         this.schedulePoll(entry, nextDelay);
       }
     } catch (err) {
-      if (this.closed || !this.tails.has(entry.key)) return;
+      if (this.closed || this.tails.get(entry.key) !== entry) return;
       const message = String((err as Error)?.message ?? err);
-      entry.lastError = message;
-      for (const sub of [...entry.subscribers]) {
-        writeSse(sub, "streamError", { error: message });
-      }
+      this.publish(entry, "streamError", { error: message });
       if (entry.subscribers.size > 0) {
         this.schedulePoll(entry, ERROR_INTERVAL_MS);
       }
     } finally {
       entry.inFlight = false;
-      if (entry.pendingWake && !this.closed && entry.subscribers.size > 0 && !entry.pollTimer) {
+      if (entry.pendingWake && !this.closed && entry.subscribers.size > 0 && !entry.poll) {
         this.schedulePoll(entry, WAKE_DEBOUNCE_MS);
       }
     }
   }
 
   private disposeEntry(entry: TailEntry): void {
-    if (entry.pollTimer) clearTimeout(entry.pollTimer);
+    if (entry.poll) clearTimeout(entry.poll.timer);
     if (entry.graceTimer) clearTimeout(entry.graceTimer);
     if (entry.keepaliveTimer) clearInterval(entry.keepaliveTimer);
     this.tails.delete(entry.key);
@@ -360,11 +340,11 @@ export class OutputTailManager {
   closeAll(): void {
     this.closed = true;
     this.unsubscribeWake?.();
-    for (const entry of [...this.tails.values()]) {
-      for (const sub of [...entry.subscribers]) {
-        try { sub.end(); } catch {}
+    for (const entry of this.tails.values()) {
+      for (const sub of entry.subscribers) {
+        sub.unsubscribe();
+        try { sub.res.end(); } catch {}
       }
-      entry.subscribers.clear();
       this.disposeEntry(entry);
     }
   }

@@ -1414,8 +1414,6 @@ const en = {
   "session.stateLive": "live",
   "session.stateDrained": "exited",
   "session.toolCount": "{n} tool calls",
-  "session.pluginHookBadge": "plugin hook",
-  "session.pluginHookTitle": "Receiving live local tool calls from the orchestration-panel Orca plugin ahead of transcript polling.",
   "session.openRawOutput": "Raw output",
   "session.timelineAria": "Worker session timeline",
   "session.dispatchPrompt": "Dispatch prompt",

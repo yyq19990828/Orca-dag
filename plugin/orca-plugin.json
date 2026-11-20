@@ -3,7 +3,7 @@
   "id": "orchestration-panel",
   "name": "Orchestration Panel",
   "version": "0.1.0",
-  "description": "Native Orca companion plugin for Orca DAG: live agent status and tool-call stream, native session resume, status bar progress, and sidebar panel.",
+  "description": "Native Orca companion plugin for Orca DAG: scoped Session transcript wakeups, native session resume, status bar progress, and sidebar panel.",
   "icon": "icon.png",
   "license": "MIT",
   "engines": {
@@ -58,8 +58,8 @@
     "settings": [
       {
         "key": "toolStream",
-        "title": "Stream tool calls",
-        "description": "Forward observed agent tool calls (agent.tool.after) to connected Orca DAG viewers.",
+        "title": "Refresh Session on tool events",
+        "description": "Use agent.tool.after to wake matching worker transcript reads early. Does not send tool previews or disable regular transcript reads.",
         "type": "boolean",
         "default": true
       },
@@ -69,15 +69,6 @@
         "description": "Show desktop notifications when a Run has a pending gate, permission prompt, or failed worker.",
         "type": "boolean",
         "default": true
-      },
-      {
-        "key": "maxToolOutputBytes",
-        "title": "Tool output truncation limit (bytes)",
-        "description": "Maximum UTF-8 byte length kept for observed tool inputs and outputs in memory.",
-        "type": "integer",
-        "default": 4096,
-        "minimum": 0,
-        "maximum": 65536
       }
     ],
     "panels": [

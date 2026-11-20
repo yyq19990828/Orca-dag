@@ -1,9 +1,10 @@
 import { createServer } from 'node:http'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import * as main from './worker'
+import { pluginEndpointPath, pluginRequestToken, signPluginReply } from './endpoint'
 
 const ALL_CAPABILITIES = [
   'workspace:read',
@@ -34,7 +35,7 @@ test('activates, updates status bar, answers status command and ping probe', asy
 test('records agent.status.changed, agent.tool.after, and passes agent.prompt.before untouched', async () => {
   const host = mockHost({
     capabilities: ALL_CAPABILITIES,
-    settings: { toolStream: true, maxToolOutputBytes: 16 },
+    settings: { toolStream: true },
   })
   const worker = await mountWorker(main, { host })
 
@@ -74,10 +75,7 @@ test('records agent.status.changed, agent.tool.after, and passes agent.prompt.be
   assert.equal(counts.tools, 1)
   assert.equal(counts.prompts, 1)
 
-  const tools = ev.recentTools as Array<Record<string, unknown>>
-  assert.equal(tools[0].tool, 'exec')
-  assert.equal(tools[0].inputTruncated, true)
-  assert.ok(Buffer.byteLength(String(tools[0].inputPreview), 'utf8') <= 16)
+  assert.equal(ev.recentTools, undefined)
 
   assert.deepEqual(worker.refusals, [])
   await worker.deactivate()
@@ -95,6 +93,10 @@ test('orca-dag.api rejects disallowed paths and returns 503 without a connected 
     '/api/../secret',
     '/api/plugin/events',
     '/api/plugin?foo=1',
+    '/api/Plugin/events',
+    '/api/workers/%2e%2e/plugin/events',
+    '/api/workers\\output',
+    '/api/activity/stream',
     '/api/runs HTTP/1.1',
   ]) {
     const res = await worker.request('orca-dag.api', { method: 'GET', url: badUrl })
@@ -114,7 +116,11 @@ test('orca-dag.api rejects disallowed paths and returns 503 without a connected 
 
 test('connects to local viewer endpoint, proxies GET/POST with mutation token, and handles inbox commands', async () => {
   const workspaceDir = mkdtempSync(join(tmpdir(), 'odag-plugin-test-'))
-  const pluginToken = 'test-plugin-token-123456'
+  const pluginToken = 'a'.repeat(32)
+  const requestToken = pluginRequestToken(pluginToken)
+  const homeVar = process.platform === 'win32' ? 'USERPROFILE' : 'HOME'
+  const previousHome = process.env[homeVar]
+  const workspace = realpathSync(workspaceDir)
   const mutationToken = 'test-mutation-token-abcdef'
   const receipts = new Map<string, Record<string, unknown>>()
   let seenHello = false
@@ -131,19 +137,25 @@ test('connects to local viewer endpoint, proxies GET/POST with mutation token, a
       const rawBody = Buffer.concat(chunks).toString('utf8')
       const body = rawBody ? (JSON.parse(rawBody) as Record<string, unknown>) : {}
       res.setHeader('content-type', 'application/json')
+      const signed = (kind: 'hello' | 'inbox', payload: unknown) => {
+        const nonce = req.headers['x-orca-plugin-nonce']
+        assert.equal(typeof nonce, 'string')
+        const text = JSON.stringify(payload)
+        res.setHeader('x-orca-plugin-proof', signPluginReply(pluginToken, kind, String(nonce), text))
+        res.end(text)
+      }
 
       if (url === '/api/plugin/hello' && req.method === 'POST') {
-        assert.equal(req.headers['x-orca-plugin-token'], pluginToken)
+        assert.equal(req.headers['x-orca-plugin-token'], requestToken)
         seenHello = true
-        res.end(JSON.stringify({ ok: true, statusBar: { text: '1/3 running', tone: 'accent' } }))
+        signed('hello', { ok: true, workspaceDir: workspace })
         return
       }
       if (url.startsWith('/api/plugin/inbox') && req.method === 'GET') {
-        assert.equal(req.headers['x-orca-plugin-token'], pluginToken)
+        assert.equal(req.headers['x-orca-plugin-token'], requestToken)
         if (!inboxDelivered) {
           inboxDelivered = true
-          res.end(
-            JSON.stringify({
+          signed('inbox', {
               commands: [
                 { id: 'cmd-ws', kind: 'workspace.list', params: {} },
                 {
@@ -154,8 +166,7 @@ test('connects to local viewer endpoint, proxies GET/POST with mutation token, a
               ],
               notifications: [],
               statusBar: null,
-            }),
-          )
+          })
           return
         }
         // Hold second poll until client aborts on deactivate.
@@ -165,7 +176,7 @@ test('connects to local viewer endpoint, proxies GET/POST with mutation token, a
         return
       }
       if (url.startsWith('/api/plugin/receipts/') && req.method === 'POST') {
-        assert.equal(req.headers['x-orca-plugin-token'], pluginToken)
+        assert.equal(req.headers['x-orca-plugin-token'], requestToken)
         const id = decodeURIComponent(url.slice('/api/plugin/receipts/'.length))
         receipts.set(id, body)
         res.end(JSON.stringify({ ok: true }))
@@ -199,17 +210,19 @@ test('connects to local viewer endpoint, proxies GET/POST with mutation token, a
   const port = typeof addr === 'object' && addr ? addr.port : 0
 
   try {
-    mkdirSync(join(workspaceDir, '.orca-dag'), { recursive: true })
+    const fakeHome = join(workspaceDir, 'home')
+    mkdirSync(fakeHome)
+    process.env[homeVar] = fakeHome
     writeFileSync(
-      join(workspaceDir, '.orca-dag', 'endpoint.json'),
+      pluginEndpointPath(workspaceDir, true),
       JSON.stringify({
-        version: 1,
+        version: 2,
         port,
         pid: process.pid,
         instanceId: 'inst-test-1',
         pluginToken,
-        workspace: workspaceDir,
-      }),
+        workspace,
+      }), { mode: 0o600 },
     )
 
     const host = mockHost({
@@ -276,11 +289,20 @@ test('connects to local viewer endpoint, proxies GET/POST with mutation token, a
       assert.equal(tabRes.reused, true)
       assert.equal(tabRes.pageId, 'page_tab_1')
 
+      // An unavailable focused workspace must not silently target the other viewer.
+      await worker.emit('workspace.changed', {
+        context: { workspaceId: 'identity:wt2:remote:other', branch: 'main', displayName: 'other', terminals: [] },
+      })
+      const outOfScope = await worker.request('orca-dag.api', { method: 'POST', url: '/api/echo', body: { hello: 'other' } })
+      assert.equal(outOfScope.status, 503)
+      assert.equal(seenUrls.filter((url) => url === 'POST /api/echo').length, 1)
       assert.deepEqual(worker.refusals, [])
     } finally {
       await worker.deactivate()
     }
   } finally {
+    if (previousHome === undefined) delete process.env[homeVar]
+    else process.env[homeVar] = previousHome
     server.closeAllConnections?.()
     await new Promise<void>((resolve) => server.close(() => resolve()))
     rmSync(workspaceDir, { recursive: true, force: true })

@@ -5,7 +5,6 @@ import { useT } from "../i18n";
 import { usePageVisible } from "../visibility";
 import type {
   DagNode,
-  PluginLiveToolView,
   WorkerOutputView,
   WorkerRowView,
   WorkerTranscriptMessageView,
@@ -38,13 +37,11 @@ type TimelineItem =
       kind: "tool";
       key: string;
       name: string;
-      callId: string | null;
       inputFormatted: string;
       preview: string;
       output: string | null;
       isError: boolean;
       status: "ok" | "error" | "pending";
-      fromLiveHook: boolean;
       timestamp: number | null;
     }
   | {
@@ -94,10 +91,7 @@ function isDispatchPreamble(role: string, text: string, idx: number): boolean {
   return text.startsWith("You are working inside Orca");
 }
 
-function buildTimeline(
-  messages: WorkerTranscriptMessageView[] | undefined,
-  liveTools: PluginLiveToolView[],
-): { items: TimelineItem[]; toolCount: number } {
+function buildTimeline(messages: WorkerTranscriptMessageView[] | undefined): { items: TimelineItem[]; toolCount: number } {
   const items: TimelineItem[] = [];
   const toolByCallId = new Map<string, Extract<TimelineItem, { kind: "tool" }>>();
   let lastToolWithoutResult: Extract<TimelineItem, { kind: "tool" }> | null = null;
@@ -139,18 +133,16 @@ function buildTimeline(
               kind: "tool",
               key,
               name: block.name,
-              callId: block.callId ?? null,
               inputFormatted: formatted,
               preview,
               output: null,
               isError: block.status === "error",
               status: block.status === "error" ? "error" : block.status === "completed" ? "ok" : "pending",
-              fromLiveHook: false,
               timestamp: msg.timestamp,
             };
             items.push(item);
             toolCount += 1;
-            if (item.callId) toolByCallId.set(item.callId, item);
+            if (block.callId) toolByCallId.set(block.callId, item);
             lastToolWithoutResult = item;
             break;
           }
@@ -168,13 +160,11 @@ function buildTimeline(
                 kind: "tool",
                 key,
                 name: "tool-result",
-                callId: block.callId ?? null,
                 inputFormatted: "",
                 preview: block.output.split("\n")[0]?.slice(0, 110) ?? "",
                 output: block.output,
                 isError: Boolean(block.isError),
                 status: block.isError ? "error" : "ok",
-                fromLiveHook: false,
                 timestamp: msg.timestamp,
               });
               toolCount += 1;
@@ -206,27 +196,6 @@ function buildTimeline(
     });
   }
 
-  // Append real-time plugin `agent.tool.after` calls that have not yet landed
-  // in the authoritative `worker-read` transcript (deduped by callId).
-  for (const live of liveTools) {
-    if (live.callId && toolByCallId.has(live.callId)) continue;
-    const { formatted, preview } = formatToolPayload(live.inputPreview);
-    items.push({
-      kind: "tool",
-      key: `live:${live.callId ?? live.id}`,
-      name: live.tool,
-      callId: live.callId,
-      inputFormatted: formatted + (live.inputTruncated ? "\n… [truncated]" : ""),
-      preview,
-      output: live.outputPreview ? live.outputPreview + (live.outputTruncated ? "\n… [truncated]" : "") : null,
-      isError: false,
-      status: "ok",
-      fromLiveHook: true,
-      timestamp: live.observedAt,
-    });
-    toolCount += 1;
-  }
-
   return { items, toolCount };
 }
 
@@ -245,8 +214,7 @@ function formatClock(ts: number | null): string | null {
  * Subscribes to the centralized server-side OutputTail SSE stream only while
  * this tab is active and the page is visible. Renders structured assistant
  * turns and collapsible `<details>` tool-call cards so the operator can see
- * what the node is doing at a glance, with immediate local tool-hook
- * acceleration when the companion Orca plugin is connected.
+ * what the node is doing at a glance from its scoped transcript.
  */
 export const NodeSessionPanel = memo(function NodeSessionPanel({
   runId,
@@ -283,7 +251,6 @@ export const NodeSessionPanel = memo(function NodeSessionPanel({
 
   const [streamState, setStreamState] = useState<{
     output: WorkerOutputView;
-    liveTools: PluginLiveToolView[];
     drained: boolean;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -310,7 +277,6 @@ export const NodeSessionPanel = memo(function NodeSessionPanel({
           setError(null);
           setStreamState({
             output: snap.output,
-            liveTools: snap.liveTools,
             drained: snap.streamingState === "drained",
           });
         },
@@ -318,7 +284,6 @@ export const NodeSessionPanel = memo(function NodeSessionPanel({
           setError(null);
           setStreamState({
             output: snap.output,
-            liveTools: snap.liveTools,
             drained: snap.streamingState === "drained",
           });
         },
@@ -328,7 +293,6 @@ export const NodeSessionPanel = memo(function NodeSessionPanel({
             if (!prev) {
               return {
                 output: delta.output,
-                liveTools: [],
                 drained: delta.streamingState === "drained",
               };
             }
@@ -336,35 +300,14 @@ export const NodeSessionPanel = memo(function NodeSessionPanel({
             const mergedMessages = delta.output.messages
               ? [...(prev.output.messages ?? []), ...delta.output.messages].slice(-MAX_RETAINED_MESSAGES)
               : prev.output.messages;
-            const seenCallIds = new Set<string>();
-            for (const m of mergedMessages ?? []) {
-              for (const b of m.blocks) {
-                if ((b.type === "tool-call" || b.type === "tool-result") && b.callId) {
-                  seenCallIds.add(b.callId);
-                }
-              }
-            }
             return {
               output: {
                 ...delta.output,
                 lines: mergedLines,
                 ...(mergedMessages !== undefined ? { messages: mergedMessages } : {}),
               },
-              liveTools: prev.liveTools.filter((lt) => !lt.callId || !seenCallIds.has(lt.callId)),
               drained: delta.streamingState === "drained",
             };
-          });
-        },
-        onLiveTool: (tool) => {
-          setStreamState((prev) => {
-            if (!prev) return prev;
-            const exists = tool.callId
-              ? prev.liveTools.some((t) => t.callId === tool.callId)
-              : prev.liveTools.some((t) => t.id === tool.id);
-            const next = exists
-              ? prev.liveTools.map((t) => ((tool.callId ? t.callId === tool.callId : t.id === tool.id) ? tool : t))
-              : [...prev.liveTools, tool].slice(-120);
-            return { ...prev, liveTools: next };
           });
         },
         onError: (msg) => setError(msg),
@@ -374,13 +317,10 @@ export const NodeSessionPanel = memo(function NodeSessionPanel({
   }, [shouldStream, runId, activeDispatchId]);
 
   const output = streamState?.output ?? null;
-  const liveTools = streamState?.liveTools ?? [];
   const drained = streamState?.drained ?? false;
 
-  const { items, toolCount } = useMemo(
-    () => buildTimeline(output?.messages, liveTools),
-    [output?.messages, liveTools],
-  );
+  const messages = output?.messages;
+  const { items, toolCount } = useMemo(() => buildTimeline(messages), [messages]);
 
   useLayoutEffect(() => {
     const el = scrollRef.current;
@@ -396,7 +336,7 @@ export const NodeSessionPanel = memo(function NodeSessionPanel({
     );
   }
 
-  const hasStructured = Boolean(output?.messages && output.messages.length > 0) || liveTools.length > 0;
+  const hasStructured = Boolean(messages?.length);
   const isTerminalOnly = Boolean(output && !hasStructured);
 
   return (
@@ -432,12 +372,6 @@ export const NodeSessionPanel = memo(function NodeSessionPanel({
 
         {toolCount > 0 && (
           <span className="odag-session__pill">{t("session.toolCount", { n: toolCount })}</span>
-        )}
-
-        {liveTools.length > 0 && (
-          <span className="odag-session__pill odag-session__pill--hook" title={t("session.pluginHookTitle")}>
-            {t("session.pluginHookBadge")}
-          </span>
         )}
 
         <span className="odag-session__bar-actions">
@@ -525,9 +459,6 @@ export const NodeSessionPanel = memo(function NodeSessionPanel({
                     />
                     <span className="odag-tool-card__name">{item.name}</span>
                     <span className="odag-tool-card__preview">{item.preview}</span>
-                    {item.fromLiveHook && (
-                      <span className="odag-tool-card__tag odag-tool-card__tag--live">LIVE</span>
-                    )}
                     {item.isError && (
                       <span className="odag-tool-card__tag odag-tool-card__tag--error">ERR</span>
                     )}

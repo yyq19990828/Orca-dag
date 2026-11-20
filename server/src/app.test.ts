@@ -1753,6 +1753,8 @@ process.stdout.write(JSON.stringify(out));
       { partialHostErrors: [{ environmentId: "env_remote", name: "remote", code: "unreachable", dispatchIds: [] }] },
       { workers: [{ runId: "run_a", taskId: "task_a", dispatchId: "ctx_a", dispatchStatus: "dispatched" }] },
       { globalWorkers: [{ runId: "run_other", taskId: "task_other", dispatchId: "ctx_chat_other", dispatchStatus: "dispatched" }] },
+      { globalWorkers: [{ runId: "run_other", taskId: "task_other", dispatchId: "ctx_unknown", dispatchStatus: "unknown" }] },
+      { globalWorkers: [{ runId: "run_other", taskId: "task_other", dispatchId: "ctx_retained", dispatchStatus: "completed", terminalState: "retained" }] },
     ]) {
       writeScript({ worktrees: [worktreeRow()], ...evidence });
       clearLog();

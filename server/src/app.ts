@@ -84,7 +84,7 @@ import {
   noteManualRelease,
   resolvePermissionPromptInboxItems,
   retryWorker,
-  runResumedBindUnderCoordinator,
+  recordResumedWorker,
   sendTaskGuidance,
   startCoordinator,
   stopCoordinator,
@@ -128,7 +128,7 @@ import {
   createViewerActivity,
   type ActivitySnapshot,
 } from "./activity";
-import { RequestLedger } from "./requestLedger";
+import { RequestLedger, type MutationRequestMeta } from "./requestLedger";
 import { ProviderSessionStore } from "./providerSessions";
 import { LaunchHistory } from "./launchHistory";
 import { resolveOpenCodeRoute } from "./openCodeRoute";
@@ -138,6 +138,7 @@ import {
   requirePluginToken,
   type PluginStatusBarSummary,
 } from "./pluginBridge";
+import { PLUGIN_NONCE, pluginRequestToken, signPluginReply } from "../../plugin/src/endpoint";
 import { OutputTailManager, type OutputTailSource } from "./outputTail";
 import { executeNativeResume, previewNativeResume } from "./nativeResume";
 
@@ -179,7 +180,7 @@ export interface CreateAppOptions {
   coordinatorStatus?: () => CoordinatorStatusSnapshot;
   /** Companion Orca plugin bridge, injectable for tests. */
   pluginBridge?: PluginBridge;
-  /** Dedicated loopback token for `/api/plugin/*`, injectable for tests. */
+  /** Private discovery key, injectable for tests. */
   pluginToken?: string;
   /** Injectable worker-read adapter for OutputTailManager tests. */
   readWorkerOutputFn?: typeof readWorkerOutput;
@@ -275,12 +276,15 @@ async function asCoordinator<T>(
   runId: string, worktree: string, fn: (from: string) => Promise<T>, control?: unknown, lifecycleLocked = false,
 ): Promise<T> {
   const work = async (): Promise<T> => {
-    const live = liveCoordinatorStatus();
     let run;
     try { run = (await showRun(runId))?.run; } catch { run = null; }
     if (!run || run.id !== runId || typeof run.consumer_generation !== "number" ||
         !(run.coordinator_handle === null || typeof run.coordinator_handle === "string")) {
       throw new OrcaCliError("Run binding cannot be verified; inspect the Run before taking control.", "coordinator_control_required");
+    }
+    const live = liveCoordinatorStatus();
+    if (live.phase === "stopping") {
+      throw new OrcaCliError("Wait for Stop to finish before taking coordinator control.", "coordinator_conflict");
     }
     if (live.running && live.runId === runId && live.coordinatorHandle &&
         run.coordinator_handle === live.coordinatorHandle) return fn(live.coordinatorHandle);
@@ -293,8 +297,9 @@ async function asCoordinator<T>(
     const handle = await createTempCoordinatorTerminal(worktree);
     try {
       const fresh = (await showRun(runId))?.run;
+      const current = liveCoordinatorStatus();
       if (!fresh || fresh.id !== runId || fresh.coordinator_handle !== run.coordinator_handle ||
-          fresh.consumer_generation !== run.consumer_generation || liveCoordinatorStatus().running) {
+          fresh.consumer_generation !== run.consumer_generation || current.running || current.phase === "stopping") {
         throw new OrcaCliError("Run binding changed; inspect it and confirm control again.", "coordinator_control_required");
       }
       await bindRun(runId, handle);
@@ -922,9 +927,19 @@ export function createApp(opts: CreateAppOptions): {
   };
 
   const app = express();
-  // No cors() on purpose: the only legitimate client is the same-origin SPA
-  // (and Vite's dev proxy, which is same-origin from the browser's view).
-  // Cross-origin JS must not be able to read /api/session or drive mutations.
+  // No CORS. A loopback bind alone cannot authenticate a browser origin: a
+  // different hostname can also resolve to loopback. Never serve its requests.
+  app.use((req, res, next) => {
+    if (!/^(?:localhost|127\.0\.0\.1)(?::[0-9]{1,5})?$/i.test(req.get("host") ?? "")) {
+      res.status(403).json({ error: "Viewer requires a loopback Host header.", code: "invalid_host" });
+      return;
+    }
+    // The full viewer opens in its own tab; the native sidebar loads packaged
+    // assets, not a frame of this HTTP server.
+    res.setHeader("Content-Security-Policy", "frame-ancestors 'none'");
+    res.setHeader("X-Frame-Options", "DENY");
+    next();
+  });
   app.use(express.json({ limit: "2mb" }));
 
   // --- session -------------------------------------------------------------
@@ -1455,6 +1470,9 @@ export function createApp(opts: CreateAppOptions): {
     "/api/run",
     requireToken(policy),
     route(async (req, res) => {
+      if (liveCoordinatorStatus().phase === "stopping") {
+        throw new OrcaCliError("Wait for Stop to finish before starting a Run.", "coordinator_conflict");
+      }
       const runId = validateId(req.body?.runId, "runId");
       if (!runId) {
         res.status(400).json({ error: "runId required", code: "run_required" });
@@ -2142,10 +2160,9 @@ export function createApp(opts: CreateAppOptions): {
   );
 
   // --- Companion Orca plugin bridge (M1/M2) ---------------------------------
-  // Dedicated `pluginToken` auth (written to `0o600` `.orca-dag/endpoint.json`,
-  // never served via `/api/session`). Tool call payloads stay in bounded RAM
-  // rings only; plugin observations are presentation/wakeup hints, never
-  // Orca Task settlement authority.
+  // The user-private discovery key is independent of the browser token.
+  // Only authenticated workers with a fresh challenge receive signed replies.
+  // Agent events are terminal-ID wake hints, never output or custody evidence.
   pluginBridge.setStatusSummaryProvider((): PluginStatusBarSummary | null => {
     const live = coordinatorStatus();
     if (!live.running) {
@@ -2172,11 +2189,24 @@ export function createApp(opts: CreateAppOptions): {
     };
   });
 
-  const pluginAuth = requirePluginToken(pluginToken);
+  const pluginAuth = requirePluginToken(pluginRequestToken(pluginToken));
+  const pluginNonce: express.RequestHandler = (req, res, next) => {
+    if (!PLUGIN_NONCE.test(req.get("x-orca-plugin-nonce") ?? "")) {
+      res.status(400).json({ error: "Plugin challenge required.", code: "invalid_plugin_nonce" });
+      return;
+    }
+    next();
+  };
+  const signedPluginReply = (req: express.Request, res: express.Response, kind: "hello" | "inbox", payload: unknown) => {
+    const body = JSON.stringify(payload);
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("x-orca-plugin-proof", signPluginReply(pluginToken, kind, req.get("x-orca-plugin-nonce")!, body));
+    res.type("json").send(body);
+  };
 
-  app.post("/api/plugin/hello", pluginAuth, (req, res) => {
+  app.post("/api/plugin/hello", pluginAuth, pluginNonce, (req, res) => {
     const status = pluginBridge.hello(req.body);
-    res.json({ ok: true, workspaceDir, worktree, status });
+    signedPluginReply(req, res, "hello", { ok: true, workspaceDir, worktree, status });
   });
 
   app.post("/api/plugin/events", pluginAuth, (req, res) => {
@@ -2184,14 +2214,14 @@ export function createApp(opts: CreateAppOptions): {
     res.json({ ok: true, ...accepted });
   });
 
-  app.get("/api/plugin/inbox", pluginAuth, async (req, res) => {
+  app.get("/api/plugin/inbox", pluginAuth, pluginNonce, async (req, res) => {
     const waitRaw = req.query.waitMs === undefined ? 10_000 : Number(req.query.waitMs);
     const waitMs = Number.isFinite(waitRaw) ? Math.max(0, Math.min(15_000, Math.round(waitRaw))) : 10_000;
     const controller = new AbortController();
-    req.on("close", () => controller.abort());
+    res.once("close", () => controller.abort());
     try {
       const inbox = await pluginBridge.pullInbox(waitMs, controller.signal);
-      if (!res.writableEnded) res.json({ ok: true, ...inbox });
+      if (!res.destroyed) signedPluginReply(req, res, "inbox", { ok: true, ...inbox });
     } catch (err) {
       if (!res.writableEnded) fail(res, err);
     }
@@ -2501,14 +2531,13 @@ export function createApp(opts: CreateAppOptions): {
       res.setHeader("Connection", "keep-alive");
       res.flushHeaders();
 
-      const unsubscribe = outputTails.subscribe({
+      outputTails.subscribe({
         runId,
         dispatchId,
         source,
         terminalId,
         res,
       });
-      req.on("close", () => unsubscribe());
     } catch (err) {
       if (!res.headersSent) fail(res, err);
     }
@@ -3328,48 +3357,36 @@ export function createApp(opts: CreateAppOptions): {
       if (decisionRaw !== "approve" && decisionRaw !== "deny") {
         throw new ValidationError('decision must be "approve" or "deny"', "invalid_decision");
       }
-      const evidence = await revalidateWorkerForMutation(dispatchId, runId);
-      if (!evidence.ok) {
-        res.status(evidence.status).json(evidence.body);
-        return;
-      }
       await requireExecutionEnabled();
       const operation = decisionRaw === "approve" ? "worker-approve" : "worker-deny";
-      const requestId = newRequestId();
-      await requestLedger
-        .record({ requestId, operation, runId, taskId: evidence.detail.taskId, dispatchId, target: promptId })
-        .catch(() => {});
-      const live = coordinatorStatus();
-      const execute = (from: string) =>
-        decideWorkerPermissionPrompt({
-          dispatchId,
-          promptId,
-          decision: decisionRaw,
-          reason,
-          from,
-          retryRequestId: requestId,
-        });
-      const receipt = live.running && live.runId === runId && live.coordinatorHandle
-        ? await execute(live.coordinatorHandle)
-        : await asCoordinator(runId, worktree, execute, req.body?.coordinatorControl);
-      await requestLedger
-        .record({
-          requestId,
-          operation,
-          runId,
-          taskId: evidence.detail.taskId,
-          dispatchId,
-          target: promptId,
-          settledLocally: true,
-          note: `${decisionRaw} prompt ${promptId}`,
-        })
-        .catch(() => {});
-      await resolvePermissionPromptInboxItems(runId, dispatchId, promptId);
+      const result = await withLifecycleMutation(async () => {
+        const evidence = await revalidateWorkerForMutation(dispatchId, runId);
+        if (!evidence.ok) return evidence;
+        const taskId = evidence.detail.taskId;
+        const requestId = newRequestId();
+        const key: MutationRequestMeta = { requestId, operation, runId, taskId, dispatchId, target: promptId };
+        const receipt = await asCoordinator(runId, worktree, async (from) => {
+          await requestLedger.record(key);
+          return decideWorkerPermissionPrompt({
+            dispatchId, promptId, decision: decisionRaw, reason, from, retryRequestId: requestId,
+          });
+        }, req.body?.coordinatorControl, true);
+        await requestLedger.record({ ...key, settledLocally: true, note: `${decisionRaw} prompt ${promptId}` });
+        return { ok: true as const, taskId, requestId, receipt };
+      });
+      if (!result.ok) {
+        res.status(result.status).json(result.body);
+        return;
+      }
+      const { taskId, requestId, receipt } = result;
+      // Mailbox processing can acquire the lifecycle lock; never hold it
+      // while acknowledging a decision in the mailbox.
+      await resolvePermissionPromptInboxItems(runId, dispatchId, promptId, decisionRaw, requestId);
       await recordActivity(
         createViewerActivity({
           runId,
           kind: "reply",
-          taskId: evidence.detail.taskId,
+          taskId,
           dispatchId,
           title: decisionRaw === "approve"
             ? "Approved worker permission prompt (once)"
@@ -3592,13 +3609,13 @@ export function createApp(opts: CreateAppOptions): {
       // not the safety inventory for destroying the shared workspace.
       listTerminals(), listWorkers(undefined, { includeRemote: true }),
     ]);
-    const activeWorkers = inventory.workers.filter(worker =>
-      worker.dispatchStatus === "dispatched" || worker.dispatchStatus === "pending" || !worker.dispatchStatus);
-    const unknownWorkers = activeWorkers.filter(worker => !worker.resource?.worktreeId);
-    const occupyingWorkers = inventory.workers.filter(worker =>
-      worker.resource?.worktreeId === row.id &&
-      (worker.dispatchStatus === "dispatched" || worker.dispatchStatus === "pending" ||
-        !worker.dispatchStatus || worker.terminalState !== "released"));
+    // Neither an unknown Dispatch state nor a retained resource proves that
+    // a workspace is vacant, even after Task settlement.
+    const possibleOccupants = inventory.workers.filter(worker =>
+      worker.terminalState !== "released" ||
+      !["completed", "failed", "stopped", "abandoned", "cancelled", "canceled"].includes(worker.dispatchStatus));
+    const unknownWorkers = possibleOccupants.filter(worker => !worker.resource?.worktreeId);
+    const occupyingWorkers = possibleOccupants.filter(worker => worker.resource?.worktreeId === row.id);
     const occupyingTerminals = terminals.filter(terminal =>
       terminal.worktreeId === row.id || terminal.worktreePath === row.path);
     if (inventory.partialHostErrors.length || unknownWorkers.length || occupyingWorkers.length || occupyingTerminals.length) {
@@ -3607,7 +3624,7 @@ export function createApp(opts: CreateAppOptions): {
       // never close a non-worker terminal implicitly on the operator's behalf.
       const reasons = [
         ...(inventory.partialHostErrors.length ? ["Some execution hosts could not be observed."] : []),
-        ...(unknownWorkers.length ? [`Unsettled workers have unknown workspace identity: ${unknownWorkers.slice(0, 8).map(worker => worker.dispatchId).join(", ")}.`] : []),
+        ...(unknownWorkers.length ? [`Workers may still hold an unknown workspace: ${unknownWorkers.slice(0, 8).map(worker => worker.dispatchId).join(", ")}.`] : []),
         ...(occupyingWorkers.length ? [`Inspect worker custody before removal: ${occupyingWorkers.slice(0, 8).map(worker => worker.dispatchId).join(", ")}.`] : []),
         ...(occupyingTerminals.length ? [`Close these terminals explicitly in Orca first: ${occupyingTerminals.slice(0, 8).map(terminal => terminal.handle).join(", ")}.`] : []),
       ];
@@ -3784,17 +3801,18 @@ export function createApp(opts: CreateAppOptions): {
    * companion Orca plugin (`agent.resume` + `worker-start --terminal --retry-of`),
    * or why it must fall back to Safe Retry (e.g. paired remote runtime `--on`).
    */
-  app.get(
+  app.post(
     "/api/workers/:dispatchId/resume-preview",
+    requireToken(policy),
     route(async (req, res) => {
       const dispatchId = validateId(req.params.dispatchId, "dispatch id");
       if (!dispatchId) {
         res.status(400).json({ error: "dispatch id required" });
         return;
       }
-      const runId = validateId(req.query.run, "run");
-      if (!runId) throw new ValidationError("run query parameter required", "run_required");
-      const sessionId = validateText(req.query.sessionId, "sessionId", 256);
+      const runId = validateId(req.body?.runId, "runId");
+      if (!runId) throw new ValidationError("runId is required", "run_required");
+      const sessionId = validateText(req.body?.sessionId, "sessionId", 256);
       const preview = await previewNativeResume(
         { runId, dispatchId, sessionId: sessionId ?? null },
         { pluginBridge, providerSessions },
@@ -3805,12 +3823,11 @@ export function createApp(opts: CreateAppOptions): {
 
   /**
    * Execute L1 native session resume (M3):
-   * - Requires execution enabled, companion plugin with `agent:launch`, local
-   *   or SSH workspace (never paired remote `--on`), verified harness, and a
-   *   non-running exact session ID.
+   * - Requires execution enabled, companion plugin with `agent:launch`, a
+   *   positively local workspace, verified harness, and a scoped inactive session.
    * - Journals `ResumeAttemptCheckpoint` BEFORE calling `agent.resume`.
-   * - Uses live coordinator lock when coordinating this Run, or `asCoordinator`
-   *   with explicit `coordinatorControl` confirmation when idle.
+   * - Validates and acquires coordinator authority before calling `agent.resume`;
+   *   holds the lifecycle lock through adoption of the resulting Dispatch.
    * - Never falls back automatically to a second fresh worker-start on refusal.
    */
   app.post(
@@ -3835,23 +3852,13 @@ export function createApp(opts: CreateAppOptions): {
         );
       }
 
-      const result = await executeNativeResume(
+      const result = await withLifecycleMutation(() => executeNativeResume(
         {
           runId,
           dispatchId,
           sessionId: sessionId ?? null,
-          runAsCoordinator: async (meta, fn) => {
-            const current = coordinatorStatus();
-            if (current.running && current.runId === runId) {
-              const started = await runResumedBindUnderCoordinator(
-                runId,
-                meta,
-                fn as (from: string) => Promise<import("./orca").StartedWorker>,
-              );
-              return started as Awaited<ReturnType<typeof fn>>;
-            }
-            return asCoordinator(runId, worktree, fn, req.body?.coordinatorControl);
-          },
+          runAsCoordinator: (fn) => asCoordinator(runId, worktree, fn, req.body?.coordinatorControl, true),
+          onStarted: (meta, started) => recordResumedWorker(runId, meta, started),
         },
         {
           pluginBridge,
@@ -3869,7 +3876,7 @@ export function createApp(opts: CreateAppOptions): {
             }).catch(() => {});
           },
         },
-      );
+      ));
 
       await recordActivity(
         createViewerActivity({

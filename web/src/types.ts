@@ -187,20 +187,6 @@ export interface WorkerTranscriptMessageView {
   blocks: WorkerTranscriptBlockView[];
 }
 
-export interface PluginLiveToolView {
-  id: string;
-  observedAt: number;
-  agent: string;
-  workspaceId: string | null;
-  terminalId: string;
-  tool: string;
-  callId: string | null;
-  inputPreview: string;
-  inputTruncated: boolean;
-  outputPreview: string;
-  outputTruncated: boolean;
-}
-
 export interface WorkerOutputView {
   dispatchId: string;
   source: string;
@@ -225,7 +211,6 @@ export interface WorkerOutputStreamSnapshot {
   output: WorkerOutputView;
   trimmedLines: number;
   trimmedMessages: number;
-  liveTools: PluginLiveToolView[];
   streamingState: "live" | "drained";
 }
 
@@ -244,7 +229,6 @@ export interface PluginCapabilitiesView {
   grantedCapabilities: string[];
   transport: "loopback-http" | null;
   lastSeenAt: string | null;
-  observedAgentCount: number;
 }
 
 export interface ResumeCandidateSessionView {
@@ -264,7 +248,7 @@ export interface NativeResumePreviewView {
   dispatchId: string;
   harness: string | null;
   sessionId: string | null;
-  sessionSource: "binding" | "plugin-live" | "explicit" | null;
+  sessionSource: "binding" | "explicit" | null;
   workspaceId: string | null;
   workspacePath: string | null;
   hostKind: string | null;

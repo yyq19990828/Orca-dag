@@ -18,16 +18,13 @@ import type { CreationOptions, PlacementSpec, SetupPolicy, WorktreeLaneSpec, Ope
  *
  * The viewer is a single-user, single-machine tool: it drives orchestration
  * mutations (`dispatch`, `gate-resolve`, `worker-start`, …) that fence real
- * agent terminals. It therefore listens on 127.0.0.1 only, ships no CORS, and
- * requires a per-process token on every mutation. Reads stay token-free so the
- * SPA, `curl` health checks and package smoke tests keep working unchanged.
+ * agent terminals. It listens only on 127.0.0.1, accepts only loopback Host
+ * headers, sets no CORS, and requires a per-process token for mutations and
+ * sensitive native-resume previews. Ordinary reads (including health checks)
+ * stay token-free.
  *
- * Threat model, honestly scoped: this is not multi-tenant hardening. It stops
- * the *accidental* attackers — any web page open in the browser (cross-origin
- * `fetch` used to work because of the unrestricted `cors()`), other users on a
- * shared host (the default Node listen binds every interface), and scripts that
- * find the port. A local process could still read `/api/session` — on a
- * single-user machine that is the same user.
+ * This protects the local browser origin, not a multi-user OS boundary:
+ * processes able to reach the loopback listener can read `/api/session`.
  */
 
 export interface SecurityPolicy {

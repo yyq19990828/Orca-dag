@@ -1747,6 +1747,15 @@ export interface WorkerPermissionPrompt {
 
 export function extractPermissionPrompt(payload: Record<string, unknown> | null | undefined): WorkerPermissionPrompt | null {
   if (!payload) return null;
+  if (payload.approval !== undefined) {
+    const approval = asRecordOrNull(payload.approval);
+    const worker = asRecordOrNull(approval?.worker);
+    if (approval?.state !== "open" || typeof approval.approvalId !== "string" ||
+        !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(approval.approvalId) ||
+        typeof payload.dispatchId !== "string" || worker?.dispatchId !== payload.dispatchId ||
+        !Array.isArray(approval.allowedActions)) return null;
+    return { id: approval.approvalId, allowSupported: approval.allowedActions.includes("allow") };
+  }
   const rawId = payload.approvalId ?? payload.promptId ?? payload.prompt ?? payload.approval_id ?? payload.prompt_id;
   if (typeof rawId !== "string" || !rawId.trim()) return null;
   const allowSupported = typeof payload.allowSupported === "boolean"
@@ -2550,37 +2559,38 @@ async function exactOpenCodeBinding(detail: Pick<WorkerDetailView, "dispatchId" 
 }
 
 function extractLocalWorkspacePath(detail: Pick<WorkerDetailView, "fleet" | "terminal">): string | null {
-  if (typeof detail.terminal?.worktreePath === "string" && detail.terminal.worktreePath.startsWith("/")) {
-    return detail.terminal.worktreePath;
+  const projection = detail.fleet?.projection;
+  const rawWorkspace: unknown = projection?.workspace;
+  const candidates = [
+    detail.terminal?.worktreePath,
+    typeof rawWorkspace === "string" ? rawWorkspace : asRecord(rawWorkspace).id,
+    detail.fleet?.resource?.worktreeId,
+  ];
+  let workspace: string | null = null;
+  for (const raw of candidates) {
+    if (typeof raw !== "string") continue;
+    const separator = raw.lastIndexOf("::/");
+    const path = separator >= 0 ? raw.slice(separator + 2) : raw;
+    if (!path.startsWith("/")) continue;
+    const canonical = realpathSyncSafe(path);
+    if (!canonical || (workspace && workspace !== canonical)) return null;
+    workspace = canonical;
   }
-  const ws: unknown = detail.fleet?.projection?.workspace;
-  if (typeof ws === "string" && ws.startsWith("/")) return ws;
-  if (ws && typeof ws === "object") {
-    const wsId = asRecord(ws).id;
-    if (typeof wsId === "string") {
-      const idx = wsId.indexOf("::/");
-      if (idx >= 0) {
-        const candidate = wsId.slice(idx + 2);
-        if (candidate.startsWith("/")) return candidate;
-      }
-      if (wsId.startsWith("/")) return wsId;
-    }
-  }
-  return null;
+  return workspace;
 }
 
 async function exactCodexBinding(detail: Pick<WorkerDetailView, "dispatchId" | "runId" | "taskId" | "fleet" | "terminal">) {
   if (!detail.runId || !detail.taskId) return null;
   const host = detail.fleet?.projection?.host;
   const workspace = extractLocalWorkspacePath(detail);
-  if (host?.kind !== "local" || host.id !== "local" || !workspace) return null;
+  if (host?.kind !== "local" || host.id !== "local" || !workspace ||
+      (detail.terminal?.executionHostId && detail.terminal.executionHostId !== "local")) return null;
   const binding = await new ProviderSessionStore(currentWorkspace().dir).get({
     runId: detail.runId, taskId: detail.taskId, dispatchId: detail.dispatchId,
   }).catch(() => null);
-  const resolvedWorkspace = realpathSyncSafe(workspace);
   const resolvedBinding = binding ? realpathSyncSafe(binding.workspace) : null;
   if (!binding || binding.harness !== "codex" || binding.host !== "local:local" ||
-      !resolvedWorkspace || !resolvedBinding || resolvedBinding !== resolvedWorkspace) return null;
+      resolvedBinding !== workspace) return null;
   return binding;
 }
 
@@ -2629,6 +2639,19 @@ export async function showWorkerDetail(
   const terminal = asRecordOrNull(result.terminal);
   const observationRaw = asRecordOrNull(result.observation);
   const fleet = asRecordOrNull(result.projection);
+  // A scoped CLI call is not a license to relabel an explicit conflicting
+  // identity in a malformed or stale response.
+  const receiptDispatchId = stringOrNull(dispatch.id);
+  const fleetDispatchId = stringOrNull(fleet?.dispatchId);
+  const receiptRunId = stringOrNull(dispatch.runId) ?? stringOrNull(dispatch.run_id);
+  const fleetRunId = stringOrNull(fleet?.runId);
+  const receiptTaskId = stringOrNull(dispatch.taskId) ?? stringOrNull(dispatch.task_id);
+  const fleetTaskId = stringOrNull(fleet?.taskId);
+  if ((receiptDispatchId && receiptDispatchId !== dispatchId) || (fleetDispatchId && fleetDispatchId !== dispatchId) ||
+      (receiptRunId && fleetRunId && receiptRunId !== fleetRunId) ||
+      (receiptTaskId && fleetTaskId && receiptTaskId !== fleetTaskId)) {
+    throw new OrcaCliError("worker-show returned conflicting worker identity", "invalid_worker_reply");
+  }
   const terminalResource =
     parseTerminalResource(result.terminalResource) ?? parseTerminalResource(fleet?.resource);
   const workerState = stringOrNull(worker.state) ?? "unknown";
@@ -2645,9 +2668,9 @@ export async function showWorkerDetail(
     : null;
   const normalizedFleet: OrcaWorkerRow | null = fleet
     ? {
-        dispatchId: stringOrNull(fleet.dispatchId) ?? dispatchId,
-        taskId: stringOrNull(fleet.taskId) ?? stringOrNull(dispatch.taskId) ?? stringOrNull(dispatch.task_id) ?? "",
-        runId: stringOrNull(fleet.runId) ?? stringOrNull(dispatch.runId) ?? "",
+        dispatchId,
+        taskId: fleetTaskId ?? receiptTaskId ?? "",
+        runId: fleetRunId ?? receiptRunId ?? "",
         workerState,
         supervision: workerSupervision({ workerState }),
         dispatchStatus: stringOrNull(dispatch.status) ?? "unknown",
@@ -2671,8 +2694,8 @@ export async function showWorkerDetail(
   });
   const detail: WorkerDetailView = {
     dispatchId,
-    runId: stringOrNull(fleet?.runId) ?? stringOrNull(dispatch.runId) ?? stringOrNull(dispatch.run_id),
-    taskId: stringOrNull(fleet?.taskId) ?? stringOrNull(dispatch.taskId) ?? stringOrNull(dispatch.task_id),
+    runId: fleetRunId ?? receiptRunId,
+    taskId: fleetTaskId ?? receiptTaskId,
     launchMode: parseNativeLaunchMode(result.mode ?? worker.mode),
     launch: startOptions
       ? {
@@ -3396,6 +3419,9 @@ export async function readWorkerOutput(
     sourceIdentity?: unknown;
     status?: unknown;
   }): WorkerOutputReceipt => {
+    if (result.dispatchId !== undefined && result.dispatchId !== dispatchId) {
+      throw new OrcaCliError("worker-read returned output for another Dispatch", "invalid_worker_reply");
+    }
     let textClipped = false;
     const transcriptMessages: WorkerTranscriptMessage[] = [];
     const transcriptLines = (result.transcript?.messages ?? []).flatMap((rawMessage): string[] => {
@@ -3484,7 +3510,7 @@ export async function readWorkerOutput(
     const lines = sourceLines.slice(0, 10_000);
     const budgetClipped = textClipped || sourceLines.length > lines.length;
     return {
-      dispatchId: String(result.dispatchId ?? dispatchId),
+      dispatchId,
       source: String(result.source ?? "auto"),
       cursor: result.cursor ?? null,
       lines,
@@ -3698,12 +3724,17 @@ export async function decideWorkerPermissionPrompt(opts: {
     "--retry-request",
     requestId,
   ]);
+  const raw = asRecord(result);
+  if (raw.dispatchId !== opts.dispatchId || raw.approvalId !== opts.promptId ||
+      raw.decision !== (opts.decision === "approve" ? "allow" : "deny")) {
+    throw new OrcaCliError(`Orca could not confirm the exact permission decision (request ${requestId}).`, RESPONSE_LOST);
+  }
   return {
     dispatchId: opts.dispatchId,
     promptId: opts.promptId,
     decision: opts.decision,
     requestId,
-    raw: asRecord(result),
+    raw,
   };
 }
 

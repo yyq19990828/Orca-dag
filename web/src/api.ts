@@ -26,7 +26,6 @@ import type {
   WorkerOutputStreamDelta,
   WorkerOutputStreamSnapshot,
   WorkerOutputView,
-  PluginLiveToolView,
   NativeResumePreviewView,
   NativeResumeResultView,
   WorkerRowView,
@@ -484,8 +483,8 @@ export async function fetchWorkerOutput(
 
 /**
  * Subscribe to the centralized server-side OutputTail SSE stream for one
- * Dispatch. Multiple views share a single upstream `worker-read` poller,
- * accelerated by companion-plugin status/tool events when connected.
+ * Dispatch. Multiple views share a single scoped `worker-read` poller.
+ * Companion-plugin status/tool events can wake the poller but carry no output.
  */
 export function openWorkerOutputStream(
   runId: string,
@@ -495,7 +494,6 @@ export function openWorkerOutputStream(
     onInit: (snapshot: WorkerOutputStreamSnapshot) => void;
     onAppend: (delta: WorkerOutputStreamDelta) => void;
     onReset: (snapshot: WorkerOutputStreamSnapshot) => void;
-    onLiveTool?: (tool: PluginLiveToolView) => void;
     onError: (message: string) => void;
   },
 ): () => void {
@@ -505,7 +503,6 @@ export function openWorkerOutputStream(
         if (event === "init") handlers.onInit(data as WorkerOutputStreamSnapshot);
         else if (event === "reset") handlers.onReset(data as WorkerOutputStreamSnapshot);
         else if (event === "append") handlers.onAppend(data as WorkerOutputStreamDelta);
-        else if (event === "liveTool" && handlers.onLiveTool) handlers.onLiveTool(data as PluginLiveToolView);
         else if (event === "streamError") {
           const payload = data as { error?: string } | null;
           handlers.onError(payload?.error ?? "Worker output stream error");
@@ -534,9 +531,6 @@ export function openWorkerOutputStream(
   es.addEventListener("init", (evt) => parseEvent<WorkerOutputStreamSnapshot>(evt as MessageEvent, handlers.onInit));
   es.addEventListener("reset", (evt) => parseEvent<WorkerOutputStreamSnapshot>(evt as MessageEvent, handlers.onReset));
   es.addEventListener("append", (evt) => parseEvent<WorkerOutputStreamDelta>(evt as MessageEvent, handlers.onAppend));
-  if (handlers.onLiveTool) {
-    es.addEventListener("liveTool", (evt) => parseEvent<PluginLiveToolView>(evt as MessageEvent, handlers.onLiveTool!));
-  }
   es.addEventListener("streamError", (evt) => {
     parseEvent<{ error?: string }>(evt as MessageEvent, (payload) => {
       handlers.onError(payload.error ?? "Worker output stream error");
@@ -594,16 +588,15 @@ export async function retryWorker(id: string): Promise<RetryWorkerResult> {
   };
 }
 
-/** Read-only eligibility check for L1 native session resume (M3). */
+/** Authenticated, read-only eligibility check for L1 native session resume (M3). */
 export async function fetchResumePreview(
   runId: string,
   dispatchId: string,
   sessionId?: string | null,
 ): Promise<NativeResumePreviewView> {
-  const params = new URLSearchParams({ run: runId });
-  if (sessionId) params.set("sessionId", sessionId);
-  const { preview } = await get<{ preview: NativeResumePreviewView }>(
-    `/api/workers/${encodeURIComponent(dispatchId)}/resume-preview?${params.toString()}`,
+  const { preview } = await post<{ preview: NativeResumePreviewView }>(
+    `/api/workers/${encodeURIComponent(dispatchId)}/resume-preview`,
+    { runId, sessionId },
   );
   return preview;
 }
