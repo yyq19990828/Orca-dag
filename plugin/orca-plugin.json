@@ -3,8 +3,26 @@
   "id": "orchestration-panel",
   "name": "Orchestration Panel",
   "version": "0.1.0",
-  "description": "Native Orca companion plugin for Orca DAG: scoped Session transcript wakeups, native session resume, status bar progress, and sidebar panel.",
+  "description": "Visual multi-agent task DAG workbench for Orca: live coordination modes, hexagonal approval gates, scoped Session wakeups, native resume, and a self-hosted embedded backend.",
+  "author": {
+    "name": "yyq19990828",
+    "url": "https://github.com/yyq19990828"
+  },
+  "repository": "https://github.com/yyq19990828/Orca-dag",
+  "homepage": "https://github.com/yyq19990828/Orca-dag",
   "icon": "icon.png",
+  "cover": {
+    "path": "assets/workbench-dark.png",
+    "alt": "Orchestration Panel four-zone dark IDE workbench showing a multi-agent task DAG, hexagonal gate, and live messages."
+  },
+  "screenshots": [
+    {
+      "path": "assets/workbench-dark.png",
+      "alt": "Orchestration Panel dark workbench with DAG canvas, Fleet sidebar, hexagonal approval gate, and Messages inspector.",
+      "caption": "4-zone DAG workbench with hexagonal approval gates, retained model and worktree chips, and live coordinator messages.",
+      "theme": "dark"
+    }
+  ],
   "license": "MIT",
   "engines": {
     "orca": ">=1.4.263"

@@ -120,3 +120,23 @@ gh run rerun <run-id> --failed
 ```
 
 重跑会检出同一标签，发布的仍是标签对应源码。不要仅因认证失败而另发一个版本。
+
+---
+
+## Orca 插件自动同步发布（`yyq19990828/orchestration-panel`）
+
+推送稳定版本标签 `vX.Y.Z`（或通过 `workflow_dispatch` 手动触发 `release.yml`）时，`.github/workflows/release.yml` 中的 `plugin` job 会执行 `scripts/build-plugin.mjs` 构建自包含插件目录 `dist-plugin/`（并将 [plugin/DIST_README.md](../plugin/DIST_README.md) 渲染为独立仓库的 `README.md`），再自动同步到独立插件仓库并打上同版本标签。
+
+由于 `yyq19990828/Orca-dag` 是 GitHub Fork，而 Orca 官方社区插件爬虫会直接忽略 Fork 仓库，独立插件仓库需满足以下一次性准备：
+
+1. 在 GitHub 创建一个**公开且非 Fork** 的仓库：`yyq19990828/orchestration-panel`。
+2. 为该仓库添加 `orca-plugin` Topic（用于自动收录进 `stablyai/orca-community-plugins`）：
+   ```bash
+   gh repo edit yyq19990828/orchestration-panel --add-topic orca-plugin
+   ```
+3. 为 `Orca-dag` 的发布工作流授予 `yyq19990828/orchestration-panel` 的写权限（二选一）：
+   - **推荐（最小权限）**：为 `yyq19990828/orchestration-panel` 添加允许写入的 SSH Deploy Key，并将私钥存为 `yyq19990828/Orca-dag` 的 Actions Secret `ORCA_PLUGIN_DEPLOY_KEY`。
+   - **备选**：创建一个仅授权 `yyq19990828/orchestration-panel` 仓库 **Contents: Read and write** 权限的 Fine-Grained PAT，存为 Actions Secret `ORCA_PLUGIN_PUSH_TOKEN`。
+   *（如需更换目标仓库名，可额外配置 Actions Variable `ORCA_PLUGIN_REPO` 覆盖。）*
+   - 若以上密钥均未配置，`plugin` job 仍会完成打包与 `orca-plugin-dist` 工件上传，并在 Job Summary 提示配置指引，不会阻塞 npm 与二进制发版。
+4. 推送稳定版本 tag 后，可在 `https://www.onorca.dev/plugins/yyq19990828/orchestration-panel` 查看社区目录收录状态（通常 1 小时内完成；远端已存在的版本标签不会被重复覆盖，以配合 Orca `releases.lock.json` 的内容哈希不可变机制）。

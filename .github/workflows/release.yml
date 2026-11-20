@@ -75,3 +75,179 @@ jobs:
         run: gh release create "$GITHUB_REF_NAME" dist/orca-dag-* dist/SHA256SUMS.txt --generate-notes --title "$GITHUB_REF_NAME"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  plugin:
+    name: Build & publish Orca plugin
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Stage Orca plugin bundle
+        run: node scripts/build-plugin.mjs
+        env:
+          PKG_VERSION: ${{ inputs.version || github.ref_name }}
+          ORCA_PLUGIN_REPO: ${{ vars.ORCA_PLUGIN_REPO || 'yyq19990828/orchestration-panel' }}
+
+      - name: Upload staged plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: orca-plugin-dist
+          path: dist-plugin/
+          retention-days: 14
+
+      - name: Sync & tag standalone plugin repository
+        env:
+          ORCA_PLUGIN_DEPLOY_KEY: ${{ secrets.ORCA_PLUGIN_DEPLOY_KEY }}
+          ORCA_PLUGIN_PUSH_TOKEN: ${{ secrets.ORCA_PLUGIN_PUSH_TOKEN }}
+          PLUGIN_REPO: ${{ vars.ORCA_PLUGIN_REPO || 'yyq19990828/orchestration-panel' }}
+          RAW_VERSION: ${{ inputs.version || github.ref_name }}
+          SOURCE_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          VERSION="${RAW_VERSION#v}"
+          TAG="v${VERSION}"
+
+          if [[ ! "$PLUGIN_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+            echo "Invalid PLUGIN_REPO: $PLUGIN_REPO" >&2
+            exit 1
+          fi
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid semver version: $VERSION" >&2
+            exit 1
+          fi
+
+          if [[ "$VERSION" == *-* ]]; then
+            {
+              echo "### Orca Plugin Publish"
+              echo ""
+              echo "- Skipped pushing \`${TAG}\` to \`${PLUGIN_REPO}\` because Orca's community plugin catalog only indexes stable \`vX.Y.Z\` tags."
+              echo "- Staged plugin bundle is attached to this workflow run as \`orca-plugin-dist\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if [[ -z "${ORCA_PLUGIN_DEPLOY_KEY}" && -z "${ORCA_PLUGIN_PUSH_TOKEN}" ]]; then
+            {
+              echo "### Orca Plugin Publish Skipped (no push credential configured)"
+              echo ""
+              echo "The plugin bundle built cleanly and was uploaded as the \`orca-plugin-dist\` artifact, but syncing to \`${PLUGIN_REPO}\` was skipped because neither \`secrets.ORCA_PLUGIN_DEPLOY_KEY\` nor \`secrets.ORCA_PLUGIN_PUSH_TOKEN\` is configured."
+              echo ""
+              echo "To enable automatic community plugin releases:"
+              echo "1. Create a **public, non-fork** GitHub repository at \`https://github.com/${PLUGIN_REPO}\`."
+              echo "2. Add the \`orca-plugin\` topic: \`gh repo edit ${PLUGIN_REPO} --add-topic orca-plugin\`."
+              echo "3. Either add a write-enabled SSH Deploy Key on \`${PLUGIN_REPO}\` and store the private key in \`${SOURCE_REPO}\` Secret \`ORCA_PLUGIN_DEPLOY_KEY\` (recommended), or store a Fine-Grained PAT with **Contents: Read and write** in Secret \`ORCA_PLUGIN_PUSH_TOKEN\`."
+              echo "   *(Optional: set Actions Variable \`ORCA_PLUGIN_REPO\` to override the target repository.)*"
+              echo "4. Re-run this release workflow (or trigger \`workflow_dispatch\` with \`version=${VERSION}\`)."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          WORK_DIR="$(mktemp -d)"
+          trap 'rm -rf "$WORK_DIR"' EXIT
+          chmod 700 "$WORK_DIR"
+
+          export GIT_TERMINAL_PROMPT=0
+          if [[ -n "${ORCA_PLUGIN_DEPLOY_KEY}" ]]; then
+            KEY_FILE="${WORK_DIR}/id_ed25519"
+            KNOWN_HOSTS="${WORK_DIR}/known_hosts"
+            printf '%s\n' "$ORCA_PLUGIN_DEPLOY_KEY" > "$KEY_FILE"
+            chmod 600 "$KEY_FILE"
+            printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$KNOWN_HOSTS"
+            chmod 600 "$KNOWN_HOSTS"
+            export GIT_SSH_COMMAND="ssh -i ${KEY_FILE} -o UserKnownHostsFile=${KNOWN_HOSTS} -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes"
+            REPO_URL="git@github.com:${PLUGIN_REPO}.git"
+          else
+            ASKPASS_SCRIPT="${WORK_DIR}/git-askpass.sh"
+            cat > "$ASKPASS_SCRIPT" <<'EOF'
+          #!/usr/bin/env bash
+          case "${1:-}" in
+            *Username*) printf '%s\n' "x-access-token" ;;
+            *) printf '%s\n' "$ORCA_PLUGIN_PUSH_TOKEN" ;;
+          esac
+          EOF
+            chmod 700 "$ASKPASS_SCRIPT"
+            export GIT_ASKPASS="$ASKPASS_SCRIPT"
+            REPO_URL="https://github.com/${PLUGIN_REPO}.git"
+          fi
+
+          # Community releases.lock.json records the first seen commit/contentHash
+          # per version; never overwrite or move an already-published tag.
+          if git ls-remote --exit-code --tags "$REPO_URL" "refs/tags/${TAG}" >/dev/null 2>&1; then
+            {
+              echo "### Orca Plugin Publish"
+              echo ""
+              echo "- Tag \`${TAG}\` already exists on \`${PLUGIN_REPO}\` — skipped push to preserve immutable release hashes."
+              echo "- Directory status: https://www.onorca.dev/plugins/${PLUGIN_REPO}"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          STAGE_REPO="${WORK_DIR}/repo"
+          if git ls-remote --exit-code --heads "$REPO_URL" main >/dev/null 2>&1; then
+            git clone --depth 1 --branch main "$REPO_URL" "$STAGE_REPO"
+            find "$STAGE_REPO" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          else
+            git init -b main "$STAGE_REPO"
+            git -C "$STAGE_REPO" remote add origin "$REPO_URL"
+          fi
+
+          cp -a dist-plugin/. "$STAGE_REPO/"
+
+          for req in orca-plugin.json README.md LICENSE icon.png worker.mjs server/index.mjs panel/index.html assets/workbench-dark.png; do
+            if [[ ! -f "${STAGE_REPO}/${req}" ]]; then
+              echo "Missing required staged plugin file: ${req}" >&2
+              exit 1
+            fi
+          done
+
+          git -C "$STAGE_REPO" config user.name "github-actions[bot]"
+          git -C "$STAGE_REPO" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$STAGE_REPO" add -A
+
+          if ! git -C "$STAGE_REPO" diff --cached --quiet; then
+            git -C "$STAGE_REPO" commit -m "Release ${TAG} (from ${SOURCE_REPO}@${SOURCE_SHA:0:7})"
+          elif ! git -C "$STAGE_REPO" rev-parse --verify HEAD >/dev/null 2>&1; then
+            echo "Nothing staged to commit for initial plugin release." >&2
+            exit 1
+          fi
+
+          git -C "$STAGE_REPO" tag -a "${TAG}" -m "Release ${TAG}"
+          git -C "$STAGE_REPO" push --atomic origin main "refs/tags/${TAG}"
+
+          META_WARNINGS=""
+          if REPO_JSON="$(curl -fsSL "https://api.github.com/repos/${PLUGIN_REPO}" 2>/dev/null)"; then
+            META_WARNINGS="$(node -e '
+              const r = JSON.parse(process.argv[1]);
+              const warns = [];
+              if (r.private) warns.push("Repository is private — Orca community catalog only indexes public repositories.");
+              if (r.fork) warns.push("Repository is a fork — Orca community catalog ignores forks.");
+              if (!Array.isArray(r.topics) || !r.topics.includes("orca-plugin")) {
+                warns.push("Repository is missing the `orca-plugin` topic (`gh repo edit " + r.full_name + " --add-topic orca-plugin`).");
+              }
+              process.stdout.write(warns.map((w) => "- ⚠️ " + w).join("\n"));
+            ' "$REPO_JSON")" || true
+          fi
+
+          {
+            echo "### Orca Plugin Published: \`${PLUGIN_REPO}@${TAG}\`"
+            echo ""
+            echo "- Release tag: https://github.com/${PLUGIN_REPO}/releases/tag/${TAG}"
+            echo "- Directory status: https://www.onorca.dev/plugins/${PLUGIN_REPO}"
+            echo "- CLI install: \`orca plugin install ${PLUGIN_REPO}@${TAG} --json\`"
+            if [[ -n "$META_WARNINGS" ]]; then
+              echo ""
+              echo "#### Community Directory Checks"
+              echo "$META_WARNINGS"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

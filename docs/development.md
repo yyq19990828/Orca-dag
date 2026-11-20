@@ -143,3 +143,23 @@ gh run rerun <run-id> --failed
 ```
 
 The rerun checks out the same tag and publishes that tagged tree. Do not cut a new version solely for an authentication failure.
+
+---
+
+## Automated Orca Plugin Release (`yyq19990828/orchestration-panel`)
+
+Pushing a stable `vX.Y.Z` tag (or running `release.yml` manually via `workflow_dispatch`) also runs the `plugin` job in `.github/workflows/release.yml`, which builds `dist-plugin/` (`scripts/build-plugin.mjs`, rendering `plugin/DIST_README.md` to `dist-plugin/README.md`) and syncs + tags the standalone plugin distribution repository.
+
+Because `yyq19990828/Orca-dag` is a GitHub fork and Orca's automated Community Plugins crawler ignores forks, the plugin must live in a separate **public, non-fork** repository:
+
+1. Create a public, non-fork GitHub repository: `yyq19990828/orchestration-panel`.
+2. Add the `orca-plugin` topic so Orca's community indexer discovers tagged releases:
+   ```bash
+   gh repo edit yyq19990828/orchestration-panel --add-topic orca-plugin
+   ```
+3. Grant `Orca-dag`'s release workflow write access to `yyq19990828/orchestration-panel` using either credential:
+   - **Recommended:** add a write-enabled SSH Deploy Key on `yyq19990828/orchestration-panel` and store its private key in `yyq19990828/Orca-dag` → **Settings → Secrets and variables → Actions** as Secret `ORCA_PLUGIN_DEPLOY_KEY`.
+   - **Alternative:** create a Fine-Grained PAT scoped to `yyq19990828/orchestration-panel` with **Contents: Read and write** and store it as Secret `ORCA_PLUGIN_PUSH_TOKEN`.
+   *(Optionally set Actions Variable `ORCA_PLUGIN_REPO` to override the target `owner/repo`.)*
+   - If neither secret is set, the `plugin` job still builds/uploads the `orca-plugin-dist` artifact and skips pushing cleanly without blocking npm or binary releases.
+4. Once tagged, check community indexing status at `https://www.onorca.dev/plugins/yyq19990828/orchestration-panel` (usually listed within ~1 hour; already-published tags are never overwritten because Orca's `releases.lock.json` is immutable).

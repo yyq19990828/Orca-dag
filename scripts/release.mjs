@@ -67,12 +67,19 @@ console.log("Checking the tree builds…");
 execFileSync("node", [join(root, "scripts", "check-skill.mjs")], { cwd: root, stdio: "inherit" });
 execFileSync("npx", ["tsc", "-p", "server/tsconfig.json", "--noEmit"], { cwd: root, stdio: "inherit" });
 execFileSync("node", [join(root, "scripts", "build-npm.mjs")], { cwd: root, stdio: "inherit" });
+execFileSync("node", [join(root, "scripts", "build-plugin.mjs")], {
+  cwd: root,
+  stdio: "inherit",
+  env: { ...process.env, PKG_VERSION: version },
+});
 
 git("tag", "-a", tag, "-m", `Release ${tag}`);
 execFileSync("git", ["push", "origin", tag], { cwd: root, stdio: "inherit" });
 
 const remote = git("remote", "get-url", "origin").replace(/\.git$/, "");
+const pluginRepo = process.env.ORCA_PLUGIN_REPO || "yyq19990828/orchestration-panel";
 console.log(`\n✅ Pushed ${tag}. CI is now publishing:`);
 console.log(`   npm      → https://www.npmjs.com/package/orca-orchestration-launcher/v/${version}`);
 console.log(`   binaries → ${remote}/releases/tag/${tag}`);
+console.log(`   plugin   → https://github.com/${pluginRepo}/releases/tag/${tag}`);
 console.log(`   progress → ${remote}/actions`);

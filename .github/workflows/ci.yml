@@ -38,6 +38,9 @@ jobs:
       - name: Stage npm package
         run: node scripts/build-npm.mjs
 
+      - name: Stage Orca plugin bundle
+        run: node scripts/build-plugin.mjs
+
       # The viewer needs the `orca` CLI for anything real, and Orca is a desktop
       # runtime we can't install here — so the smoke test covers exactly the part
       # that is CI-checkable: the published tarball boots on plain Node, serves
