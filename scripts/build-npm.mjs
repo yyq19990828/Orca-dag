@@ -23,7 +23,7 @@
 // and node: builtins, so a plain Node bundle runs everywhere `npx` does.
 
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -82,11 +82,27 @@ mkdirSync(join(out, "docs"), { recursive: true });
 // README and tutorial navigation now include the docs index and reference pages.
 // Ship the complete documentation tree so future topic moves stay package-safe.
 cpSync(join(root, "docs"), join(out, "docs"), { recursive: true });
-// Ship the skill too, so `npx skills add orca-orchestration-launcher` (npm
-// source) and a plain `npm i -g orca-orchestration-launcher` both put SKILL.md
-// on disk next to the viewer.
+// Ship the managed skill files (`SKILL.md` + `references/*.md`), so both
+// `npx skills add orca-orchestration-launcher` and `npm i -g orca-orchestration-launcher`
+// install the complete handbook without ever bundling local USER_PREFERENCES.md.
 mkdirSync(join(out, "skill"), { recursive: true });
 cpSync(join(root, "skill", "SKILL.md"), join(out, "skill", "SKILL.md"));
+const skillRefsSrc = join(root, "skill", "references");
+if (existsSync(skillRefsSrc)) {
+  const dirStat = lstatSync(skillRefsSrc);
+  if (dirStat.isDirectory() && !dirStat.isSymbolicLink()) {
+    const skillRefsDst = join(out, "skill", "references");
+    mkdirSync(skillRefsDst, { recursive: true });
+    for (const entry of readdirSync(skillRefsSrc).sort()) {
+      if (!entry.endsWith(".md") || entry === "USER_PREFERENCES.md") continue;
+      const srcFile = join(skillRefsSrc, entry);
+      const stat = lstatSync(srcFile);
+      if (stat.isFile() && !stat.isSymbolicLink()) {
+        cpSync(srcFile, join(skillRefsDst, entry));
+      }
+    }
+  }
+}
 
 writeFileSync(
   join(out, "package.json"),

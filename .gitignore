@@ -16,5 +16,8 @@ server/.sessions/
 .orca-dag.sessions.json
 .orca-dag.launches.jsonl
 .orca-dag/
+skill/USER_PREFERENCES.md
+skill/SKILL_zh.md
+skill/references_zh/
 .playwright-cli/
 output/playwright/

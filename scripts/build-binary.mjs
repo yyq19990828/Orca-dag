@@ -19,7 +19,7 @@
 // (the target machine still needs its own `claude` + `orca` on PATH).
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -85,8 +85,25 @@ const entries = files.map((abs) => {
 
 // The binary has no package directory to read the skill from, so it rides along
 // in the same generated module — `orca-dag` installs it into the local agents on
-// startup and must work from a single downloaded file.
-const skillMd = readFileSync(join(root, "skill", "SKILL.md"), "utf8");
+// startup and must work from a single downloaded file. Explicitly package only
+// SKILL.md and references/*.md (never local USER_PREFERENCES.md).
+const skillDir = join(root, "skill");
+const skillMd = readFileSync(join(skillDir, "SKILL.md"), "utf8");
+const skillFiles = { "SKILL.md": skillMd };
+const skillRefsDir = join(skillDir, "references");
+if (existsSync(skillRefsDir)) {
+  const dirStat = lstatSync(skillRefsDir);
+  if (dirStat.isDirectory() && !dirStat.isSymbolicLink()) {
+    for (const entry of readdirSync(skillRefsDir).sort()) {
+      if (!entry.endsWith(".md") || entry === "USER_PREFERENCES.md") continue;
+      const full = join(skillRefsDir, entry);
+      const fileStat = lstatSync(full);
+      if (fileStat.isFile() && !fileStat.isSymbolicLink()) {
+        skillFiles[`references/${entry}`] = readFileSync(full, "utf8");
+      }
+    }
+  }
+}
 
 mkdirSync(genDir, { recursive: true });
 writeFileSync(
@@ -95,7 +112,8 @@ writeFileSync(
     `// ${files.length} files, ${(totalBytes / 1024).toFixed(0)} KiB from web/dist embedded as base64.\n` +
     `import type { EmbeddedAsset } from "../webAssets";\n\n` +
     `export const WEB_ASSETS: Record<string, EmbeddedAsset> = {\n${entries.join("\n")}\n};\n\n` +
-    `export const SKILL_MD = ${JSON.stringify(skillMd)};\n`,
+    `export const SKILL_MD = ${JSON.stringify(skillMd)};\n` +
+    `export const SKILL_FILES: Record<string, string> = ${JSON.stringify(skillFiles)};\n`,
 );
 console.log(`\nEmbedded ${files.length} web files (${(totalBytes / 1024).toFixed(0)} KiB) → ${relative(root, genFile)}`);
 

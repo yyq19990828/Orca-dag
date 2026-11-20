@@ -64,8 +64,8 @@ function install(overrides: NodeJS.ProcessEnv = {}, moduleDir = dirname(skillFil
   return JSON.parse(command(code, overrides).trim().split("\n").at(-1)!);
 }
 
-function uninstall(dryRun: boolean, overrides: NodeJS.ProcessEnv = {}): string {
-  const code = `import { runUninstall } from ${JSON.stringify(uninstallUrl)}; await runUninstall({ dryRun: ${dryRun}, purge: false, workspace: ${JSON.stringify(workspace)} });`;
+function uninstall(dryRun: boolean, overrides: NodeJS.ProcessEnv = {}, purge = false): string {
+  const code = `import { runUninstall } from ${JSON.stringify(uninstallUrl)}; await runUninstall({ dryRun: ${dryRun}, purge: ${purge}, workspace: ${JSON.stringify(workspace)} });`;
   return command(code, overrides);
 }
 
@@ -341,5 +341,72 @@ describe("skill uninstall paths", () => {
     assert.equal(existsSync(skillDir), false);
     assert.equal(readFileSync(join(checkout, "SKILL.md"), "utf8"), "user checkout\\n");
     assert.equal(readFileSync(join(checkout, "marker.txt"), "utf8"), "keep\\n");
+  });
+
+  it("installs bundled references/*.md, stabilizes mtimes, preserves USER_PREFERENCES.md across upgrades and ordinary uninstall, and removes it on --purge", () => {
+    mkdirSync(join(home, ".claude"));
+    const skillDir = join(home, ".claude/skills/orca-dag");
+    const entryTarget = join(skillDir, "SKILL.md");
+    const refPrefs = join(skillDir, "references/preferences.md");
+    const refTemplates = join(skillDir, "references/templates.md");
+    const userPrefs = join(skillDir, "USER_PREFERENCES.md");
+
+    const first = install();
+    assert.deepEqual(first.installed, [entryTarget]);
+    assert.equal(existsSync(refPrefs), true);
+    assert.equal(existsSync(refTemplates), true);
+
+    const fixed = new Date("2020-01-02T03:04:05.000Z");
+    utimesSync(entryTarget, fixed, fixed);
+    utimesSync(refPrefs, fixed, fixed);
+    const second = install();
+    assert.deepEqual(second.upToDate, [entryTarget]);
+    assert.equal(statSync(refPrefs).mtimeMs, statSync(entryTarget).mtimeMs);
+
+    // User preferences written during first run survive SKILL.md upgrades and ordinary uninstall.
+    writeFileSync(userPrefs, "coordination_mode: agent_coordinator\n", "utf8");
+    writeFileSync(entryTarget, "# stale SKILL.md\n", "utf8");
+    const upgraded = install();
+    assert.deepEqual(upgraded.installed, [entryTarget]);
+    assert.equal(readFileSync(userPrefs, "utf8"), "coordination_mode: agent_coordinator\n");
+
+    uninstall(true, {}, false);
+    assert.equal(existsSync(entryTarget), true);
+    assert.equal(existsSync(refPrefs), true);
+    assert.equal(existsSync(userPrefs), true);
+
+    uninstall(false, {}, false);
+    assert.equal(existsSync(entryTarget), false);
+    assert.equal(existsSync(join(skillDir, "references")), false);
+    assert.equal(readFileSync(userPrefs, "utf8"), "coordination_mode: agent_coordinator\n");
+
+    // Explicit --purge clears everything inside the skill folder including USER_PREFERENCES.md.
+    install();
+    uninstall(false, {}, true);
+    assert.equal(existsSync(skillDir), false);
+  });
+
+  it("never writes through a symlinked references directory or reference file", () => {
+    const external = join(root, "external-refs");
+    mkdirSync(external);
+    writeFileSync(join(external, "preferences.md"), "user external ref\n", "utf8");
+    mkdirSync(join(home, ".cursor/skills/orca-dag"), { recursive: true });
+    symlinkSync(external, join(home, ".cursor/skills/orca-dag/references"));
+
+    mkdirSync(join(home, ".gemini/skills/orca-dag/references"), { recursive: true });
+    const extTemplate = join(external, "templates.md");
+    writeFileSync(extTemplate, "external template\n", "utf8");
+    symlinkSync(extTemplate, join(home, ".gemini/skills/orca-dag/references/templates.md"));
+
+    const result = install();
+    assert.deepEqual(result.installed, [
+      join(home, ".cursor/skills/orca-dag/SKILL.md"),
+      join(home, ".gemini/skills/orca-dag/SKILL.md"),
+    ]);
+    assert.equal(readFileSync(join(external, "preferences.md"), "utf8"), "user external ref\n");
+    assert.equal(existsSync(join(external, "templates.md")), true);
+    assert.equal(readFileSync(extTemplate, "utf8"), "external template\n");
+    assert.equal(lstatSync(join(home, ".cursor/skills/orca-dag/references")).isSymbolicLink(), true);
+    assert.equal(lstatSync(join(home, ".gemini/skills/orca-dag/references/templates.md")).isSymbolicLink(), true);
   });
 });

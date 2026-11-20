@@ -20,7 +20,7 @@ import { existsSync, lstatSync, rmSync, rmdirSync, unlinkSync } from "node:fs";
 import type { Stats } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { isSafeSkillPath, resolveAgentSkillDirs, SKILL_NAME } from "./skill";
+import { isSafeSkillPath, resolveAgentSkillDirs, SKILL_NAME, USER_PREFERENCES_FILE } from "./skill";
 import { COORDINATOR_TITLE, closeTerminal, listTerminals, parseCoordinatorTitle } from "./orca";
 import { stageGitStoreDir } from "./stageGit";
 import { LEGACY_PLANNING_DIR, PLANNING_DIR, removePlanningIgnore } from "./planning";
@@ -46,7 +46,7 @@ const tilde = (p: string) => p.replace(homedir(), "~");
 const act = (verb: string) => `  ${verb.padEnd(13)}`;
 
 /** Remove current and legacy skill locations without traversing linked parents. */
-function removeSkills(dryRun: boolean, log: (line: string) => void): number {
+function removeSkills(dryRun: boolean, purge: boolean, log: (line: string) => void): number {
   let removed = 0;
   for (const { agent, skills, safeRoot } of resolveAgentSkillDirs()) {
     const dir = join(skills, SKILL_NAME);
@@ -65,13 +65,58 @@ function removeSkills(dryRun: boolean, log: (line: string) => void): number {
     try {
       // A final symlink is the `ln -s "$PWD/skill"` recipe. Unlink the link
       // itself, never the checkout it points at.
-      const note = link ? " (symlink only — your checkout is untouched)" : "";
-      if (!dryRun) {
-        if (link) unlinkSync(dir);
-        else rmSync(dir, { recursive: true, force: true });
+      if (link) {
+        if (!dryRun) unlinkSync(dir);
+        log(`${act(dryRun ? "would remove" : "removed")}${agent}: ${tilde(dir)} (symlink only — your checkout is untouched)`);
+        removed++;
+        continue;
       }
-      log(`${act(dryRun ? "would remove" : "removed")}${agent}: ${tilde(dir)}${note}`);
-      removed++;
+
+      const prefsPath = join(dir, USER_PREFERENCES_FILE);
+      let hasUserPrefs = false;
+      try {
+        const prefsInfo = lstatSync(prefsPath);
+        hasUserPrefs = prefsInfo.isFile() && !prefsInfo.isSymbolicLink();
+      } catch {
+        hasUserPrefs = false;
+      }
+
+      if (hasUserPrefs && !purge) {
+        let managedCount = 0;
+        const skillFile = join(dir, "SKILL.md");
+        if (isSafeSkillPath(skillFile, false, safeRoot)) {
+          try {
+            const fInfo = lstatSync(skillFile);
+            if (fInfo.isFile() && !fInfo.isSymbolicLink()) {
+              if (!dryRun) unlinkSync(skillFile);
+              managedCount++;
+            }
+          } catch {
+            /* absent */
+          }
+        }
+        const refsDir = join(dir, "references");
+        if (isSafeSkillPath(refsDir, false, safeRoot)) {
+          try {
+            const rInfo = lstatSync(refsDir);
+            if (rInfo.isDirectory() && !rInfo.isSymbolicLink()) {
+              if (!dryRun) rmSync(refsDir, { recursive: true, force: true });
+              managedCount++;
+            }
+          } catch {
+            /* absent */
+          }
+        }
+        if (managedCount > 0) {
+          log(`${act(dryRun ? "would remove" : "removed")}${agent}: ${tilde(dir)} (managed skill files only)`);
+          removed++;
+        }
+        log(`${act("kept")}${tilde(prefsPath)} — user skill preferences (delete with --purge)`);
+      } else {
+        if (!dryRun) rmSync(dir, { recursive: true, force: true });
+        log(`${act(dryRun ? "would remove" : "removed")}${agent}: ${tilde(dir)}`);
+        removed++;
+      }
     } catch (err) {
       log(`${act("failed")}${tilde(dir)}: ${String((err as Error)?.message ?? err)}`);
     }
@@ -137,7 +182,7 @@ export async function runUninstall(opts: UninstallOptions): Promise<void> {
 
   console.log(opts.dryRun ? "orca-dag uninstall (dry run — nothing will change)\n" : "orca-dag uninstall\n");
 
-  const skills = removeSkills(opts.dryRun, log);
+  const skills = removeSkills(opts.dryRun, opts.purge, log);
   const terminals = await closeCoordinatorTerminals(opts.dryRun, log);
   const ignore = removePlanningIgnore(opts.workspace, opts.dryRun);
   if (ignore.reason) {

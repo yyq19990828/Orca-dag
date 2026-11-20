@@ -45,3 +45,15 @@ export async function loadEmbeddedSkill(): Promise<string | null> {
     return null;
   }
 }
+
+/** All managed skill files embedded into the compiled binary (`SKILL.md` + `references/*.md`). */
+export async function loadEmbeddedSkillFiles(): Promise<Record<string, string> | null> {
+  try {
+    // @ts-ignore — generated at build time, may not exist in a dev checkout.
+    const mod: { SKILL_FILES?: Record<string, string>; SKILL_MD?: string } = await import("./generated/webAssets");
+    if (mod.SKILL_FILES && typeof mod.SKILL_FILES["SKILL.md"] === "string") return mod.SKILL_FILES;
+    return typeof mod.SKILL_MD === "string" ? { "SKILL.md": mod.SKILL_MD } : null;
+  } catch {
+    return null;
+  }
+}

@@ -1,155 +1,240 @@
 ---
 name: orca-dag
-description: "Plan software work as an Orca orchestration task DAG and hand it off to Orchestration Panel (or coordinate it directly in Orca when requested). Use when the user wants to break a feature or project into an executable graph of tasks with dependencies and approval gates in Orca, write language-matched specs, and visualize or drive execution via Orchestration Panel / the orca-dag viewer."
+description: "Plan software work through a structured 5-phase SOP into an Orca orchestration task DAG and hand it off to Orchestration Panel (or coordinate it directly in Orca when requested), with first-run user preference onboarding in USER_PREFERENCES.md."
 ---
 
-# orca-dag
+# orca-dag — Structured Orchestration Handbook
 
-Refine a software requirement through conversation and land it as an **Orca orchestration task DAG** (directed acyclic graph). You own **the project workflow** — requirements, PRD, technical design, and the shape of the graph written into Orca.
+Turn software requirements into a verified **Orca orchestration task DAG** executed in parallel waves. Every planning output **must be written into Orca orchestration state** (never left as chat prose alone), because Orchestration Panel polls Orca live and renders whatever exists in the Run.
 
-Orca supports **two coordination models**, and you should respect whichever the user chooses:
+**Authority rule:** This handbook owns the **project workflow** (preferences, PRD, technical design, DAG shape, Stage-Git integration, handover). All orchestration command flags, JSON schemas, worker lifecycle, and gate rules belong to the **runtime-matched `orchestration` guide** loaded in Phase 0. If the runtime guide and this handbook ever disagree, **the runtime guide wins**.
 
-1. **Human-driven coordination via Orchestration Panel (default handover)**: You finish the DAG and hand the Run ID to the user. In **Orchestration Panel** (either the self-contained native Orca plugin `orchestration-panel` or the standalone `orca-dag` viewer), the user picks per-node harness/model/effort/placement, reviews launch preview and account quotas, clicks **Run**, and directly handles approval gates, worker Q&A, permission prompts, retries, and L1 native session resumes while the deterministic coordinator advances ready waves in parallel.
-2. **Model / Agent-as-Coordinator in Orca (when explicitly requested)**: If the user explicitly asks *you* (an Orca agent/model session) to drive execution as the Run's coordinator, follow the runtime-matched `orchestration` guide's wake-driven loop: start independent ready workers, **end your turn** so Orca wakes you on replies/completions (never poll or run watch scripts), steer via `send`, and let Orchestration Panel observe read-only.
+```text
+[Phase 0: Preflight & Preferences]
+  Resolve 1 CLI -> Check runtime (>=1.4.205) -> Load `skills get orchestration`
+  -> Load or initialize `<skill-dir>/USER_PREFERENCES.md` -> Verify `.gitignore`
+        │
+        ▼
+[Phase 1: Scope & PRD]
+  Classify size (S/M/L) -> Clarify 1 question at a time -> Name external resources
+  -> Write `.orca-dag/<timestamp>/PRD.md`
+        │
+        ▼
+[Phase 2: Tech Spec & Topology]
+  Interfaces & data -> Workspace placement & lanes -> Approval / Integration gates
+  -> Write `.orca-dag/<timestamp>/TECH_SPEC.md`
+        │
+        ▼
+[Phase 3: Author & Verify DAG]
+  Open Run (`run-create`) -> Batch `task-create` (`--spec-file`) -> Gates
+  -> Verify `task-list --run <id>` -> Record Run ID in PRD & TECH_SPEC
+        │
+        ▼
+[Phase 4: Handover or Coordinate]
+  Route A: Orchestration Panel (Default) | Route B: Viewer API | Route C: Agent Coordinator
+```
 
-This skill is deliberately **thin about orchestration commands**. Command flags, JSON shapes, worker lifecycle, recovery, and gate rules belong to the **runtime-matched orchestration guide your resolved CLI prints** — load it (Step 2) and follow it. Copy-pasted command syntax here would silently drift from the installed runtime; this file only adds the project workflow around that guide. If the guide and this file ever disagree, **the guide wins**.
+## Quick routing tables
 
-Every planning result **must be written into Orca's orchestration state** (by running orchestration commands), not left as chat text — Orchestration Panel polls Orca live and draws whatever is there.
+### Task sizing rubric
 
-## Tools you may use
-- **Bash** to run the resolved Orca CLI and read/write orchestration state.
-- **Read / Write / Edit** to write planning docs in the working directory (`.orca-dag/<timestamp>/PRD.md`, `.orca-dag/<timestamp>/TECH_SPEC.md`).
-- Do not run destructive commands unrelated to this task (`rm`, `git push`, deleting files, …).
+| Size | Scope & shape | Planning docs (`.orca-dag/<timestamp>/`) | Workspace placement default |
+| :--- | :--- | :--- | :--- |
+| **S** (1–2 tasks, serial) | Focused fix or small module change | Concise `PRD.md` + compact `TECH_SPEC.md` | Coordinator `current` workspace |
+| **M** (3–6 tasks, mixed) | Multi-module feature, partial parallelism | Standard `PRD.md` + `TECH_SPEC.md` (templates) | `current` if disjoint files; isolated worktrees if overlapping |
+| **L** (multi-branch parallel / join) | Cross-feature parallel dev + integration | Full `PRD.md` + `TECH_SPEC.md` + Stage-Git split | Separate worktrees / Serial Lanes + `[orca-dag:merge-prep]` or `integrated` gate |
 
-## Step 1 — resolve the Orca CLI (once, before anything else)
+### Coordination modes
 
-The wrong binary silently breaks everything: on Linux outside Orca, plain `orca` is usually GNOME's **screen reader** (`/usr/bin/orca` — its `--version` prints a small number like `42.0`), not the Orca IDE. Resolve **one** executable, in this order (the same rules the viewer uses):
+| Route | When to use | Panel observability state | Reference |
+| :--- | :--- | :--- | :--- |
+| **Route A — Human-driven Orchestration Panel (Default)** | User picks per-node harness/model/placement, runs parallel waves, handles gates/Q&A/permissions | `human_panel` (or `panel_mismatch` if terminal target differs) | This file (Phase 4) |
+| **Route B — Viewer API Launch (When requested)** | User explicitly asks you to launch execution via the running viewer's HTTP API | `human_panel` | `references/execution-and-harnesses.md` |
+| **Route C — Agent-as-Coordinator (When explicitly asked)** | User asks *you* (Orca chat or PTY agent session) to drive workers via Orca wake loop | `agent_native_chat` or `agent_terminal` (read-only Panel view) | Runtime guide `references/coordinator-loop.md` |
 
-1. `ORCA_CLI_COMMAND` from the environment (exact quoted argv, parsed without a shell);
-2. `orca-dev`, when `ORCA_DEV_REPO_ROOT` is set;
-3. on **Linux outside a managed Orca terminal**, `orca-ide`;
-4. otherwise plain `orca`.
+## Allowed tools & workspace boundaries
+- **Bash**: Run only the resolved Orca CLI (`ORCA`), check runtime readiness, inspect Git status/branches, or call the verified loopback viewer API when executing Route B. Never run destructive unrelated commands (`rm`, `git push`, wiping user files).
+- **Read / Write / Edit**: Write planning docs under `.orca-dag/<timestamp>/` and user preferences in `<skill-dir>/USER_PREFERENCES.md`. Keep `.gitignore` protection verified before creating planning files.
 
-Verify before using: `<cli> status --json` must report `result.runtime.appVersion` **≥ 1.4.205** (the execution baseline; on 1.4.160–1.4.204 the viewer stays view-only; **≥ 1.4.263** adds the native `orchestration-panel` companion plugin, verified OMP `--effort`, cascading helper stops, paired peer mail, and single-use worker permission prompts). Then use this **one literal executable for every command in this session** — never switch mid-run. The runtime guide writes `ORCA` in its examples: that always means the binary you resolved here.
+---
 
-## Step 2 — load the runtime-matched orchestration guide (required)
+## Phase 0 — Preflight, Runtime Guide & User Preferences
 
-Before asking planning questions or touching orchestration state, load the guide and follow it for every orchestration command — its flags, JSON shapes, worker lifecycle, completion accounting, and gate rules are the authority:
+### 0.1 Resolve ONE literal Orca CLI
+On Linux outside a managed Orca terminal, bare `orca` is usually GNOME's **screen reader** (`/usr/bin/orca`, `--version` prints a small number like `42.0`). Resolve **one** binary in this exact order and keep using it verbatim for the entire session:
 
+| Priority | Condition | Resolved `<cli>` |
+| :--- | :--- | :--- |
+| 1 | `ORCA_CLI_COMMAND` env var is set | Exact quoted argv (parsed with no shell) |
+| 2 | `ORCA_DEV_REPO_ROOT` env var is set | `orca-dev` |
+| 3 | Linux **outside** a managed Orca terminal | `orca-ide` |
+| 4 | Otherwise (inside Orca terminal / macOS / Windows) | `orca` |
+
+### 0.2 Check runtime readiness & version tier
+```bash
+<cli> status --json
+```
+- `result.runtime.state` must be `"ready"` (otherwise ask the user to run `orca open` first).
+- **Version tiers** (`result.runtime.appVersion`):
+  - `< 1.4.160`: unsupported.
+  - `1.4.160 – 1.4.204`: viewer stays read-only (no execution).
+  - `>= 1.4.205` (**execution baseline**): full DAG authoring & viewer execution.
+  - `>= 1.4.263`: unlocks native `orchestration-panel` plugin, verified OMP `--effort`, cascading helper stops, paired peer mail, and single-use worker permission prompts.
+
+### 0.3 Load the runtime-matched orchestration guide (Required)
+Before asking planning questions or touching orchestration state, load the guide from the resolved CLI:
 ```bash
 <cli> skills get orchestration
 ```
+- If the CLI rejects `skills get`, stop and report the installed runtime version (execution requires `>= 1.4.205`).
+- Load bundled runtime references on demand (`<cli> skills get orchestration --references`):
+  - `references/coordinator-loop.md` (multi-Run handling, wake-driven coordination)
+  - `references/messaging-and-gates.md` (group mail, approval/integration gates)
+  - `references/placement-and-remote.md` (worktrees, SSH/WSL, paired servers)
+  - `references/recovery-and-cleanup.md` (failed/unknown workers, stop/abandon, circuit breaker, reopen)
 
-Load bundled references on demand (`<cli> skills get orchestration --references` lists all names):
-- Task DAGs & multiple Runs: `--reference references/coordinator-loop.md`
-- Group mail & decision gates: `--reference references/messaging-and-gates.md`
-- Child/top-level worktrees, SSH/WSL, paired servers: `--reference references/placement-and-remote.md`
-- Failed/unknown workers, stop/abandon, circuit breaker & reopen: `--reference references/recovery-and-cleanup.md`
+### 0.4 Load or initialize `<skill-dir>/USER_PREFERENCES.md`
+Let `<skill-dir>` denote the directory containing this loaded `SKILL.md` file:
+- **If `<skill-dir>/USER_PREFERENCES.md` exists**: Read it, adopt its saved defaults (coordination mode, preferred harness/model/effort, OpenCode UI, planning doc depth, language, workspace strategy, approval cadence), and echo a concise **1-line summary** of active defaults. Explicit instructions in the current chat always override saved defaults.
+- **If `<skill-dir>/USER_PREFERENCES.md` is missing (first run)**: Read `<skill-dir>/references/preferences.md`, then offer a quick **1-turn setup** asking the user's preferences on:
+  1. Default coordination mode (`human_panel` via Orchestration Panel vs `agent_coordinator` vs `ask_each_time`),
+  2. Preferred verified harness (`claude` / `codex` / `opencode` / `omp` / `antigravity` / `ask`) + optional default model/effort,
+  3. Default planning doc verbosity & language (`adaptive` / `full` / `spec_only`; `match_conversation` / `zh` / `en`),
+  4. Default workspace isolation (`current` / `isolated_worktrees` / `stage_git`) & approval gate style.
+  Accept `"defaults"` or `"skip"` to save recommended defaults immediately and continue without slowing the user down. Never store tokens/secrets; never write through symlinks. If `<skill-dir>` is read-only (e.g. inside a locked checkout), proceed cleanly with session defaults and inform the user once.
 
-If the CLI rejects `skills get` entirely, stop and report the runtime version — the viewer needs ≥ 1.4.205 to execute anyway.
+### 0.5 Verify `.gitignore` protection
+- Standalone launcher (`npx orca-orchestration-launcher`) automatically appends a marked `.orca-dag/` rule in `.gitignore` on startup (unless `--no-workspace-init`).
+- Native plugin (`orchestration-panel`) or skill-only installs **do not edit `.gitignore`**: verify `.orca-dag/` is ignored before creating planning directories; if missing, add `.orca-dag/` (never write through a symlinked `.gitignore` or `.orca-dag` dir) or warn explicitly.
+- Note that `npx orca-orchestration-launcher uninstall` removes managed ignore blocks and skill files while keeping planning docs (and keeping `USER_PREFERENCES.md` unless `--purge` is passed). See `references/artifacts-and-troubleshooting.md` for full details.
 
-## Preflight
-```bash
-<cli> status --json      # result.runtime.state should be "ready"; if not, ask the user to run `orca open` first
-                         # result.runtime.appVersion >= 1.4.205 for execution; >= 1.4.263 for plugin/OMP effort/permissions
-```
+**Phase 0 Exit Checklist:**
+- [ ] One literal `<cli>` resolved and `status --json` verified (`ready`, `>= 1.4.205` for execution).
+- [ ] Runtime `skills get orchestration` guide loaded.
+- [ ] `USER_PREFERENCES.md` loaded (or initialized on first run) and active defaults noted.
+- [ ] `.gitignore` ignores `.orca-dag/` (or warning/fix surfaced before creating files).
 
-## Workflow (three phases, all in conversation)
-1. **Requirement clarification (PRD)**: align on the goal, MVP scope, and explicit non-goals with short questions — one key question at a time. If MVP is enough, plan only P0; don't over-design. Once agreed, write `.orca-dag/<timestamp>/PRD.md` in the user's conversation language.
-2. **Technical design (TECH_SPEC)**: stack, data model (down to fields), module interfaces (pseudocode). Write `.orca-dag/<timestamp>/TECH_SPEC.md` in the **same** planning directory and in the user's conversation language.
-3. **Decompose into a task DAG**: split the design into parallel/serial subtasks and write them into Orca (next section). **This step is the required output.**
+---
 
-### Make prerequisites actionable before dispatch
+## Phase 1 — Requirement Clarification & `PRD.md`
 
-- **Separate worker placement from test resources.** A Task's assigned worktree is where its worker executes. An isolated test runtime, fixture workspace, account, or service is a separate resource; placement controls do not provision arbitrary external runtimes.
-- **Provision first, or add a preparation dependency.** Name the resource owner, exact paths/selectors, runtime identity, access method, allowed changes, and cleanup owner in the dependent Task's spec. Do not request execution approval while required resources remain unspecified and unowned.
-- **Account for verified worker harnesses and adapter routes.** Verified supervised worker harnesses in Orchestration Panel are `claude`, `codex`, `opencode`, `omp`, and `antigravity` (five unverified IDs — `gemini`, `grok`, `cursor`, `droid`, `kimi` — are refused for worker launch, even if the skill is installed for them). On Orca ≥ **1.4.263**, OMP supports named `--effort` levels alongside Claude and Codex (never treat raw numeric `reasoning_effort` values as a 0–100 scale). OpenCode Auto uses native `opencode2` (default model) or native `opencode` (plain model on ≥ 1.4.241), while `#variant`, effort, or older runtimes keep CLI compatibility or explicit Mini/Full TUI adapters. Preserve the requested model/variant, never silently change it to make another route fit. Provider activity/output is separate from Orca settlement.
-- **Review launch preview and account quotas before handover.** `POST /api/launch-preview` and `GET /api/accounts` explain route selection, launch constraints, and account/quota status, not guaranteed startup or prerequisites hidden in prose. Agent-specific validation remains on the execution host.
-- **Account for launch locks.** Preferences freeze while the coordinator runs and remain pinned after a Task's first Dispatch. Do not ask the user to move an already-started worker through disabled controls or configure an external runtime in a field the viewer does not have. Supply additional test resources when safe; otherwise preserve the outcome and use the runtime's explicit recovery contract.
+1. **Create an exclusive planning directory** for this Run under `.orca-dag/<timestamp>/` using filesystem-safe UTC timestamp with milliseconds (`YYYYMMDD-HHmmss-SSS`, e.g., `.orca-dag/20261120-164000-123/`). Never reuse another Run's directory or overwrite existing plans. Keep all intermediate notes inside this same directory — never in `docs/` or repo root.
+2. **Clarify requirements iteratively**: Apply user preferences for depth/language, ask **one key question at a time** to lock: Goal, MVP/P0 Scope, Explicit Non-Goals, and Acceptance Criteria. Avoid over-engineering when P0 MVP suffices.
+3. **Audit external prerequisites explicitly**:
+   - Separate **worker placement** (where code edits run) from **external test resources** (dedicated test runtime, fixture DB/workspace, account credentials, local dev server). Viewer placement controls never provision arbitrary external runtimes.
+   - If a task needs external resources, either provision them beforehand or insert an explicit preparation dependency naming: resource owner, exact path/selector, runtime identity, access method, allowed mutations, and cleanup owner.
+4. **Write `.orca-dag/<timestamp>/PRD.md`** in the user's conversation language (unless `USER_PREFERENCES.md` fixes a language) using the template in `references/templates.md`.
 
-### Planning artifacts (one directory per plan)
+**Phase 1 Exit Checklist:**
+- [ ] Exclusive `.orca-dag/<timestamp>/` directory created.
+- [ ] Goal, P0 scope, non-goals, and acceptance criteria agreed.
+- [ ] All external test/runtime prerequisites assigned clear ownership (nothing hidden in vague prose).
+- [ ] `.orca-dag/<timestamp>/PRD.md` written.
 
-- For each **new requirement or fresh replanning Run**, create a new `.orca-dag/<timestamp>/` directory. Use a filesystem-safe UTC timestamp with milliseconds: `YYYYMMDD-HHmmss-SSS` (e.g. `.orca-dag/20261008-143012-123/`). Create the final directory exclusively; if it already exists, choose a new timestamp or append a numeric suffix. Never reuse another plan's directory or overwrite its documents.
-- Put **all file-based planning intermediates** in that same directory, including any supplemental notes, task-spec drafts, or local DAG drafts you choose to create. Do not scatter them in the project root or shared `docs/` files. Local drafts never replace the required writes into Orca's orchestration state.
-- Viewer runtime state shares the `.orca-dag/` root: `config.json`, `activity.jsonl`, `launches.jsonl`, `requests.jsonl`, and `sessions.json`. The endpoint record is never workspace data: it lives in the native plugin's private per-user discovery registry and is not for API clients. In addition to provider session bindings, `sessions.json` stores critical recovery journals (`mailboxChecks`, `guidanceSends`, `operatorMessages`, and `resumeAttempts`) that serve as recovery authority, not rotating audit logs. Unsupported older readers will fail if encountering these fields, so critical recovery journals cannot safely be hot-downgraded across unsupported readers. The viewer migrates legacy root `.orca-dag.*` files without overwriting existing destinations; stop old viewers before upgrading. Do not hand-edit these state files as part of planning. Uninstall keeps them by default; `--purge` removes only known state files, never timestamp planning directories or other user files.
-- Keep the same directory while refining that plan or adding Tasks to its existing Run. When resuming, use its explicitly recorded path, not whichever directory happens to be newest. After creating the Run, record its id in both documents and report the **Run id + planning directory** to the user.
-- `npx orca-orchestration-launcher` adds a marked `.orca-dag/` rule to the workspace's `.gitignore` on startup and announces it. The native plugin does not edit `.gitignore` automatically: if the project does not already ignore `.orca-dag/`, add the rule before using the plugin. If you installed only the skill, opted out of workspace initialization, or saw an initialization warning, also check that `.orca-dag/` is ignored before writing documents. Preserve existing rules and never write through a symlinked `.gitignore` or `.orca-dag` directory. Explain any inability to set up the ignore rule instead of silently assuming protection.
-- Planning docs are **local, ignored artifacts**, not committed source. Do not force-add them. Isolated worktrees won't automatically contain them: every Task spec must embed the requirements, interfaces, and acceptance criteria its worker needs, rather than relying on a planning-document path. Include the originating planning path for traceability, not as a required worker input.
-- Existing legacy `.orca/` documents are not automatically moved or deleted. All new planning output uses `.orca-dag/`. Startup preserves any legacy managed ignore block; `npx orca-orchestration-launcher uninstall` removes the installed skill, the workspace's private viewer registry entry, any legacy `.orca-dag/endpoint.json`, orphaned coordinator terminals, and exact managed ignore blocks for either location, but keeps planning documents even with `--purge`. User-authored ignore rules remain untouched.
+---
 
-## Writing the DAG into Orca (the core)
+## Phase 2 — Technical Design & DAG Topology (`TECH_SPEC.md`)
 
-One Run holds one DAG — Orca treats a Run as a namespace and home inbox, so "one Run = one DAG" is a planning convention rendered by Orchestration Panel. The runtime guide owns exact command syntax; conceptually you will:
+1. **Author technical architecture**: Concrete stack, data model down to field types, module/API interfaces (pseudocode), error handling, and verification plan.
+2. **Decompose into parallel & serial Stages**: Maximize safe parallelism across disjoint files/modules; keep conflicting edits serialized or isolated.
+3. **Plan workspace placement & integration**:
+   - By default, tasks run in coordinator `current` workspace.
+   - Tasks modifying overlapping files in parallel **must** use isolated worktrees (`existing`, `new-child`, `new-top-level`) or share an ordered Serial Lane.
+   - If downstream work integrates committed results from multiple isolated worktrees on local Git, **load `references/workspace-and-stage-git.md`** to design the two-step `[orca-dag:merge-prep]` + `[orca-dag:merge-inputs-v3]` split (or ordinary human `integrated` checkpoint). Remember: uncommitted source changes (including a newly added `.gitignore` rule) must be committed cleanly **before** starting a Stage-Git Run.
+4. **Plan decision gates & harnesses**:
+   - Place approval gates at irreversible milestones or human checkpoints.
+   - Account for verified worker harnesses (`claude`, `codex`, `opencode`, `omp`, `antigravity`; `gemini`/`grok`/`cursor`/`droid`/`kimi` are refused). See `references/execution-and-harnesses.md` when choosing model/effort/OpenCode UI.
+   - Remember **launch locks**: preferences freeze when execution starts and lock per-task upon first Dispatch.
+5. **Write `.orca-dag/<timestamp>/TECH_SPEC.md`** in the **same** `.orca-dag/<timestamp>/` directory using `references/templates.md`.
 
-- **Match the user's conversation language for every Run, Task, and Gate.** Write the Run objective, every Task's title (`--task-title`), display name (`--display-name`), and spec body (`--spec` / `--spec-file`), and every decision gate's question in the **language the user is conversing in** (e.g., Simplified Chinese when the user interacts in Chinese; English when in English). Keep exact technical identifiers, file paths, symbol names, CLI flags, code snippets, and local protocol markers (such as `[orca-dag:merge-prep]` / `[orca-dag:merge-inputs-v3]`) verbatim.
-- **Open a fresh Run** for this plan (`run-create`) and note the returned `run_*` id. Note that on Orca 1.4.263+, a later `run-create` keeps earlier Runs alive while commands without `--run` default to the newest Run — always pass `--run <run_id>` explicitly when adding tasks or inspecting a specific Run. To replan, open a **new** Run — **never** `reset`.
-- **Create tasks one by one**, passing each task's dependencies as a **JSON array** of earlier task ids. Deps may only point at tasks **within the same Run**, and they are what make execution advance in the right order — **remember every returned task id**. On Orca 1.4.263+, prefer passing multi-line Markdown specs from a file or stdin via the runtime guide's `--spec-file` flag alongside concise `--task-title` and `--display-name` (in the user's language) so shell quoting never corrupts code fences or backticks and cards stay readable in both the full Tab and compact Sidebar.
-- **Self-check the graph after each batch** with a Run-scoped read (`task-list --run <run_id> --json`): verify the dependency arrows, because a wrong edge **cannot be fixed after creation** (see Boundaries).
-- **Write self-contained specs** — the guide's *Task-spec contract* is the floor: target, change, constraints, ownership (what the worker may edit), observable acceptance evidence, and whether a non-zero exit means failure or is the deliverable. Every planned input and resource must be available when the worker starts; do not leave them to post-dispatch clarification or local plan mode. Unexpected runtime blockers follow the live preamble's `ask` contract (call `ask`, then end turn so Orca wakes the worker with the reply). Use imperative sentences and avoid vague phrasing like "investigate" or "as appropriate".
-- **Plan workspace placement through the viewer (or `worker-start`), not by telling workers to branch:** by default every task executes in the coordinator's current workspace. Tasks editing overlapping files in parallel must run in isolated local workspaces — an exact existing workspace, a stacked child worktree, or an independent top-level one — and a dependency-ordered chain may share one such workspace as a serial lane. Which task goes where is **launch configuration**, not Orca task state. Tell each worker to edit and commit in the worktree **already assigned to its Dispatch**; never tell it to create a worktree or switch branches when placement creates one. Otherwise the worker can create a nested worktree with a different Git base, leaving the assigned Stage unchanged.
-- **For committed Stage integration, split every cross-workspace join into two Tasks**: a merge-preparation Task containing both `[orca-dag:merge-prep]` and `[orca-dag:merge-inputs-v3]`, then a development Task depending on it. The merge-preparation Task depends on every source Stage and runs in the target worktree. Its spec must require the worker to use the runtime-matched guide to ask the bound coordinator for immutable dependency inputs before any Git edit. The ENTIRE question text must be EXACTLY `[orca-dag:merge-inputs-v3]`, with no surrounding prose; wait for the exact immutable SHA reply before proceeding. Then merge those commits with history-preserving Git merges, resolve conflicts, commit, and report completion. Both markers are required; legacy runnable merge specs lacking the marker must replan in a fresh Run. Note that the official public orchestration contract is contract 1 (`orchestration.contract.v1`), runtime protocol is 3, federation lifecycle settlement protocol is 3, and control mail protocol is 2; `[orca-dag:merge-inputs-v3]` is a local viewer contract marker (not a global upstream version name) and must not be renamed. Never rely on a blind post-start message for essential inputs. The development Task uses the **same workspace** and depends on merge preparation; give it only development work. Commit current-worktree source changes (including a newly added `.gitignore` rule) **before starting the Run** so its base HEAD is clean; keep `.orca-dag/` planning docs ignored, never force-add them. Every Stage worker must leave its worktree clean with its result committed before `worker_done`. Assign parallel source Stages to separate worktrees; unordered Tasks must not share a worktree, even if they edit different files. New worktrees in this mode start from the Run's captured HEAD, so leave any viewer `baseBranch` override empty. Git must verify that all dependency SHAs are ancestors of the merge worktree's clean HEAD before development proceeds; missing evidence parks the dependent Task. This mode is local Git only; remote and folder workspaces are unsupported.
-- **For ordinary lane Runs without that marker**, a cross-lane join retains the human `integrated` checkpoint. That resolution is a human assertion and does not prove Git ancestry.
-- **Merge handshake implementation:** The viewer verifies immutable dependency snapshots and the current merge worker's identity before replying. Legacy runnable merge specs without the local merge-inputs-v3 marker are rejected at preview and execution admission; replan them in a fresh Run rather than sending essential inputs after launch.
-- **Add a decision gate** where human approval is needed (e.g. approving the design or a wave milestone, written in the user's language) — the guide's gates reference has the rules; Orchestration Panel surfaces approve/reject buttons in both the full Tab and compact Sidebar **Pending** view. Canonical approval/rejection gates can also be created for not-yet-dispatched Tasks in the same Run via `POST /api/gates` before dispatch.
+**Phase 2 Exit Checklist:**
+- [ ] Task decomposition covers every P0 requirement with acyclic dependencies (`deps`).
+- [ ] Every parallel write conflict resolved via dependencies, Serial Lanes, or isolated worktrees.
+- [ ] Stage-Git `[orca-dag:merge-prep]` / `[orca-dag:merge-inputs-v3]` splits (if used) and approval gates designed.
+- [ ] `.orca-dag/<timestamp>/TECH_SPEC.md` written alongside `PRD.md`.
 
-## After the DAG is built: hand off to Orchestration Panel (or coordinate directly if asked)
+---
 
-Once the graph is right, report the **Run id + `.orca-dag/<timestamp>/` planning directory** to the user:
+## Phase 3 — Author & Verify the DAG in Orca
 
-- **With the native Orca plugin (`orchestration-panel`, Orca ≥ 1.4.263)**: No extra terminal is needed — the plugin automatically manages an isolated loopback backend per workspace and displays the Run in Orca's right sidebar (**Tasks** / **Pending** / **Live**) and full workbench Tab (`↗ Tab` or status bar click). **Session** cards come from scoped `worker-read` transcripts; tool, prompt and status events only wake the read, without forwarding previews. **L1 Native Session Resume** requires exact session history in the same local workspace and provider, with no active session or existing pane; it is unavailable for OMP and Antigravity.
-- **Standalone CLI / web viewer**: If the plugin is not installed, ask the user to run:
-  ```bash
-  npx orca-orchestration-launcher    # run in the project root; prints the local viewer URL and opens the browser
-  ```
+1. **Match the user's conversation language** for Run objective, Task `--task-title`, `--display-name`, `--spec-file`, and Gate `--question`. Keep technical identifiers, file paths, symbol names, CLI flags, code snippets, and `[orca-dag:merge-prep]` / `[orca-dag:merge-inputs-v3]` verbatim.
+2. **Optimize text for UI readability**:
+   - **Task cards (`296×136` canvas + sidebar)**: keep `--task-title` / `--display-name` concise enough to fit cleanly on 1 line; keep long detail inside `--spec-file`.
+   - **Gate nodes (`244×100` hexagonal/octagonal checkpoints)**: keep `--question` crisp (≤ 2 lines) and action option labels concise.
+3. **Create a fresh Run** using the runtime guide's `run-create` operation and record the returned `run_*` id.
+   - On Orca `>= 1.4.263`, later `run-create` calls keep older Runs active while commands omitting `--run` target the newest Run — **always pass `--run <run_id>` explicitly**.
+   - To replan, always open a **new** Run — **never** `reset`.
+4. **Create Tasks in topological order** using the runtime guide's `task-create` operation:
+   - Pass dependencies as a JSON array of earlier `task_*` IDs within the **same** Run.
+   - On Orca `>= 1.4.263`, prefer `--spec-file` (or stdin) for multi-line Markdown specs so shell quoting never corrupts code fences or backticks.
+   - Write **self-contained specs** using the 6-part template in `references/templates.md` (`Target`, `Change`, `Ownership`, `Constraints & Prerequisites`, `Acceptance Evidence`, `Exit-Code Semantics`). Remember `.orca-dag/` docs are gitignored and absent in isolated worktrees: embed all required context inline (cite `.orca-dag/<timestamp>/...` only as provenance, never as required worker input), instruct workers to work in their assigned Dispatch worktree (never manually create branches/worktrees when placement already creates one), and remind them to commit cleanly before `worker_done` in Stage-Git runs.
+5. **Add Decision Gates** via `gate-create` (or `POST /api/gates` pre-dispatch) where human approval is needed.
+6. **Verify every batch live** with a Run-scoped `task-list --run <run_id> --json` (and `gate-list --run <run_id> --json`): check all IDs and dependency edges immediately, because existing Tasks/deps **cannot be edited or deleted after creation**.
+7. **Finalize documentation**: Write the created `run_id` into both `.orca-dag/<timestamp>/PRD.md` and `.orca-dag/<timestamp>/TECH_SPEC.md`, and summarize the DAG's parallel vs serial waves in one sentence for the user.
 
-The user picks the Run, chooses per-node harness/model/effort/placement, and clicks **"▶ Run with Orca"**.
+**Phase 3 Exit Checklist:**
+- [ ] Fresh `run_<id>` created and passed explicitly via `--run` on every operation.
+- [ ] All Tasks and Gates created with self-contained specs and verified via `task-list --run <run_id> --json`.
+- [ ] Zero broken edges, missing specs, or ambiguous external resources.
+- [ ] `run_id` recorded in both `PRD.md` and `TECH_SPEC.md`.
 
-**Triggering execution via the backend API (when the user asks you to start the viewer run yourself):**
-Use only the local viewer URL printed by a launcher you started for the intended workspace or opened for that workspace by Orca. Confirm the workspace in that startup output or Orca tab before fetching or sending a token. Never obtain a URL or port from workspace files, guess a fallback port, read the private plugin registry, or follow redirects. If you cannot verify the viewer, use the Orca UI instead. Inspect `POST /api/launch-preview` and `GET /api/accounts` before starting; the API cannot infer external resource readiness from Task prose.
+---
 
-```bash
-(
-  set -o pipefail
-  PORT='<verified_port>' # Replace with the port from the trusted local viewer URL.
-  if [[ ! $PORT =~ ^[1-9][0-9]{0,4}$ ]] || (( PORT > 65535 )); then
-    printf '%s\n' 'Expected a numeric viewer port from 1 to 65535.' >&2
-    exit 1
-  fi
-  VIEWER="http://127.0.0.1:${PORT}"
-  TOKEN=$(curl -q --noproxy '*' --fail --silent --show-error "$VIEWER/api/session" |
-    python3 -c '
-import json, re, sys
-token = json.load(sys.stdin)["token"]
-if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
-    sys.exit("Invalid viewer token")
-print(token)
-') || exit 1
-  curl -q --noproxy '*' --fail --silent --show-error "$VIEWER/api/run" \
-    -H "X-Orca-Dag-Token: $TOKEN" -H "Content-Type: application/json" \
-    -d '{"runId":"<run_id>","defaultHarness":"codex","maxConcurrency":2}'
-)
-```
+## Phase 4 — Handover or Coordinate Execution
 
-The viewer then binds **its own** terminal as the Run's coordinator and advances the graph autonomously — parallel waves, durable mailbox recovery, gate and single-use permission surfacing, terminal release/retain. The **Session** tab shows scoped transcript output, and **Messages** shows worker messages and check receipts. Failed worker starts are never auto-retried; they park their Task for inspection or explicit retry. Use L1 native resume only when the exited session meets the eligibility rules above.
+Follow the user's selected route (from chat instruction or `USER_PREFERENCES.md`):
 
-**When the user explicitly asks you (the model) to act as coordinator in Orca instead of the viewer:**
-Follow the loaded `orchestration` guide's wake-driven loop (`references/coordinator-loop.md` and `references/recovery-and-cleanup.md`): start ready workers, end your turn so Orca wakes you on mail/completions, never run polling/watch scripts (plain `check` steals mail and prevents wakes), steer via `send` (never terminal keystrokes), and use `--keep-open` or `worker-keep-open` when the user wants to keep using a worker's chat. Orchestration Panel will automatically display your Run live in read-only observability mode without interfering.
+### Route A — Handover to Orchestration Panel (Default)
+1. Deliver the structured **Handover Report** (`references/templates.md`): Run ID, `.orca-dag/<timestamp>/` path, parallel/serial wave summary, recommended Harness/Model/Placement suggestions, and any pre-run notes (e.g., clean Git commit required for Stage-Git).
+2. Point the user to Orchestration Panel:
+   - **Native Orca Plugin (`orchestration-panel`, Orca `>= 1.4.263`)**: Already embedded in Orca right sidebar (**Tasks** / **Pending** / **Live**) and workbench tab — no manual terminal needed.
+   - **Standalone Launcher** (if plugin not active):
+     ```bash
+     npx orca-orchestration-launcher
+     ```
+3. In Orchestration Panel, inspect **Launch Preview** & account quotas if needed, configure harnesses/models/worktree placements, and click **Run** (or **Run with Orca**).
 
-⚠️ **Fencing is normal when switching coordinators.** Starting execution in Orchestration Panel binds the viewer's terminal as the Run's coordinator, so subsequent mutations from your terminal fail with `consumer_fenced` (reads such as `task-list --run <id>` and `gate-list --run <id>` stay open). To hand authority back cleanly, re-bind via `run-use` following the runtime guide's rules. Conversely, Orchestration Panel refuses implicit takeover of an externally coordinated Run unless the operator explicitly confirms matching binding evidence (`coordinatorControl`).
+### Route B — Launch Viewer Execution via API (When explicitly asked)
+Read `references/execution-and-harnesses.md`, verify the trusted local port (`POST /api/launch-preview`, `GET /api/accounts`), and trigger `POST /api/run` using the verified script. Wait cleanly for user checks or monitor read-only without interfering with the viewer's bound terminal.
 
-## Boundaries and known constraints
-- **Default to planning + DAG authoring**; only drive execution directly in your terminal if the user explicitly asks for Model-as-Coordinator mode, or trigger the viewer via `/api/run` when asked to launch through Orchestration Panel.
-- **Created tasks cannot be edited or deleted**: `task-update` only changes `--status` / `--result` — there is no interface to change spec/title/deps, and no command to delete a single task. You can still **add** new tasks or gates to a Run that hasn't finished (additions are creates), but to **change** an existing task or dependency, open a **new Run and redraw** the whole DAG; the old Run stays as history.
-- **Never `reset` during planning.** `orchestration reset --tasks` / `--all` has **no `--run` scope**: it wipes the entire local orchestration DB across all Runs. Only run `reset` when the user explicitly chooses to discard local coordination state; the right way to replan is always a fresh Run.
-- **Circuit breaker & user-directed reopen (Orca ≥ 1.4.226 / 1.4.263)**: Three consecutive failed starts in one `--retry-of` chain trip `circuit_broken` (a worker's own `failed` report does not increment it). Never route around a breaker by creating a replacement Task or Run. Only when the user explicitly directs a retry/reassignment may the Run's coordinator inspect retained attempts (`worker-show`/`worker-read`), settle/release reclaimable failed terminals, and reopen the **same Task** in its owning Run.
-- **Mailbox, permission, helper, and recovery semantics depend on the runtime.** Upstream official public orchestration contract is contract 1 (`orchestration.contract.v1`), runtime protocol is 3, federation lifecycle settlement protocol is 3, and control mail protocol is 2; local V3 migration is a local viewer contract.
-  - Legacy FIFO checks replay the oldest unacknowledged Delivery; consuming checks acknowledge on read and a standalone ACK does not fetch the next batch. Transport acknowledgment is not local processing completion: durable checkpoints live in `sessions.json` (`mailboxChecks`, `guidanceSends`, `operatorMessages`, `resumeAttempts`) and cannot safely be hot-downgraded across unsupported readers. Recover lost responses with the same request identity, never a fresh mutation.
-  - Native `stopReason` escalations (`finished`, `errored`, `needs-input`, `exited`, `lost`) are events, not replyable question threads; resolution follows exact Dispatch steering (`send`), operator decisions, or authoritative later settlement.
-  - On Orca **1.4.263+**: `worker-stop` cascades to child helpers (`orchestration.worker-stop-helpers.v1`), direct paired-server mail uses `send --on <server>` (`orchestration.peer-mail.v1`), remote receipts use `request-show --on <server>` (`orchestration.remote-owned-workers.v1`), and pending worker permission prompts can be answered single-use from the viewer (`POST /api/workers/:dispatchId/permission`, backed by `approve`/`deny` when enabled in Orca settings).
-  - Guidance sends support positively evidenced `recipient_run_bound_redirect` to actual destination mailboxes without adopting child authority. `--peek` is observation only; never consume another agent's mailbox to monitor it.
-- The retired scheduler commands (`orchestration run` / `run-stop` / `coordinator-start` / `coordinator-stop`) are no-ops — don't use them.
-- Don't run destructive or off-task system commands.
+### Route C — Agent-as-Coordinator (When explicitly asked)
+Load `<cli> skills get orchestration --reference references/coordinator-loop.md` and `references/recovery-and-cleanup.md`: start independent ready workers, **end your turn** so Orca wakes you on replies/completions (never run polling/watch scripts), steer via `send`, and let Orchestration Panel observe live in read-only mode.
 
-## Communication style
-- Follow the user's language across conversation, planning docs, Run objectives, Task titles/display names/specs, and Gate questions. Concise and direct.
-- After each batch of task creation, summarize the DAG's current shape in one sentence (what runs in parallel, what is serial) — the user is watching it appear live in Orchestration Panel.
+**⚠️ Coordinator Fencing Rule:** Clicking **Run** in Orchestration Panel binds its own coordinator terminal to the Run, causing subsequent terminal mutations from your agent to fail with `consumer_fenced` (reads stay open). See `references/artifacts-and-troubleshooting.md` for `run-use` handback and explicit `coordinatorControl` confirmation rules.
+
+**Phase 4 Exit Checklist:**
+- [ ] Handover report sent with exact Run ID + `.orca-dag/<timestamp>/` path (or coordinator loop / API run initiated as explicitly requested).
+- [ ] Active preferences match expectations (offer `"update my orca-dag preferences"` anytime if user adjusts defaults).
+
+---
+
+## On-Demand Reference Routing
+
+### Skill Handbooks (`<skill-dir>/references/*.md`)
+| Scenario | Reference to read |
+| :--- | :--- |
+| First-run setup or updating saved defaults (`USER_PREFERENCES.md`) | `references/preferences.md` |
+| Writing `PRD.md`, `TECH_SPEC.md`, Task Spec (6-part), Gate, or Handover | `references/templates.md` |
+| Isolated worktrees, Serial Lanes, remote placement, or Stage-Git merge protocol | `references/workspace-and-stage-git.md` |
+| Verified harnesses, OMP/OpenCode routing, L1 resume, `/api/run` execution | `references/execution-and-harnesses.md` |
+| `.orca-dag/` stores, `.gitignore`/`uninstall`, fencing, circuit breaker, runtime quirks | `references/artifacts-and-troubleshooting.md` |
+
+### Runtime Orca CLI References (`<cli> skills get orchestration --reference ...`)
+- `references/coordinator-loop.md` — Wake-driven coordination loop & multiple Runs
+- `references/messaging-and-gates.md` — Group mail & gate CLI mechanics
+- `references/placement-and-remote.md` — Worktrees, SSH/WSL, paired execution servers
+- `references/recovery-and-cleanup.md` — Worker failure, stop/abandon, reopen after circuit breaker
+
+---
+
+## Non-Negotiable Guardrails
+- **Immutability after creation**: Created Tasks cannot change title/spec/deps and cannot be deleted; new Tasks/Gates may still be added before completion, otherwise **replan in a fresh Run**.
+- **Never `reset` during planning**: `orchestration reset --tasks`/`--all` wipes **all** Runs across the workspace DB with no `--run` filter.
+- **No self-healing past circuit breakers**: 3 consecutive failed start attempts in one `--retry-of` chain trip `circuit_broken`. Never invent replacement Tasks/Runs around it; surface for user-directed inspection/release/reopen (`references/artifacts-and-troubleshooting.md`).
+- **No retired scheduler commands**: Do not invoke `orchestration run` / `run-stop` / `coordinator-start` / `coordinator-stop`.
+- **No copy-pasted orchestration mutation flags**: Command syntax lives strictly in `<cli> skills get orchestration`.
+- **No secrets in preferences**: `USER_PREFERENCES.md` holds workflow/tool preferences only, never tokens, API keys, or credentials.
+
+## Communication Style
+- Match the user's language across conversation, `PRD.md`, `TECH_SPEC.md`, Run objectives, Task titles/display names/specs, and Gate questions.
+- After every batch of created Tasks, summarize the current DAG shape in **one sentence** (what runs in parallel, what serializes).

@@ -532,9 +532,9 @@ describe("questions hold the Delivery open", () => {
       requestId, runId, requestedTaskId: "task_aaa", requestedDispatchId: dispatchId, from: coordinatorTerminal(getState()).handle,
       state: "prepared", receipt: null, creationProven: false, createdAt: timestamp, updatedAt: timestamp, error: null,
     });
-    const observed = coordinatorStatus().lastReconciledAt;
-    await waitFor(() => callsOf("request-show", "--request", requestId).length > 0 && coordinatorStatus().lastReconciledAt > observed,
-      "native redirect reconciliation");
+    await waitFor(() => callsOf("request-show", "--request", requestId).length > 0, "native redirect request-show");
+    const afterShow = coordinatorStatus().lastReconciledAt;
+    await waitFor(() => coordinatorStatus().lastReconciledAt > afterShow, "native redirect reconciliation");
     assert.equal((await store.listGuidanceSends(runId))[0].receipt?.kind, "recipient_run_bound_redirect");
     assert.ok(coordinatorStatus().inbox.pending.some(item => item.messageId === event.id));
     assert.ok((await store.listMailboxChecks(runId)).every(row => !row.resolvedStopEvents?.[event.id]));

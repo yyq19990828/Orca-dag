@@ -97,9 +97,12 @@ jobs:
           cd /tmp/smoke
           HOME=/tmp/fakehome NO_OPEN=1 PORT=8897 timeout 5 ./node_modules/.bin/orca-dag || true
           test -f /tmp/fakehome/.claude/skills/orca-dag/SKILL.md
+          test -f /tmp/fakehome/.claude/skills/orca-dag/references/preferences.md
+          test -f /tmp/fakehome/.claude/skills/orca-dag/references/templates.md
           # The freshly installed skill must be the thin workflow that loads the
           # runtime-matched orchestration guide — not a stale command copy.
           grep -q 'skills get orchestration' /tmp/fakehome/.claude/skills/orca-dag/SKILL.md
+          grep -Fq 'USER_PREFERENCES.md' /tmp/fakehome/.claude/skills/orca-dag/SKILL.md
           grep -Fq '.orca-dag/<timestamp>/PRD.md' /tmp/fakehome/.claude/skills/orca-dag/SKILL.md
           grep -Fxq '# >>> orca-dag planning artifacts (managed)' .gitignore
           grep -Fxq '.orca-dag/' .gitignore
@@ -161,7 +164,10 @@ jobs:
           curl -sf http://localhost:8898/ | grep -qi '<div id="root">'
           # Same for the skill: embedded, installed, and guide-loading.
           test -f /tmp/binhome/.claude/skills/orca-dag/SKILL.md
+          test -f /tmp/binhome/.claude/skills/orca-dag/references/preferences.md
+          test -f /tmp/binhome/.claude/skills/orca-dag/references/templates.md
           grep -q 'skills get orchestration' /tmp/binhome/.claude/skills/orca-dag/SKILL.md
+          grep -Fq 'USER_PREFERENCES.md' /tmp/binhome/.claude/skills/orca-dag/SKILL.md
           echo "✅ binary embeds and installs the updated thin skill"
           # Same security contract as the npm package: loopback-only socket and
           # token-gated mutations.

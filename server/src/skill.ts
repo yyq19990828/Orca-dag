@@ -1,4 +1,4 @@
-// Install `skill/SKILL.md` into the coding agents on this machine.
+// Install `skill/SKILL.md` and `skill/references/*.md` into coding agents on this machine.
 //
 // Why the viewer does this at all: the project has two halves that are useless
 // apart — the skill teaches your agent to *build* the DAG, the viewer *runs* it
@@ -6,17 +6,19 @@
 // `npx orca-orchestration-launcher` installs the skill on startup and then serves the UI. One
 // command, everything works.
 //
-// It is deliberately dumb and idempotent: write the file, don't touch anything
-// else. No symlinks (they break when the npx cache is evicted), no agent config
-// edits, no network. Opt out with `--no-skill` / `ORCA_DAG_NO_SKILL=1`.
+// It is deliberately dumb and idempotent: write managed skill files, never
+// rewrite unchanged files, and never clobber user-authored `USER_PREFERENCES.md`.
+// No symlinks (they break when the npx cache is evicted), no agent config edits,
+// no network. Opt out with `--no-skill` / `ORCA_DAG_NO_SKILL=1`.
 
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import type { Stats } from "node:fs";
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
-import { loadEmbeddedSkill } from "./webAssets";
+import { loadEmbeddedSkillFiles } from "./webAssets";
 import { homedir } from "node:os";
 
 export const SKILL_NAME = "orca-dag";
+export const USER_PREFERENCES_FILE = "USER_PREFERENCES.md";
 
 export interface AgentSkillDir {
   agent: string;
@@ -240,24 +242,52 @@ function migrateLegacySkillDir(sources: string[], destination: string, destinati
 }
 
 /**
- * Find the skill text: embedded in the binary, or on disk. A broken package or
- * damaged embedded payload must not prevent the viewer itself from starting.
+ * Find the managed skill files (`SKILL.md` + `references/*.md`): embedded in the
+ * binary, or on disk. Never picks up local `USER_PREFERENCES.md`, and a damaged
+ * payload must not prevent the viewer itself from starting.
  *
- * Disk candidates cover the npm package (`<pkg>/skill/SKILL.md`, two levels up
- * from `<pkg>/dist/server/`) and a dev checkout (`<repo>/skill/SKILL.md`, two
- * levels up from `<repo>/server/src/`) — which happen to be the same relative
- * path, the same coincidence the web/dist fallback relies on.
+ * Disk candidates cover the npm package (`<pkg>/skill/`, two levels up from
+ * `<pkg>/dist/server/`) and a dev checkout (`<repo>/skill/`, two levels up from
+ * `<repo>/server/src/`) — which happen to match.
  */
-async function readSkill(here: string): Promise<string | null> {
+async function readSkillFiles(here: string): Promise<Map<string, string> | null> {
   try {
-    const embedded = await loadEmbeddedSkill();
-    if (embedded) return embedded;
+    const embedded = await loadEmbeddedSkillFiles();
+    if (embedded && typeof embedded["SKILL.md"] === "string") {
+      const files = new Map<string, string>();
+      files.set("SKILL.md", embedded["SKILL.md"]);
+      for (const [rel, text] of Object.entries(embedded)) {
+        if (rel === "SKILL.md") continue;
+        if (rel.startsWith("references/") && rel.endsWith(".md") && typeof text === "string") {
+          files.set(rel, text);
+        }
+      }
+      return files;
+    }
   } catch {
     // Fall back to disk if the binary's embedded assets are unavailable.
   }
-  for (const candidate of [join(here, "..", "..", "skill", "SKILL.md"), join(here, "..", "..", "..", "skill", "SKILL.md")]) {
+  for (const skillRoot of [join(here, "..", "..", "skill"), join(here, "..", "..", "..", "skill")]) {
     try {
-      if (existsSync(candidate)) return readFileSync(candidate, "utf8");
+      const entryPath = join(skillRoot, "SKILL.md");
+      if (!existsSync(entryPath)) continue;
+      const entryStat = lstatSync(entryPath);
+      if (!entryStat.isFile() || entryStat.isSymbolicLink()) continue;
+      const files = new Map<string, string>();
+      files.set("SKILL.md", readFileSync(entryPath, "utf8"));
+      const refsDir = join(skillRoot, "references");
+      const refsStat = lstatIfPresent(refsDir);
+      if (refsStat && refsStat.isDirectory() && !refsStat.isSymbolicLink()) {
+        for (const name of readdirSync(refsDir).sort()) {
+          if (!name.endsWith(".md") || name === USER_PREFERENCES_FILE) continue;
+          const refPath = join(refsDir, name);
+          const refStat = lstatIfPresent(refPath);
+          if (refStat && refStat.isFile() && !refStat.isSymbolicLink()) {
+            files.set(`references/${name}`, readFileSync(refPath, "utf8"));
+          }
+        }
+      }
+      return files;
     } catch {
       // Continue to the other package layout; installation is best effort.
     }
@@ -266,7 +296,8 @@ async function readSkill(here: string): Promise<string | null> {
 }
 
 /**
- * Write the skill into every agent present on this machine.
+ * Write the managed skill files into every agent present on this machine,
+ * preserving user-authored `USER_PREFERENCES.md` inside the skill folder.
  *
  * Never throws: a read-only home directory or a weird agent layout must not
  * stop the viewer from starting — the skill is a convenience, the UI is the
@@ -279,8 +310,8 @@ export async function installSkill(moduleDir: string, enabled: boolean): Promise
     return result;
   }
 
-  const text = await readSkill(moduleDir);
-  if (!text) {
+  const skillFiles = await readSkillFiles(moduleDir);
+  if (!skillFiles) {
     result.skipped = "not-found";
     return result;
   }
@@ -288,35 +319,63 @@ export async function installSkill(moduleDir: string, enabled: boolean): Promise
   for (const location of resolveAgentSkillDirs()) {
     if (!location.install) continue;
     const dir = join(location.skills, SKILL_NAME);
-    const target = join(dir, "SKILL.md");
+    const entryTarget = join(dir, "SKILL.md");
     try {
-      if (!isSafeSkillPath(dir, false, location.safeRoot) || !isSafeSkillPath(target, false, location.safeRoot)) continue;
+      if (!isSafeSkillPath(dir, false, location.safeRoot) || !isSafeSkillPath(entryTarget, false, location.safeRoot)) continue;
       let dirInfo = lstatIfPresent(dir);
       if (dirInfo && (!dirInfo.isDirectory() || dirInfo.isSymbolicLink())) continue;
-      let targetInfo = lstatIfPresent(target);
-      if (targetInfo && (!targetInfo.isFile() || targetInfo.isSymbolicLink())) continue;
+      const entryInfo = lstatIfPresent(entryTarget);
+      if (entryInfo && (!entryInfo.isFile() || entryInfo.isSymbolicLink())) continue;
 
       if (!dirInfo && location.migrateFrom.length > 0) {
         migrateLegacySkillDir(location.migrateFrom, dir, location.safeRoot);
         dirInfo = lstatIfPresent(dir);
-        targetInfo = lstatIfPresent(target);
         if (dirInfo && (!dirInfo.isDirectory() || dirInfo.isSymbolicLink())) continue;
-        if (targetInfo && (!targetInfo.isFile() || targetInfo.isSymbolicLink())) continue;
+        const migratedEntry = lstatIfPresent(entryTarget);
+        if (migratedEntry && (!migratedEntry.isFile() || migratedEntry.isSymbolicLink())) continue;
       }
 
-      // Rewriting only on change keeps the log quiet on every restart and keeps
-      // mtimes stable for agents that cache their skill index.
-      if (targetInfo && readFileSync(target, "utf8") === text) {
-        result.upToDate.push(target);
-        continue;
+      let anyChanged = false;
+      let entryUpToDate = false;
+      let unsafeEntry = false;
+      for (const [relPath, text] of skillFiles) {
+        const target = join(dir, relPath);
+        if (!isSafeSkillPath(target, false, location.safeRoot)) {
+          if (relPath === "SKILL.md") {
+            unsafeEntry = true;
+            break;
+          }
+          continue;
+        }
+        let targetInfo = lstatIfPresent(target);
+        if (targetInfo && (!targetInfo.isFile() || targetInfo.isSymbolicLink())) {
+          if (relPath === "SKILL.md") {
+            unsafeEntry = true;
+            break;
+          }
+          continue;
+        }
+        // Rewriting only on change keeps mtimes stable for agents that cache their skill index.
+        if (targetInfo && readFileSync(target, "utf8") === text) {
+          if (relPath === "SKILL.md") entryUpToDate = true;
+          continue;
+        }
+        const parentDir = dirname(target);
+        if (!isSafeSkillPath(parentDir, false, location.safeRoot)) continue;
+        const parentInfo = lstatIfPresent(parentDir);
+        if (parentInfo && (!parentInfo.isDirectory() || parentInfo.isSymbolicLink())) continue;
+        mkdirSync(parentDir, { recursive: true });
+        // Re-check after mkdir so a pre-existing or raced-in link is never used.
+        if (!isSafeSkillPath(dir, false, location.safeRoot) || !isSafeSkillPath(target, false, location.safeRoot)) continue;
+        targetInfo = lstatIfPresent(target);
+        if (targetInfo && (!targetInfo.isFile() || targetInfo.isSymbolicLink())) continue;
+        writeFileSync(target, text);
+        anyChanged = true;
       }
-      mkdirSync(dirname(target), { recursive: true });
-      // Re-check after mkdir so a pre-existing or raced-in link is never used.
-      if (!isSafeSkillPath(dir, false, location.safeRoot) || !isSafeSkillPath(target, false, location.safeRoot)) continue;
-      targetInfo = lstatIfPresent(target);
-      if (targetInfo && (!targetInfo.isFile() || targetInfo.isSymbolicLink())) continue;
-      writeFileSync(target, text);
-      result.installed.push(target);
+
+      if (unsafeEntry) continue;
+      if (anyChanged) result.installed.push(entryTarget);
+      else if (entryUpToDate) result.upToDate.push(entryTarget);
     } catch {
       // Unwritable directory — skip this agent silently.
     }
