@@ -75,7 +75,7 @@ export interface ViewerConfig {
   laneByTask?: Record<string, string>;
   maxConcurrency?: number;
   layout?: string;
-  /** Last Run the user was looking at — tasks are Run-scoped since Orca 1.4.160. */
+  /** Last selected Run. Empty string explicitly clears it; absence permits legacy migration. */
   runId?: string;
   /**
    * Explicit semantic lead stage for each Run. This is viewer-only metadata:
@@ -437,7 +437,7 @@ function sanitize(raw: unknown, previous?: ViewerConfig): ViewerConfig {
     // Retired force layouts migrate on read and persist with the next write.
     out.layout = layout === "force" ? "layered-lr" : layout;
   }
-  if (typeof r.runId === "string" && r.runId.trim()) {
+  if (typeof r.runId === "string") {
     out.runId = r.runId.trim();
   }
   // Lead-stage metadata is a Run -> Task map rather than the Task -> value

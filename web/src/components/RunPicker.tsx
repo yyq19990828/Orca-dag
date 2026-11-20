@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchRunById, fetchRunsPage } from "../api";
+import { ApiError, fetchRunById, fetchRunsPage } from "../api";
 import { useT } from "../i18n";
 import type { OrcaRun } from "../types";
 import { usePageVisible } from "../visibility";
@@ -66,7 +66,8 @@ export function RunPicker({
   const [ownership, setOwnership] = useState<Record<string, { owned: boolean; evidence: string }>>({});
   const [exactId, setExactId] = useState("");
   const [exactBusy, setExactBusy] = useState(false);
-  const combined = dedupeById([...pinned, ...firstPage, ...older]);
+  const removedIds = useRef(new Set<string>());
+  const combined = dedupeById([...pinned, ...firstPage, ...older]).filter((run) => !removedIds.current.has(run.id));
   const combinedRef = useRef(combined);
   combinedRef.current = combined;
 
@@ -102,6 +103,9 @@ export function RunPicker({
     if (autoPick && !runId && combined.length > 0) onPick(combined[0].id);
   }, [autoPick, combined, runId, onPick]);
 
+  // Check each new selection once. Recheck absent selections after a page
+  // poll: falling off the first page could mean older or foreign, not deleted.
+  const pageToCheck = firstPage.some((run) => run.id === runId) ? null : firstPage;
   useEffect(() => {
     if (!autoPick || !runId) return;
     let alive = true;
@@ -111,23 +115,18 @@ export function RunPicker({
       setOwnership((previous) => ({ ...previous, [run.id]: workspace }));
     }).catch((error) => {
       if (!alive) return;
-      const msg = String((error as Error).message ?? error);
-      setErr(msg);
-      const code = (error as { code?: string })?.code;
-      const status = (error as { status?: number })?.status;
-      const isMissing = code === "run_not_found" || status === 404 || status === 409 || /not_found|not found/i.test(msg);
-      if (isMissing) {
-        const available = combinedRef.current;
-        if (available.length > 0) {
-          const fallback = available.find((r) => r.id !== runId);
-          onPick(fallback ? fallback.id : "");
-        } else {
-          onPick("");
-        }
+      if (error instanceof ApiError && error.code === "run_not_found") {
+        // The list, exact-ID pins and older pages may still contain the old
+        // row. Exclude it before choosing a fallback, including late pages.
+        removedIds.current.add(runId);
+        setErr(null);
+        onPick(combinedRef.current.find((run) => !removedIds.current.has(run.id))?.id ?? "");
+      } else {
+        setErr(String((error as Error).message ?? error));
       }
     });
     return () => { alive = false; };
-  }, [autoPick, runId, onPick]);
+  }, [autoPick, runId, onPick, pageToCheck]);
 
   // Interval paused while the tab is hidden (Orca never throttles
   // background timers, so the 10s list poll would run forever unseen). The
@@ -164,6 +163,7 @@ export function RunPicker({
     setErr(null);
     try {
       const { run, workspace } = await fetchRunById(id);
+      removedIds.current.delete(run.id);
       setOwnership((prev) => ({ ...prev, [run.id]: workspace }));
       setPinned((prev) => dedupeById([run, ...prev]));
       setExactId("");

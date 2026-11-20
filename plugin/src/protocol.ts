@@ -5,6 +5,7 @@ export interface ProbeRequest {
 }
 
 export interface BridgeApiRequest {
+  workspaceId: string
   method: 'GET' | 'POST' | 'PUT'
   url: string
   body?: unknown
@@ -20,18 +21,17 @@ export type SkillInstallReply =
   | { ok: true; installed: number; upToDate: number }
   | { ok: false; code: 'confirmation_required' | 'bundle_unavailable' | 'install_failed' | 'skill_busy' }
 
-export interface ActivitySubscribeRequest {
+export interface ActivitySubscribeRequest extends StreamSubscription {
+  workspaceId: string
   runId: string
 }
 
-export interface OutputSubscribeRequest {
-  subId: string
-  runId: string
+export interface OutputSubscribeRequest extends ActivitySubscribeRequest {
   dispatchId: string
   source?: 'auto' | 'terminal' | 'transcript'
 }
 
-export interface OutputUnsubscribeRequest {
+export interface StreamSubscription {
   subId: string
 }
 
@@ -54,7 +54,7 @@ declare module 'orca' {
       output: { ok: boolean }
     }
     'orca-dag.activity.unsubscribe': {
-      input: ActivitySubscribeRequest
+      input: StreamSubscription
       output: { ok: boolean }
     }
     'orca-dag.output.subscribe': {
@@ -62,7 +62,7 @@ declare module 'orca' {
       output: { ok: boolean }
     }
     'orca-dag.output.unsubscribe': {
-      input: OutputUnsubscribeRequest
+      input: StreamSubscription
       output: { ok: boolean }
     }
   }

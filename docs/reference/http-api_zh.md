@@ -130,7 +130,7 @@ viewer 作为一个具有直接控制 Orca 运行时能力的管理面进程，�
 | `GET` | `/api/environments/:envId/repos` | `:envId`: 环境标识符 | 获取远程环境上已注册的仓库列表（用于新建顶层工作树）。 |
 | `GET` | `/api/environments/:envId/projects` | `:envId`: 环境标识符 | 获取远程环境上可见的项目分组列表。 |
 | `GET` | `/api/config` | 无 | 读取当前工作区的偏好配置（`.orca-dag/config.json`）。 |
-| `PUT` | `/api/config` | 合并配置对象 | 合并并更新当前工作区的偏好配置。 |
+| `PUT` | `/api/config` | 合并配置对象 | 合并并更新当前工作区的偏好配置。传入 `{"runId":""}` 清除记住的 Run；省略 `runId` 则保留原选择。 |
 | `GET` | `/api/health` | 无 | 基础服务健康检查接口，返回 `{ ok, workspace, worktree }`。 |
 
 ### 原生伴生插件桥接路由（`/api/plugin/*`）

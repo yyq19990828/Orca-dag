@@ -30,7 +30,7 @@ interface OrcaHostGlobal {
     request: <T = unknown>(
       name: string,
       input?: unknown,
-      opts?: { timeoutMs?: number },
+      opts?: { signal?: AbortSignal; timeoutMs?: number },
     ) => Promise<T>;
     on?: (event: string, handler: (payload: unknown) => void) => OrcaDisposable;
   };
@@ -78,6 +78,30 @@ export function isSidebarMode(): boolean {
   }
 }
 
+let panelWorkspace: { id: string; signal: AbortSignal } | null = null;
+
+/** Orca replays the current context to each subscriber; terminal-only changes keep the same workspace. */
+export function watchOrcaWorkspace(onReset: (id: string | null) => void, onReady: () => void): void {
+  let previous: string | null | undefined;
+  let controller: AbortController | undefined;
+  getOrcaGlobal()?.on?.("workspace.changed", (payload) => {
+    const context = (payload as { context?: { workspaceId?: unknown } | null } | null)?.context;
+    const id = typeof context?.workspaceId === "string" && context.workspaceId ? context.workspaceId : null;
+    if (previous === id) return;
+    previous = id;
+    panelWorkspace = null;
+    controller?.abort();
+    controller = undefined;
+    // Old effects must be torn down while no workspace can accept requests.
+    onReset(id);
+    if (id) {
+      controller = new AbortController();
+      panelWorkspace = { id, signal: controller.signal };
+      onReady();
+    }
+  });
+}
+
 /** Read Orca's active UI locale (`en`, `zh-CN`, etc.) when inside a plugin frame. */
 export function readOrcaHostLocale(): string | null {
   const host = getOrcaGlobal();
@@ -92,14 +116,21 @@ export function subscribeOrcaHostTheme(onChange: (payload?: unknown) => void): (
   return () => disposeOf(sub);
 }
 
-async function requestPlugin<T>(name: string, input: unknown): Promise<T> {
+async function requestPlugin<T>(name: string, input: unknown, signal?: AbortSignal): Promise<T> {
   const host = getOrcaGlobal();
   if (!host?.plugin?.request) {
     throw new Error("Orca plugin bridge is unavailable.");
   }
-  const raw = await host.plugin.request<T | { output: T }>(name, input);
+  const raw = await host.plugin.request<T | { output: T }>(name, input, signal ? { signal } : undefined);
+  signal?.throwIfAborted();
   if (raw && typeof raw === "object" && "output" in raw) return raw.output;
   return raw as T;
+}
+
+async function requestWorkspace<T>(name: string, input: object): Promise<T> {
+  const workspace = panelWorkspace;
+  if (!workspace) throw new Error("No active Orca workspace.");
+  return requestPlugin(name, { ...input, workspaceId: workspace.id }, workspace.signal);
 }
 
 /** Invoke only after the operator confirms installing the bundled skill. */
@@ -120,10 +151,10 @@ export async function pluginApiRequest(
   url: string,
   body?: unknown,
 ): Promise<OrcaPluginBridgeResponse> {
-  return requestPlugin("orca-dag.api", body === undefined ? { method, url } : { method, url, body });
+  return requestWorkspace("orca-dag.api", body === undefined ? { method, url } : { method, url, body });
 }
 
-let outputSubSeq = 0;
+let streamSeq = 0;
 
 /**
  * Subscribe to a worker's centralized OutputTail stream through the plugin
@@ -143,18 +174,21 @@ export function openPluginOutputStream(
     handlers.onError("Orca plugin output bridge is unavailable.");
     return () => {};
   }
-  const subId = `out_${++outputSubSeq}_${Date.now()}`;
+  const subId = `out_${++streamSeq}`;
+  const signal = panelWorkspace?.signal;
   let closed = false;
   const sub = host.plugin.on("orca-dag.output", (raw) => {
-    if (closed || !raw || typeof raw !== "object") return;
+    if (closed || signal?.aborted || !raw || typeof raw !== "object") return;
     const msg = raw as { subId?: unknown; event?: unknown; data?: unknown };
     if (msg.subId !== subId || typeof msg.event !== "string") return;
     handlers.onEvent(msg.event, msg.data);
   });
-  void host.plugin
-    .request("orca-dag.output.subscribe", { subId, runId, dispatchId, source })
+  void requestWorkspace<{ ok: boolean }>("orca-dag.output.subscribe", { subId, runId, dispatchId, source })
+    .then(({ ok }) => {
+      if (!ok && !closed) handlers.onError("No viewer is connected for this workspace.");
+    })
     .catch((err) => {
-      if (!closed) handlers.onError(String((err as Error)?.message ?? err));
+      if (!closed && !signal?.aborted) handlers.onError(String((err as Error)?.message ?? err));
     });
   return () => {
     closed = true;
@@ -198,25 +232,27 @@ export function openActivityStream(
 ): () => void {
   if (isOrcaPluginFrame()) {
     const host = getOrcaGlobal()!;
+    const subId = `activity_${++streamSeq}`;
+    const signal = panelWorkspace?.signal;
     let closed = false;
     const listener = (payload: unknown) => {
-      if (!closed && isActivitySnapshot(payload, runId)) handlers.onSnapshot(payload);
+      if (!closed && !signal?.aborted && isActivitySnapshot(payload, runId) &&
+        (payload as ActivitySnapshot & { subId?: string }).subId === subId) handlers.onSnapshot(payload);
     };
     const subPlugin = host.plugin?.on?.("orca-dag.activity", listener);
     const subFrame = !subPlugin ? host.on?.("orca-dag.activity", listener) : undefined;
-    void host.plugin
-      ?.request("orca-dag.activity.subscribe", { runId })
-      .then(() => {
-        if (!closed) handlers.onOpen();
+    void requestWorkspace<{ ok: boolean }>("orca-dag.activity.subscribe", { subId, runId })
+      .then(({ ok }) => {
+        if (!closed && !signal?.aborted) (ok ? handlers.onOpen : handlers.onError)();
       })
       .catch(() => {
-        if (!closed) handlers.onError();
+        if (!closed && !signal?.aborted) handlers.onError();
       });
     return () => {
       closed = true;
       disposeOf(subPlugin);
       disposeOf(subFrame);
-      void host.plugin?.request("orca-dag.activity.unsubscribe", { runId }).catch(() => {});
+      void host.plugin?.request("orca-dag.activity.unsubscribe", { subId }).catch(() => {});
     };
   }
 

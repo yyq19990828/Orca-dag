@@ -12,6 +12,8 @@ on:
 jobs:
   npm:
     name: Publish orca-orchestration-launcher to npm
+    # Permit a single GitHub/plugin release without contacting npm.
+    if: ${{ (inputs.version && format('v{0}', inputs.version) || github.ref_name) != vars.SKIP_NPM_PUBLISH_TAG }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

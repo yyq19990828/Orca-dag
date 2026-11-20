@@ -75,6 +75,7 @@ const zh: Dict = {
   "operations.noWorkers": "此 Run 暂无执行记录。",
   "topbar.connDetailChecking": "尚未取得运行时就绪证据。仍可查看已读取的数据；执行资格以服务端检查为准。",
   "read.loadingRuns": "正在读取 Run",
+  "read.pickWorkspace": "选择一个 Orca 工作区以查看其 Run。",
   "read.loadingTasks": "正在读取任务",
   "read.loadingBody": "正在获取此工作区的 Run 与任务记录。",
   "read.runsFailed": "无法读取 Run",

@@ -13,7 +13,7 @@
    - **C 区（底部可调高坞）**：`实时事件流`、`Worker 输出`（基于 `OutputTail` SSE 的 `WorkerOutputDockView`）与 `变更请求账本`。
    - **D 区（右侧可调宽上下文检视面板）**：审批门检视（`GateInspector`）或紧凑模式 `ChatPanel`（`.odag-inspector--compact-chat`），包含 4 个同级页签：**消息**（黑白灰聊天气泡 + 头像 + 统一自适应输入框）、**会话**（`NodeSessionPanel` 可折叠实时工具调用卡片）、**任务**（`NodePanel`）与**启动配置**。
 2. **精简右侧边栏伴生面板（`SidebarApp.tsx`、`components/sidebar-app.css`、`?view=sidebar`）**——面向 Orca 原生 `orchestration-panel` 窄侧栏（`320–450px`）设计：
-   - **紧凑双行顶栏**：Run 选择器、传送的 Run/Stop 图标按钮、**唯一**的 `↗ 标签页` 入口（`POST /api/open-tab`，智能复用或原地复活完整标签页）、原生 `<progress>` 进度条及横向状态筛选芯片。
+   - **紧凑顶栏**：Run 选择器、Run/Stop 图标、**技能**和 `↗ 标签页`（通过 `POST /api/open-tab` 打开或原地恢复完整标签页）在同一行。Run 选择器的提示显示在下方，不挤动按钮；原生 `<progress>` 进度条和状态筛选位于操作区下方。
    - **3 个主导航页签**：**任务**（状态图标、harness 胶囊、最新摘要）、**待处理**（审批门禁、Worker 提问、单次权限审批、停止事件与可恢复失败节点）、**活动**（最近实时动态）。
    - **单任务下钻详情**：顶部返回栏附带**聚焦终端**与**恢复会话**（L1 原生恢复）快捷按钮，下方 3 个同级页签在视觉风格与命名上与完整 Web 保持完全一致：
      - **消息**（`chat.view.messages`）：直接复用 `<ChatPanel embeddedMessagesOnly />` 与 `.odag-inspector--compact-chat` 样式，保证聊天气泡、头像、从 Task 历史恢复的初始简报、引用回复、运行态摘要与统一输入栏 100% 一致。

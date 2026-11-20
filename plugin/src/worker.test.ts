@@ -100,13 +100,13 @@ test('orca-dag.api rejects disallowed paths and returns 503 without a connected 
     '/api/activity/stream',
     '/api/runs HTTP/1.1',
   ]) {
-    const res = await worker.request('orca-dag.api', { method: 'GET', url: badUrl })
+    const res = await worker.request('orca-dag.api', { workspaceId: 'missing', method: 'GET', url: badUrl })
     assert.equal(res.status, 400)
     assert.equal(res.ok, false)
     assert.equal(res.body.code, 'invalid_path')
   }
 
-  const disconnected = await worker.request('orca-dag.api', { method: 'GET', url: '/api/runs' })
+  const disconnected = await worker.request('orca-dag.api', { workspaceId: 'missing', method: 'GET', url: '/api/runs' })
   assert.equal(disconnected.status, 503)
   assert.equal(disconnected.ok, false)
   assert.equal(disconnected.body.code, 'viewer_not_connected')
@@ -116,6 +116,7 @@ test('orca-dag.api rejects disallowed paths and returns 503 without a connected 
 })
 
 test('connects to local viewer endpoint, proxies GET/POST with mutation token, and handles inbox commands', async () => {
+  const workspaceId = 'identity:wt2:local:ws-test'
   const workspaceDir = mkdtempSync(join(tmpdir(), 'odag-plugin-test-'))
   const pluginToken = 'a'.repeat(32)
   const requestToken = pluginRequestToken(pluginToken)
@@ -248,7 +249,7 @@ test('connects to local viewer endpoint, proxies GET/POST with mutation token, a
         'workspace.list': {
           workspaces: [
             {
-              id: 'identity:wt2:local:ws-test',
+              id: workspaceId,
               kind: 'worktree',
               path: workspaceDir,
               name: 'ws-test',
@@ -301,7 +302,7 @@ test('connects to local viewer endpoint, proxies GET/POST with mutation token, a
       assert.equal(resumeReceipt?.terminalId, 'term_resumed_sess-42')
       assert.equal(resumeReceipt?.started, true)
 
-      const getRes = await worker.request('orca-dag.api', { method: 'GET', url: '/api/runs' })
+      const getRes = await worker.request('orca-dag.api', { workspaceId, method: 'GET', url: '/api/runs' })
       assert.equal(getRes.ok, true)
       assert.equal(getRes.status, 200)
       assert.deepEqual(getRes.body, { runs: [{ id: 'run_test' }] })
@@ -318,14 +319,15 @@ test('connects to local viewer endpoint, proxies GET/POST with mutation token, a
       // A failed activity read is not a snapshot and must not cut off recovery.
       await Promise.all([
         once(activity, 'snapshot', { signal: AbortSignal.timeout(5_000) }),
-        worker.request('orca-dag.activity.subscribe', { runId: 'run_test' }, { panel: 'orchestration' }),
+        worker.request('orca-dag.activity.subscribe', { workspaceId, subId: 'activity_1', runId: 'run_test' }, { panel: 'orchestration' }),
       ])
       assert.deepEqual(
         worker.posts.filter(post => post.event === 'orca-dag.activity').map(post => post.payload),
-        [activitySnapshot],
+        [{ ...activitySnapshot, subId: 'activity_1' }],
       )
 
       const postRes = await worker.request('orca-dag.api', {
+        workspaceId,
         method: 'POST',
         url: '/api/echo',
         body: { hello: 'panel' },
@@ -342,13 +344,21 @@ test('connects to local viewer endpoint, proxies GET/POST with mutation token, a
       assert.equal(tabRes.reused, true)
       assert.equal(tabRes.pageId, 'page_tab_1')
 
-      // An unavailable focused workspace must not silently target the other viewer.
+      // New-scope requests must not fall back to the only connected viewer.
+      // An already issued old-scope request still addresses that exact viewer.
+      const remoteId = 'identity:wt2:remote:other'
       await worker.emit('workspace.changed', {
-        context: { workspaceId: 'identity:wt2:remote:other', branch: 'main', displayName: 'other', terminals: [] },
+        context: { workspaceId: remoteId, branch: 'main', displayName: 'other', terminals: [] },
       })
-      const outOfScope = await worker.request('orca-dag.api', { method: 'POST', url: '/api/echo', body: { hello: 'other' } })
+      const outOfScope = await worker.request('orca-dag.api', {
+        workspaceId: remoteId, method: 'POST', url: '/api/echo', body: { hello: 'other' },
+      })
       assert.equal(outOfScope.status, 503)
       assert.equal(seenUrls.filter((url) => url === 'POST /api/echo').length, 1)
+      assert.deepEqual(
+        await worker.request('orca-dag.api', { workspaceId, method: 'GET', url: '/api/runs' }),
+        getRes,
+      )
       assert.deepEqual(worker.refusals, [])
     } finally {
       await worker.deactivate()

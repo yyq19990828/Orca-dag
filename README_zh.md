@@ -48,6 +48,8 @@ orca-ide plugin dev load ./plugin --json
 
 批准启用后，插件会在未检测到外部 viewer 终端时自动为当前本地工作区拉起隔离的内置回环后端服务（工作区关闭或插件停用时自动回收；若外部 viewer 启动或关闭则无缝发现与故障切换）。点击 Orca 右侧栏的 **Orchestration Panel** 图标即可查看精简侧边栏，点击侧栏顶部 `↗ 标签页` 或状态栏进度即可直达完整工作台标签页。打包独立插件目录见 [`plugin/README.md`](plugin/README.md)。
 
+侧栏跟随 Orca 当前工作区。切换项目或 worktree 时，侧栏会清除上一个 Run，再读取新工作区保存的选择和 Run 列表。已打开的完整工作台标签页仍绑定打开它的工作区。
+
 在 Orca 的插件详情或命令面板中运行 **Orchestration Panel: Install or Update Agent Skill**，也可以在插件侧栏点击 **技能** 并确认 **安装或更新**。两种方式都把插件附带的 `orca-dag` 技能写入本机检测到的 Agent 技能目录，保留 `USER_PREFERENCES.md`，无需创建 Run、连接查看器或联网下载。安装或启动插件时不会自动写入。
 
 若只想移除技能，运行 **Orchestration Panel: Uninstall Agent Skill**。该命令只删除受管技能文件，保留偏好、自定义文件、符号链接指向的技能工作副本、插件和工作区数据。

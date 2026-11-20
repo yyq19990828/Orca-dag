@@ -320,4 +320,4 @@ These routes are for the trusted native plugin, not browser or operator API clie
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/config` | Reads persisted viewer preferences from `.orca-dag/config.json`. |
-| `PUT` | `/api/config` | Merges and writes viewer preferences into `.orca-dag/config.json`. |
+| `PUT` | `/api/config` | Merges and writes viewer preferences into `.orca-dag/config.json`. Send `{"runId":""}` to clear the remembered Run; omitting `runId` leaves the selection unchanged. |

@@ -31,7 +31,8 @@
 
 .odag-sb__header-row {
   display: flex;
-  align-items: center;
+  /* Picker status text can add a second line; align actions to the trigger. */
+  align-items: flex-start;
   gap: 6px;
   min-inline-size: 0;
 }

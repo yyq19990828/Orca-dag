@@ -106,8 +106,9 @@ interface SessionInfo {
 let session: SessionInfo | null = null;
 let sessionPromise: Promise<SessionInfo> | null = null;
 
-/** Fetch and retain the mutation token once. Safe to call repeatedly. */
+/** Cache the standalone session; the plugin's worker manages its own per-viewer tokens. */
 export function initSession(): Promise<SessionInfo> {
+  if (isOrcaPluginFrame()) return get<SessionInfo>("/api/session");
   if (!sessionPromise) {
     sessionPromise = get<SessionInfo>("/api/session").then((s) => {
       session = s;

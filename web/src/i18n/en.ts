@@ -74,6 +74,7 @@ const en = {
   "operations.noWorkers": "No worker records for this Run yet.",
   "topbar.connDetailChecking": "Runtime readiness has not been verified. Data may still be available; the server checks execution eligibility.",
   "read.loadingRuns": "Loading Runs",
+  "read.pickWorkspace": "Select an Orca workspace to see its Runs.",
   "read.loadingTasks": "Loading tasks",
   "read.loadingBody": "Reading this workspace's Run and task records.",
   "read.runsFailed": "Could not load Runs",

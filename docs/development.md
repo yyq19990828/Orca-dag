@@ -134,6 +134,8 @@ GitHub Actions builds all release binaries, attaches them to a new GitHub Releas
 
 The stable release tag is the version of record; `PKG_VERSION` supplies staged package metadata, so no repository version-bump commit is required. The npm job uses Node 24, npm ≥ 11.5.1, and `id-token: write` for OIDC.
 
+To publish just the GitHub binaries and Orca plugin for one release, set the repository Actions variable `SKIP_NPM_PUBLISH_TAG` to the exact tag (for example, `v2.0.2`) before pushing it. Only that version skips the npm job.
+
 ### Recovering a Failed npm Publish
 
 If npm rejects OIDC authentication before publishing, fix the Trusted Publisher mapping and rerun the failed job:

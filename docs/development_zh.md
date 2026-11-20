@@ -111,6 +111,8 @@ npm run release 1.0.0
 
 GitHub Actions 随后通过 OIDC 发布 npm 包，并将各平台二进制附加到 GitHub Release。正式版以标签为版本依据，`PKG_VERSION` 提供发布包元数据，无需另提交仓库版本号变更。npm job 使用 Node 24、npm ≥ 11.5.1 及 `id-token: write`。
 
+如果某个版本只发布 GitHub 二进制和 Orca 插件，在推送标签前把仓库的 Actions 变量 `SKIP_NPM_PUBLISH_TAG` 设为完整标签（例如 `v2.0.2`）。只有匹配该标签的版本会跳过 npm job。
+
 ### 3. npm 发布失败的恢复
 
 如果 npm 在实际发布前拒绝 OIDC 认证，修正 Trusted Publisher 映射后重跑失败 job：

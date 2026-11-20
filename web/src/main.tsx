@@ -1,30 +1,44 @@
 import React, { lazy, Suspense } from "react";
+import { flushSync } from "react-dom";
 import ReactDOM from "react-dom/client";
 import { DecisionDialogProvider } from "./components/DecisionDialog";
 import { initSession } from "./api";
-import { isSidebarMode } from "./bridge/orcaBridge";
+import { isOrcaPluginFrame, isSidebarMode, watchOrcaWorkspace } from "./bridge/orcaBridge";
+import { resetWorkspaceConfig } from "./harness";
+import { useT } from "./i18n";
 import "./styles/ide-workbench.css";
 
 const App = lazy(() => import("./App"));
 const SidebarApp = lazy(() => import("./components/SidebarApp"));
 
-// Fetch the per-process mutation token before the first render, so every
-// mutation control is live (or visibly explained) from the start. Failure is
-// not fatal: the app still renders read-only, and mutations throw a clear
-// session_not_initialized error until the page is reloaded.
-initSession()
-  .catch(() => {
-    /* read-only mode — server unreachable or older backend without /api/session */
-  })
-  .finally(() => {
-    const sidebar = isSidebarMode();
-    ReactDOM.createRoot(document.getElementById("root")!).render(
-      <React.StrictMode>
-        <DecisionDialogProvider>
-          <Suspense fallback={null}>
-            {sidebar ? <SidebarApp /> : <App />}
-          </Suspense>
-        </DecisionDialogProvider>
-      </React.StrictMode>,
-    );
-  });
+const root = ReactDOM.createRoot(document.getElementById("root")!);
+
+function renderApp(sidebar: boolean) {
+  root.render(
+    <React.StrictMode>
+      <DecisionDialogProvider>
+        <Suspense fallback={null}>
+          {sidebar ? <SidebarApp /> : <App />}
+        </Suspense>
+      </DecisionDialogProvider>
+    </React.StrictMode>,
+  );
+}
+
+function WorkspacePlaceholder({ waiting = false }: { waiting?: boolean }) {
+  const t = useT();
+  return <p className="dag-read-state" role="status">{t(waiting ? "read.loadingRuns" : "read.pickWorkspace")}</p>;
+}
+
+if (isOrcaPluginFrame()) {
+  root.render(<WorkspacePlaceholder waiting />);
+  watchOrcaWorkspace((workspaceId) => {
+    // Clear the previous subtree (including portals and cached picker pages)
+    // before the new workspace can issue requests or the browser can paint.
+    flushSync(() => root.render(<WorkspacePlaceholder waiting={workspaceId !== null} />));
+    resetWorkspaceConfig();
+  }, () => renderApp(true));
+} else {
+  // Standalone mutations need the loopback token; reads still work if it fails.
+  void initSession().catch(() => {}).finally(() => renderApp(isSidebarMode()));
+}

@@ -474,19 +474,9 @@ export default function App() {
       if (selectedRunRef.current === requestedRun && seq >= dagAppliedSeq.current) {
         const msg = String((e as Error).message ?? e);
         setDagFailure({ runId: requestedRun, message: msg });
-        const code = (e as { code?: string })?.code;
-        const status = (e as { status?: number })?.status;
-        const isMissing =
-          code === "run_not_found" ||
-          status === 404 ||
-          status === 409 ||
-          /not_found|not found/i.test(msg);
-        if (isMissing && hydrated) {
-          pickRun("");
-        }
       }
     }
-  }, [runId, hydrated, pickRun]);
+  }, [runId]);
 
   const pageVisible = usePageVisible();
 

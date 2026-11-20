@@ -40,6 +40,13 @@ describe("config: retired layout migration", () => {
   });
 });
 
+it("persists a cleared Run selection without dropping unrelated viewer settings", async () => {
+  writeFileSync(join(dir, CONFIG_FILE), JSON.stringify({ runId: "run_removed", defaultHarness: "codex" }));
+  await saveConfig(dir, { runId: "" });
+  await saveConfig(dir, { maxConcurrency: 3 });
+  assert.deepEqual(await loadConfig(dir), { runId: "", defaultHarness: "codex", maxConcurrency: 3 });
+});
+
 describe("config: OpenCode interface preferences", () => {
   it("preserves legacy absence and round-trips defaults, overrides, inheritance and patches", async () => {
     writeFileSync(join(dir, CONFIG_FILE), JSON.stringify({ defaultHarness: "codex" }));

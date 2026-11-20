@@ -7,6 +7,7 @@
 
 import { useSyncExternalStore } from "react";
 import { fetchConfig, fetchReadiness, initSession, saveConfig } from "./api";
+import { isOrcaPluginFrame } from "./bridge/orcaBridge";
 import {
   BASE_BRANCH_PATTERN,
   COMMENT_MAX,
@@ -52,6 +53,7 @@ const DEFAULTS: ViewerConfig = {
 let config: ViewerConfig = { ...DEFAULTS };
 const listeners = new Set<() => void>();
 let configRefreshTimer: number | null = null;
+let workspaceEpoch = 0;
 
 // Server-side policy flags, from GET /api/session (see api.ts). Not config —
 // the server owns them — but the UI needs them reactively, and this store is
@@ -112,11 +114,16 @@ export function useReadiness(): OrcaReadiness | null {
  * back: a full write here could erase settings another Viewer just saved.
  */
 export async function initConfig(): Promise<void> {
+  const epoch = workspaceEpoch;
+  // The native frame may share the same browser storage across workspaces.
+  // Its viewer always hydrates from the workspace's own file, never this mirror.
+  const migrateLegacy = !isOrcaPluginFrame();
   // Session (mutation token + policy flags) hydrates reactively: api.ts blocks
   // mutations on it anyway (synthetic 503 until ready), and this only gates
   // the "Custom…" UI. Never fails initConfig — reads work without a session.
   initSession()
     .then((s) => {
+      if (epoch !== workspaceEpoch) return;
       flags = { customCommandsAllowed: s.allowCustomCommands, platform: s.platform ?? null };
       emit();
     })
@@ -127,6 +134,7 @@ export async function initConfig(): Promise<void> {
   // and the server-side gate still refuses execution if the probe failed here.
   fetchReadiness()
     .then((r) => {
+      if (epoch !== workspaceEpoch) return;
       readiness = r;
       emit();
     })
@@ -141,13 +149,14 @@ export async function initConfig(): Promise<void> {
   } catch {
     // backend unreachable — stay on defaults / localStorage mirror
   }
-  config = hydratedConfig(server, true);
+  if (epoch !== workspaceEpoch) return;
+  config = hydratedConfig(server, migrateLegacy);
   const migrated: Partial<ViewerConfig> = {};
-  if (fetched) {
+  if (fetched && migrateLegacy) {
     if (!server.defaultHarness && safeStorageGet(DEFAULT_KEY)) migrated.defaultHarness = config.defaultHarness;
     if (!server.harnessByTask && Object.keys(config.harnessByTask).length) migrated.harnessByTask = config.harnessByTask;
     if (!server.layout && config.layout) migrated.layout = config.layout;
-    if (!server.runId && config.runId) migrated.runId = config.runId;
+    if (server.runId === undefined && config.runId) migrated.runId = config.runId;
   }
   mirrorToLocalStorage();
   emit();
@@ -196,7 +205,8 @@ function hydratedConfig(server: Partial<ViewerConfig>, legacy: boolean): ViewerC
     leadTaskByRun: asHarnessMap(server.leadTaskByRun) ?? {},
     maxConcurrency: asConcurrency(server.maxConcurrency) ?? DEFAULTS.maxConcurrency,
     layout: asLayout(server.layout) || (legacy ? asLayout(safeStorageGet(LAYOUT_KEY)) : "") || "",
-    runId: asString(server.runId) || (legacy ? safeStorageGet(RUN_KEY) : "") || "",
+    // An explicit server-side clear must win over a stale browser mirror.
+    runId: server.runId === undefined && legacy ? asString(safeStorageGet(RUN_KEY)) : asString(server.runId),
   };
 }
 
@@ -213,6 +223,18 @@ let pendingPatch: Partial<ViewerConfig> = {};
 let persistInFlight: Promise<void> | null = null;
 let revision = 0;
 
+/** The old sidebar is unmounted in the same turn; late config work cannot repopulate the new one. */
+export function resetWorkspaceConfig(): void {
+  workspaceEpoch++;
+  config = DEFAULTS;
+  flags = { customCommandsAllowed: false, platform: null };
+  readiness = null;
+  if (persistTimer !== null) window.clearTimeout(persistTimer);
+  persistTimer = null;
+  pendingPatch = {};
+  persistInFlight = null;
+}
+
 /** Debounced, field-scoped write-through. Run selection cannot overwrite maps. */
 function schedulePersist(patch: Partial<ViewerConfig>): void {
   pendingPatch = { ...pendingPatch, ...patch };
@@ -226,35 +248,43 @@ function schedulePersist(patch: Partial<ViewerConfig>): void {
 }
 
 async function flushConfigChanges(): Promise<void> {
+  const epoch = workspaceEpoch;
   if (persistTimer !== null) {
     window.clearTimeout(persistTimer);
     persistTimer = null;
   }
   if (persistInFlight) {
     await persistInFlight;
+    if (epoch !== workspaceEpoch) return;
     return flushConfigChanges();
   }
   if (!Object.keys(pendingPatch).length) return;
   const patch = pendingPatch;
   pendingPatch = {};
   persistInFlight = saveConfig(patch).catch((error: unknown) => {
-    pendingPatch = { ...patch, ...pendingPatch };
+    if (epoch === workspaceEpoch) pendingPatch = { ...patch, ...pendingPatch };
     throw error;
   });
   try {
     await persistInFlight;
   } finally {
-    persistInFlight = null;
+    if (epoch === workspaceEpoch) persistInFlight = null;
   }
-  return flushConfigChanges();
+  if (epoch === workspaceEpoch) return flushConfigChanges();
 }
 
 /** Refresh the exact plan used by Run, after all local edits have reached disk. */
 export async function refreshConfig(): Promise<ViewerConfig> {
+  const epoch = workspaceEpoch;
+  const assertCurrent = () => {
+    if (epoch !== workspaceEpoch) throw new DOMException("Orca workspace changed.", "AbortError");
+  };
   for (;;) {
     await flushConfigChanges();
+    assertCurrent();
     const before = revision;
     const server = await fetchConfig();
+    assertCurrent();
     // An edit while GET was in flight must be saved before that snapshot is
     // allowed to replace the store or become a launch plan.
     if (revision !== before) continue;
@@ -269,10 +299,12 @@ export async function refreshConfig(): Promise<ViewerConfig> {
 }
 
 function mirrorToLocalStorage(): void {
+  if (isOrcaPluginFrame()) return;
   try {
     localStorage.setItem(DEFAULT_KEY, config.defaultHarness);
     if (config.layout) localStorage.setItem(LAYOUT_KEY, config.layout);
     if (config.runId) localStorage.setItem(RUN_KEY, config.runId);
+    else localStorage.removeItem(RUN_KEY);
     for (const key of Object.keys(localStorage)) {
       if (key.startsWith(NODE_PREFIX) || key.startsWith(MODEL_PREFIX)) localStorage.removeItem(key);
     }
