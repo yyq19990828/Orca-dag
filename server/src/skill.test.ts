@@ -69,6 +69,42 @@ function uninstall(dryRun: boolean, overrides: NodeJS.ProcessEnv = {}, purge = f
   return command(code, overrides);
 }
 
+it("plugin skill uninstall preserves custom files, preferences and linked checkouts", () => {
+  const moduleDir = join(root, "plugin", "server");
+  const bundled = join(moduleDir, "skill");
+  const refs = join(bundled, "references");
+  mkdirSync(refs, { recursive: true });
+  writeFileSync(join(bundled, "SKILL.md"), "bundled skill\n");
+  writeFileSync(join(refs, "preferences.md"), "bundled reference\n");
+
+  const claude = join(home, ".claude", "skills", "orca-dag");
+  const cursor = join(home, ".cursor", "skills", "orca-dag");
+  for (const dir of [claude, cursor]) {
+    mkdirSync(join(dir, "references"), { recursive: true });
+    writeFileSync(join(dir, "SKILL.md"), "older skill\n");
+    writeFileSync(join(dir, "references", "preferences.md"), "older reference\n");
+  }
+  const prefs = join(claude, "USER_PREFERENCES.md");
+  const custom = join(claude, "references", "my-notes.md");
+  writeFileSync(prefs, "user preferences\n");
+  writeFileSync(custom, "user notes\n");
+
+  mkdirSync(join(home, ".gemini", "skills"), { recursive: true });
+  const linked = join(home, ".gemini", "skills", "orca-dag");
+  symlinkSync(bundled, linked, "dir");
+  const code = `import { uninstallBundledSkill } from ${JSON.stringify(skillUrl)}; console.log(JSON.stringify(await uninstallBundledSkill(${JSON.stringify(moduleDir)})));`;
+
+  assert.deepEqual(JSON.parse(command(code)), { removed: 2, failed: 0 });
+  assert.equal(existsSync(join(claude, "SKILL.md")), false);
+  assert.equal(existsSync(join(claude, "references", "preferences.md")), false);
+  assert.equal(existsSync(cursor), false);
+  assert.equal(readFileSync(prefs, "utf8"), "user preferences\n");
+  assert.equal(readFileSync(custom, "utf8"), "user notes\n");
+  assert.equal(lstatSync(linked).isSymbolicLink(), true);
+  assert.equal(readFileSync(join(bundled, "SKILL.md"), "utf8"), "bundled skill\n");
+  assert.deepEqual(JSON.parse(command(code)), { removed: 0, failed: 0 });
+});
+
 const sharedParents: Array<[string, string]> = [
   ["Codex", ".codex"],
   ["OpenCode", ".config/opencode"],

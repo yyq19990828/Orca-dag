@@ -274,8 +274,8 @@ test('connects to local viewer endpoint, proxies GET/POST with mutation token, a
           ...orca,
           panels: {
             ...orca.panels,
-            post(event, payload, options) {
-              orca.panels.post(event, payload, options)
+            post(event: string, payload?: unknown, options?: { panel?: string }) {
+              Reflect.apply(orca.panels.post, orca.panels, [event, payload, options])
               if (event === 'orca-dag.activity' && payload && typeof payload === 'object' && 'runId' in payload) {
                 activity.emit('snapshot')
               }
@@ -305,6 +305,15 @@ test('connects to local viewer endpoint, proxies GET/POST with mutation token, a
       assert.equal(getRes.ok, true)
       assert.equal(getRes.status, 200)
       assert.deepEqual(getRes.body, { runs: [{ id: 'run_test' }] })
+
+      assert.deepEqual(
+        await worker.request('orca-dag.skill.install', { confirmed: false }, { panel: 'orchestration' }),
+        { ok: false, code: 'confirmation_required' },
+      )
+      assert.deepEqual(
+        await worker.request('orca-dag.skill.install', { confirmed: true }, { panel: 'another-panel' }),
+        { ok: false, code: 'confirmation_required' },
+      )
 
       // A failed activity read is not a snapshot and must not cut off recovery.
       await Promise.all([

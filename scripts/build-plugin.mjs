@@ -172,6 +172,7 @@ const requiredPaths = [
   "orca-plugin.json",
   "worker.mjs",
   "server/index.mjs",
+  "server/skill/SKILL.md",
   "panel/index.html",
   "README.md",
   "LICENSE",

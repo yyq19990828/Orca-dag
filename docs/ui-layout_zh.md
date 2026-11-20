@@ -19,6 +19,7 @@
      - **消息**（`chat.view.messages`）：直接复用 `<ChatPanel embeddedMessagesOnly />` 与 `.odag-inspector--compact-chat` 样式，保证聊天气泡、头像、从 Task 历史恢复的初始简报、引用回复、运行态摘要与统一输入栏 100% 一致。
      - **会话**（`ide.inspector.tabSession`）：挂载 `NodeSessionPanel` 展示实时可折叠工具调用卡片。
      - **输出**（`sb.detailOutput`）：挂载 `WorkerOutputDockView` 查看原始终端/transcript 流。
+   - **底部悬浮状态胶囊**：协调模式与句柄固定在侧栏底部中央，不遮挡可滚动的任务列表或详情。点击胶囊向上展开 Run 健康详情和完整句柄。
 
 ---
 

@@ -16,6 +16,10 @@ export interface BridgeApiResponse {
   body: Record<string, unknown>
 }
 
+export type SkillInstallReply =
+  | { ok: true; installed: number; upToDate: number }
+  | { ok: false; code: 'confirmation_required' | 'bundle_unavailable' | 'install_failed' | 'skill_busy' }
+
 export interface ActivitySubscribeRequest {
   runId: string
 }
@@ -40,6 +44,10 @@ declare module 'orca' {
     'orca-dag.api': {
       input: BridgeApiRequest
       output: BridgeApiResponse
+    }
+    'orca-dag.skill.install': {
+      input: { confirmed: boolean }
+      output: SkillInstallReply
     }
     'orca-dag.activity.subscribe': {
       input: ActivitySubscribeRequest

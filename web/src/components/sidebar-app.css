@@ -151,36 +151,16 @@
   color: var(--fg-primary);
 }
 
+.odag-sb__tab-btn:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 /* Progress strip (native <progress> styled per modern-web-guidance) */
 .odag-sb__progress-row {
   display: flex;
   flex-direction: column;
   gap: 6px;
-}
-
-.odag-sb__mode-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  min-inline-size: 0;
-}
-
-.odag-sb__mode-handle {
-  display: none;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--fg-tertiary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-inline-size: 0;
-}
-
-@container (min-width: 340px) {
-  .odag-sb__mode-handle {
-    display: inline-block;
-  }
 }
 
 .odag-sb__progress-meta {
@@ -371,6 +351,47 @@
 .odag-sb__tab-badge--warn {
   background: color-mix(in oklab, var(--st-failed), transparent 82%);
   color: var(--st-failed);
+}
+
+/* --- Floating Status Capsule --------------------------------------------- */
+
+.odag-sb__status {
+  /* Outside the scroll region so the last row and chat composer stay clear. */
+  flex: none;
+  align-self: center;
+  max-inline-size: calc(100% - 24px);
+  margin-block: 4px 12px;
+}
+
+.odag-sb__status .runhealth {
+  display: flex;
+}
+
+.odag-sb__status .runhealth__chip {
+  max-inline-size: 100%;
+  min-block-size: 30px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font: 500 var(--text-xs)/1.25 var(--font-sans);
+  box-shadow: var(--shadow-float);
+}
+
+.odag-sb__status :is(svg, .runhealth__flag, .runhealth__info-dot) {
+  flex: none;
+}
+
+.odag-sb__status :is(.runhealth__chip-label, .runhealth__chip-handle) {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.odag-sb__status .runhealth__chip-handle {
+  max-inline-size: 18ch;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--fg-secondary);
 }
 
 /* --- Main Scroll Container (Standard + Legacy Scrollbar Styling) ---------- */

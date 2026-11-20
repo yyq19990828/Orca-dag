@@ -3956,17 +3956,6 @@
     border-color: color-mix(in oklab, var(--st-failed), transparent 60%) !important;
   }
 
-  .runhealth__chip--compact {
-    min-block-size: 24px !important;
-    padding: 2px 8px !important;
-    font-family: var(--font-sans) !important;
-    font-size: var(--text-xs) !important;
-    font-weight: 500 !important;
-    line-height: 1.25 !important;
-    border-radius: 999px !important;
-    gap: 5px !important;
-  }
-
   /* Shared fine-grained orchestration mode badges & Settings mode matrix */
   .odag-mode-pill {
     display: inline-flex;

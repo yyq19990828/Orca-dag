@@ -11,6 +11,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { stageSkill } from "./stage-skill.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const webDir = join(root, "web");
@@ -85,3 +86,4 @@ execFileSync(
   ],
   { cwd: root, stdio: "inherit" },
 );
+stageSkill(join(root, "skill"), join(serverOutDir, "skill"));

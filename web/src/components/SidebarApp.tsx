@@ -9,6 +9,7 @@ import {
 } from "react";
 import {
   ArrowLeft,
+  BookDown,
   ChevronRight,
   Crosshair,
   ExternalLink,
@@ -28,7 +29,7 @@ import {
   resolveGate,
   resumeWorkerSession,
 } from "../api";
-import { openActivityStream } from "../bridge/orcaBridge";
+import { installPluginSkill, isOrcaPluginFrame, openActivityStream } from "../bridge/orcaBridge";
 import {
   effectiveHarness,
   initConfig,
@@ -49,7 +50,6 @@ import type {
   TaskStatus,
   WorkerRowView,
 } from "../types";
-import { formatCoordinatorHandleShort } from "../coordinationMode";
 import { useRunHealth } from "../useRunHealth";
 import { usePageVisible } from "../visibility";
 import { ChatPanel } from "./ChatPanel";
@@ -174,6 +174,7 @@ export default function SidebarApp() {
   const [detailTab, setDetailTab] = useState<DetailTab>("messages");
   const [selectedOutputDispatchId, setSelectedOutputDispatchId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [installingSkill, setInstallingSkill] = useState(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const [resumePreview, setResumePreview] = useState<NativeResumePreviewView | null>(null);
@@ -400,6 +401,29 @@ export default function SidebarApp() {
     setResumePickedSession("");
     setResumeReceipt(null);
   }, [selectedTask, selectedTaskWorkers]);
+
+  const handleInstallSkill = async () => {
+    const title = t("sb.skill.title");
+    const confirmed = await dialog.confirm({
+      title,
+      message: t("sb.skill.confirm"),
+      confirmLabel: t("sb.skill.apply"),
+    });
+    if (!confirmed) return;
+
+    setInstallingSkill(true);
+    try {
+      const receipt = await installPluginSkill().catch(() => null);
+      await dialog.alert({
+        title,
+        message: receipt
+          ? (receipt.installed || receipt.upToDate ? t("sb.skill.result", receipt) : t("sb.skill.noTargets"))
+          : t("sb.skill.failed"),
+      });
+    } finally {
+      setInstallingSkill(false);
+    }
+  };
 
   const handleOpenTab = useCallback(async (hash?: string) => {
     setActionError(null);
@@ -675,6 +699,20 @@ export default function SidebarApp() {
             ref={setExecActionHost}
             hidden={!runId && !status?.running}
           />
+          {isOrcaPluginFrame() && (
+            <button
+              type="button"
+              className="odag-sb__tab-btn"
+              title={t("sb.skill.title")}
+              aria-label={t("sb.skill.title")}
+              aria-busy={installingSkill}
+              disabled={installingSkill}
+              onClick={() => void handleInstallSkill()}
+            >
+              <BookDown size={12} aria-hidden="true" />
+              <span>{t("sb.skill.button")}</span>
+            </button>
+          )}
           <button
             type="button"
             className="odag-sb__tab-btn"
@@ -696,19 +734,6 @@ export default function SidebarApp() {
 
         {runId && (
           <div className="odag-sb__progress-row">
-            {runHealth && (
-              <div className="odag-sb__mode-row">
-                <RunHealthBadge runId={runId} health={runHealth} compact align="start" />
-                {runHealth.coordinatorHandle && (
-                  <span
-                    className="odag-sb__mode-handle"
-                    title={runHealth.coordinatorHandle}
-                  >
-                    {formatCoordinatorHandleShort(runHealth.coordinatorHandle, 20)}
-                  </span>
-                )}
-              </div>
-            )}
             <div className="odag-sb__progress-meta">
               <progress
                 className="odag-sb__progress"
@@ -1295,6 +1320,11 @@ export default function SidebarApp() {
             )}
           </div>
         </>
+      )}
+      {runId && runHealth && (
+        <div className="odag-sb__status">
+          <RunHealthBadge runId={runId} health={runHealth} sidebar />
+        </div>
       )}
     </div>
   );

@@ -92,6 +92,25 @@ export function subscribeOrcaHostTheme(onChange: (payload?: unknown) => void): (
   return () => disposeOf(sub);
 }
 
+async function requestPlugin<T>(name: string, input: unknown): Promise<T> {
+  const host = getOrcaGlobal();
+  if (!host?.plugin?.request) {
+    throw new Error("Orca plugin bridge is unavailable.");
+  }
+  const raw = await host.plugin.request<T | { output: T }>(name, input);
+  if (raw && typeof raw === "object" && "output" in raw) return raw.output;
+  return raw as T;
+}
+
+/** Invoke only after the operator confirms installing the bundled skill. */
+export async function installPluginSkill(): Promise<{ installed: number; upToDate: number }> {
+  const receipt = await requestPlugin<Record<string, unknown>>("orca-dag.skill.install", { confirmed: true });
+  if (receipt?.ok !== true || typeof receipt.installed !== "number" || typeof receipt.upToDate !== "number") {
+    throw new Error("The Orca plugin could not install its bundled skill.");
+  }
+  return { installed: receipt.installed, upToDate: receipt.upToDate };
+}
+
 /**
  * Route an API call through `window.orca.plugin.request("orca-dag.api", ...)`
  * when running inside a native Orca plugin frame.
@@ -101,19 +120,7 @@ export async function pluginApiRequest(
   url: string,
   body?: unknown,
 ): Promise<OrcaPluginBridgeResponse> {
-  const host = getOrcaGlobal();
-  if (!host?.plugin?.request) {
-    throw new Error("Orca plugin bridge is unavailable.");
-  }
-  const payload = body === undefined ? { method, url } : { method, url, body };
-  const raw = await host.plugin.request<OrcaPluginBridgeResponse | { output?: OrcaPluginBridgeResponse }>(
-    "orca-dag.api",
-    payload,
-  );
-  if (raw && typeof raw === "object" && "output" in raw && raw.output) {
-    return raw.output;
-  }
-  return raw as OrcaPluginBridgeResponse;
+  return requestPlugin("orca-dag.api", body === undefined ? { method, url } : { method, url, body });
 }
 
 let outputSubSeq = 0;

@@ -71,6 +71,14 @@
       {
         "id": "orchestration-panel.reconnect",
         "title": "Orchestration Panel: Reconnect Viewer"
+      },
+      {
+        "id": "orchestration-panel.installSkill",
+        "title": "Orchestration Panel: Install or Update Agent Skill"
+      },
+      {
+        "id": "orchestration-panel.uninstallSkill",
+        "title": "Orchestration Panel: Uninstall Agent Skill"
       }
     ],
     "settings": [

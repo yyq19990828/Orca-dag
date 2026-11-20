@@ -11,8 +11,8 @@ import { CoordinationModeIcon } from "./CoordinationModeIcon";
 /**
  * Compact Run orchestration-mode & health indicator (operations epic O2).
  *
- * Sits next to the Run selector (full workbench topbar and narrow Orca sidebar)
- * and answers two operational questions at a glance:
+ * Sits beside the Run selector in the full workbench, or at the bottom of
+ * the Orca sidebar, and answers two operational questions at a glance:
  *  - which coordination mode is active (Human · Panel, Agent · Orca Native Chat,
  *    Agent · External Terminal PTY, Panel mismatch, Unbound, or Unknown), and
  *    whether this panel is active control or read-only observation;
@@ -44,15 +44,13 @@ function formatCounts(health: RunHealthView): string {
 export function RunHealthBadge({
   runId,
   health: providedHealth,
-  compact = false,
-  align = "end",
+  sidebar = false,
 }: {
   runId: string;
   /** Optional shared snapshot from parent `useRunHealth`; omits duplicate polling when passed. */
   health?: RunHealthView | null;
-  /** Compact variant for narrow containers (e.g. Orca right-sidebar panel). */
-  compact?: boolean;
-  align?: "start" | "center" | "end";
+  /** The sidebar capsule includes the handle and opens its popover upward. */
+  sidebar?: boolean;
 }) {
   const t = useT();
   const pollOwn = providedHealth === undefined;
@@ -135,11 +133,14 @@ export function RunHealthBadge({
       <Popover.Trigger asChild>
         <button
           type="button"
-          className={`runhealth__chip runhealth__chip--${meta.tone}${compact ? " runhealth__chip--compact" : ""}`}
+          className={`runhealth__chip runhealth__chip--${meta.tone}`}
           title={`${t(meta.label)} — ${t(meta.brief)}\n${health.ownershipDetail}`}
         >
-          <CoordinationModeIcon mode={mode} size={compact ? 11 : 13} />
-          <span>{t(meta.shortLabel)}</span>
+          <CoordinationModeIcon mode={mode} size={sidebar ? 11 : 13} />
+          <span className="runhealth__chip-label">{t(meta.shortLabel)}</span>
+          {sidebar && health.coordinatorHandle && (
+            <code className="runhealth__chip-handle">{health.coordinatorHandle}</code>
+          )}
           {warningCount > 0 && <b className="runhealth__flag">{warningCount}</b>}
           {warningCount === 0 && infoCount > 0 && <span className="runhealth__info-dot">i</span>}
         </button>
@@ -150,7 +151,8 @@ export function RunHealthBadge({
           role="region"
           aria-label={t("health.panelAria")}
           sideOffset={8}
-          align={align}
+          side={sidebar ? "top" : "bottom"}
+          align={sidebar ? "center" : "end"}
           collisionPadding={12}
         >
           <div className="runhealth__row">

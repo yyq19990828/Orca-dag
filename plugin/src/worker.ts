@@ -9,11 +9,12 @@
 //    deliver gate/failure notifications, and execute approved host commands
 //    (such as `agent.resume` in M3).
 // 4. Report connection status without exposing privileged host diagnostics.
-import { spawn, type ChildProcess } from 'node:child_process'
+import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { pluginRequestToken, readPluginEndpointFile, signPluginReply, type PluginEndpointRecord } from './endpoint'
 import type {
@@ -23,6 +24,7 @@ import type {
   OutputSubscribeRequest,
   OutputUnsubscribeRequest,
   ProbeRequest,
+  SkillInstallReply,
 } from './protocol'
 
 const PLUGIN_ID = 'orchestration-panel'
@@ -35,6 +37,11 @@ const INBOX_WAIT_MS = 10_000
 const MAX_PANEL_POST_BYTES = 220 * 1024
 const MANAGED_START_TIMEOUT_MS = 8_000
 const MANAGED_POLL_INTERVAL_MS = 80
+const execFileAsync = promisify(execFile)
+
+type SkillUninstallReply =
+  | { ok: true; removed: number; failed: number }
+  | { ok: false; code: 'bundle_unavailable' | 'uninstall_failed' }
 
 interface BundledAssets {
   serverEntry: string
@@ -169,6 +176,8 @@ export default function activate(orca: OrcaWorkerApi): void {
   const outputStreams = new Map<string, AbortController>()
   let focusedWorkspaceId: string | null = null
   const bundledAssets = resolveBundledAssets()
+  let skillInstall: Promise<SkillInstallReply> | undefined
+  let skillUninstall: Promise<SkillUninstallReply> | undefined
 
   const state: RingState = {
     activatedAt: Date.now(),
@@ -728,6 +737,65 @@ export default function activate(orca: OrcaWorkerApi): void {
     return { ok: true, viewers: connectionSummary() }
   })
 
+  function runSkillTool<T>(serverEntry: string, flag: '--install-plugin-skill' | '--uninstall-plugin-skill'): Promise<T> {
+    // The worker selects the bundled executable and fixed action, never a
+    // workspace path, launch argument from the caller, or external viewer.
+    return execFileAsync(process.execPath, [serverEntry, flag], {
+      cwd: dirname(serverEntry),
+      timeout: 15_000,
+      maxBuffer: 4096,
+    }).then(({ stdout }) => JSON.parse(stdout) as T)
+  }
+
+  function installBundledSkill(): SkillInstallReply | Promise<SkillInstallReply> {
+    if (!bundledAssets) return { ok: false, code: 'bundle_unavailable' }
+    if (skillUninstall) return { ok: false, code: 'skill_busy' }
+
+    // A confirmed write can complete after its caller closes. Share an install
+    // already in flight between Orca commands and panels.
+    return skillInstall ??= runSkillTool<SkillInstallReply>(bundledAssets.serverEntry, '--install-plugin-skill')
+      .catch(() => ({ ok: false, code: 'install_failed' }) as const)
+      .finally(() => { skillInstall = undefined })
+  }
+
+  orca.commands.register('orchestration-panel.installSkill', async (_args, { signal }) => {
+    // Choosing this explicitly named install command is the user's action.
+    // The sidebar uses its own confirmation before calling the same installer.
+    if (signal.aborted) return 'Agent skill installation cancelled.'
+    const result = await installBundledSkill()
+    if (!result.ok) {
+      if (result.code === 'skill_busy') return 'Skill removal is in progress. Try installing again after it finishes.'
+      return result.code === 'bundle_unavailable'
+        ? 'The orca-dag skill is missing from this plugin bundle.'
+        : 'Could not confirm the orca-dag skill installation. Check the plugin bundle and local permissions.'
+    }
+    if (result.installed === 0 && result.upToDate === 0) {
+      return 'No writable, supported Agent skill directory could be confirmed.'
+    }
+    return `orca-dag skill directories installed or updated: ${result.installed}. Already current: ${result.upToDate}.`
+  })
+
+  orca.commands.register('orchestration-panel.uninstallSkill', async (_args, { signal }) => {
+    if (signal.aborted) return 'Agent skill removal cancelled.'
+    if (!bundledAssets) return 'The orca-dag skill is missing from this plugin bundle.'
+    if (skillInstall) return 'Skill installation is in progress. Try uninstalling again after it finishes.'
+
+    skillUninstall ??= runSkillTool<SkillUninstallReply>(bundledAssets.serverEntry, '--uninstall-plugin-skill')
+      .catch(() => ({ ok: false, code: 'uninstall_failed' }) as const)
+      .finally(() => { skillUninstall = undefined })
+    const result = await skillUninstall
+    if (!result.ok) {
+      return result.code === 'bundle_unavailable'
+        ? 'The orca-dag skill is missing from this plugin bundle.'
+        : 'Could not confirm orca-dag skill removal. Check the plugin bundle and local permissions.'
+    }
+    if (result.failed > 0) {
+      return `Removed orca-dag skill files from ${result.removed} directories. Could not finish removal in ${result.failed}; check directory permissions.`
+    }
+    if (result.removed === 0) return 'No managed orca-dag skill files were removed.'
+    return `Removed managed orca-dag skill files from ${result.removed} directories. User preferences were kept.`
+  })
+
   // --- Panel & diagnostic handlers ---
   orca.panels.handle('orchestration-panel.probe', async (rawInput) => {
     const input = (rawInput ?? { action: 'ping' }) as ProbeRequest
@@ -898,6 +966,13 @@ export default function activate(orca: OrcaWorkerApi): void {
       // Panel may have closed.
     }
   }
+
+  orca.panels.handle('orca-dag.skill.install', (input, { panel, signal }): SkillInstallReply | Promise<SkillInstallReply> => {
+    if (panel.surface !== 'panel' || panel.contributionId !== 'orchestration' || input?.confirmed !== true || signal.aborted) {
+      return { ok: false, code: 'confirmation_required' }
+    }
+    return installBundledSkill()
+  })
 
   orca.panels.handle('orca-dag.api', async (rawInput, ctx): Promise<BridgeApiResponse> => {
     const req = (rawInput ?? {}) as Partial<BridgeApiRequest>

@@ -49,6 +49,10 @@ orca-ide plugin dev load ./plugin --json
 
 Once approved and running, the plugin automatically spawns an isolated loopback backend per active workspace whenever no external viewer terminal is running (and transparently attaches/fails over if you start or close one). Open the **Orchestration Panel** sidebar icon in Orca's right rail or click the status bar item to jump straight into the full workbench Tab. See [`plugin/README.md`](plugin/README.md) for staging `dist-plugin/`.
 
+In Orca's plugin details or command palette, run **Orchestration Panel: Install or Update Agent Skill**. Alternatively, select **Skill** in the plugin sidebar and confirm **Install or update**. Both install the bundled `orca-dag` skill into detected local Agent skill directories without a Run, viewer connection, or download. They preserve `USER_PREFERENCES.md`. Installing or starting the plugin never installs the skill automatically.
+
+To remove just the skill, run **Orchestration Panel: Uninstall Agent Skill**. It removes managed skill files and leaves preferences, custom files, symlinked skill checkouts, the plugin, and workspace data untouched.
+
 Before using the plugin in a Git project that does not already ignore `.orca-dag/`, add `.orca-dag/` to the project's `.gitignore`. The plugin does not edit `.gitignore` automatically.
 
 ## Quick Start

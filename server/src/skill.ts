@@ -11,7 +11,7 @@
 // No symlinks (they break when the npx cache is evicted), no agent config edits,
 // no network. Opt out with `--no-skill` / `ORCA_DAG_NO_SKILL=1`.
 
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import type { Stats } from "node:fs";
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { loadEmbeddedSkillFiles } from "./webAssets";
@@ -249,10 +249,11 @@ function migrateLegacySkillDir(sources: string[], destination: string, destinati
  * Disk candidates cover the npm package (`<pkg>/skill/`, two levels up from
  * `<pkg>/dist/server/`) and a dev checkout (`<repo>/skill/`, two levels up from
  * `<repo>/server/src/`) — which happen to match.
+ * The explicit plugin install is pinned to its staged bundle directory.
  */
-async function readSkillFiles(here: string): Promise<Map<string, string> | null> {
+async function readSkillFiles(here: string, bundledSkillRoot?: string): Promise<Map<string, string> | null> {
   try {
-    const embedded = await loadEmbeddedSkillFiles();
+    const embedded = bundledSkillRoot ? null : await loadEmbeddedSkillFiles();
     if (embedded && typeof embedded["SKILL.md"] === "string") {
       const files = new Map<string, string>();
       files.set("SKILL.md", embedded["SKILL.md"]);
@@ -267,8 +268,12 @@ async function readSkillFiles(here: string): Promise<Map<string, string> | null>
   } catch {
     // Fall back to disk if the binary's embedded assets are unavailable.
   }
-  for (const skillRoot of [join(here, "..", "..", "skill"), join(here, "..", "..", "..", "skill")]) {
+  const roots = bundledSkillRoot
+    ? [bundledSkillRoot]
+    : [join(here, "..", "..", "skill"), join(here, "..", "..", "..", "skill")];
+  for (const skillRoot of roots) {
     try {
+      if (bundledSkillRoot && !lstatIfPresent(skillRoot)?.isDirectory()) continue;
       const entryPath = join(skillRoot, "SKILL.md");
       if (!existsSync(entryPath)) continue;
       const entryStat = lstatSync(entryPath);
@@ -303,14 +308,18 @@ async function readSkillFiles(here: string): Promise<Map<string, string> | null>
  * stop the viewer from starting — the skill is a convenience, the UI is the
  * product.
  */
-export async function installSkill(moduleDir: string, enabled: boolean): Promise<SkillInstallResult> {
+export async function installSkill(
+  moduleDir: string,
+  enabled: boolean,
+  bundledSkillRoot?: string,
+): Promise<SkillInstallResult> {
   const result: SkillInstallResult = { installed: [], upToDate: [], skipped: null };
   if (!enabled) {
     result.skipped = "disabled";
     return result;
   }
 
-  const skillFiles = await readSkillFiles(moduleDir);
+  const skillFiles = await readSkillFiles(moduleDir, bundledSkillRoot);
   if (!skillFiles) {
     result.skipped = "not-found";
     return result;
@@ -381,6 +390,47 @@ export async function installSkill(moduleDir: string, enabled: boolean): Promise
     }
   }
   return result;
+}
+
+/** The plugin command removes only files it ships, not workspace state or user content. */
+export async function uninstallBundledSkill(moduleDir: string): Promise<{ removed: number; failed: number } | null> {
+  const files = await readSkillFiles(moduleDir, join(moduleDir, "skill"));
+  if (!files) return null;
+
+  let removed = 0;
+  let failed = 0;
+  for (const { skills, safeRoot } of resolveAgentSkillDirs()) {
+    const dir = join(skills, SKILL_NAME);
+    if (!isSafeSkillPath(dir, false, safeRoot)) continue;
+    let changed = false;
+    let incomplete = false;
+    for (const name of files.keys()) {
+      const target = join(dir, name);
+      if (!isSafeSkillPath(target, false, safeRoot)) continue;
+      try {
+        if (!lstatIfPresent(target)?.isFile()) continue;
+        unlinkSync(target);
+        changed = true;
+      } catch {
+        incomplete = true;
+      }
+    }
+    if (changed) {
+      removed++;
+      // Remove empty directories only; user files also keep their parent.
+      for (const target of [join(dir, "references"), dir]) {
+        if (!isSafeSkillPath(target, false, safeRoot)) continue;
+        try {
+          if (lstatIfPresent(target)?.isDirectory()) rmdirSync(target);
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code !== "ENOTEMPTY" && code !== "EEXIST" && code !== "ENOENT") incomplete = true;
+        }
+      }
+    }
+    if (incomplete) failed++;
+  }
+  return { removed, failed };
 }
 
 export interface SkillInstallResult {

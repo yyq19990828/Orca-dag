@@ -19,6 +19,7 @@ English | [简体中文](ui-layout_zh.md) · [Documentation](README.md)
      - **Messages** (`chat.view.messages`): embeds `<ChatPanel embeddedMessagesOnly />` inside `.odag-inspector--compact-chat`, guaranteeing 100% identical chat bubbles, avatars, recovered briefs, reply quotes, status summary, and unified composer.
      - **Session** (`ide.inspector.tabSession`): mounts `NodeSessionPanel` for live collapsible tool-call cards.
      - **Output** (`sb.detailOutput`): mounts `WorkerOutputDockView` for raw terminal/transcript tailing.
+   - **Bottom Status Capsule**: The coordination mode and handle stay centered below the scrollable list or task detail without covering either. Open the capsule to see Run health and the full handle above it.
 
 ---
 

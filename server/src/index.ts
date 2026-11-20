@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
+import { writeSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { runOrca, initOrcaRuntime, getOrcaRuntime, formatCommand, checkReadiness } from "./orca";
 import { loadEmbeddedAssets } from "./webAssets";
-import { describeSkillInstall, installSkill } from "./skill";
+import { describeSkillInstall, installSkill, uninstallBundledSkill } from "./skill";
 import { createApp, listenLoopback } from "./app";
 import { createSecurityPolicy } from "./security";
 import { describePlanningSetup, setupPlanningWorkspace } from "./planning";
@@ -77,6 +78,23 @@ if (argv.includes("uninstall")) {
     purge: argv.includes("--purge"),
     workspace: RAW_WORKSPACE_DIR,
   });
+  process.exit(0);
+}
+
+// Private entry points for the trusted plugin worker's explicit skill actions.
+// Do not initialize a workspace, bind a port or fall back to another skill source.
+if (argv[0] === "--install-plugin-skill") {
+  const result = await installSkill(__dirname, true, join(__dirname, "skill"));
+  const receipt = result.skipped === null
+    ? { ok: true, installed: result.installed.length, upToDate: result.upToDate.length }
+    : { ok: false, code: "bundle_unavailable" };
+  writeSync(1, JSON.stringify(receipt) + "\n");
+  process.exit(0);
+}
+
+if (argv[0] === "--uninstall-plugin-skill") {
+  const result = await uninstallBundledSkill(__dirname);
+  writeSync(1, JSON.stringify(result ? { ok: true, ...result } : { ok: false, code: "bundle_unavailable" }) + "\n");
   process.exit(0);
 }
 

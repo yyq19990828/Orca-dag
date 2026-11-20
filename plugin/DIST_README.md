@@ -42,7 +42,11 @@ orca plugin install {{PLUGIN_REPO}}@v{{VERSION}} --json
 
 ### Companion Agent Skill (Optional)
 
-To teach Claude Code, Codex, OpenCode, or Orca agents how to turn requirements into PRDs, technical specs, and runnable task DAGs before opening the panel:
+After installing the plugin, run **Orchestration Panel: Install or Update Agent Skill** from the plugin details or command palette. Alternatively, open the plugin sidebar and select **Skill → Install or update**. Both install the bundled `orca-dag` version into detected local Agent skill directories without a selected Run, viewer connection, or download. They preserve `USER_PREFERENCES.md`. Installing or starting the plugin does not install the skill automatically.
+
+Use **Orchestration Panel: Uninstall Agent Skill** to remove only the bundled skill's managed files from local Agent skill directories. Preferences, custom files, symlinked skill checkouts, the plugin, and workspace data remain untouched.
+
+Without the plugin, you can install the skill separately:
 
 ```bash
 npx skills add yyq19990828/orca-orchestration-launcher --skill orca-dag
@@ -57,6 +61,8 @@ npx skills add yyq19990828/orca-orchestration-launcher --skill orca-dag
 | `orchestration-panel.openTab` | Orchestration Panel: Open Full Tab | Open or revive the full 4-zone DAG workbench in an Orca browser tab |
 | `orchestration-panel.status` | Orchestration Panel: Connection Status | Show active workspace bridge connection status |
 | `orchestration-panel.reconnect` | Orchestration Panel: Reconnect Viewer | Re-probe endpoints / restart the embedded backend for the active workspace |
+| `orchestration-panel.installSkill` | Orchestration Panel: Install or Update Agent Skill | Install the bundled `orca-dag` skill and report how many directories changed or were already current |
+| `orchestration-panel.uninstallSkill` | Orchestration Panel: Uninstall Agent Skill | Remove managed `orca-dag` skill files without uninstalling the plugin |
 
 ### Settings
 
