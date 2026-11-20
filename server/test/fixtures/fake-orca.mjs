@@ -316,6 +316,7 @@ function workerRows(runId, terminalStateFilter) {
       dispatchStatus: d.status,
       agentTerminalHandle: d.agentTerminal ?? null,
       terminalState: d.terminalState ?? "active",
+      ...(d.resource ? { resource: d.resource } : {}),
       projection: {
         id: d.id,
         dispatchId: d.id,

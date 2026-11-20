@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import { AlertOctagon, CheckCircle2, Clock, Lock, PlayCircle } from "lucide-react";
 import type { Gate, TaskStatus } from "../types";
 
@@ -37,6 +38,7 @@ export function StatusGlyph({
       return (
         <span
           className={executing ? "odag-pulse-dot odag-pulse-dot--live" : "odag-pulse-dot"}
+          style={{ "--dot-color": "var(--st-dispatched)" } as CSSProperties}
           aria-hidden="true"
         />
       );

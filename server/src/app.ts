@@ -500,6 +500,22 @@ export function createApp(opts: CreateAppOptions): {
   const viewerCreatedRunIds = new Set<string>();
   const activityJournal = new ActivityJournal(workspaceDir);
   const activityCache = new Map<string, { at: number; value: Promise<ActivitySnapshot> }>();
+  // Active `/api/activity/stream` subscribers keyed by Run id so local
+  // mutations (replies, guidance, broadcasts, dispatches, inbox checks) wake
+  // SSE streams immediately (<100ms) instead of waiting for the 2s fallback
+  // poll interval. External Orca-side events still surface on the 2s tick.
+  const activitySubscribers = new Map<string, Set<() => void>>();
+  const notifyActivitySubscribers = (runId: string): void => {
+    const listeners = activitySubscribers.get(runId);
+    if (!listeners || listeners.size === 0) return;
+    for (const wake of [...listeners]) {
+      try {
+        wake();
+      } catch {
+        /* isolate one broken SSE subscriber from mutations and sibling streams */
+      }
+    }
+  };
   // Presentation GETs can poll the same Run at once. Share only their
   // identical reads while they are pending; settled values are never cached.
   const presentationReads = new Map<string, Promise<unknown>>();
@@ -684,6 +700,7 @@ export function createApp(opts: CreateAppOptions): {
       // the user to repeat the mutation.
     } finally {
       activityCache.delete(event.runId);
+      notifyActivitySubscribers(event.runId);
     }
   };
 
@@ -1635,6 +1652,7 @@ export function createApp(opts: CreateAppOptions): {
         onCheck: async (receipt) => {
           await activityJournal.appendCheck(runId, receipt);
           activityCache.delete(runId);
+          notifyActivitySubscribers(runId);
         },
         // Phase 5: the coordinator's mutation requests (worker-start/release/
         // retain/stop) land in the durable ledger — best-effort, metadata
@@ -2717,29 +2735,58 @@ export function createApp(opts: CreateAppOptions): {
     res.flushHeaders();
     let closed = false;
     let lastSignature = "";
+    let inFlight = false;
+    let pendingFlush = false;
     const send = async () => {
+      if (closed) return;
+      if (inFlight) {
+        pendingFlush = true;
+        return;
+      }
+      inFlight = true;
       try {
-        const snapshot = await loadActivity(runId!);
-        const signature = JSON.stringify([
-          snapshot.events[0]?.id ?? "empty",
-          snapshot.events.length,
-          snapshot.pendingCount,
-          snapshot.events.slice(0, 20).map((event) => [event.id, event.createdAt, event.groupedCount]),
-        ]);
-        if (signature !== lastSignature && !closed) {
-          lastSignature = signature;
-          res.write(`id: ${snapshot.events[0]?.id ?? snapshot.generatedAt}\n`);
-          res.write(`data: ${JSON.stringify(snapshot)}\n\n`);
-        }
+        do {
+          pendingFlush = false;
+          const snapshot = await loadActivity(runId!);
+          const signature = JSON.stringify([
+            snapshot.events[0]?.id ?? "empty",
+            snapshot.events.length,
+            snapshot.pendingCount,
+            snapshot.checks.length,
+            snapshot.checks[0]?.sequence ?? null,
+            snapshot.events.slice(0, 20).map((event) => [event.id, event.createdAt, event.groupedCount]),
+          ]);
+          if (signature !== lastSignature && !closed) {
+            lastSignature = signature;
+            res.write(`id: ${snapshot.events[0]?.id ?? snapshot.generatedAt}\n`);
+            res.write(`data: ${JSON.stringify(snapshot)}\n\n`);
+          }
+        } while (pendingFlush && !closed);
       } catch (err) {
         if (!closed) res.write(`event: error\ndata: ${JSON.stringify({ error: String((err as Error).message ?? err) })}\n\n`);
+      } finally {
+        inFlight = false;
       }
     };
+    const wake = () => {
+      void send();
+    };
+    let listeners = activitySubscribers.get(runId);
+    if (!listeners) {
+      listeners = new Set();
+      activitySubscribers.set(runId, listeners);
+    }
+    listeners.add(wake);
     void send();
-    const timer = setInterval(() => void send(), 2_000);
+    const timer = setInterval(wake, 2_000);
     req.on("close", () => {
       closed = true;
       clearInterval(timer);
+      const current = activitySubscribers.get(runId!);
+      if (current) {
+        current.delete(wake);
+        if (current.size === 0) activitySubscribers.delete(runId!);
+      }
     });
   });
 

@@ -1,5 +1,5 @@
 import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { acknowledgeStopEvent, ApiError, decideWorkerPermission, replyToMessage, sendTaskMessage } from "../api";
+import { acknowledgeStopEvent, ApiError, decideWorkerPermission, releaseWorker, replyToMessage, retainWorker, sendTaskMessage } from "../api";
 import { formatClock, formatDateTime, isUrgent, priorityLabel } from "../format";
 import { t, useLang, useT } from "../i18n";
 import { useDecisionDialog } from "./DecisionDialog";
@@ -634,6 +634,62 @@ export const ChatPanel = memo(function ChatPanel({
     } finally { setActionBusy(false); }
   }
 
+  async function decideCleanup(event: ActivityEvent, action: "release" | "retain") {
+    const targetId = event.actionable?.targetId;
+    if (!targetId || disabled || busy || actionBusy) return;
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      const receipt = action === "release"
+        ? await releaseWorker(runId, targetId)
+        : await retainWorker(runId, targetId);
+      setOperatorReceipt({ runId, value: JSON.stringify(receipt) });
+      onResolved();
+    } catch (error) {
+      setActionError(String((error as Error).message ?? error));
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  function renderCleanupActions(event: ActivityEvent) {
+    if (event.actionable?.kind !== "release" && event.actionable?.kind !== "retain") return null;
+    const targetId = event.actionable.targetId;
+    return (
+      <div className="chat-message__actions">
+        {event.actionable.kind === "release" && (
+          <button
+            type="button"
+            className="btn btn--gate"
+            disabled={disabled || busy || actionBusy}
+            aria-label={`${t("activity.release")} ${targetId}`}
+            onClick={() => void decideCleanup(event, "release")}
+          >
+            {t("activity.release")}
+          </button>
+        )}
+        <button
+          type="button"
+          className="btn"
+          disabled={disabled || busy || actionBusy}
+          aria-label={`${t("activity.retain")} ${targetId}`}
+          onClick={() => void decideCleanup(event, "retain")}
+        >
+          {t("activity.retain")}
+        </button>
+        <button
+          type="button"
+          className="btn"
+          disabled={actionBusy}
+          aria-label={`${t("attention.reviewWorker")} ${targetId}`}
+          onClick={() => onSelectWorker(targetId)}
+        >
+          {t("attention.reviewWorker")}
+        </button>
+      </div>
+    );
+  }
+
   async function sendMessage() {
     const body = draft.trim();
     const targetId = replyTarget?.actionable?.targetId;
@@ -886,6 +942,7 @@ export const ChatPanel = memo(function ChatPanel({
                   <div key={event.id} className={`chat-message chat-message--system chat-message--${event.severity}`}>
                     <span>{event.title}</span>
                     <p>{messageBody(event)}</p>
+                    {renderCleanupActions(event)}
                     <time dateTime={event.createdAt}>{formatDateTime(event.createdAt)}</time>
                   </div>
                 ) : (
@@ -998,6 +1055,7 @@ export const ChatPanel = memo(function ChatPanel({
                         )}
                       </div>
                     )}
+                    {renderCleanupActions(event)}
                     {event.detail?.trim() && event.detail.trim() !== event.summary.trim() && (
                       <details className="chat-message__details">
                         <summary>{event.kind === "dispatch_started" ? t("chat.brief.full") : t("chat.report.full")}</summary>

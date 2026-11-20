@@ -4180,6 +4180,138 @@ describe("Phase 5: terminal reuse and retain", () => {
     assert.equal(attempt("task_bbb").terminalDecision, "not_needed", "the failed start created nothing");
     await stopCoordinator();
   });
+
+  it("auto-reconciles donor reuse release_unknown debt once worker-list positively proves terminal transfer", async () => {
+    const runId = "run_reuse_unknown_reconcile";
+    await chainState(runId);
+    await startCoordinator(baseOpts(runId, { maxConcurrency: 2 }));
+    await waitFor(() => (calls("worker-start").length === 1 ? true : null), "A to start");
+    const aDispatch = await dispatchIdOf("task_aaa");
+    const termA = getState().dispatches[aDispatch].agentTerminal as string;
+
+    // Simulate Orca creating B on the reused terminal while returning start_unknown.
+    await mutateState((s) => {
+      s.workerStartUnknown = true;
+    });
+    await settleViaWorkerDone("task_aaa", "succeeded", "msg_ru_unk_1");
+
+    await waitFor(
+      () => (attempt("task_aaa").terminalDecision === "release_unknown" ? true : null),
+      "donor records conservative release_unknown debt",
+    );
+    const bDispatch = await dispatchIdOf("task_bbb");
+    assert.ok(
+      coordinatorStatus().cleanupDebt.some((d) => d.kind === "release_unknown" && d.dispatchId === aDispatch),
+      "donor release_unknown debt is surfaced while transfer is unproven",
+    );
+    assert.equal(
+      callsOf("worker-release", "--dispatch", aDispatch).length,
+      0,
+      "donor terminal must not be auto-released when reuse outcome is unknown",
+    );
+
+    // Orca's authoritative worker-list now reports the exact durable resource transfer
+    // (donor absent/not_materialized; recipient originDispatchId=A, ownerDispatchId=B, same terminal).
+    await mutateState((s) => {
+      delete s.workerStartUnknown;
+      s.dispatches[aDispatch].terminalState = "retained";
+      s.dispatches[aDispatch].resource = {
+        ownershipState: "absent",
+        retainedReason: "not_materialized",
+        originDispatchId: null,
+        ownerDispatchId: null,
+        terminalHandle: null,
+      };
+      s.dispatches[bDispatch].resource = {
+        ownershipState: "owned",
+        retainedReason: null,
+        originDispatchId: aDispatch,
+        ownerDispatchId: bDispatch,
+        terminalHandle: termA,
+      };
+    });
+
+    await waitFor(
+      () => (attempt("task_aaa").terminalDecision === "reused" ? true : null),
+      "donor debt reconciles to reused on positive transfer evidence",
+    );
+    assert.deepEqual(coordinatorStatus().cleanupDebt, [], "donor cleanupDebt clears once transfer is proven");
+    assert.equal(
+      callsOf("worker-release", "--dispatch", aDispatch).length,
+      0,
+      "reconciling transfer never issues a release against the donor",
+    );
+
+    await settleViaWorkerDone("task_bbb", "succeeded", "msg_ru_unk_2");
+    await waitFor(() => (coordinatorStatus().phase === "completed" ? true : null), "run reaches completed");
+    assert.equal(attempt("task_bbb").terminalDecision, "released");
+    assert.deepEqual(coordinatorStatus().cleanupDebt, []);
+  });
+
+  it("keeps donor reuse release_unknown debt open when fleet resource evidence does not positively prove transfer", async () => {
+    const runId = "run_reuse_unknown_unproven";
+    await chainState(runId);
+    await startCoordinator(baseOpts(runId, { maxConcurrency: 2 }));
+    await waitFor(() => (calls("worker-start").length === 1 ? true : null), "A to start");
+    const aDispatch = await dispatchIdOf("task_aaa");
+    const termA = getState().dispatches[aDispatch].agentTerminal as string;
+
+    await mutateState((s) => {
+      s.workerStartUnknown = true;
+    });
+    await settleViaWorkerDone("task_aaa", "succeeded", "msg_ru_unp_1");
+    await waitFor(
+      () => (attempt("task_aaa").terminalDecision === "release_unknown" ? true : null),
+      "donor records release_unknown debt",
+    );
+    const bDispatch = await dispatchIdOf("task_bbb");
+
+    // Case 1: Donor still owns the resource even though recipient mentions originDispatchId.
+    await mutateState((s) => {
+      delete s.workerStartUnknown;
+      s.dispatches[aDispatch].terminalState = "reclaimable";
+      s.dispatches[aDispatch].resource = {
+        ownershipState: "reclaimable",
+        originDispatchId: aDispatch,
+        ownerDispatchId: aDispatch,
+        terminalHandle: termA,
+      };
+      s.dispatches[bDispatch].resource = {
+        ownershipState: "owned",
+        originDispatchId: aDispatch,
+        ownerDispatchId: bDispatch,
+        terminalHandle: termA,
+      };
+    });
+    await settleViaWorkerDone("task_bbb", "succeeded", "msg_ru_unp_2");
+    await waitFor(() => (attempt("task_bbb").terminalDecision === "released" ? true : null), "B released");
+    await waitFor(() => (coordinatorStatus().phase === "awaiting_input" ? true : null), "held in awaiting_input");
+    assert.equal(attempt("task_aaa").terminalDecision, "release_unknown");
+    assert.equal(coordinatorStatus().cleanupDebt.some((d) => d.dispatchId === aDispatch), true);
+
+    // Case 2: Donor becomes absent, but recipient's terminalHandle does not match donor's terminal.
+    await mutateState((s) => {
+      s.dispatches[aDispatch].terminalState = "retained";
+      s.dispatches[aDispatch].resource = {
+        ownershipState: "absent",
+        retainedReason: "not_materialized",
+        originDispatchId: null,
+        ownerDispatchId: null,
+        terminalHandle: null,
+      };
+      s.dispatches[bDispatch].resource = {
+        ownershipState: "released",
+        originDispatchId: aDispatch,
+        ownerDispatchId: bDispatch,
+        terminalHandle: "term_other_handle",
+      };
+    });
+    await new Promise((r) => setTimeout(r, 120));
+    assert.equal(attempt("task_aaa").terminalDecision, "release_unknown", "mismatched terminal handle must not clear debt");
+    assert.equal(coordinatorStatus().phase, "awaiting_input");
+    assert.equal(callsOf("worker-release", "--dispatch", aDispatch).length, 0);
+    await stopCoordinator();
+  });
 });
 
 // --- Phase 5: worker output API + launch-preference API ----------------------

@@ -1988,4 +1988,82 @@ process.stdout.write(JSON.stringify(out));
     assert.ok((recovered.json.nodes as Record<string, unknown>[]).some((node) => node.id === "task_after_failure"));
   });
 
+  it("wakes /api/activity/stream immediately on local viewer activity without waiting 2s", async () => {
+    const sseRun = "run_sse_wake";
+    writeScript({
+      tasksByRun: { [sseRun]: [{ id: "task_sse", run_id: sseRun, status: "dispatched", title: "SSE Task" }] },
+      workerShow: {
+        ctx_sse: workerShowReceipt({ runId: sseRun, taskId: "task_sse", dispatchId: "ctx_sse" }),
+      },
+      workers: [],
+    });
+
+    const controller = new AbortController();
+    const res = await fetch(`${opsBase}/api/activity/stream?run=${sseRun}`, {
+      signal: controller.signal,
+    });
+    assert.equal(res.status, 200);
+    assert.ok(res.body, "SSE response exposes a readable stream");
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    const nextSseSnapshot = async (timeoutMs: number): Promise<Record<string, unknown>> => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const sep = buffer.indexOf("\n\n");
+        if (sep >= 0) {
+          const chunk = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          const dataLine = chunk.split("\n").find((line) => line.startsWith("data: "));
+          if (dataLine) return JSON.parse(dataLine.slice("data: ".length)) as Record<string, unknown>;
+          continue;
+        }
+        const remaining = Math.max(1, deadline - Date.now());
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const next = await Promise.race([
+          reader.read(),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error("timed out waiting for SSE frame")), remaining);
+          }),
+        ]).finally(() => {
+          if (timer) clearTimeout(timer);
+        });
+        if (next.done) throw new Error("SSE stream closed unexpectedly");
+        buffer += decoder.decode(next.value, { stream: true });
+      }
+      throw new Error("timed out waiting for SSE snapshot");
+    };
+
+    try {
+      const initial = await nextSseSnapshot(2_000);
+      assert.equal(initial.runId, sseRun);
+
+      const startedAt = Date.now();
+      const focusRes = await rpc("POST", "/api/workers/ctx_sse/focus", { runId: sseRun }, opsPolicy.token);
+      assert.equal(focusRes.status, 200);
+
+      // Must arrive via immediate event-driven wake-up, well below the 2_000ms fallback poll interval.
+      const pushed = await nextSseSnapshot(1_200);
+      const elapsedMs = Date.now() - startedAt;
+      assert.equal(pushed.runId, sseRun);
+      assert.ok(
+        elapsedMs < 1_200,
+        `expected immediate SSE wake-up (<1200ms), got ${elapsedMs}ms`,
+      );
+      const events = pushed.events as { kind?: string; dispatchId?: string | null }[];
+      assert.ok(
+        events.some((ev) => ev.kind === "focus" && ev.dispatchId === "ctx_sse"),
+        "pushed SSE snapshot includes the freshly recorded activity event",
+      );
+    } finally {
+      controller.abort();
+      await reader.cancel().catch(() => {});
+    }
+
+    // Subsequent activity after disconnect must never throw or leak onto closed streams.
+    const afterClose = await rpc("POST", "/api/workers/ctx_sse/focus", { runId: sseRun }, opsPolicy.token);
+    assert.equal(afterClose.status, 200);
+  });
+
 });

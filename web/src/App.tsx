@@ -123,6 +123,7 @@ const EMPTY_ACTIVITY: ActivitySnapshot = {
 };
 
 const EMPTY_ATTEMPTS: RunAttempt[] = [];
+const EMPTY_ACTIVITY_EVENTS: ActivitySnapshot["events"] = [];
 const POLL_MS = 2000;
 const STAGE_VIEWS: readonly IdeStageView[] = ["canvas", "board", "runs", "resources", "settings"];
 
@@ -1262,9 +1263,12 @@ export default function App() {
                   >
                     <span
                       className={`odag-pulse-dot${selectedRunExecuting ? " odag-pulse-dot--live" : ""}`}
-                      style={{
-                        background: selectedRunExecuting ? "var(--st-completed)" : "var(--fg-tertiary)",
-                      }}
+                      style={
+                        {
+                          "--dot-color": selectedRunExecuting ? "var(--st-completed)" : "var(--fg-tertiary)",
+                          background: selectedRunExecuting ? "var(--st-completed)" : "var(--fg-tertiary)",
+                        } as React.CSSProperties
+                      }
                     />
                     {coordPhaseLabel}
                   </span>
@@ -1597,6 +1601,23 @@ export default function App() {
                       active={route.view === "canvas"}
                       fleetFresh={fleetFresh}
                       pendingDispatchIds={pendingDispatchIds}
+                      activityEvents={
+                        activitySnapshot.runId === runId ? activitySnapshot.events : EMPTY_ACTIVITY_EVENTS
+                      }
+                      activityReady={
+                        activitySnapshot.runId === runId && activitySnapshot.generatedAt > 0
+                      }
+                      coordinatorRunning={selectedRunExecuting}
+                      coordinatorPhaseLabel={coordPhaseLabel}
+                      coordinatorAwaitingInput={
+                        runStatus?.runId === runId && runStatus.phase === "awaiting_input"
+                      }
+                      coordinatorHandle={coordHandle}
+                      activeWorkerCount={activeWorkerCount}
+                      maxConcurrency={
+                        runStatus?.runId === runId ? runStatus.maxConcurrency : config.maxConcurrency
+                      }
+                      onOpenCoordinator={() => openCoordinatorView("chat")}
                     />
                   </GraphMounted>
                 </Suspense>

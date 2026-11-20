@@ -27,6 +27,9 @@ import {
   Map as MapIcon,
   Maximize2,
   Network,
+  Pause,
+  Play,
+  Radio,
   RotateCcw,
   ShieldCheck,
   ZoomIn,
@@ -37,9 +40,17 @@ import { effectiveHarness, useConfig } from "../harness";
 import { useLang, useT, type TranslationKey, type Translator } from "../i18n";
 import { laneSummaryLabel } from "../placement";
 import { workerWorkspaceLabel } from "../workerWorkspace";
+import { CanvasCommsOverlay } from "./CanvasCommsOverlay";
 import { HarnessAvatar } from "./HarnessAvatar";
 import { isGatePending, isIntegrationGate, StatusGlyph, statusTokenVars } from "./statusUi";
 import {
+  useCanvasComms,
+  type CanvasCommsMode,
+  type LastTaskComm,
+  type PendingTaskSignal,
+} from "./useCanvasComms";
+import {
+  type ActivityEvent,
   type DagNode,
   type DagResponse,
   type Gate,
@@ -70,7 +81,14 @@ type TaskNodeData = {
   workspaceLabel: string | null;
   dir: "LR" | "TB";
   executing: boolean;
+  waiting: boolean;
   active: boolean;
+  motionPaused: boolean;
+  pendingSignal: PendingTaskSignal | null;
+  lastComm: LastTaskComm | null;
+  heartbeat: boolean;
+  arrivalColor: string | null;
+  settledFlash: "ok" | "fail" | null;
 };
 
 type GateNodeData = {
@@ -259,17 +277,29 @@ const TaskNode = memo(function TaskNode({ data }: NodeProps<Node<TaskNodeData>>)
   const vars = statusTokenVars(data.status);
   const statusLabel = t(`status.${data.status}`);
   const isTB = data.dir === "TB";
+  const animateLive = data.executing && data.active && !data.motionPaused;
 
   return (
     <div
       role="group"
-      className={`odag-node${data.selected ? " is-selected" : ""}${data.dimmed ? " is-dimmed" : ""}`}
+      className={`odag-node odag-node--task${data.selected ? " is-selected" : ""}${
+        data.dimmed ? " is-dimmed" : ""
+      }${data.heartbeat ? " is-heartbeat" : ""}${data.arrivalColor ? " is-arrival" : ""}${
+        data.settledFlash === "ok"
+          ? " is-settled-ok"
+          : data.settledFlash === "fail"
+            ? " is-settled-fail"
+            : ""
+      }`}
       data-status={data.status}
+      data-executing={data.executing && data.active ? "true" : "false"}
+      data-waiting={data.waiting ? "true" : "false"}
       title={data.lead ? t("dag.node.leadTitle") : undefined}
       aria-label={[
         `${data.label}.`,
         `${statusLabel}.`,
         `${data.summary}.`,
+        data.pendingSignal ? `${data.pendingSignal.label}.` : null,
         data.harnessActual
           ? t("dag.node.ariaHarnessActual", { harness: data.harness })
           : t("dag.node.ariaHarnessPlanned", { harness: data.harness }),
@@ -287,9 +317,38 @@ const TaskNode = memo(function TaskNode({ data }: NodeProps<Node<TaskNodeData>>)
           inlineSize: NODE_W,
           blockSize: NODE_H,
           "--node-color": vars.fg,
+          ...(data.arrivalColor ? { "--arrival-color": data.arrivalColor } : undefined),
         } as CSSProperties
       }
     >
+      {/* Variant B running motion layers (pure compositor translate/rotate/opacity) */}
+      <span className="odag-node__halo" aria-hidden="true" />
+      <span className="odag-node__trace" aria-hidden="true" />
+      <span className="odag-node__rail" aria-hidden="true">
+        <span className="odag-node__rail-beam" />
+      </span>
+      <span className="odag-node__comms-port" aria-hidden="true" />
+
+      {data.pendingSignal && (
+        <span
+          className="odag-node__pending-chip"
+          title={data.pendingSignal.summary || data.pendingSignal.label}
+        >
+          <span aria-hidden="true">●</span>
+          {data.pendingSignal.label}
+        </span>
+      )}
+
+      {data.lastComm && (
+        <span
+          className="odag-node__last-comm truncate"
+          title={`${data.lastComm.direction === "down" ? "→" : "←"} ${data.lastComm.text}`}
+        >
+          <span aria-hidden="true">{data.lastComm.direction === "down" ? "→" : "←"}</span>
+          <span className="truncate">{data.lastComm.text}</span>
+        </span>
+      )}
+
       <Handle type="target" position={isTB ? Position.Top : Position.Left} style={{ opacity: 0.45 }} />
       <div className="odag-node__head">
         <span style={{ display: "inline-flex", alignItems: "center", gap: 6, minInlineSize: 0 }}>
@@ -328,7 +387,7 @@ const TaskNode = memo(function TaskNode({ data }: NodeProps<Node<TaskNodeData>>)
           className="odag-pill"
           style={{ "--pill-fg": vars.fg, "--pill-bg": vars.bg } as CSSProperties}
         >
-          <StatusGlyph status={data.status} executing={data.executing && data.active} size={11} />
+          <StatusGlyph status={data.status} executing={animateLive} size={11} />
           {statusLabel}
         </span>
       </div>
@@ -438,6 +497,7 @@ function HierarchyEdge(props: EdgeProps) {
 const edgeTypes = { hierarchy: HierarchyEdge };
 
 const NO_PENDING_DISPATCHES: readonly string[] = [];
+const NO_ACTIVITY_EVENTS: readonly ActivityEvent[] = [];
 
 interface DagViewProps {
   dag: DagResponse;
@@ -460,6 +520,15 @@ interface DagViewProps {
   active?: boolean;
   fleetFresh?: boolean;
   pendingDispatchIds?: readonly string[];
+  activityEvents?: readonly ActivityEvent[];
+  activityReady?: boolean;
+  coordinatorRunning?: boolean;
+  coordinatorPhaseLabel?: string;
+  coordinatorAwaitingInput?: boolean;
+  coordinatorHandle?: string | null;
+  activeWorkerCount?: number;
+  maxConcurrency?: number | null;
+  onOpenCoordinator?: () => void;
 }
 
 function Flow({
@@ -483,6 +552,15 @@ function Flow({
   active = true,
   fleetFresh = false,
   pendingDispatchIds = NO_PENDING_DISPATCHES,
+  activityEvents = NO_ACTIVITY_EVENTS,
+  activityReady = false,
+  coordinatorRunning = false,
+  coordinatorPhaseLabel,
+  coordinatorAwaitingInput = false,
+  coordinatorHandle = null,
+  activeWorkerCount = 0,
+  maxConcurrency = null,
+  onOpenCoordinator,
 }: DagViewProps) {
   const rf = useReactFlow();
   const config = useConfig();
@@ -497,10 +575,31 @@ function Flow({
   const [showMinimap, setShowMinimap] = useState(true);
   const [manualFlowList, setManualFlowList] = useState(false);
   const [narrowContainer, setNarrowContainer] = useState(false);
+  const [canvasWidth, setCanvasWidth] = useState(0);
+  const [motionPaused, setMotionPaused] = useState(false);
+  const [commsMode, setCommsMode] = useState<CanvasCommsMode>("live");
   const [zoomPct, setZoomPct] = useState(100);
   const handledFitNonce = useRef(fitNonce);
   const handledLayout = useRef({ layout, reorgNonce });
   const [documentVisible, setDocumentVisible] = useState(() => !document.hidden);
+  const prevStatusByTaskRef = useRef<{ runId: string; map: Map<string, TaskStatus> }>({
+    runId: "",
+    map: new Map(),
+  });
+  const settledTimersRef = useRef<Map<string, number>>(new Map());
+  const [settledFlashByTask, setSettledFlashByTask] = useState<Map<string, "ok" | "fail">>(
+    () => new Map(),
+  );
+
+  const clearSettledFlashes = useCallback(() => {
+    for (const timerId of settledTimersRef.current.values()) {
+      window.clearTimeout(timerId);
+    }
+    settledTimersRef.current.clear();
+    setSettledFlashByTask((cur) => (cur.size === 0 ? cur : new Map()));
+  }, []);
+
+  useEffect(() => clearSettledFlashes, [clearSettledFlashes]);
 
   useEffect(() => {
     const onVisibilityChange = () => setDocumentVisible(!document.hidden);
@@ -511,13 +610,84 @@ function Flow({
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
-    const obs = new ResizeObserver(() => {
-      setNarrowContainer(el.clientWidth > 0 && el.clientWidth <= 680);
-    });
+    const syncWidth = () => {
+      const width = el.clientWidth;
+      setCanvasWidth(width);
+      setNarrowContainer(width > 0 && width <= 680);
+    };
+    const obs = new ResizeObserver(syncWidth);
     obs.observe(el);
-    setNarrowContainer(el.clientWidth > 0 && el.clientWidth <= 680);
+    syncWidth();
     return () => obs.disconnect();
   }, []);
+
+  // Clear any in-flight settlement markers immediately when paused, hidden, or inactive
+  useEffect(() => {
+    if (!active || !documentVisible || motionPaused) {
+      clearSettledFlashes();
+    }
+  }, [active, documentVisible, motionPaused, clearSettledFlashes]);
+
+  // Track one-shot settlement flashes when a running node completes or fails.
+  // Timers live in `settledTimersRef` (per task) rather than an effect cleanup
+  // so routine 2s DAG polls never cancel an in-flight 760ms cleanup timer and
+  // leave stale `settledFlash` markers stuck on the node.
+  useEffect(() => {
+    const prev = prevStatusByTaskRef.current;
+    if (prev.runId !== dag.runId) {
+      prevStatusByTaskRef.current = {
+        runId: dag.runId,
+        map: new Map(dag.nodes.map((node) => [node.id, node.status])),
+      };
+      clearSettledFlashes();
+      return;
+    }
+
+    const newlySettled: [string, "ok" | "fail"][] = [];
+    const nextMap = new Map<string, TaskStatus>();
+    for (const node of dag.nodes) {
+      nextMap.set(node.id, node.status);
+      const before = prev.map.get(node.id);
+      if (before === "dispatched" && (node.status === "completed" || node.status === "failed")) {
+        newlySettled.push([node.id, node.status === "completed" ? "ok" : "fail"]);
+      }
+    }
+    prevStatusByTaskRef.current = { runId: dag.runId, map: nextMap };
+
+    if (newlySettled.length === 0 || !active || !documentVisible || motionPaused) return;
+    setSettledFlashByTask((cur) => {
+      const next = new Map(cur);
+      for (const [id, kind] of newlySettled) next.set(id, kind);
+      return next;
+    });
+    for (const [id] of newlySettled) {
+      const existing = settledTimersRef.current.get(id);
+      if (existing !== undefined) window.clearTimeout(existing);
+      const timerId = window.setTimeout(() => {
+        settledTimersRef.current.delete(id);
+        setSettledFlashByTask((cur) => {
+          if (!cur.has(id)) return cur;
+          const next = new Map(cur);
+          next.delete(id);
+          return next;
+        });
+      }, 760);
+      settledTimersRef.current.set(id, timerId);
+    }
+  }, [active, clearSettledFlashes, dag.nodes, dag.runId, documentVisible, motionPaused]);
+
+  const canvasActive = active && documentVisible;
+  const comms = useCanvasComms({
+    runId: dag.runId,
+    events: activityEvents,
+    activityReady,
+    nodes: dag.nodes,
+    workerRows,
+    active: canvasActive,
+    motionPaused,
+    commsMode,
+    t,
+  });
 
   // Build combined Task + First-Class Gate topology for deterministic dagre layout
   const topologyKey = `${JSON.stringify(dag.nodes.map((n) => n.id))}|${JSON.stringify(
@@ -691,6 +861,16 @@ function Flow({
     const gateById = new Map(dag.gates.map((g) => [`${GATE_NODE_PREFIX}${g.id}`, g]));
     const normalizedQuery = searchQuery.trim().toLowerCase();
     const pendingDispatches = new Set(pendingDispatchIds);
+    const attentionDispatches = new Set(
+      workerRows
+        .filter(
+          (row) =>
+            row.runId === dag.runId &&
+            row.dispatchStatus === "dispatched" &&
+            row.projection?.attention?.requiresAction === true,
+        )
+        .map((row) => `${row.taskId}\0${row.dispatchId}`),
+    );
     const liveDispatches = new Set(
       fleetFresh
         ? workerRows
@@ -708,6 +888,7 @@ function Flow({
     );
 
     const dimmedById = new Map<string, boolean>();
+    const executingTaskIds = new Set<string>();
 
     const decoratedNodes: Node<CanvasNodeData>[] = laid.nodes.map((n) => {
       if (n.id.startsWith(GATE_NODE_PREFIX)) {
@@ -774,6 +955,19 @@ function Flow({
       const dimmed = !(statusMatches && queryMatches);
       dimmedById.set(n.id, dimmed);
 
+      const pendingSignal = comms.pendingByTask.get(n.id) ?? null;
+      const isWaiting =
+        status === "dispatched" &&
+        (Boolean(pendingSignal) ||
+          Boolean(dagNode?.dispatchId && pendingDispatches.has(dagNode.dispatchId)) ||
+          Boolean(dagNode?.dispatchId && attentionDispatches.has(`${n.id}\0${dagNode.dispatchId}`)));
+      const isExecuting =
+        status === "dispatched" &&
+        !isWaiting &&
+        !!dagNode?.dispatchId &&
+        liveDispatches.has(`${n.id}\0${dagNode.dispatchId}`);
+      if (isExecuting) executingTaskIds.add(n.id);
+
       return {
         ...n,
         type: "task",
@@ -805,11 +999,15 @@ function Flow({
               : "",
           workspaceLabel: wsLabel,
           dir,
-          executing:
-            status === "dispatched" &&
-            !!dagNode?.dispatchId &&
-            liveDispatches.has(`${n.id}\0${dagNode.dispatchId}`),
-          active: active && documentVisible,
+          executing: isExecuting,
+          waiting: isWaiting,
+          active: canvasActive,
+          motionPaused,
+          pendingSignal,
+          lastComm: comms.lastCommByTask.get(n.id) ?? null,
+          heartbeat: comms.heartbeatTaskIds.has(n.id),
+          arrivalColor: comms.arrivalByTask.get(n.id)?.color ?? null,
+          settledFlash: settledFlashByTask.get(n.id) ?? null,
         },
       };
     });
@@ -820,6 +1018,7 @@ function Flow({
       const dstGate = gateById.get(e.target);
       const fromStatus = statusById.get(e.source);
       const toStatus = statusById.get(e.target);
+      const toExecuting = executingTaskIds.has(e.target);
 
       let stroke = "var(--border-control)";
       let dash: string | undefined;
@@ -838,6 +1037,7 @@ function Flow({
         source: e.source,
         target: e.target,
         type: "smoothstep",
+        className: toExecuting && canvasActive && !motionPaused ? "odag-edge--active" : undefined,
         style: {
           stroke,
           strokeWidth: 1.75,
@@ -894,9 +1094,14 @@ function Flow({
     setEdges,
     fleetFresh,
     workerRows,
-    active,
-    documentVisible,
+    canvasActive,
+    motionPaused,
     pendingDispatchIds,
+    comms.pendingByTask,
+    comms.lastCommByTask,
+    comms.heartbeatTaskIds,
+    comms.arrivalByTask,
+    settledFlashByTask,
   ]);
 
   const triggerFit = useCallback(() => {
@@ -972,6 +1177,14 @@ function Flow({
     [onSelect, onSelectGate],
   );
 
+  // Must remain above the empty-graph early return so hook count never changes
+  // when a Run transitions between empty and non-empty topologies.
+  const cycleCommsMode = useCallback(() => {
+    setCommsMode((current) =>
+      current === "live" ? "pinned" : current === "pinned" ? "off" : "live",
+    );
+  }, []);
+
   if (dag.nodes.length === 0 && dag.gates.length === 0) {
     return (
       <div className="dag-empty" style={{ margin: "auto", padding: 32, textAlign: "center" }}>
@@ -988,11 +1201,19 @@ function Flow({
   }
 
   const showFlowList = manualFlowList || narrowContainer;
+  const compactChrome = canvasWidth > 0 && canvasWidth < 940;
+  const commsLabel =
+    commsMode === "live"
+      ? t("ide.canvas.commsLive")
+      : commsMode === "pinned"
+        ? t("ide.canvas.commsPinned")
+        : t("ide.canvas.commsOff");
 
   return (
     <div
       ref={wrapRef}
       className="odag-canvas-wrap"
+      data-motion-paused={motionPaused ? "true" : "false"}
       style={
         showFlowList
           ? { display: "flex", flexDirection: "column" }
@@ -1073,11 +1294,30 @@ function Flow({
                       </strong>
                     </span>
                     <span className="odag-pill" style={{ "--pill-fg": vars.fg, "--pill-bg": vars.bg } as CSSProperties}>
-                      <StatusGlyph status={td.status} executing={td.executing} size={11} />
+                      <StatusGlyph status={td.status} executing={td.executing && td.active && !motionPaused} size={11} />
                       {t(`status.${td.status}`)}
                     </span>
                   </div>
                   <div style={{ fontSize: "var(--text-sm)", color: "var(--fg-secondary)" }}>{td.summary}</div>
+                  {(td.pendingSignal || td.lastComm) && (
+                    <div
+                      className="mono truncate"
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                        fontSize: "var(--text-xs)",
+                        color: td.pendingSignal ? "var(--st-dispatched)" : "var(--fg-secondary)",
+                      }}
+                    >
+                      {td.pendingSignal && <span>● {td.pendingSignal.label}</span>}
+                      {td.lastComm && (
+                        <span className="truncate">
+                          {td.lastComm.direction === "down" ? "→" : "←"} {td.lastComm.text}
+                        </span>
+                      )}
+                    </div>
+                  )}
                   <div className="mono" style={{ display: "flex", justifyContent: "space-between", fontSize: "var(--text-xs)", color: "var(--fg-tertiary)" }}>
                     <span>{td.workspaceLabel}</span>
                     <span>{td.harness}</span>
@@ -1148,9 +1388,38 @@ function Flow({
             )}
           </ReactFlow>
 
+          <CanvasCommsOverlay
+            wrapRef={wrapRef}
+            canvasWidth={canvasWidth}
+            commsMode={commsMode}
+            motionPaused={motionPaused}
+            active={canvasActive}
+            coordinatorRunning={coordinatorRunning}
+            coordinatorPhaseLabel={coordinatorPhaseLabel ?? t("ide.coord.idle")}
+            coordinatorAwaitingInput={coordinatorAwaitingInput}
+            coordinatorHandle={coordinatorHandle}
+            activeWorkerCount={activeWorkerCount}
+            maxConcurrency={maxConcurrency}
+            activePulses={comms.activePulses}
+            activePills={comms.activePills}
+            pendingByTask={comms.pendingByTask}
+            recentLinks={comms.recentLinks}
+            hubPingNonce={comms.hubPingNonce}
+            hubBroadcastNonce={comms.hubBroadcastNonce}
+            offscreenAlert={comms.offscreenAlert}
+            onArrival={comms.triggerArrival}
+            onReportOffscreen={comms.reportOffscreen}
+            onDismissOffscreen={comms.dismissOffscreen}
+            onSelectTask={(taskId) => onSelect(taskId)}
+            onOpenCoordinator={onOpenCoordinator}
+          />
+
           {/* Top-Left Floating Topology Chrome */}
-          <div className="odag-glass-bar" style={{ insetBlockStart: 10, insetInlineStart: 10 }}>
-            <span className="mono" style={{ fontSize: "var(--text-xs)", paddingInline: 6, color: "var(--fg-secondary)" }}>
+          <div
+            className={`odag-glass-bar${compactChrome ? " odag-glass-bar--compact" : ""}`}
+            style={{ insetBlockStart: 10, insetInlineStart: 10 }}
+          >
+            <span className="mono" style={{ fontSize: "var(--text-xs)", paddingInline: 6, color: "var(--fg-secondary)", whiteSpace: "nowrap" }}>
               {t("toolbar.taskDepCount", { tasks: dag.nodes.length, deps: dag.edges.length })}
             </span>
             {onToggleHierarchy && (
@@ -1158,27 +1427,75 @@ function Flow({
                 type="button"
                 className="odag-btn odag-btn--ghost"
                 style={{
-                  blockSize: 24,
-                  paddingInline: 7,
+                  minBlockSize: 24,
+                  minInlineSize: compactChrome ? 24 : undefined,
+                  paddingInline: compactChrome ? 0 : 7,
                   fontSize: "var(--text-xs)",
                   color: showHierarchy ? "var(--accent)" : undefined,
                 }}
+                aria-label={t("ide.canvas.lineage")}
                 aria-pressed={showHierarchy}
                 onClick={onToggleHierarchy}
                 title={t("toolbar.hierarchyToggleTitle")}
               >
-                <GitFork size={12} />
-                {t("ide.canvas.lineage")}
+                <GitFork size={12} aria-hidden="true" />
+                {!compactChrome && t("ide.canvas.lineage")}
               </button>
             )}
             <button
               type="button"
               className="odag-btn odag-btn--ghost"
-              style={{ blockSize: 24, paddingInline: 7, fontSize: "var(--text-xs)" }}
+              style={{
+                minBlockSize: 24,
+                minInlineSize: compactChrome ? 24 : undefined,
+                paddingInline: compactChrome ? 0 : 7,
+                fontSize: "var(--text-xs)",
+                color:
+                  commsMode === "live"
+                    ? "var(--accent)"
+                    : commsMode === "pinned"
+                      ? "var(--fg-primary)"
+                      : undefined,
+              }}
+              aria-label={commsLabel}
+              aria-pressed={commsMode !== "off"}
+              onClick={cycleCommsMode}
+              title={`${commsLabel} · ${t("ide.canvas.commsToggleTitle")}`}
+            >
+              <Radio size={12} aria-hidden="true" />
+              {!compactChrome && commsLabel}
+            </button>
+            <button
+              type="button"
+              className="odag-btn odag-btn--ghost"
+              style={{
+                minBlockSize: 24,
+                minInlineSize: compactChrome ? 24 : undefined,
+                paddingInline: compactChrome ? 0 : 7,
+                fontSize: "var(--text-xs)",
+              }}
+              aria-label={motionPaused ? t("ide.canvas.motionResume") : t("ide.canvas.motionPause")}
+              onClick={() => setMotionPaused((paused) => !paused)}
+              title={t("ide.canvas.motionToggleTitle")}
+            >
+              {motionPaused ? <Play size={12} aria-hidden="true" /> : <Pause size={12} aria-hidden="true" />}
+              {!compactChrome && (motionPaused ? t("ide.canvas.motionResume") : t("ide.canvas.motionPause"))}
+            </button>
+            <button
+              type="button"
+              className="odag-btn odag-btn--ghost"
+              style={{
+                minBlockSize: 24,
+                minInlineSize: compactChrome ? 24 : undefined,
+                paddingInline: compactChrome ? 0 : 7,
+                fontSize: "var(--text-xs)",
+              }}
+              aria-label={t("ide.canvas.flowList")}
+              title={t("ide.canvas.flowList")}
               onClick={() => setManualFlowList(true)}
             >
-              <ListTree size={12} />
-              {t("ide.canvas.flowList")}
+              <ListTree size={12} aria-hidden="true" />
+              {!compactChrome && t("ide.canvas.flowList")}
             </button>
           </div>
 

@@ -4490,6 +4490,13 @@ async function reconcile(): Promise<void> {
     }
 
     if (attempt.settled) {
+      const transferRecipient = findProvenReuseTransferRecipient(attempt, row, runId, workerRows);
+      if (transferRecipient) {
+        attempt.terminalDecision = "reused";
+        attempt.terminalDetail =
+          `terminal transfer confirmed to dispatch ${transferRecipient.dispatchId} (task ${transferRecipient.taskId})`;
+        clearAttemptDebt(attempt);
+      }
       if (state.stageGit && attempt.outcome === "succeeded" && attempt.dispatchId && task &&
           !state.stageGit.artifact(task.id)) {
         try {
@@ -5018,6 +5025,66 @@ function applyReleaseReceipt(
       recordDebt(attempt, "release_unknown", receipt.reason);
       break;
   }
+}
+
+/**
+ * When a terminal-reuse `worker-start --terminal` returns an ambiguous
+ * `unknown` or provisional `failed` outcome, the donor Dispatch conservatively
+ * records `release_unknown` debt so the coordinator never releases a terminal
+ * that may have moved to the recipient Dispatch.
+ *
+ * Once Orca's authoritative `worker-list` positively proves BOTH:
+ *   1. another Dispatch in the same Run holds/held the transferred resource
+ *      (`resource.originDispatchId === donor.dispatchId` and
+ *       `resource.ownerDispatchId !== null && resource.ownerDispatchId !== donor.dispatchId`,
+ *      with matching terminal handle whenever the donor's handle is known), AND
+ *   2. the donor's own fresh fleet row confirms it no longer owns a resource
+ *      (`resource.ownerDispatchId !== donor.dispatchId` and either
+ *       `resource.ownershipState === "absent"` or
+ *       `terminalState === "released"` with no active/owned resource),
+ * the transfer is proven: resolve the donor's `release_unknown` debt to
+ * `"reused"` without issuing any release/stop mutation. Absence of rows or
+ * unverified fields never clear debt.
+ */
+function findProvenReuseTransferRecipient(
+  attempt: Attempt,
+  donorRow: OrcaWorkerRow | undefined,
+  runId: string,
+  workerRows: OrcaWorkerRow[],
+): OrcaWorkerRow | null {
+  if (
+    !attempt.settled ||
+    !attempt.dispatchId ||
+    attempt.terminalDecision !== "release_unknown" ||
+    !attempt.terminalDetail?.startsWith("reuse start ")
+  ) {
+    return null;
+  }
+  if (!donorRow || donorRow.runId !== runId || donorRow.dispatchId !== attempt.dispatchId) {
+    return null;
+  }
+  if (donorRow.resource?.ownerDispatchId === attempt.dispatchId) {
+    return null;
+  }
+  const donorResourceState = donorRow.resource?.ownershipState ?? null;
+  const donorNoLongerOwns =
+    donorResourceState === "absent" ||
+    (donorRow.terminalState === "released" &&
+      (donorResourceState === null || donorResourceState === "absent" || donorResourceState === "released"));
+  if (!donorNoLongerOwns) return null;
+
+  const donorHandle = attempt.agentTerminalHandle ?? donorRow.agentTerminalHandle ?? null;
+  for (const candidate of workerRows) {
+    if (candidate.runId !== runId || candidate.dispatchId === attempt.dispatchId) continue;
+    const res = candidate.resource;
+    if (!res) continue;
+    if (res.originDispatchId !== attempt.dispatchId) continue;
+    if (!res.ownerDispatchId || res.ownerDispatchId === attempt.dispatchId) continue;
+    const candidateHandle = res.terminalHandle ?? candidate.agentTerminalHandle ?? null;
+    if (donorHandle && candidateHandle !== donorHandle) continue;
+    return candidate;
+  }
+  return null;
 }
 
 /** Drop this attempt's cleanup-debt rows (a settled decision resolves them). */
