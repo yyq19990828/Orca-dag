@@ -1,7 +1,7 @@
 import express from "express";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, extname, isAbsolute, join, normalize } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, normalize } from "node:path";
 import {
   OrcaCliError,
   assertNativePresetSupport,
@@ -550,71 +550,276 @@ export function createApp(opts: CreateAppOptions): {
   // and provider observations cannot by themselves settle work or grant custody.
   const providerSessions = new ProviderSessionStore(workspaceDir);
   const launchHistory = new LaunchHistory(workspaceDir);
-  // worker-list has no startOptions on Orca 1.4.207. Share the one-time
-  // worker-show read across overlapping 2s polls; failed/empty reads may be
-  // retried later if a remote peer reconnects. GET stays read-only: only the
-  // coordinator's successful launch path writes local history.
+  // worker-list omits startOptions on settled rows on Orca 1.4.207+. Share
+  // the one-time worker-show read across overlapping 2s polls; failed/empty
+  // reads may be retried later if a remote peer reconnects. GET stays read-only:
+  // only the coordinator's launch/reconcile paths write local history, while an
+  // in-memory observation cache preserves runtime-seen default models/worktrees
+  // for externally coordinated or same-session Runs.
+  type DispatchLaunchMeta = {
+    agent: string | null;
+    model: string | null;
+    effort: string | null;
+    worktree: string | null;
+    branch: string | null;
+  };
   const launchLookups = new Map<string, {
     at: number;
-    value: Promise<{ agent: string } | null>;
+    value: Promise<{ verified: boolean; meta: DispatchLaunchMeta } | null>;
     confirmed: boolean;
   }>();
+  const observedDispatchMeta = new Map<string, DispatchLaunchMeta>();
+  let worktreeCatalogCache: { at: number; value: Promise<OrcaWorktreeRow[]> } | null = null;
+
+  const RESERVED_WORKTREE_MODES = new Set(["current", "new-child", "new-top-level", "active"]);
+  const nonReservedWorktree = (value: unknown): string | null => {
+    if (typeof value !== "string") return null;
+    const trimmed = value.trim();
+    return trimmed && !RESERVED_WORKTREE_MODES.has(trimmed) ? trimmed : null;
+  };
+  const rawWorkspaceId = (ws: unknown): string | null => {
+    if (typeof ws === "string") return nonReservedWorktree(ws);
+    if (ws && typeof ws === "object" && "id" in ws) {
+      return nonReservedWorktree((ws as { id?: unknown }).id);
+    }
+    return null;
+  };
+  const stripWorktreeSelectorPrefix = (raw: string): string => {
+    const withoutPath = raw.startsWith("path:") ? raw.slice(5) : raw;
+    const sepIndex = withoutPath.lastIndexOf("::/");
+    return sepIndex >= 0 ? withoutPath.slice(sepIndex + 2) : withoutPath;
+  };
+  const worktreeBasename = (raw: string | null): string | null => {
+    if (!raw || RESERVED_WORKTREE_MODES.has(raw)) return null;
+    const pathPart = stripWorktreeSelectorPrefix(raw).replace(/\/+$/, "");
+    if (!pathPart) return null;
+    const base = basename(pathPart);
+    return base || pathPart;
+  };
+  const mergeDispatchMeta = (base: DispatchLaunchMeta, incoming: Partial<DispatchLaunchMeta> | null | undefined): DispatchLaunchMeta => ({
+    agent: incoming?.agent ?? base.agent,
+    model: incoming?.model ?? base.model,
+    effort: incoming?.effort ?? base.effort,
+    worktree: incoming?.worktree ?? base.worktree,
+    branch: incoming?.branch ?? base.branch,
+  });
+  const cachedWorktreeCatalog = (): Promise<OrcaWorktreeRow[]> => {
+    if (worktreeCatalogCache && Date.now() - worktreeCatalogCache.at < 15_000) {
+      return worktreeCatalogCache.value;
+    }
+    const value = listWorktrees().catch(() => []);
+    worktreeCatalogCache = { at: Date.now(), value };
+    return value;
+  };
 
   /**
    * Share the exact Dispatch's launch identity between fleet badges and Chat.
    * Settled worker-list rows often omit both launch and provider. Recover only
-   * from scoped launch history/worker-show, never today's Task preferences;
-   * keep this separate from effective launch, liveness and custody evidence.
+   * from scoped launch history / runtime observations / worker-show / OpenCode
+   * launch journals — never today's mutable Task preferences; keep this separate
+   * from effective launch, liveness and custody evidence.
    */
-  const enrichWorkerLaunchEvidence = async (runId: string, workers: OrcaWorkerRow[]): Promise<OrcaWorkerRow[]> => {
+  const enrichWorkerLaunchEvidence = async (
+    runId: string,
+    workers: OrcaWorkerRow[],
+    opts?: { resolveWorktrees?: boolean },
+  ): Promise<OrcaWorkerRow[]> => {
     // A damaged/unreadable viewer history must not hide Orca's inventory.
-    const saved = await launchHistory.list(runId).catch(() => new Map());
-    const enriched = workers.map((row): OrcaWorkerRow => {
+    const [saved, openCodeLaunches] = await Promise.all([
+      launchHistory.list(runId).catch(() => new Map()),
+      providerSessions.listOpenCodeLaunches(runId).catch(() => []),
+    ]);
+    const openCodeByDispatch = new Map<string, { taskId: string; model: string | null; workspace: string }>();
+    for (const launch of openCodeLaunches) {
+      if (launch.runId !== runId || !launch.dispatchId || !launch.model) continue;
+      const modelId = `${launch.model.providerID}/${launch.model.id}${launch.model.variant ? `#${launch.model.variant}` : ""}`;
+      openCodeByDispatch.set(launch.dispatchId, {
+        taskId: launch.taskId,
+        model: modelId,
+        workspace: launch.workspace,
+      });
+    }
+
+    type EnrichedMetaState = {
+      row: OrcaWorkerRow;
+      key: string;
+      meta: DispatchLaunchMeta;
+      hasFleetCore: boolean;
+      hasWorkerShowCore: boolean;
+      scopedSource: "viewer-launch" | "worker-show" | null;
+      scopedWorktreeName: string | null;
+      scopedBranch: string | null;
+    };
+
+    const states: EnrichedMetaState[] = workers.map((row) => {
+      const key = `${runId}:${row.taskId}:${row.dispatchId}`;
       const fleetAgent = row.projection?.launch?.agent ?? row.projection?.provider?.id ?? null;
+      const fleetModel = row.projection?.launch?.model ?? row.projection?.provider?.model ?? null;
+      const fleetEffort = row.projection?.launch?.effort ?? null;
+      const fleetWorktree =
+        rawWorkspaceId(row.projection?.workspace) ??
+        nonReservedWorktree(row.projection?.launch?.worktree) ??
+        nonReservedWorktree(row.resource?.worktreeId) ??
+        null;
+
+      if (row.dispatchId && row.taskId && (fleetAgent || fleetModel || fleetEffort || fleetWorktree)) {
+        const prevObs = observedDispatchMeta.get(key) ?? { agent: null, model: null, effort: null, worktree: null, branch: null };
+        if (observedDispatchMeta.size >= 2_000 && !observedDispatchMeta.has(key)) observedDispatchMeta.clear();
+        observedDispatchMeta.set(key, mergeDispatchMeta(prevObs, {
+          agent: fleetAgent,
+          model: fleetModel,
+          effort: fleetEffort,
+          worktree: fleetWorktree,
+        }));
+      }
+
+      const observed = row.dispatchId && row.taskId ? observedDispatchMeta.get(key) : undefined;
       const recorded = saved.get(row.dispatchId);
       const scopedRecord = recorded?.taskId === row.taskId ? recorded : null;
+      const openCodeRecord = openCodeByDispatch.get(row.dispatchId);
+      const scopedOpenCode = openCodeRecord?.taskId === row.taskId ? openCodeRecord : null;
+
+      // Priority for same-dispatch presentation: live fleet > runtime observation > worker-show record > viewer-launch record > OpenCode launch journal
+      let meta: DispatchLaunchMeta = { agent: null, model: null, effort: null, worktree: null, branch: null };
+      if (scopedOpenCode) {
+        meta = mergeDispatchMeta(meta, { model: scopedOpenCode.model, worktree: nonReservedWorktree(scopedOpenCode.workspace) });
+      }
+      if (scopedRecord) {
+        meta = mergeDispatchMeta(meta, {
+          agent: scopedRecord.harness,
+          model: scopedRecord.model ?? null,
+          effort: scopedRecord.effort ?? null,
+          worktree: nonReservedWorktree(scopedRecord.worktree),
+          branch: scopedRecord.branch ?? null,
+        });
+      }
+      if (observed) meta = mergeDispatchMeta(meta, observed);
+      meta = mergeDispatchMeta(meta, {
+        agent: fleetAgent,
+        model: fleetModel,
+        effort: fleetEffort,
+        worktree: fleetWorktree,
+      });
+
       return {
-        ...row,
-        launchEvidence: fleetAgent
-          ? { agent: fleetAgent, source: "fleet" }
-          : scopedRecord
-            ? { agent: scopedRecord.harness, source: scopedRecord.source }
-            : null,
+        row: { ...row },
+        key,
+        meta,
+        hasFleetCore: Boolean(fleetAgent),
+        hasWorkerShowCore: scopedRecord?.source === "worker-show",
+        scopedSource: scopedRecord?.source ?? null,
+        scopedWorktreeName: scopedRecord?.worktreeName ?? null,
+        scopedBranch: scopedRecord?.branch ?? null,
       };
     });
-    const needsDetail = enriched.filter((row) =>
-      row.dispatchId && workerSupervision(row) === "supervised" &&
-      row.launchEvidence?.source !== "fleet" &&
-      row.launchEvidence?.source !== "worker-show"
-    );
+
+    const needsDetail = states.filter((entry) => {
+      const { row, meta } = entry;
+      if (!row.dispatchId || workerSupervision(row) !== "supervised") return false;
+      return !meta.agent || !meta.model || !meta.worktree;
+    });
+
     // Bound historical sweeps and share pending/confirmed lookups across
-    // HTTP/SSE polls. Unavailable detail leaves the identity unknown.
+    // HTTP/SSE polls. Unavailable detail leaves missing fields unknown.
     for (let i = 0; i < needsDetail.length; i += 6) {
-      await Promise.all(needsDetail.slice(i, i + 6).map(async (row) => {
-        const key = `${runId}:${row.taskId}:${row.dispatchId}`;
+      await Promise.all(needsDetail.slice(i, i + 6).map(async (entry) => {
+        const { row, key } = entry;
         let cached = launchLookups.get(key);
         if (!cached || (!cached.confirmed && Date.now() - cached.at > 60_000)) {
+          const isActive = row.dispatchStatus === "dispatched";
           const value = showWorkerDetail(row.dispatchId)
-            .then((detail) =>
-              detail?.runId === runId && detail.taskId === row.taskId && detail.launch?.agent
-                ? { agent: detail.launch.agent }
-                : null,
-            )
+            .then((detail) => {
+              if (!detail || detail.runId !== runId || detail.taskId !== row.taskId) return null;
+              // Never substitute requestedLaunch for effective/runtime identity.
+              const showMeta: DispatchLaunchMeta = {
+                agent: detail.launch?.agent ?? detail.fleet?.projection?.launch?.agent ?? detail.fleet?.projection?.provider?.id ?? null,
+                model: detail.launch?.model ?? detail.fleet?.projection?.launch?.model ?? detail.fleet?.projection?.provider?.model ?? null,
+                effort: detail.launch?.effort ?? detail.fleet?.projection?.launch?.effort ?? null,
+                worktree:
+                  nonReservedWorktree(detail.terminal?.worktreePath) ??
+                  nonReservedWorktree(detail.launch?.resolvedWorktreeId) ??
+                  rawWorkspaceId(detail.fleet?.projection?.workspace) ??
+                  nonReservedWorktree(detail.terminalResource?.worktreeId) ??
+                  null,
+                branch: detail.terminal?.branch?.trim() || null,
+              };
+              const complete = Boolean(showMeta.agent && showMeta.model && showMeta.worktree);
+              return { verified: !isActive || complete, meta: showMeta };
+            })
             .catch(() => null);
           cached = { at: Date.now(), value, confirmed: false };
-          const entry = cached;
-          void value.then((observed) => {
-            if (observed) entry.confirmed = true;
+          const cacheEntry = cached;
+          void value.then((result) => {
+            if (result?.verified) cacheEntry.confirmed = true;
           });
           launchLookups.set(key, cached);
           if (launchLookups.size > 2_000) launchLookups.clear();
         }
         const observed = await cached.value;
         if (!observed) return;
-        row.launchEvidence = { agent: observed.agent, source: "worker-show" };
+        const m = observed.meta;
+        if (m.agent || m.model || m.effort || m.worktree || m.branch) {
+          const prevObs = observedDispatchMeta.get(key) ?? { agent: null, model: null, effort: null, worktree: null, branch: null };
+          if (observedDispatchMeta.size >= 2_000 && !observedDispatchMeta.has(key)) observedDispatchMeta.clear();
+          observedDispatchMeta.set(key, mergeDispatchMeta(prevObs, m));
+          entry.meta = mergeDispatchMeta(m, entry.meta);
+          entry.hasWorkerShowCore = true;
+        }
       }));
     }
-    return enriched;
+
+    const byWorktreeLookup = new Map<string, OrcaWorktreeRow>();
+    if (opts?.resolveWorktrees && states.some((entry) => Boolean(entry.meta.worktree || !entry.scopedWorktreeName))) {
+      const worktrees = await cachedWorktreeCatalog();
+      for (const wt of worktrees) {
+        byWorktreeLookup.set(wt.id, wt);
+        if (wt.path) {
+          const norm = wt.path.replace(/\/+$/, "");
+          byWorktreeLookup.set(norm, wt);
+          byWorktreeLookup.set(`path:${norm}`, wt);
+        }
+      }
+    }
+
+    return states.map((entry): OrcaWorkerRow => {
+      const { row, meta, hasFleetCore, hasWorkerShowCore, scopedSource, scopedWorktreeName } = entry;
+      let matchedWt: OrcaWorktreeRow | undefined;
+      if (meta.worktree && byWorktreeLookup.size > 0) {
+        const cleaned = meta.worktree.replace(/\/+$/, "");
+        matchedWt =
+          byWorktreeLookup.get(meta.worktree) ??
+          byWorktreeLookup.get(cleaned) ??
+          byWorktreeLookup.get(stripWorktreeSelectorPrefix(cleaned).replace(/\/+$/, ""));
+      }
+      const worktreeName =
+        matchedWt?.displayName?.trim() ||
+        (matchedWt?.path ? worktreeBasename(matchedWt.path) : null) ||
+        scopedWorktreeName ||
+        worktreeBasename(meta.worktree) ||
+        null;
+      const branch = meta.branch ?? matchedWt?.branch?.trim() ?? null;
+      const hasAny = Boolean(meta.agent || meta.model || meta.effort || meta.worktree || worktreeName || branch);
+      const source: "fleet" | "worker-show" | "viewer-launch" =
+        hasWorkerShowCore
+          ? "worker-show"
+          : hasFleetCore
+            ? "fleet"
+            : scopedSource ?? "viewer-launch";
+      return {
+        ...row,
+        launchEvidence: hasAny
+          ? {
+              agent: meta.agent,
+              ...(meta.model ? { model: meta.model } : {}),
+              ...(meta.effort ? { effort: meta.effort } : {}),
+              ...(meta.worktree ? { worktree: meta.worktree } : {}),
+              ...(worktreeName ? { worktreeName } : {}),
+              ...(branch ? { branch } : {}),
+              source,
+            }
+          : null,
+      };
+    });
   };
 
   // The status provider, resolved once: the live module singleton by default,
@@ -2413,7 +2618,7 @@ export function createApp(opts: CreateAppOptions): {
         return;
       }
       const inventory = await presentationWorkers(runId, { includeRemote: true });
-      const workers = await enrichWorkerLaunchEvidence(runId, inventory.workers);
+      const workers = await enrichWorkerLaunchEvidence(runId, inventory.workers, { resolveWorktrees: true });
       res.json({ workers, partialHostErrors: inventory.partialHostErrors });
     }),
   );

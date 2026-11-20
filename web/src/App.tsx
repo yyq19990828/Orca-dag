@@ -41,6 +41,7 @@ import { BoardView } from "./components/BoardView";
 import { CapabilityPanel } from "./components/CapabilityPanel";
 import { ChatPanel } from "./components/ChatPanel";
 import { CleanupPanel } from "./components/CleanupPanel";
+import { CoordinationModeIcon } from "./components/CoordinationModeIcon";
 import { isGatePending, StatusGlyph } from "./components/statusUi";
 import { ExecControls } from "./components/ExecControls";
 import { GateInspector } from "./components/GateInspector";
@@ -86,8 +87,14 @@ import {
   type TaskStatus,
   type WorkerRowView,
 } from "./types";
+import {
+  COORDINATION_MODE_META,
+  formatCoordinatorHandleShort,
+  resolveCoordinationMode,
+} from "./coordinationMode";
+import { useRunHealth } from "./useRunHealth";
 import { usePageVisible } from "./visibility";
-import { workerWorkspaceLabel } from "./workerWorkspace";
+import { isGateRejected, resolveWorkerWorkspaceInfo, shortModelName, shortWorktreeName } from "./workerWorkspace";
 
 const DagView = lazy(() =>
   import("./components/DagView").then((module) => ({ default: module.DagView })),
@@ -295,6 +302,7 @@ export default function App() {
   const [startedRevision, setStartedRevision] = useState(0);
   const [runStatus, setRunStatus] = useState<RunStatus | null>(null);
   const [startingRunId, setStartingRunId] = useState<string | null>(null);
+  const { health: runHealth, refresh: refreshRunHealth } = useRunHealth(runId);
   const [workerHistoryLoading, setWorkerHistoryLoading] = useState(false);
   const [workerHistoryError, setWorkerHistoryError] = useState<string | null>(null);
   const [workerRows, setWorkerRows] = useState<WorkerRowView[]>([]);
@@ -566,11 +574,13 @@ export default function App() {
   const onRunStartFinished = useCallback((id: string, status: RunStatus | null) => {
     setStartingRunId((current) => (current === id ? null : current));
     if (status && selectedRunRef.current === id) setRunStatus(status);
-  }, []);
+    void refreshRunHealth();
+  }, [refreshRunHealth]);
 
   const onRunStopped = useCallback(() => {
     void refreshExecutionState();
-  }, [refreshExecutionState]);
+    void refreshRunHealth();
+  }, [refreshExecutionState, refreshRunHealth]);
 
   // Inspector horizontal resize
   function clampInspectorWidth(width: number): number {
@@ -690,21 +700,44 @@ export default function App() {
     return map;
   }, [visibleDag.nodes]);
 
+  const currentWorkspaceName = useMemo(
+    () => shortWorktreeName(readiness?.workspace ?? null),
+    [readiness?.workspace],
+  );
+
   const workerMetaByTask = useMemo(() => {
-    const map = new Map<string, { harness: string | null; workspace: string | null }>();
+    const map = new Map<string, { harness: string | null; model: string | null; workspace: string | null }>();
+    const byTask = new Map<string, WorkerRowView[]>();
     for (const row of workerRows) {
-      if (!row.taskId || map.has(row.taskId)) continue;
+      if (!row.taskId) continue;
+      const list = byTask.get(row.taskId) ?? [];
+      list.push(row);
+      byTask.set(row.taskId, list);
+    }
+    for (const node of visibleDag.nodes) {
+      const rows = byTask.get(node.id);
+      if (!rows?.length) continue;
+      const row =
+        (node.dispatchId ? rows.find((r) => r.dispatchId === node.dispatchId) : undefined) ??
+        (node.status === "completed"
+          ? rows.find((r) => r.projection?.outcome === "succeeded" || r.workerState === "succeeded")
+          : undefined) ??
+        rows[0];
       const agent =
         row.launchEvidence?.agent ??
         row.projection?.launch?.agent ??
         row.projection?.provider?.id ??
         null;
-      const rawWs = workerWorkspaceLabel(row.projection?.workspace) ?? row.projection?.launch?.worktree ?? null;
-      const ws = rawWs ? rawWs.split("::").at(-1)?.split("/").at(-1) || rawWs : null;
-      map.set(row.taskId, { harness: agent, workspace: ws });
+      const model =
+        row.projection?.launch?.model ??
+        row.projection?.provider?.model ??
+        row.launchEvidence?.model ??
+        null;
+      const wsInfo = resolveWorkerWorkspaceInfo(row);
+      map.set(node.id, { harness: agent, model: shortModelName(model), workspace: wsInfo.name });
     }
     return map;
-  }, [workerRows]);
+  }, [workerRows, visibleDag.nodes]);
 
   const operationSnapshots = {
     runId,
@@ -953,7 +986,37 @@ export default function App() {
     runStatus?.runId === runId
       ? t(PHASE_KEY[runStatus.phase] ?? "phase.idle")
       : t("ide.coord.idle");
-  const coordHandle = runStatus?.runId === runId ? runStatus.coordinatorHandle : null;
+  const coordMode = runHealth
+    ? resolveCoordinationMode(runHealth)
+    : selectedRunExecuting
+      ? "human_panel"
+      : null;
+  const coordModeMeta = coordMode ? COORDINATION_MODE_META[coordMode] : null;
+  const coordHandle =
+    (runStatus?.runId === runId ? runStatus.coordinatorHandle : null) ??
+    runHealth?.coordinatorHandle ??
+    null;
+  const coordDotColor =
+    coordMode === "human_panel" || selectedRunExecuting
+      ? "var(--st-completed)"
+      : coordMode === "agent_native_chat"
+        ? "var(--st-blocked)"
+        : coordMode === "agent_terminal" || coordMode === "panel_mismatch"
+          ? "var(--st-dispatched)"
+          : coordMode === "unknown"
+            ? "var(--st-failed)"
+            : "var(--fg-tertiary)";
+  const coordStatusText =
+    coordMode === "human_panel"
+      ? `${t("mode.human_panel.short")} · ${coordPhaseLabel}`
+      : coordModeMeta
+        ? t(coordModeMeta.shortLabel)
+        : coordPhaseLabel;
+  const coordSubtitleText = coordHandle
+    ? `${coordModeMeta ? t(coordModeMeta.hubLabel) : t("ide.coord.bound")} · ${formatCoordinatorHandleShort(coordHandle, 22)}`
+    : coordMode === "unbound"
+      ? t("ide.coord.unboundHint")
+      : t("ide.coord.hint");
 
   const themeModeLabel =
     colorScheme.rendered === "dark" ? t("ide.theme.dark") : t("ide.theme.light");
@@ -1022,7 +1085,7 @@ export default function App() {
         )}
 
         <div className="odag-hide-narrow" style={{ display: "inline-flex" }}>
-          <RunHealthBadge runId={runId} />
+          <RunHealthBadge runId={runId} health={runHealth} />
         </div>
 
         <div
@@ -1238,7 +1301,11 @@ export default function App() {
               <button
                 type="button"
                 className="odag-coord-box"
-                title={t("ide.coord.hint")}
+                title={
+                  coordModeMeta
+                    ? `${t(coordModeMeta.label)} — ${t(coordModeMeta.panelRole)}${coordHandle ? ` (${coordHandle})` : ""}`
+                    : t("ide.coord.hint")
+                }
                 onClick={() => openCoordinatorView("scheduler")}
                 style={{
                   borderColor:
@@ -1258,23 +1325,24 @@ export default function App() {
                       alignItems: "center",
                       gap: 5,
                       fontSize: "var(--text-xs)",
-                      color: selectedRunExecuting ? "var(--st-completed)" : "var(--fg-secondary)",
+                      color: coordDotColor === "var(--fg-tertiary)" ? "var(--fg-secondary)" : coordDotColor,
                     }}
                   >
                     <span
                       className={`odag-pulse-dot${selectedRunExecuting ? " odag-pulse-dot--live" : ""}`}
                       style={
                         {
-                          "--dot-color": selectedRunExecuting ? "var(--st-completed)" : "var(--fg-tertiary)",
-                          background: selectedRunExecuting ? "var(--st-completed)" : "var(--fg-tertiary)",
+                          "--dot-color": coordDotColor,
+                          background: coordDotColor,
                         } as React.CSSProperties
                       }
                     />
-                    {coordPhaseLabel}
+                    {coordMode && <CoordinationModeIcon mode={coordMode} size={11} />}
+                    <span className="truncate">{coordStatusText}</span>
                   </span>
                 </div>
                 <div className="mono truncate" style={{ fontSize: "var(--text-xs)", color: "var(--fg-secondary)" }}>
-                  {coordHandle ? `${t("ide.coord.bound")} · ${coordHandle}` : t("ide.coord.hint")}
+                  {coordSubtitleText}
                 </div>
               </button>
 
@@ -1298,6 +1366,7 @@ export default function App() {
                     </div>
                     {visibleDag.gates.map((gate) => {
                       const pending = isGatePending(gate);
+                      const rejected = !pending && isGateRejected(gate);
                       return (
                         <button
                           key={gate.id}
@@ -1308,7 +1377,11 @@ export default function App() {
                           <Diamond
                             size={14}
                             style={{
-                              color: pending ? "var(--st-blocked)" : "var(--st-completed)",
+                              color: rejected
+                                ? "var(--st-failed)"
+                                : pending
+                                  ? "var(--st-blocked)"
+                                  : "var(--st-completed)",
                               flex: "none",
                             }}
                             aria-hidden="true"
@@ -1345,7 +1418,8 @@ export default function App() {
                 {visibleDag.nodes.map((node) => {
                   const wm = workerMetaByTask.get(node.id);
                   const harness = wm?.harness ?? effectiveHarness(node.id);
-                  const ws = wm?.workspace ?? config.laneByTask[node.id] ?? "current";
+                  const ws = wm?.workspace ?? config.laneByTask[node.id] ?? currentWorkspaceName ?? t("dag.currentWorkspaceFallback");
+                  const metaSuffix = wm?.model ? `${harness} · ${wm.model}` : harness;
                   const isSelected = route.task === node.id && !route.gate;
                   return (
                     <button
@@ -1360,7 +1434,7 @@ export default function App() {
                           {node.label}
                         </div>
                         <div className="mono truncate" style={{ fontSize: "var(--text-xs)", color: "var(--fg-tertiary)" }}>
-                          {harness} · {ws}
+                          {metaSuffix} · {ws}
                         </div>
                       </div>
                       <StatusGlyph status={node.status} size={13} />
@@ -1597,6 +1671,7 @@ export default function App() {
                       statusFilter={statusFilter}
                       searchQuery={searchQuery}
                       workerRows={workerRows}
+                      workspaceName={currentWorkspaceName}
                       attempts={runStatus?.runId === runId ? runStatus.attempts : EMPTY_ATTEMPTS}
                       active={route.view === "canvas"}
                       fleetFresh={fleetFresh}
@@ -1613,9 +1688,14 @@ export default function App() {
                         runStatus?.runId === runId && runStatus.phase === "awaiting_input"
                       }
                       coordinatorHandle={coordHandle}
+                      coordinationMode={coordMode}
                       activeWorkerCount={activeWorkerCount}
                       maxConcurrency={
-                        runStatus?.runId === runId ? runStatus.maxConcurrency : config.maxConcurrency
+                        coordModeMeta?.isExternal
+                          ? null
+                          : runStatus?.runId === runId
+                            ? runStatus.maxConcurrency
+                            : config.maxConcurrency
                       }
                       onOpenCoordinator={() => openCoordinatorView("chat")}
                     />
@@ -1630,6 +1710,7 @@ export default function App() {
                 dag={visibleDag}
                 runId={runId}
                 workerRows={workerRows}
+                workspaceName={currentWorkspaceName}
                 selectedTaskId={route.task}
                 selectedGateId={route.gate}
                 statusFilter={statusFilter}
@@ -1649,6 +1730,8 @@ export default function App() {
                 workerRows={workerRows}
                 pendingGatesCount={pendingGates.length}
                 pendingInboxCount={activityPending}
+                health={runHealth}
+                runStatus={runStatus}
                 onPickRun={(nextId) => {
                   pickRun(nextId);
                   switchView("canvas");
@@ -1738,6 +1821,7 @@ export default function App() {
                   readyCount={counts.ready ?? 0}
                   startingRunId={startingRunId}
                   status={runStatus}
+                  runHealth={runHealth}
                   workerHistoryLoading={workerHistoryLoading}
                   workerHistoryError={workerHistoryError}
                   onRunStarting={onRunStarting}

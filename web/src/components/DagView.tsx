@@ -20,9 +20,11 @@ import "@xyflow/react/dist/style.css";
 import {
   ArrowDownUp,
   ArrowLeftRight,
+  Cpu,
   Diamond,
   GitBranch,
   GitFork,
+  GitMerge,
   ListTree,
   Map as MapIcon,
   Maximize2,
@@ -32,6 +34,7 @@ import {
   Radio,
   RotateCcw,
   ShieldCheck,
+  XCircle,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
@@ -39,7 +42,13 @@ import { applyLayout, GATE_H, GATE_W, NODE_H, NODE_W } from "../layout";
 import { effectiveHarness, useConfig } from "../harness";
 import { useLang, useT, type TranslationKey, type Translator } from "../i18n";
 import { laneSummaryLabel } from "../placement";
-import { workerWorkspaceLabel } from "../workerWorkspace";
+import {
+  formatElapsedDuration,
+  isGateRejected,
+  resolveWorkerWorkspaceInfo,
+  shortModelName,
+  shortWorktreeName,
+} from "../workerWorkspace";
 import { CanvasCommsOverlay } from "./CanvasCommsOverlay";
 import { HarnessAvatar } from "./HarnessAvatar";
 import { isGatePending, isIntegrationGate, StatusGlyph, statusTokenVars } from "./statusUi";
@@ -56,6 +65,7 @@ import {
   type Gate,
   type LayoutKind,
   type RunAttempt,
+  type RunCoordinationMode,
   type TaskStatus,
   type WorkerRowView,
 } from "../types";
@@ -75,10 +85,17 @@ type TaskNodeData = {
   harness: string;
   harnessActual: boolean;
   harnessPlanned: boolean;
-  settings: string | null;
-  settingsTitle: string;
-  settingsActual: boolean;
-  workspaceLabel: string | null;
+  launched: boolean;
+  modelLabel: string | null;
+  effortLabel: string | null;
+  modelActual: boolean;
+  modelTitle: string;
+  remoteHost: string | null;
+  attemptCount: number;
+  durationLabel: string | null;
+  workspaceName: string;
+  branchName: string | null;
+  workspaceTitle: string;
   dir: "LR" | "TB";
   executing: boolean;
   waiting: boolean;
@@ -96,6 +113,7 @@ type GateNodeData = {
   gate: Gate;
   integration: boolean;
   resolved: boolean;
+  rejected: boolean;
   selected: boolean;
   dimmed: boolean;
   dir: "LR" | "TB";
@@ -278,6 +296,12 @@ const TaskNode = memo(function TaskNode({ data }: NodeProps<Node<TaskNodeData>>)
   const statusLabel = t(`status.${data.status}`);
   const isTB = data.dir === "TB";
   const animateLive = data.executing && data.active && !data.motionPaused;
+  const showModelChip = Boolean(data.modelLabel) || (data.launched && !data.harnessPlanned);
+  const showMetaRow =
+    showModelChip ||
+    Boolean(data.remoteHost) ||
+    data.attemptCount > 1 ||
+    Boolean(data.durationLabel);
 
   return (
     <div
@@ -303,11 +327,13 @@ const TaskNode = memo(function TaskNode({ data }: NodeProps<Node<TaskNodeData>>)
         data.harnessActual
           ? t("dag.node.ariaHarnessActual", { harness: data.harness })
           : t("dag.node.ariaHarnessPlanned", { harness: data.harness }),
-        data.settings
-          ? data.settingsActual
-            ? t("dag.node.ariaActualSettings", { settings: data.settingsTitle })
-            : t("dag.node.ariaPlannedSettings", { settings: data.settingsTitle })
+        data.modelLabel
+          ? data.modelActual
+            ? t("dag.node.ariaActualSettings", { settings: data.modelTitle })
+            : t("dag.node.ariaPlannedSettings", { settings: data.modelTitle })
           : null,
+        data.workspaceName,
+        data.branchName,
         data.lead ? t("dag.node.ariaLead") : null,
       ]
         .filter(Boolean)
@@ -355,7 +381,7 @@ const TaskNode = memo(function TaskNode({ data }: NodeProps<Node<TaskNodeData>>)
           <HarnessAvatar harness={data.harness} size={19} />
           <span
             className="mono truncate"
-            style={{ fontSize: "var(--text-xs)", color: "var(--fg-secondary)", maxInlineSize: 118 }}
+            style={{ fontSize: "var(--text-xs)", color: "var(--fg-secondary)", maxInlineSize: 124 }}
             title={
               data.harnessActual
                 ? t("dag.node.harnessActualTitle")
@@ -392,83 +418,183 @@ const TaskNode = memo(function TaskNode({ data }: NodeProps<Node<TaskNodeData>>)
         </span>
       </div>
 
-      <div className="odag-node__title" title={data.label}>
-        {data.label}
+      <div className="odag-node__main">
+        <div className="odag-node__title" title={data.label}>
+          {data.label}
+        </div>
+        <div className="odag-node__summary" title={data.summaryTitle}>
+          {data.summary}
+        </div>
       </div>
 
-      <div className="odag-node__summary" title={data.summaryTitle}>
-        {data.summary}
-      </div>
+      {showMetaRow && (
+        <div className="odag-node__meta">
+          {data.modelLabel ? (
+            <span
+              className={`odag-model-chip${data.modelActual ? "" : " odag-model-chip--planned"}`}
+              title={data.modelTitle}
+            >
+              <Cpu size={10} aria-hidden="true" />
+              <span className="truncate">
+                {data.modelActual
+                  ? data.effortLabel
+                    ? `${data.modelLabel} · ${data.effortLabel}`
+                    : data.modelLabel
+                  : t("dag.plannedModelChip", {
+                      model: data.effortLabel ? `${data.modelLabel} · ${data.effortLabel}` : data.modelLabel,
+                    })}
+              </span>
+            </span>
+          ) : data.launched && !data.harnessPlanned ? (
+            <span className="odag-model-chip odag-model-chip--muted" title={t("dag.defaultModel")}>
+              <Cpu size={10} aria-hidden="true" />
+              <span className="truncate">{t("dag.defaultModel")}</span>
+            </span>
+          ) : (
+            <span />
+          )}
 
-      <div className="odag-node__foot">
-        <span className="truncate" style={{ display: "inline-flex", alignItems: "center", gap: 4, minInlineSize: 0 }}>
-          <GitBranch size={10} aria-hidden="true" />
-          <span className="truncate">{data.workspaceLabel || "workspace"}</span>
-        </span>
-        {data.settings && (
-          <span className="truncate" style={{ maxInlineSize: 116 }} title={data.settingsTitle}>
-            {data.settings}
+          <span className="odag-meta-right">
+            {data.remoteHost && (
+              <span className="odag-meta-pill" title={data.remoteHost}>
+                @{data.remoteHost}
+              </span>
+            )}
+            {data.attemptCount > 1 && (
+              <span
+                className={`odag-meta-pill${data.status === "failed" ? " odag-meta-pill--warn" : ""}`}
+                title={t("dag.retriesTitle", { n: data.attemptCount })}
+              >
+                ×{data.attemptCount}
+              </span>
+            )}
+            {data.durationLabel && (
+              <span
+                className="odag-meta-duration"
+                title={t("dag.durationTitle", { duration: data.durationLabel })}
+              >
+                {data.durationLabel}
+              </span>
+            )}
           </span>
-        )}
+        </div>
+      )}
+
+      <div className="odag-node__foot" title={data.workspaceTitle}>
+        <span className="truncate" style={{ display: "inline-flex", alignItems: "center", gap: 4, minInlineSize: 0, flex: 1 }}>
+          <GitBranch size={11} aria-hidden="true" />
+          <span className="odag-ws-name truncate">{data.workspaceName}</span>
+          {data.branchName && (
+            <span className="odag-ws-branch truncate">({data.branchName})</span>
+          )}
+        </span>
       </div>
       <Handle type="source" position={isTB ? Position.Bottom : Position.Right} style={{ opacity: 0.45 }} />
     </div>
   );
 });
 
+const GATE_POLY_LR = "18,1 226,1 243,50 226,99 18,99 1,50";
+const GATE_POLY_TB = "16,1 228,1 243,16 243,84 228,99 16,99 1,84 1,16";
+
 const GateNode = memo(function GateNode({ data }: NodeProps<Node<GateNodeData>>) {
   const t = useT();
   const isTB = data.dir === "TB";
-  const { gate, integration, resolved, selected, dimmed } = data;
+  const { gate, integration, resolved, rejected, selected, dimmed } = data;
   const question = gate.question?.trim() || t("gate.resolveFallback");
+  const statusColor = rejected
+    ? "var(--st-failed)"
+    : resolved
+      ? "var(--st-completed)"
+      : "var(--st-blocked)";
+  const statusBg = rejected
+    ? "var(--st-failed-bg)"
+    : resolved
+      ? "var(--st-completed-bg)"
+      : "var(--st-blocked-bg)";
+  const polyPoints = isTB ? GATE_POLY_TB : GATE_POLY_LR;
+  const statusTag = rejected
+    ? t("ide.gate.rejectedTag", { resolution: gate.resolution ?? "no" })
+    : resolved
+      ? t("ide.gate.resolvedTag", { resolution: gate.resolution ?? "ok" })
+      : t("ide.gate.pendingTag");
 
   return (
     <div
       role="group"
-      className={`odag-node odag-node--gate${resolved ? " is-resolved" : ""}${selected ? " is-selected" : ""}${dimmed ? " is-dimmed" : ""}`}
-      style={{ inlineSize: GATE_W, blockSize: GATE_H } as CSSProperties}
-      aria-label={`${integration ? t("ide.gate.integrationBadge") : t("ide.gate.approvalBadge")}: ${question}`}
+      data-dir={data.dir}
+      className={`odag-node odag-node--gate${resolved ? " is-resolved" : ""}${
+        rejected ? " is-rejected" : ""
+      }${selected ? " is-selected" : ""}${dimmed ? " is-dimmed" : ""}`}
+      style={{ inlineSize: GATE_W, blockSize: GATE_H, "--gate-accent": statusColor } as CSSProperties}
+      aria-label={`${integration ? t("ide.gate.integrationBadge") : t("ide.gate.approvalBadge")}: ${question} (${statusTag})`}
     >
-      <Handle type="target" position={isTB ? Position.Top : Position.Left} style={{ opacity: 0.45 }} />
-      <div className="odag-node__head">
-        <span
-          className="mono"
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 4,
-            fontSize: "var(--text-xs)",
-            fontWeight: 700,
-            color: resolved ? "var(--st-completed)" : "var(--st-blocked)",
-          }}
-        >
-          {resolved ? <ShieldCheck size={12} aria-hidden="true" /> : <Diamond size={11} aria-hidden="true" />}
-          {integration ? t("ide.gate.integrationBadge") : t("ide.gate.approvalBadge")}
-        </span>
-        <span
-          className="odag-pill"
-          style={
-            {
-              "--pill-fg": resolved ? "var(--st-completed)" : "var(--st-blocked)",
-              "--pill-bg": resolved ? "var(--st-completed-bg)" : "var(--st-blocked-bg)",
-            } as CSSProperties
-          }
-        >
-          {resolved
-            ? t("ide.gate.resolvedTag", { resolution: gate.resolution ?? "ok" })
-            : t("ide.gate.pendingTag")}
-        </span>
-      </div>
+      <svg
+        className="odag-gate__svg"
+        viewBox={`0 0 ${GATE_W} ${GATE_H}`}
+        preserveAspectRatio="none"
+        aria-hidden="true"
+      >
+        <polygon className="odag-gate__fill" points={polyPoints} />
+        <polygon className="odag-gate__stroke" points={polyPoints} />
+      </svg>
 
-      <div className="odag-node__title" title={question}>
-        {question}
-      </div>
+      <span className="odag-gate__crest" aria-hidden="true">
+        {rejected ? (
+          <XCircle size={11} />
+        ) : resolved ? (
+          <ShieldCheck size={11} />
+        ) : integration ? (
+          <GitMerge size={11} />
+        ) : (
+          <Diamond size={10} />
+        )}
+      </span>
 
-      <div className="odag-node__foot">
-        <span className="truncate">{gate.id}</span>
-        <span>{integration ? t("ide.gate.integrationHint") : gate.options.join(" / ")}</span>
+      <Handle type="target" position={isTB ? Position.Top : Position.Left} style={{ opacity: 0.55 }} />
+      <div className="odag-gate__body">
+        <div className="odag-node__head">
+          <span
+            className="mono truncate"
+            style={{
+              fontSize: "var(--text-xs)",
+              fontWeight: 700,
+              color: statusColor,
+              letterSpacing: "0.02em",
+            }}
+          >
+            {integration ? t("ide.gate.integrationBadge") : t("ide.gate.approvalBadge")}
+          </span>
+          <span
+            className="odag-pill"
+            style={{ "--pill-fg": statusColor, "--pill-bg": statusBg } as CSSProperties}
+          >
+            {statusTag}
+          </span>
+        </div>
+
+        <div className="odag-gate__question" title={question}>
+          {question}
+        </div>
+
+        <div className="odag-gate__foot">
+          <span className="mono truncate" style={{ maxInlineSize: 92 }}>
+            {gate.id}
+          </span>
+          <span className="odag-gate__opts">
+            {integration ? (
+              <span className="odag-gate__opt-chip">integrated</span>
+            ) : (
+              gate.options.slice(0, 2).map((opt) => (
+                <span key={opt} className="odag-gate__opt-chip">
+                  {opt}
+                </span>
+              ))
+            )}
+          </span>
+        </div>
       </div>
-      <Handle type="source" position={isTB ? Position.Bottom : Position.Right} style={{ opacity: 0.45 }} />
+      <Handle type="source" position={isTB ? Position.Bottom : Position.Right} style={{ opacity: 0.55 }} />
     </div>
   );
 });
@@ -516,6 +642,7 @@ interface DagViewProps {
   statusFilter?: TaskStatus | "all";
   searchQuery?: string;
   workerRows: WorkerRowView[];
+  workspaceName?: string | null;
   attempts: RunAttempt[];
   active?: boolean;
   fleetFresh?: boolean;
@@ -526,6 +653,7 @@ interface DagViewProps {
   coordinatorPhaseLabel?: string;
   coordinatorAwaitingInput?: boolean;
   coordinatorHandle?: string | null;
+  coordinationMode?: RunCoordinationMode | null;
   activeWorkerCount?: number;
   maxConcurrency?: number | null;
   onOpenCoordinator?: () => void;
@@ -548,6 +676,7 @@ function Flow({
   statusFilter = "all",
   searchQuery = "",
   workerRows,
+  workspaceName = null,
   attempts,
   active = true,
   fleetFresh = false,
@@ -558,6 +687,7 @@ function Flow({
   coordinatorPhaseLabel,
   coordinatorAwaitingInput = false,
   coordinatorHandle = null,
+  coordinationMode = null,
   activeWorkerCount = 0,
   maxConcurrency = null,
   onOpenCoordinator,
@@ -773,47 +903,137 @@ function Flow({
   const harnessEvidence = useMemo(() => {
     const actual = new Map<string, string>();
     const actualModel = new Map<string, string>();
+    const actualEffort = new Map<string, string>();
     const actualWorkspace = new Map<string, string>();
+    const actualWorkspaceFull = new Map<string, string>();
+    const actualBranch = new Map<string, string>();
+    const actualHost = new Map<string, string>();
+    const actualDuration = new Map<string, string>();
+    const attemptCountByTask = new Map<string, number>();
     const launched = new Set<string>();
-    const latestRow = new Map<string, WorkerRowView>();
-    const currentDispatch = new Map(dag.nodes.map((node) => [node.id, node.dispatchId]));
+
+    const rowsByTask = new Map<string, WorkerRowView[]>();
+    const dispatchIdsByTask = new Map<string, Set<string>>();
     for (const row of workerRows) {
-      if (currentDispatch.get(row.taskId) && currentDispatch.get(row.taskId) !== row.dispatchId) continue;
-      if (!row.taskId || latestRow.has(row.taskId)) continue;
-      latestRow.set(row.taskId, row);
-      launched.add(row.taskId);
-      const agent =
-        row.launchEvidence?.agent ??
-        row.projection?.launch?.agent ??
-        row.projection?.provider?.id ??
-        null;
-      if (agent) actual.set(row.taskId, agent);
-      const model = row.projection?.launch?.model ?? row.projection?.provider?.model;
-      if (model) actualModel.set(row.taskId, model);
-      const rawWs = workerWorkspaceLabel(row.projection?.workspace) ?? row.projection?.launch?.worktree ?? null;
-      const ws = rawWs ? rawWs.split("::").at(-1)?.split("/").at(-1) || rawWs : null;
-      if (ws) actualWorkspace.set(row.taskId, ws);
+      if (!row.taskId) continue;
+      const list = rowsByTask.get(row.taskId) ?? [];
+      list.push(row);
+      rowsByTask.set(row.taskId, list);
+      if (row.dispatchId) {
+        const set = dispatchIdsByTask.get(row.taskId) ?? new Set<string>();
+        set.add(row.dispatchId);
+        dispatchIdsByTask.set(row.taskId, set);
+      }
     }
+
     const latestAttemptByTask = new Map<string, RunAttempt>();
+    const attemptByDispatch = new Map<string, RunAttempt>();
     for (const attempt of attempts) {
       const prev = latestAttemptByTask.get(attempt.taskId);
       if (!prev || attempt.startedAt >= prev.startedAt) latestAttemptByTask.set(attempt.taskId, attempt);
-    }
-    for (const [taskId, attempt] of latestAttemptByTask) {
-      if (attempt.adopted || !attempt.dispatchId) continue;
-      const row = latestRow.get(taskId);
-      if (currentDispatch.get(taskId) && currentDispatch.get(taskId) !== attempt.dispatchId) continue;
-      if (row && row.dispatchId !== attempt.dispatchId) continue;
-      launched.add(taskId);
-      const agent = attempt.effective?.agent ?? attempt.harness;
-      if (agent && !actual.has(taskId)) actual.set(taskId, agent);
-      if (attempt.effective?.model && !actualModel.has(taskId)) actualModel.set(taskId, attempt.effective.model);
-      if (attempt.effective?.worktree && !actualWorkspace.has(taskId)) {
-        actualWorkspace.set(taskId, attempt.effective.worktree.split("::").at(-1)?.split("/").at(-1) ?? attempt.effective.worktree);
+      if (attempt.dispatchId) {
+        attemptByDispatch.set(attempt.dispatchId, attempt);
+        const set = dispatchIdsByTask.get(attempt.taskId) ?? new Set<string>();
+        set.add(attempt.dispatchId);
+        dispatchIdsByTask.set(attempt.taskId, set);
       }
     }
-    return { actual, actualModel, actualWorkspace, launched };
-  }, [workerRows, attempts, dag.nodes]);
+
+    for (const node of dag.nodes) {
+      const taskRows = rowsByTask.get(node.id) ?? [];
+      const row =
+        (node.dispatchId ? taskRows.find((r) => r.dispatchId === node.dispatchId) : undefined) ??
+        (node.status === "completed"
+          ? taskRows.find((r) => r.projection?.outcome === "succeeded" || r.workerState === "succeeded")
+          : undefined) ??
+        taskRows[0];
+
+      const attempt = row?.dispatchId
+        ? attemptByDispatch.get(row.dispatchId)
+        : latestAttemptByTask.get(node.id);
+      const count = dispatchIdsByTask.get(node.id)?.size ?? (row || attempt ? 1 : 0);
+      if (count > 0) attemptCountByTask.set(node.id, count);
+
+      if (row) {
+        launched.add(node.id);
+        const agent =
+          row.launchEvidence?.agent ??
+          row.projection?.launch?.agent ??
+          row.projection?.provider?.id ??
+          null;
+        if (agent) actual.set(node.id, agent);
+        const model =
+          row.projection?.launch?.model ??
+          row.projection?.provider?.model ??
+          row.launchEvidence?.model ??
+          null;
+        if (model) actualModel.set(node.id, model);
+        const effort =
+          row.projection?.launch?.effort ??
+          row.launchEvidence?.effort ??
+          null;
+        if (effort) actualEffort.set(node.id, effort);
+
+        const wsInfo = resolveWorkerWorkspaceInfo(row);
+        if (wsInfo.name) actualWorkspace.set(node.id, wsInfo.name);
+        if (wsInfo.full) actualWorkspaceFull.set(node.id, wsInfo.full);
+        if (wsInfo.branch) actualBranch.set(node.id, wsInfo.branch);
+
+        const host = row.projection?.host;
+        if (host && host.kind !== "local" && host.id.toLowerCase() !== "local" && host.id.trim()) {
+          actualHost.set(node.id, host.id.trim());
+        }
+      }
+
+      if (attempt && !attempt.adopted && attempt.dispatchId) {
+        if (!node.dispatchId || node.dispatchId === attempt.dispatchId) {
+          launched.add(node.id);
+          const agent = attempt.effective?.agent ?? attempt.harness;
+          if (agent && !actual.has(node.id)) actual.set(node.id, agent);
+          if (attempt.effective?.model && !actualModel.has(node.id)) {
+            actualModel.set(node.id, attempt.effective.model);
+          }
+          if (attempt.effective?.effort && !actualEffort.has(node.id)) {
+            actualEffort.set(node.id, attempt.effective.effort);
+          }
+          if (attempt.effective?.worktree && !actualWorkspace.has(node.id)) {
+            const name = shortWorktreeName(attempt.effective.worktree);
+            if (name) {
+              actualWorkspace.set(node.id, name);
+              actualWorkspaceFull.set(node.id, attempt.effective.worktree);
+            }
+          }
+          if (
+            attempt.host &&
+            attempt.host.kind !== "local" &&
+            attempt.host.id.toLowerCase() !== "local" &&
+            attempt.host.id.trim() &&
+            !actualHost.has(node.id)
+          ) {
+            actualHost.set(node.id, attempt.host.id.trim());
+          }
+        }
+      }
+
+      const startTime = attempt?.startedAt ?? (launched.has(node.id) || node.status !== "pending" && node.status !== "ready" && node.status !== "blocked" ? node.createdAt : null);
+      const endTime = node.completedAt ?? (node.status === "dispatched" ? dag.generatedAt : null);
+      const dur = formatElapsedDuration(startTime, endTime);
+      if (dur) actualDuration.set(node.id, dur);
+    }
+
+    return {
+      actual,
+      actualModel,
+      actualEffort,
+      actualWorkspace,
+      actualWorkspaceFull,
+      actualBranch,
+      actualHost,
+      actualDuration,
+      attemptCountByTask,
+      launched,
+    };
+  }, [workerRows, attempts, dag.nodes, dag.generatedAt]);
 
   const stageSummaries = useMemo(() => {
     const nodesById = new Map(dag.nodes.map((node) => [node.id, node]));
@@ -894,10 +1114,12 @@ function Flow({
       if (n.id.startsWith(GATE_NODE_PREFIX)) {
         const gate = gateById.get(n.id)!;
         const pending = isGatePending(gate);
+        const rejected = !pending && isGateRejected(gate);
         const statusMatches =
           statusFilter === "all" ||
           (statusFilter === "blocked" && pending) ||
-          (statusFilter === "completed" && !pending);
+          (statusFilter === "completed" && !pending && !rejected) ||
+          (statusFilter === "failed" && rejected);
         const queryMatches =
           !normalizedQuery ||
           gate.id.toLowerCase().includes(normalizedQuery) ||
@@ -912,6 +1134,7 @@ function Flow({
             gate,
             integration: isIntegrationGate(gate),
             resolved: !pending,
+            rejected,
             selected: selectedGateId === gate.id,
             dimmed,
             dir,
@@ -921,29 +1144,65 @@ function Flow({
 
       const dagNode = nodeById.get(n.id);
       const status = dagNode?.status ?? "pending";
+      const taskLaunched =
+        harnessEvidence.launched.has(n.id) ||
+        status === "dispatched" ||
+        status === "completed" ||
+        status === "failed";
       const harnessPlanned =
-        !harnessEvidence.launched.has(n.id) &&
+        !taskLaunched &&
         (status === "pending" || status === "ready" || status === "blocked");
       const laneId = config.laneByTask[n.id];
       const placement = laneId
         ? config.worktreeLanes[laneId]?.placement
         : config.placementByTask[n.id];
+      const plannedModelRaw = harnessPlanned ? config.modelByTask[n.id] ?? null : null;
+      const plannedModelShort = shortModelName(plannedModelRaw);
+      const plannedEffort = harnessPlanned && plannedModelRaw ? config.effortByTask[n.id] ?? null : null;
       const plannedParts = harnessPlanned
         ? [
-            config.modelByTask[n.id] ? t("dag.plannedModel", { model: config.modelByTask[n.id] }) : null,
+            plannedModelRaw ? t("dag.plannedModel", { model: plannedModelRaw }) : null,
             laneId
               ? laneSummaryLabel(laneId, plannedPlacementLabel(placement, t))
               : plannedPlacementLabel(placement, t),
           ].filter((part): part is string => Boolean(part))
         : [];
-      const model = harnessEvidence.actualModel.get(n.id);
+      const actualModelRaw = harnessEvidence.actualModel.get(n.id) ?? null;
+      const actualModelShort = shortModelName(actualModelRaw);
+      const actualEffort = harnessEvidence.actualEffort.get(n.id) ?? null;
+      const modelLabel = actualModelShort ?? (harnessPlanned ? plannedModelShort : null);
+      const effortLabel = actualModelShort ? actualEffort : harnessPlanned ? plannedEffort : null;
+      const modelTitle = actualModelRaw
+        ? t("dag.actualTitle", {
+            summary: t("dag.actualModel", {
+              model: actualEffort ? `${actualModelRaw} · ${actualEffort}` : actualModelRaw,
+            }),
+          })
+        : plannedParts.length
+          ? t("dag.plannedTitle", {
+              summary:
+                plannedParts.join(" · ") +
+                (placement?.kind === "existing"
+                  ? t("dag.plannedSelectorSuffix", { selector: placement.selector })
+                  : ""),
+            })
+          : "";
+
       const resolvedHarness =
         harnessEvidence.actual.get(n.id) ??
         (harnessPlanned ? effectiveHarness(n.id) : t("dag.harnessUnknown"));
-      const wsLabel =
-        harnessEvidence.actualWorkspace.get(n.id) ??
+      const wsActual = harnessEvidence.actualWorkspace.get(n.id) ?? null;
+      const wsFull = harnessEvidence.actualWorkspaceFull.get(n.id) ?? null;
+      const branchName = harnessEvidence.actualBranch.get(n.id) ?? null;
+      const wsDisplayName =
+        wsActual ??
         (laneId ? laneId : plannedPlacementLabel(placement, t)) ??
-        "current";
+        workspaceName ??
+        t("dag.currentWorkspaceFallback");
+      const wsTitleTarget = wsFull ?? wsDisplayName;
+      const workspaceTitle = branchName
+        ? t("dag.worktreeBranchTitle", { worktree: wsTitleTarget, branch: branchName })
+        : t("dag.worktreeActualTitle", { worktree: wsTitleTarget });
 
       const statusMatches = statusFilter === "all" || status === statusFilter;
       const queryMatches =
@@ -951,7 +1210,9 @@ function Flow({
         n.id.toLowerCase().includes(normalizedQuery) ||
         (dagNode?.label ?? "").toLowerCase().includes(normalizedQuery) ||
         resolvedHarness.toLowerCase().includes(normalizedQuery) ||
-        wsLabel.toLowerCase().includes(normalizedQuery);
+        wsDisplayName.toLowerCase().includes(normalizedQuery) ||
+        (branchName ?? "").toLowerCase().includes(normalizedQuery) ||
+        (actualModelRaw ?? plannedModelRaw ?? "").toLowerCase().includes(normalizedQuery);
       const dimmed = !(statusMatches && queryMatches);
       dimmedById.set(n.id, dimmed);
 
@@ -984,20 +1245,17 @@ function Flow({
           harness: resolvedHarness,
           harnessActual: harnessEvidence.actual.has(n.id),
           harnessPlanned,
-          settings: model ? model.split("/").at(-1) ?? model : plannedParts.length ? plannedParts.join(" · ") : null,
-          settingsActual: !!model,
-          settingsTitle: model
-            ? t("dag.actualTitle", { summary: t("dag.actualModel", { model }) })
-            : plannedParts.length
-              ? t("dag.plannedTitle", {
-                  summary:
-                    plannedParts.join(" · ") +
-                    (placement?.kind === "existing"
-                      ? t("dag.plannedSelectorSuffix", { selector: placement.selector })
-                      : ""),
-                })
-              : "",
-          workspaceLabel: wsLabel,
+          launched: taskLaunched,
+          modelLabel,
+          effortLabel,
+          modelActual: Boolean(actualModelShort),
+          modelTitle,
+          remoteHost: harnessEvidence.actualHost.get(n.id) ?? null,
+          attemptCount: harnessEvidence.attemptCountByTask.get(n.id) ?? 0,
+          durationLabel: harnessEvidence.actualDuration.get(n.id) ?? null,
+          workspaceName: wsDisplayName,
+          branchName,
+          workspaceTitle,
           dir,
           executing: isExecuting,
           waiting: isWaiting,
@@ -1025,10 +1283,20 @@ function Flow({
       if ((srcGate && isGatePending(srcGate)) || (dstGate && isGatePending(dstGate))) {
         stroke = "var(--st-blocked)";
         dash = "5 4";
+      } else if (
+        (srcGate && !isGatePending(srcGate) && isGateRejected(srcGate)) ||
+        (dstGate && !isGatePending(dstGate) && isGateRejected(dstGate))
+      ) {
+        stroke = "var(--st-failed)";
       } else if (fromStatus === "dispatched" || toStatus === "dispatched") {
         stroke = "var(--st-dispatched)";
         dash = "6 5";
-      } else if (fromStatus === "completed" && (toStatus === "completed" || (srcGate && !isGatePending(srcGate)))) {
+      } else if (
+        (fromStatus === "completed" || (srcGate && !isGatePending(srcGate))) &&
+        (toStatus === "completed" || (dstGate && !isGatePending(dstGate)))
+      ) {
+        stroke = "var(--st-completed)";
+      } else if (fromStatus === "completed" && toStatus === "completed") {
         stroke = "var(--st-completed)";
       }
 
@@ -1097,6 +1365,7 @@ function Flow({
     canvasActive,
     motionPaused,
     pendingDispatchIds,
+    workspaceName,
     comms.pendingByTask,
     comms.lastCommByTask,
     comms.heartbeatTaskIds,
@@ -1240,31 +1509,66 @@ function Flow({
             {nodes.map((node) => {
               if (node.data.kind === "gate") {
                 const gd = node.data;
+                const gateColor = gd.rejected
+                  ? "var(--st-failed)"
+                  : gd.resolved
+                    ? "var(--st-completed)"
+                    : "var(--st-blocked)";
+                const gateTag = gd.rejected
+                  ? t("ide.gate.rejectedTag", { resolution: gd.gate.resolution ?? "no" })
+                  : gd.resolved
+                    ? t("ide.gate.resolvedTag", { resolution: gd.gate.resolution ?? "ok" })
+                    : t("ide.gate.pendingTag");
                 return (
                   <button
                     key={node.id}
                     type="button"
                     onClick={() => onSelectGate?.(gd.gate.id)}
-                    className="odag-card"
+                    className={`odag-card odag-flow-gate${gd.resolved ? " odag-flow-gate--resolved" : ""}${
+                      gd.rejected ? " odag-flow-gate--rejected" : ""
+                    }${gd.selected ? " is-selected" : ""}`}
                     style={{
                       textAlign: "start",
-                      borderStyle: gd.resolved ? "solid" : "dashed",
-                      borderColor: gd.selected ? "var(--accent)" : "var(--st-blocked)",
                       opacity: gd.dimmed ? 0.35 : 1,
                       display: "flex",
                       flexDirection: "column",
                       gap: 5,
                     }}
                   >
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                      <span className="mono" style={{ fontSize: "var(--text-xs)", fontWeight: 700, color: "var(--st-blocked)" }}>
-                        ◆ {gd.integration ? t("ide.gate.integrationBadge") : t("ide.gate.approvalBadge")}
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                      <span className="mono" style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: "var(--text-xs)", fontWeight: 700, color: gateColor }}>
+                        {gd.rejected ? (
+                          <XCircle size={12} aria-hidden="true" />
+                        ) : gd.resolved ? (
+                          <ShieldCheck size={12} aria-hidden="true" />
+                        ) : gd.integration ? (
+                          <GitMerge size={12} aria-hidden="true" />
+                        ) : (
+                          <Diamond size={11} aria-hidden="true" />
+                        )}
+                        {gd.integration ? t("ide.gate.integrationBadge") : t("ide.gate.approvalBadge")}
                       </span>
-                      <span className="mono" style={{ fontSize: "var(--text-xs)", color: "var(--fg-secondary)" }}>
-                        {gd.resolved ? gd.gate.resolution : t("ide.gate.pendingTag")}
+                      <span className="mono" style={{ fontSize: "var(--text-xs)", color: gateColor }}>
+                        {gateTag}
                       </span>
                     </div>
                     <strong style={{ fontSize: "var(--text-base)" }}>{gd.gate.question || t("gate.resolveFallback")}</strong>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+                      <span className="mono" style={{ fontSize: "var(--text-xs)", color: "var(--fg-tertiary)" }}>
+                        {gd.gate.id}
+                      </span>
+                      <span className="odag-gate__opts">
+                        {gd.integration ? (
+                          <span className="odag-gate__opt-chip">integrated</span>
+                        ) : (
+                          gd.gate.options.slice(0, 2).map((opt) => (
+                            <span key={opt} className="odag-gate__opt-chip">
+                              {opt}
+                            </span>
+                          ))
+                        )}
+                      </span>
+                    </div>
                   </button>
                 );
               }
@@ -1299,6 +1603,29 @@ function Flow({
                     </span>
                   </div>
                   <div style={{ fontSize: "var(--text-sm)", color: "var(--fg-secondary)" }}>{td.summary}</div>
+                  {(td.modelLabel || td.durationLabel || td.attemptCount > 1 || td.remoteHost) && (
+                    <div className="odag-node__meta">
+                      {td.modelLabel ? (
+                        <span className={`odag-model-chip${td.modelActual ? "" : " odag-model-chip--planned"}`} title={td.modelTitle}>
+                          <Cpu size={10} aria-hidden="true" />
+                          <span className="truncate">
+                            {td.modelActual
+                              ? td.effortLabel
+                                ? `${td.modelLabel} · ${td.effortLabel}`
+                                : td.modelLabel
+                              : t("dag.plannedModelChip", { model: td.modelLabel })}
+                          </span>
+                        </span>
+                      ) : (
+                        <span />
+                      )}
+                      <span className="odag-meta-right">
+                        {td.remoteHost && <span className="odag-meta-pill">@{td.remoteHost}</span>}
+                        {td.attemptCount > 1 && <span className="odag-meta-pill">×{td.attemptCount}</span>}
+                        {td.durationLabel && <span className="odag-meta-duration">{td.durationLabel}</span>}
+                      </span>
+                    </div>
+                  )}
                   {(td.pendingSignal || td.lastComm) && (
                     <div
                       className="mono truncate"
@@ -1318,8 +1645,11 @@ function Flow({
                       )}
                     </div>
                   )}
-                  <div className="mono" style={{ display: "flex", justifyContent: "space-between", fontSize: "var(--text-xs)", color: "var(--fg-tertiary)" }}>
-                    <span>{td.workspaceLabel}</span>
+                  <div className="mono" style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: "var(--text-xs)", color: "var(--fg-tertiary)" }} title={td.workspaceTitle}>
+                    <span className="truncate">
+                      <span className="odag-ws-name">{td.workspaceName}</span>
+                      {td.branchName && <span className="odag-ws-branch"> ({td.branchName})</span>}
+                    </span>
                     <span>{td.harness}</span>
                   </div>
                 </button>
@@ -1374,7 +1704,7 @@ function Flow({
                 maskColor="rgb(0 0 0 / 0.16)"
                 nodeColor={(n) => {
                   const d = n.data as CanvasNodeData | undefined;
-                  if (d?.kind === "gate") return d.resolved ? "#34d399" : "#a78bfa";
+                  if (d?.kind === "gate") return d.rejected ? "#f87171" : d.resolved ? "#34d399" : "#a78bfa";
                   if (d?.kind === "task") {
                     if (d.status === "completed") return "#34d399";
                     if (d.status === "dispatched") return "#f59e0b";
@@ -1398,6 +1728,7 @@ function Flow({
             coordinatorPhaseLabel={coordinatorPhaseLabel ?? t("ide.coord.idle")}
             coordinatorAwaitingInput={coordinatorAwaitingInput}
             coordinatorHandle={coordinatorHandle}
+            coordinationMode={coordinationMode}
             activeWorkerCount={activeWorkerCount}
             maxConcurrency={maxConcurrency}
             activePulses={comms.activePulses}
@@ -1615,6 +1946,29 @@ function Flow({
                 </span>
               );
             })}
+            <span style={{ inlineSize: 1, blockSize: 12, background: "var(--border-hairline)" }} aria-hidden="true" />
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 5,
+                fontSize: "var(--text-xs)",
+                color: "var(--fg-secondary)",
+              }}
+            >
+              <span
+                style={{
+                  inlineSize: 7,
+                  blockSize: 7,
+                  rotate: "45deg",
+                  borderRadius: 1,
+                  border: "1.5px solid var(--st-blocked)",
+                  background: "color-mix(in oklab, var(--st-blocked), transparent 72%)",
+                }}
+                aria-hidden="true"
+              />
+              {t("ide.canvas.legendGate")}
+            </span>
           </div>
         </>
       )}

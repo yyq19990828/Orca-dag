@@ -2211,7 +2211,12 @@ export interface OrcaWorkerRow {
   terminalState: TerminalState | string;
   /** Dispatch-scoped presentation identity; never lifecycle or custody authority. */
   launchEvidence?: {
-    agent: string;
+    agent: string | null;
+    model?: string | null;
+    effort?: string | null;
+    worktree?: string | null;
+    worktreeName?: string | null;
+    branch?: string | null;
     source: "fleet" | "worker-show" | "viewer-launch";
   } | null;
   /** Terminal resource the row still holds; absent = unknown. */

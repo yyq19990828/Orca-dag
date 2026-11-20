@@ -1,5 +1,11 @@
 import { fetchLaunchPreview, startRun, stopRun, type LaunchPlanRequest } from "../api";
+import {
+  classifyControlTargetMode,
+  COORDINATION_MODE_META,
+  resolveCoordinationMode,
+} from "../coordinationMode";
 import { useT, type TranslationKey } from "../i18n";
+import { CoordinationModeIcon } from "./CoordinationModeIcon";
 import { DoodleSelect } from "./DoodleSelect";
 import { LaunchPreview } from "./LaunchPreview";
 import { useDecisionDialog } from "./DecisionDialog";
@@ -21,7 +27,7 @@ import {
   laneMap,
   lanesSpecMap,
 } from "../harness";
-import { HARNESSES, UNVERIFIED_HARNESSES, OPEN_CODE_UIS, isOpenCodeUi, type DagEdge, type RunStatus } from "../types";
+import { HARNESSES, UNVERIFIED_HARNESSES, OPEN_CODE_UIS, isOpenCodeUi, type DagEdge, type RunCoordinationMode, type RunHealthView, type RunStatus } from "../types";
 import { lanePlanProblems } from "../placement";
 import { useState, useRef, useEffect, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -80,6 +86,7 @@ export function ExecControls({
   readyCount = 0,
   startingRunId = null,
   status = null,
+  runHealth = null,
   workerHistoryLoading = false,
   workerHistoryError = null,
   onRunStarting,
@@ -106,6 +113,8 @@ export function ExecControls({
    * hidden; it now renders whatever App's (visibility-gated) poll provides.
    */
   status?: RunStatus | null;
+  /** Shared RunHealth snapshot so Settings & Run confirmation show exact coordination mode. */
+  runHealth?: RunHealthView | null;
   /** Worker history is the durable launch-lock source; uncertainty fails closed. */
   workerHistoryLoading?: boolean;
   workerHistoryError?: string | null;
@@ -299,12 +308,29 @@ export function ExecControls({
     try {
       const plan = await prepareLaunchPlan(true);
       const latestPreview = await fetchLaunchPreview(plan);
+      const currentMode = runHealth ? resolveCoordinationMode(runHealth) : null;
+      const targetKind = classifyControlTargetMode(runHealth?.coordinatorHandle);
+      const confirmCopy =
+        currentMode === "unbound"
+          ? t("dialog.confirmRunUnbound")
+          : currentMode === "agent_native_chat" || currentMode === "agent_terminal"
+            ? t("dialog.confirmRunExternal", {
+                id: runId,
+                mode: t(COORDINATION_MODE_META[currentMode].label),
+                handle: runHealth?.coordinatorHandle ?? t("worker.unknown"),
+                carrier: t(
+                  targetKind === "native_chat"
+                    ? "dialog.carrier.chat"
+                    : "dialog.carrier.terminal",
+                ),
+              })
+            : t("dialog.confirmRunMessage", { id: runId });
       const ok = await dialog.confirm({
         title: t("exec.previewTitle"),
         message: t("exec.previewConfirmDescription"),
         content: (
           <>
-            <p className="launch-preview__coordinator-copy">{t("dialog.confirmRunMessage", { id: runId })}</p>
+            <p className="launch-preview__coordinator-copy">{confirmCopy}</p>
             <p className="launch-preview__notice">{t("exec.previewReady")}</p>
             <p className="launch-preview__notice">{t("exec.previewWarning")}</p>
             <LaunchPreview preview={latestPreview} plan={plan} labelsById={labelsById} />
@@ -357,8 +383,111 @@ export function ExecControls({
     }
   }
 
+  const activeMode: RunCoordinationMode | null = runId && runHealth
+    ? resolveCoordinationMode(runHealth)
+    : running
+      ? "human_panel"
+      : null;
+  const activeModeMeta = activeMode ? COORDINATION_MODE_META[activeMode] : null;
+  const modeReferenceCards: readonly {
+    mode: RunCoordinationMode;
+    title: TranslationKey;
+    desc: TranslationKey;
+  }[] = [
+    {
+      mode: "human_panel",
+      title: "mode.card.humanTitle",
+      desc: "mode.card.humanDesc",
+    },
+    {
+      mode: "agent_native_chat",
+      title: "mode.card.chatTitle",
+      desc: "mode.card.chatDesc",
+    },
+    {
+      mode: "agent_terminal",
+      title: "mode.card.termTitle",
+      desc: "mode.card.termDesc",
+    },
+  ];
+
   return (
     <div className="exec">
+      <section className="exec__section odag-modes-section" aria-label={t("mode.card.sectionTitle")}>
+        <div className="odag-modes-head">
+          <div>
+            <h4 className="cap__title">{t("mode.card.sectionTitle")}</h4>
+            <p className="cap__note">{t("mode.card.sectionNote")}</p>
+          </div>
+          {activeMode && activeModeMeta && (
+            <span
+              className={`odag-mode-pill odag-mode-pill--${activeModeMeta.tone}`}
+              title={t(activeModeMeta.brief)}
+            >
+              <CoordinationModeIcon mode={activeMode} size={12} />
+              <span>{t(activeModeMeta.label)}</span>
+            </span>
+          )}
+        </div>
+
+        {runId && activeMode && activeModeMeta && (
+          <div className="odag-modes-active">
+            <div className="odag-modes-active__row">
+              <span className="odag-modes-active__key">{t("mode.card.currentRun", { id: runId })}</span>
+              <span className="odag-modes-active__val">{t(activeModeMeta.panelRole)}</span>
+            </div>
+            <div className="odag-modes-active__row">
+              <span className="odag-modes-active__key">{t("health.carrierKey")}</span>
+              <span className="odag-modes-active__val">
+                {t(activeModeMeta.carrier)}
+                {runHealth?.coordinatorHandle ? (
+                  <>
+                    {" · "}
+                    <code>{runHealth.coordinatorHandle}</code>
+                  </>
+                ) : null}
+                {runHealth && runHealth.consumerGeneration !== null
+                  ? t("health.generation", { n: runHealth.consumerGeneration })
+                  : ""}
+              </span>
+            </div>
+          </div>
+        )}
+
+        <div className="odag-modes-grid">
+          {modeReferenceCards.map((card) => {
+            const meta = COORDINATION_MODE_META[card.mode];
+            const isCurrent = activeMode === card.mode;
+            return (
+              <div
+                key={card.mode}
+                className={`odag-modes-card odag-modes-card--${meta.tone}${isCurrent ? " is-active" : ""}`}
+              >
+                <div className="odag-modes-card__head">
+                  <span className="odag-modes-card__title">
+                    <CoordinationModeIcon mode={card.mode} size={14} />
+                    <span>{t(card.title)}</span>
+                  </span>
+                  {isCurrent && (
+                    <span className={`odag-mode-pill odag-mode-pill--${meta.tone}`}>
+                      {t("mode.card.current")}
+                    </span>
+                  )}
+                </div>
+                <p className="odag-modes-card__desc">{t(card.desc)}</p>
+              </div>
+            );
+          })}
+        </div>
+
+        {runId && (
+          <div className="odag-modes-handover">
+            <span>{t("mode.card.handoverHint")}</span>
+            <code>{`orca orchestration run-use --id ${runId}`}</code>
+          </div>
+        )}
+      </section>
+
       <section className="exec__section" aria-label={t("exec.groupAria")}>
         <h4 className="cap__title">{t("exec.groupAria")}</h4>
         <p className="cap__note">{t("exec.settingsTitle")}</p>

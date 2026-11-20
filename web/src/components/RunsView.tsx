@@ -1,21 +1,32 @@
 import { memo, useCallback, useEffect, useState } from "react";
 import { Archive, History, Search } from "lucide-react";
 import { fetchRemovedWork, fetchRunById, fetchRunHealth, fetchRunsPage } from "../api";
+import {
+  classifyRunRowMode,
+  COORDINATION_MODE_META,
+  formatCoordinatorHandleShort,
+  resolveCoordinationMode,
+} from "../coordinationMode";
 import { formatDateTime } from "../format";
 import { useT } from "../i18n";
-import type { OrcaRun, RemovedWorkEntryView, RunHealthView, WorkerRowView } from "../types";
+import type { OrcaRun, RemovedWorkEntryView, RunHealthView, RunStatus, WorkerRowView } from "../types";
+import { CoordinationModeIcon } from "./CoordinationModeIcon";
 
 export const RunsView = memo(function RunsView({
   runId,
   workerRows,
   pendingGatesCount,
   pendingInboxCount,
+  health: providedHealth,
+  runStatus = null,
   onPickRun,
 }: {
   runId: string;
   workerRows: WorkerRowView[];
   pendingGatesCount: number;
   pendingInboxCount: number;
+  health?: RunHealthView | null;
+  runStatus?: RunStatus | null;
   onPickRun: (nextRunId: string) => void;
 }) {
   const t = useT();
@@ -26,7 +37,8 @@ export const RunsView = memo(function RunsView({
   const [query, setQuery] = useState("");
   const [exactId, setExactId] = useState("");
   const [exactError, setExactError] = useState<string | null>(null);
-  const [health, setHealth] = useState<RunHealthView | null>(null);
+  const [polledHealth, setPolledHealth] = useState<RunHealthView | null>(null);
+  const health = providedHealth !== undefined ? providedHealth : polledHealth;
 
   const [removedItems, setRemovedItems] = useState<RemovedWorkEntryView[] | null>(null);
   const [removedCursor, setRemovedCursor] = useState<string | null>(null);
@@ -51,20 +63,21 @@ export const RunsView = memo(function RunsView({
   }, [loadInitial]);
 
   useEffect(() => {
-    setHealth(null);
     setRemovedItems(null);
     setRemovedCursor(null);
+    if (providedHealth !== undefined) return;
+    setPolledHealth(null);
     if (!runId) return;
     let alive = true;
     void fetchRunHealth(runId)
       .then((h) => {
-        if (alive) setHealth(h);
+        if (alive) setPolledHealth(h);
       })
       .catch(() => {});
     return () => {
       alive = false;
     };
-  }, [runId]);
+  }, [runId, providedHealth]);
 
   async function loadOlder() {
     if (!nextCursor || loading) return;
@@ -113,16 +126,22 @@ export const RunsView = memo(function RunsView({
   }
 
   const q = query.trim().toLowerCase();
-  const filteredRuns = runs.filter(
-    (r) =>
-      !q ||
+  const filteredRuns = runs.filter((r) => {
+    if (!q) return true;
+    const rowMode = classifyRunRowMode(r, runStatus);
+    const modeLabel = t(COORDINATION_MODE_META[rowMode].label).toLowerCase();
+    return (
       r.id.toLowerCase().includes(q) ||
       (r.objective ?? "").toLowerCase().includes(q) ||
-      (r.coordinator_handle ?? "").toLowerCase().includes(q),
-  );
+      (r.coordinator_handle ?? "").toLowerCase().includes(q) ||
+      modeLabel.includes(q)
+    );
+  });
 
   const activeDispatches = workerRows.filter((w) => w.dispatchStatus === "dispatched").length;
   const retainedPanes = workerRows.filter((w) => w.terminalState === "retained").length;
+  const activeMode = health ? resolveCoordinationMode(health) : null;
+  const activeModeMeta = activeMode ? COORDINATION_MODE_META[activeMode] : null;
 
   return (
     <div className="odag-scroll" style={{ flex: 1, minBlockSize: 0, overflowY: "auto", padding: 16 }}>
@@ -134,8 +153,10 @@ export const RunsView = memo(function RunsView({
               {
                 label: t("ide.runs.activeDispatches"),
                 value: String(activeDispatches),
-                sub: health?.coordinatorHandle
-                  ? `${t("ide.coord.bound")} · ${health.coordinatorHandle}`
+                sub: activeModeMeta
+                  ? health?.coordinatorHandle
+                    ? `${t(activeModeMeta.shortLabel)} · ${formatCoordinatorHandleShort(health.coordinatorHandle, 22)}`
+                    : t(activeModeMeta.shortLabel)
                   : t("ide.runs.unbound"),
                 tone: "var(--accent)",
               },
@@ -241,15 +262,17 @@ export const RunsView = memo(function RunsView({
                     background: "var(--bg-panel)",
                   }}
                 >
-                  <th style={{ padding: "8px 14px", textAlign: "start", fontWeight: 600 }}>{t("ide.runs.colId")}</th>
-                  <th style={{ padding: "8px 14px", textAlign: "start", fontWeight: 600 }}>{t("ide.runs.colObjective")}</th>
-                  <th style={{ padding: "8px 14px", textAlign: "start", fontWeight: 600 }}>{t("ide.runs.colCoordinator")}</th>
-                  <th style={{ padding: "8px 14px", textAlign: "start", fontWeight: 600 }}>{t("ide.runs.colCreated")}</th>
+                  <th scope="col" style={{ padding: "8px 14px", textAlign: "start", fontWeight: 600 }}>{t("ide.runs.colId")}</th>
+                  <th scope="col" style={{ padding: "8px 14px", textAlign: "start", fontWeight: 600 }}>{t("ide.runs.colObjective")}</th>
+                  <th scope="col" style={{ padding: "8px 14px", textAlign: "start", fontWeight: 600 }}>{t("ide.runs.colCoordinator")}</th>
+                  <th scope="col" style={{ padding: "8px 14px", textAlign: "start", fontWeight: 600 }}>{t("ide.runs.colCreated")}</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredRuns.map((row) => {
                   const active = row.id === runId;
+                  const rowMode = classifyRunRowMode(row, runStatus);
+                  const rowMeta = COORDINATION_MODE_META[rowMode];
                   return (
                     <tr
                       key={row.id}
@@ -264,8 +287,25 @@ export const RunsView = memo(function RunsView({
                         {row.id}
                       </td>
                       <td style={{ padding: "10px 14px", fontWeight: 500 }}>{row.objective || "—"}</td>
-                      <td className="mono" style={{ padding: "10px 14px", color: "var(--fg-secondary)", fontSize: "var(--text-xs)" }}>
-                        {row.coordinator_handle || t("ide.runs.unbound")}
+                      <td style={{ padding: "10px 14px" }}>
+                        <div className="odag-runs-mode-cell">
+                          <span
+                            className={`odag-mode-pill odag-mode-pill--${rowMeta.tone}`}
+                            title={t(rowMeta.brief)}
+                          >
+                            <CoordinationModeIcon mode={rowMode} size={11} />
+                            <span>{t(rowMeta.shortLabel)}</span>
+                          </span>
+                          {row.coordinator_handle && (
+                            <span
+                              className="mono truncate"
+                              style={{ fontSize: "var(--text-xs)", color: "var(--fg-tertiary)", maxInlineSize: 220 }}
+                              title={row.coordinator_handle}
+                            >
+                              {row.coordinator_handle}
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="mono" style={{ padding: "10px 14px", color: "var(--fg-tertiary)", fontSize: "var(--text-xs)" }}>
                         {row.created_at ? formatDateTime(row.created_at) : "—"}

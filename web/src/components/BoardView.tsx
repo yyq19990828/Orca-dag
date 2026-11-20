@@ -1,10 +1,10 @@
 import { memo, useMemo, useState, type CSSProperties } from "react";
-import { CheckCircle2, Diamond, GitBranch, Lock, PlayCircle } from "lucide-react";
+import { CheckCircle2, Cpu, Diamond, GitBranch, GitMerge, Lock, PlayCircle, ShieldCheck, XCircle } from "lucide-react";
 import { resolveGate } from "../api";
 import { effectiveHarness, useConfig } from "../harness";
 import { useT } from "../i18n";
 import type { DagNode, DagResponse, Gate, TaskStatus, WorkerRowView } from "../types";
-import { workerWorkspaceLabel } from "../workerWorkspace";
+import { isGateRejected, resolveWorkerWorkspaceInfo, shortModelName } from "../workerWorkspace";
 import { isGatePending, isIntegrationGate, StatusGlyph, statusTokenVars } from "./statusUi";
 import { useDecisionDialog } from "./DecisionDialog";
 import { HarnessAvatar } from "./HarnessAvatar";
@@ -14,6 +14,7 @@ export const BoardView = memo(function BoardView({
   dag,
   runId,
   workerRows,
+  workspaceName = null,
   selectedTaskId,
   selectedGateId,
   statusFilter = "all",
@@ -27,6 +28,7 @@ export const BoardView = memo(function BoardView({
   dag: DagResponse;
   runId: string;
   workerRows: WorkerRowView[];
+  workspaceName?: string | null;
   selectedTaskId: string | null;
   selectedGateId: string | null;
   statusFilter?: TaskStatus | "all";
@@ -44,20 +46,54 @@ export const BoardView = memo(function BoardView({
   const [busyGateId, setBusyGateId] = useState<string | null>(null);
 
   const workerMetaByTask = useMemo(() => {
-    const map = new Map<string, { harness: string | null; workspace: string | null }>();
+    const map = new Map<
+      string,
+      {
+        harness: string | null;
+        model: string | null;
+        effort: string | null;
+        workspace: string | null;
+        branch: string | null;
+      }
+    >();
+    const byTask = new Map<string, WorkerRowView[]>();
     for (const row of workerRows) {
-      if (!row.taskId || map.has(row.taskId)) continue;
+      if (!row.taskId) continue;
+      const list = byTask.get(row.taskId) ?? [];
+      list.push(row);
+      byTask.set(row.taskId, list);
+    }
+    for (const node of dag.nodes) {
+      const rows = byTask.get(node.id);
+      if (!rows?.length) continue;
+      const row =
+        (node.dispatchId ? rows.find((r) => r.dispatchId === node.dispatchId) : undefined) ??
+        (node.status === "completed"
+          ? rows.find((r) => r.projection?.outcome === "succeeded" || r.workerState === "succeeded")
+          : undefined) ??
+        rows[0];
       const agent =
         row.launchEvidence?.agent ??
         row.projection?.launch?.agent ??
         row.projection?.provider?.id ??
         null;
-      const rawWs = workerWorkspaceLabel(row.projection?.workspace) ?? row.projection?.launch?.worktree ?? null;
-      const ws = rawWs ? rawWs.split("::").at(-1)?.split("/").at(-1) || rawWs : null;
-      map.set(row.taskId, { harness: agent, workspace: ws });
+      const model =
+        row.projection?.launch?.model ??
+        row.projection?.provider?.model ??
+        row.launchEvidence?.model ??
+        null;
+      const effort = row.projection?.launch?.effort ?? row.launchEvidence?.effort ?? null;
+      const wsInfo = resolveWorkerWorkspaceInfo(row);
+      map.set(node.id, {
+        harness: agent,
+        model: shortModelName(model),
+        effort,
+        workspace: wsInfo.name,
+        branch: wsInfo.branch,
+      });
     }
     return map;
-  }, [workerRows]);
+  }, [workerRows, dag.nodes]);
 
   const q = searchQuery.trim().toLowerCase();
 
@@ -70,10 +106,12 @@ export const BoardView = memo(function BoardView({
         n.id.toLowerCase().includes(q) ||
         n.label.toLowerCase().includes(q) ||
         (wm?.workspace ?? "").toLowerCase().includes(q) ||
+        (wm?.branch ?? "").toLowerCase().includes(q) ||
+        (wm?.model ?? config.modelByTask[n.id] ?? "").toLowerCase().includes(q) ||
         (wm?.harness ?? effectiveHarness(n.id)).toLowerCase().includes(q)
       );
     });
-  }, [dag.nodes, statusFilter, q, workerMetaByTask]);
+  }, [dag.nodes, statusFilter, q, workerMetaByTask, config.modelByTask]);
 
   const filteredGates = useMemo(() => {
     return dag.gates.filter((g) => {
@@ -162,19 +200,18 @@ export const BoardView = memo(function BoardView({
               {col.gates.map((gate) => {
                 const pending = isGatePending(gate);
                 const integration = isIntegrationGate(gate);
+                const rejected = !pending && isGateRejected(gate);
+                const statusColor = rejected
+                  ? "var(--st-failed)"
+                  : pending
+                    ? "var(--st-blocked)"
+                    : "var(--st-completed)";
                 return (
                   <div
                     key={gate.id}
-                    className="odag-card"
-                    style={{
-                      borderStyle: pending ? "dashed" : "solid",
-                      borderColor:
-                        selectedGateId === gate.id
-                          ? "var(--accent)"
-                          : pending
-                            ? "var(--st-blocked)"
-                            : "var(--border-hairline)",
-                    }}
+                    className={`odag-card odag-flow-gate${!pending ? " odag-flow-gate--resolved" : ""}${
+                      rejected ? " odag-flow-gate--rejected" : ""
+                    }${selectedGateId === gate.id ? " is-selected" : ""}`}
                   >
                     <button
                       type="button"
@@ -197,14 +234,29 @@ export const BoardView = memo(function BoardView({
                             gap: 4,
                             fontSize: "var(--text-xs)",
                             fontWeight: 700,
-                            color: pending ? "var(--st-blocked)" : "var(--st-completed)",
+                            color: statusColor,
                           }}
                         >
-                          <Diamond size={11} aria-hidden="true" />
+                          {rejected ? (
+                            <XCircle size={12} aria-hidden="true" />
+                          ) : !pending ? (
+                            <ShieldCheck size={12} aria-hidden="true" />
+                          ) : integration ? (
+                            <GitMerge size={12} aria-hidden="true" />
+                          ) : (
+                            <Diamond size={11} aria-hidden="true" />
+                          )}
                           {integration ? t("ide.gate.integrationBadge") : t("ide.gate.approvalBadge")}
                         </span>
-                        <span className="mono truncate" style={{ fontSize: "var(--text-xs)", color: "var(--fg-tertiary)", maxInlineSize: 100 }}>
-                          {gate.id}
+                        <span
+                          className="mono truncate"
+                          style={{ fontSize: "var(--text-xs)", color: pending ? "var(--fg-tertiary)" : statusColor, maxInlineSize: 120 }}
+                        >
+                          {pending
+                            ? gate.id
+                            : rejected
+                              ? t("ide.gate.rejectedTag", { resolution: gate.resolution ?? "no" })
+                              : t("ide.gate.resolvedTag", { resolution: gate.resolution ?? "ok" })}
                         </span>
                       </div>
                       <div style={{ fontWeight: 600, fontSize: "var(--text-base)", marginBlockStart: 5 }}>
@@ -242,7 +294,10 @@ export const BoardView = memo(function BoardView({
                 const wm = workerMetaByTask.get(task.id);
                 const harness = wm?.harness ?? effectiveHarness(task.id);
                 const laneId = config.laneByTask[task.id];
-                const ws = wm?.workspace ?? laneId ?? "current";
+                const ws = wm?.workspace ?? laneId ?? workspaceName ?? t("dag.currentWorkspaceFallback");
+                const planned = task.status === "pending" || task.status === "ready" || task.status === "blocked";
+                const modelText = wm?.model ?? (planned ? shortModelName(config.modelByTask[task.id]) : null);
+                const effortText = wm?.effort ?? (planned ? config.effortByTask[task.id] : null);
                 return (
                   <button
                     key={task.id}
@@ -254,7 +309,7 @@ export const BoardView = memo(function BoardView({
                       borderColor: selectedTaskId === task.id && !selectedGateId ? "var(--accent)" : undefined,
                       display: "flex",
                       flexDirection: "column",
-                      gap: 7,
+                      gap: 6,
                     }}
                   >
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
@@ -279,23 +334,40 @@ export const BoardView = memo(function BoardView({
                       {taskReason(task)}
                     </div>
 
+                    {modelText && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                        <span className={`odag-model-chip${wm?.model ? "" : " odag-model-chip--planned"}`}>
+                          <Cpu size={10} aria-hidden="true" />
+                          <span className="truncate">
+                            {wm?.model
+                              ? effortText
+                                ? `${modelText} · ${effortText}`
+                                : modelText
+                              : t("dag.plannedModelChip", { model: modelText })}
+                          </span>
+                        </span>
+                      </div>
+                    )}
+
                     <div
                       className="mono"
                       style={{
                         display: "flex",
                         alignItems: "center",
                         justifyContent: "space-between",
-                        paddingBlockStart: 6,
+                        gap: 6,
+                        paddingBlockStart: 5,
                         borderBlockStart: "1px solid var(--border-hairline)",
                         fontSize: "var(--text-xs)",
                         color: "var(--fg-tertiary)",
                       }}
                     >
-                      <span className="truncate" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                      <span className="truncate" style={{ display: "inline-flex", alignItems: "center", gap: 4, minInlineSize: 0 }}>
                         <GitBranch size={10} aria-hidden="true" />
-                        {ws}
+                        <span className="odag-ws-name truncate">{ws}</span>
+                        {wm?.branch && <span className="odag-ws-branch truncate">({wm.branch})</span>}
                       </span>
-                      <span className="truncate" style={{ maxInlineSize: 96 }}>
+                      <span className="truncate" style={{ maxInlineSize: 90 }}>
                         {task.id}
                       </span>
                     </div>

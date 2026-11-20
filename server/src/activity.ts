@@ -273,7 +273,7 @@ function normalizeMessage(
   const dispatchId = resolvedDispatchId ?? worker?.dispatchId ?? null;
   const task = taskId ? taskMap.get(taskId) : undefined;
   const harness = worker?.projection?.launch?.agent ?? worker?.projection?.provider?.id ?? worker?.launchEvidence?.agent ?? null;
-  const model = worker?.projection?.launch?.model ?? worker?.projection?.provider?.model ?? null;
+  const model = worker?.projection?.launch?.model ?? worker?.projection?.provider?.model ?? worker?.launchEvidence?.model ?? null;
   const label = taskLabel(task, taskId);
   const rejected = Boolean(payload._orcaLifecycleRejection) || /^Rejected\s/i.test(subject);
   const eventId =
@@ -623,8 +623,9 @@ function inferredAgentSummary(
     model:
       worker?.projection?.launch?.model ??
       worker?.projection?.provider?.model ??
+      worker?.launchEvidence?.model ??
       null,
-    effort: worker?.projection?.launch?.effort ?? null,
+    effort: worker?.projection?.launch?.effort ?? worker?.launchEvidence?.effort ?? null,
     outcome,
     observedAt: null,
   };
@@ -784,7 +785,7 @@ export function buildActivitySnapshot(input: {
     dispatchId: string,
     projection: OrcaWorkerRow["projection"] | null,
     attempt: (typeof attempts)[number] | undefined,
-    launchAgent: string | null = null,
+    launchEvidence: OrcaWorkerRow["launchEvidence"] = null,
   ): StagePresence => {
     // The durable fleet row is authoritative when it carries a field. During
     // a live coordinator session, its in-memory attempt also retains the most
@@ -815,15 +816,20 @@ export function buildActivitySnapshot(input: {
       agent:
         projection?.launch?.agent ??
         projection?.provider?.id ??
-        launchAgent ??
+        launchEvidence?.agent ??
         attempt?.effective?.agent ??
         null,
       model:
         projection?.launch?.model ??
         projection?.provider?.model ??
+        launchEvidence?.model ??
         attempt?.effective?.model ??
         null,
-      effort: projection?.launch?.effort ?? attempt?.effective?.effort ?? null,
+      effort:
+        projection?.launch?.effort ??
+        launchEvidence?.effort ??
+        attempt?.effective?.effort ??
+        null,
       observedAt: attempt?.lastHeartbeatAt ?? null,
     };
   };
@@ -833,7 +839,7 @@ export function buildActivitySnapshot(input: {
     const attempt = attempts.find(
       (candidate) => candidate.dispatchId === worker.dispatchId || candidate.taskId === worker.taskId,
     );
-    presence.push(presenceFrom(worker.taskId, worker.dispatchId, worker.projection, attempt, worker.launchEvidence?.agent));
+    presence.push(presenceFrom(worker.taskId, worker.dispatchId, worker.projection, attempt, worker.launchEvidence ?? null));
   }
   // Binding/recovery can briefly expose a coordinator attempt before the
   // paged fleet read includes its row. Keep that Task visible, but only with

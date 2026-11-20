@@ -27,6 +27,34 @@ export type RunOwnershipState =
   | "unbound"
   | "unverifiable";
 
+/** Exact carrier backing the bound coordinator handle (positive handle evidence only). */
+export type CoordinatorKind =
+  | "viewer_loop"
+  | "native_chat"
+  | "external_terminal"
+  | "none"
+  | "unknown";
+
+/** Fine-grained UI/API orchestration mode derived from ownership + coordinator handle. */
+export type RunCoordinationMode =
+  | "human_panel"
+  | "panel_mismatch"
+  | "agent_native_chat"
+  | "agent_terminal"
+  | "unbound"
+  | "unknown";
+
+/** True when a coordinator handle names an Orca Native Chat session (non-PTY). */
+export function isChatCoordinatorHandle(handle: string | null | undefined): boolean {
+  if (typeof handle !== "string") return false;
+  const trimmed = handle.trim();
+  return (
+    trimmed.startsWith("orca_session_id:") ||
+    trimmed.startsWith("session:") ||
+    trimmed.startsWith("chat:")
+  );
+}
+
 /** What this viewer's process-local coordinator currently reports. */
 export interface ViewerCoordinatorFacts {
   running: boolean;
@@ -38,6 +66,8 @@ export interface ViewerCoordinatorFacts {
 
 export interface RunOwnershipView {
   state: RunOwnershipState;
+  coordinatorKind: CoordinatorKind;
+  coordinationMode: RunCoordinationMode;
   /** Readable English explanation; safe to render verbatim (no raw JSON). */
   detail: string;
 }
@@ -50,7 +80,8 @@ export type RunRecordEvidence = Pick<OrcaRun, "id" | "coordinator_handle" | "con
  * facts. Precedence: unreadable record → unverifiable; no bound handle →
  * unbound; bound handle === our live loop's handle → viewer-owned (split by
  * which Run the loop believes it is serving — a mismatch is surfaced, never
- * papered over); anything else is an external coordinator.
+ * papered over); anything else is an external coordinator (distinguishing
+ * Orca Native Chat session handles from external PTY terminals).
  */
 export function evaluateRunOwnership(
   run: RunRecordEvidence | null,
@@ -59,6 +90,8 @@ export function evaluateRunOwnership(
   if (!run) {
     return {
       state: "unverifiable",
+      coordinatorKind: "unknown",
+      coordinationMode: "unknown",
       detail:
         "The Run record could not be read (unknown id, or the run-show read failed). " +
         "Ownership is unknown; mutation stays unavailable.",
@@ -68,6 +101,8 @@ export function evaluateRunOwnership(
   if (!bound) {
     return {
       state: "unbound",
+      coordinatorKind: "none",
+      coordinationMode: "unbound",
       detail:
         "No coordinator is bound to this Run. This viewer may start it; the start will " +
         "bind its own coordinator terminal.",
@@ -78,11 +113,15 @@ export function evaluateRunOwnership(
     if (viewer.runId === run.id) {
       return {
         state: "viewer_coordinator",
+        coordinatorKind: "viewer_loop",
+        coordinationMode: "human_panel",
         detail: "This viewer's live coordinator is bound to this Run and owns its scheduling.",
       };
     }
     return {
       state: "viewer_coordinator_other_run",
+      coordinatorKind: "viewer_loop",
+      coordinationMode: "panel_mismatch",
       detail: `This viewer's coordinator terminal is bound here, but the loop reports Run ${viewer.runId ?? "unknown"} — the two disagree, which needs attention before starting anything.`,
     };
   }
@@ -92,9 +131,11 @@ export function evaluateRunOwnership(
       : "";
   // Orca 1.4.218+ lets a native chat coordinate a Run under its own session
   // id. The viewer may observe it, but the Run button will fence that chat.
-  const chat = bound.startsWith("orca_session_id:") || bound.startsWith("session:");
+  const chat = isChatCoordinatorHandle(bound);
   return {
     state: "external_coordinator",
+    coordinatorKind: chat ? "native_chat" : "external_terminal",
+    coordinationMode: chat ? "agent_native_chat" : "agent_terminal",
     detail:
       `${chat ? "Native chat" : "Terminal"} ${bound} is bound as this Run's coordinator. ` +
       `This viewer cannot mutate the Run until it takes over, which would fence that ` +
@@ -143,6 +184,8 @@ export interface RemovedWorkSummary {
 export interface RunHealthView {
   runId: string;
   ownership: RunOwnershipState;
+  coordinatorKind: CoordinatorKind;
+  coordinationMode: RunCoordinationMode;
   ownershipDetail: string;
   /** The coordinator handle the Run record reports, verbatim (null = none). */
   coordinatorHandle: string | null;
@@ -287,6 +330,8 @@ export function buildRunHealth(opts: {
   return {
     runId,
     ownership: ownership.state,
+    coordinatorKind: ownership.coordinatorKind,
+    coordinationMode: ownership.coordinationMode,
     ownershipDetail: ownership.detail,
     coordinatorHandle: run && typeof run.coordinator_handle === "string" && run.coordinator_handle.trim() ? run.coordinator_handle : null,
     consumerGeneration: run && typeof run.consumer_generation === "number" ? run.consumer_generation : null,

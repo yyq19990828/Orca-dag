@@ -311,7 +311,12 @@ export interface WorkerRowView {
   resource?: WorkerTerminalResourceView | null;
   /** Dispatch-scoped launch identity from Orca or the viewer's durable log. */
   launchEvidence?: {
-    agent: string;
+    agent: string | null;
+    model?: string | null;
+    effort?: string | null;
+    worktree?: string | null;
+    worktreeName?: string | null;
+    branch?: string | null;
     source: "fleet" | "worker-show" | "viewer-launch";
   } | null;
   projection: {
@@ -1325,6 +1330,23 @@ export type RunOwnershipState =
   | "unbound"
   | "unverifiable";
 
+/** Exact carrier backing the bound coordinator handle (positive handle evidence only). */
+export type CoordinatorKind =
+  | "viewer_loop"
+  | "native_chat"
+  | "external_terminal"
+  | "none"
+  | "unknown";
+
+/** Fine-grained orchestration mode derived from ownership + coordinator handle. */
+export type RunCoordinationMode =
+  | "human_panel"
+  | "panel_mismatch"
+  | "agent_native_chat"
+  | "agent_terminal"
+  | "unbound"
+  | "unknown";
+
 /** One evidence-backed health warning (readable message, stable code). */
 export interface RunHealthWarning {
   code:
@@ -1368,6 +1390,8 @@ export interface RemovedWorkPageView {
 export interface RunHealthView {
   runId: string;
   ownership: RunOwnershipState;
+  coordinatorKind?: CoordinatorKind;
+  coordinationMode?: RunCoordinationMode;
   ownershipDetail: string;
   coordinatorHandle: string | null;
   consumerGeneration: number | null;

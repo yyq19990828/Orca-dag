@@ -2,10 +2,10 @@ import dagre from "@dagrejs/dagre";
 import { Position, type Edge, type Node } from "@xyflow/react";
 import type { LayoutKind } from "./types";
 
-export const NODE_W = 280;
-export const NODE_H = 120;
-export const GATE_W = 256;
-export const GATE_H = 114;
+export const NODE_W = 296;
+export const NODE_H = 136;
+export const GATE_W = 244;
+export const GATE_H = 100;
 
 /**
  * Assign deterministic left-to-right (or top-to-bottom) positions using dagre —
@@ -18,7 +18,7 @@ function layoutDag<N extends Node>(
   direction: "LR" | "TB" = "LR",
 ): { nodes: N[]; edges: Edge[] } {
   const g = new dagre.graphlib.Graph();
-  g.setGraph({ rankdir: direction, nodesep: 24, ranksep: 62, marginx: 18, marginy: 18 });
+  g.setGraph({ rankdir: direction, nodesep: 28, ranksep: 68, marginx: 18, marginy: 18 });
   g.setDefaultEdgeLabel(() => ({}));
 
   nodes.forEach((n) => {

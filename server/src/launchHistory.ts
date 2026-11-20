@@ -4,10 +4,11 @@ import { prepareWorkspaceStateFile, workspaceStateReadPath, WORKSPACE_STATE_FILE
 
 /**
  * A Dispatch's launch choice is historical execution evidence, not a mutable
- * Task preference. Orca 1.4.207 omits it from worker-list, and a legacy
- * tracking Dispatch (notably opencode) has no worker-start options at all.
- * Keep only the four bounded identity fields needed to label past launches;
- * preambles, capabilities, commands, and provider session IDs never go here.
+ * Task preference. Orca 1.4.207 omits launch/provider details from settled
+ * worker-list rows, and a legacy tracking Dispatch (notably opencode) has no
+ * worker-start options at all. Keep only bounded identity & workspace fields
+ * needed to label past launches; preambles, capabilities, commands, and
+ * provider session IDs never go here.
  */
 export const LAUNCHES_FILE = WORKSPACE_STATE_FILES.launches;
 
@@ -16,6 +17,11 @@ export interface LaunchRecord {
   taskId: string;
   dispatchId: string;
   harness: string;
+  model?: string | null;
+  effort?: string | null;
+  worktree?: string | null;
+  worktreeName?: string | null;
+  branch?: string | null;
   source: "viewer-launch" | "worker-show";
 }
 
@@ -26,6 +32,20 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const HARNESS = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const queues = new Map<string, Promise<void>>();
 
+function validOptionalText(value: unknown, maxLength: number): boolean {
+  if (value === undefined || value === null) return true;
+  if (typeof value !== "string") return false;
+  if (value.length === 0 || value.length > maxLength) return false;
+  return !/[\x00-\x1f\x7f]/.test(value);
+}
+
+function normalizeOptionalText(value: string | null | undefined, maxLength: number): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > maxLength || /[\x00-\x1f\x7f]/.test(trimmed)) return null;
+  return trimmed;
+}
+
 function valid(value: unknown): value is LaunchRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const row = value as Partial<LaunchRecord>;
@@ -33,7 +53,45 @@ function valid(value: unknown): value is LaunchRecord {
     typeof row.taskId === "string" && ID.test(row.taskId) &&
     typeof row.dispatchId === "string" && ID.test(row.dispatchId) &&
     typeof row.harness === "string" && HARNESS.test(row.harness) &&
+    validOptionalText(row.model, 512) &&
+    validOptionalText(row.effort, 64) &&
+    validOptionalText(row.worktree, 1024) &&
+    validOptionalText(row.worktreeName, 256) &&
+    validOptionalText(row.branch, 256) &&
     (row.source === "viewer-launch" || row.source === "worker-show");
+}
+
+function mergeRecord(previous: LaunchRecord | undefined, next: LaunchRecord): LaunchRecord {
+  const normalizedNext: LaunchRecord = {
+    runId: next.runId,
+    taskId: next.taskId,
+    dispatchId: next.dispatchId,
+    harness: next.harness,
+    model: normalizeOptionalText(next.model, 512),
+    effort: normalizeOptionalText(next.effort, 64),
+    worktree: normalizeOptionalText(next.worktree, 1024),
+    worktreeName: normalizeOptionalText(next.worktreeName, 256),
+    branch: normalizeOptionalText(next.branch, 256),
+    source: next.source,
+  };
+  if (!previous) return normalizedNext;
+  const authoritativeNext = previous.source !== "worker-show" || normalizedNext.source === "worker-show";
+  const pick = <K extends "model" | "effort" | "worktree" | "worktreeName" | "branch">(field: K): string | null =>
+    authoritativeNext
+      ? (normalizedNext[field] ?? previous[field] ?? null)
+      : (previous[field] ?? normalizedNext[field] ?? null);
+  return {
+    runId: normalizedNext.runId,
+    taskId: authoritativeNext ? normalizedNext.taskId : previous.taskId,
+    dispatchId: normalizedNext.dispatchId,
+    harness: authoritativeNext ? normalizedNext.harness : previous.harness,
+    model: pick("model"),
+    effort: pick("effort"),
+    worktree: pick("worktree"),
+    worktreeName: pick("worktreeName"),
+    branch: pick("branch"),
+    source: previous.source === "worker-show" ? "worker-show" : normalizedNext.source,
+  };
 }
 
 export class LaunchHistory {
@@ -74,10 +132,7 @@ export class LaunchHistory {
         if (valid(row) && row.runId === runId) {
           // A runtime observation can improve a viewer launch receipt, never
           // let a weaker later append replace the exact worker-show choice.
-          const previous = records.get(row.dispatchId);
-          if (!previous || previous.source !== "worker-show" || row.source === "worker-show") {
-            records.set(row.dispatchId, row);
-          }
+          records.set(row.dispatchId, mergeRecord(records.get(row.dispatchId), row));
         }
       } catch {
         // A crash can tear the last JSONL line; earlier evidence survives.

@@ -158,6 +158,31 @@
   gap: 6px;
 }
 
+.odag-sb__mode-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-inline-size: 0;
+}
+
+.odag-sb__mode-handle {
+  display: none;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--fg-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-inline-size: 0;
+}
+
+@container (min-width: 340px) {
+  .odag-sb__mode-handle {
+    display: inline-block;
+  }
+}
+
 .odag-sb__progress-meta {
   display: flex;
   align-items: center;

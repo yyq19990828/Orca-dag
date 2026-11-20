@@ -257,6 +257,8 @@ describe("evaluateRunOwnership (pure)", () => {
       { running: true, runId: "run_a", coordinatorHandle: "term_mine" },
     );
     assert.equal(view.state, "viewer_coordinator");
+    assert.equal(view.coordinatorKind, "viewer_loop");
+    assert.equal(view.coordinationMode, "human_panel");
   });
 
   it("viewer_coordinator_other_run: our handle is bound here but the loop serves another Run", () => {
@@ -265,6 +267,8 @@ describe("evaluateRunOwnership (pure)", () => {
       { running: true, runId: "run_b", coordinatorHandle: "term_mine" },
     );
     assert.equal(view.state, "viewer_coordinator_other_run");
+    assert.equal(view.coordinatorKind, "viewer_loop");
+    assert.equal(view.coordinationMode, "panel_mismatch");
   });
 
   it("external_coordinator: some other terminal is bound", () => {
@@ -273,20 +277,26 @@ describe("evaluateRunOwnership (pure)", () => {
       idle,
     );
     assert.equal(view.state, "external_coordinator");
+    assert.equal(view.coordinatorKind, "external_terminal");
+    assert.equal(view.coordinationMode, "agent_terminal");
     assert.match(view.detail, /term_user/);
     // the plan's hard rule: a handle missing from a local terminal list is NOT
     // evidence of staleness — the wording must not claim the coordinator is dead
     assert.doesNotMatch(view.detail, /stale|dead|exited/i);
   });
 
-  it("names a native chat coordinator as a chat", () => {
-    const view = evaluateRunOwnership(
-      { id: "run_chat", coordinator_handle: "orca_session_id:chat_123", consumer_generation: 6 },
-      idle,
-    );
-    assert.equal(view.state, "external_coordinator");
-    assert.match(view.detail, /Native chat orca_session_id:chat_123/);
-    assert.doesNotMatch(view.detail, /Terminal/);
+  it("names a native chat coordinator as a chat (orca_session_id:, session:, chat:)", () => {
+    for (const handle of ["orca_session_id:chat_123", "session:abc_456", "chat:native_789"]) {
+      const view = evaluateRunOwnership(
+        { id: "run_chat", coordinator_handle: handle, consumer_generation: 6 },
+        idle,
+      );
+      assert.equal(view.state, "external_coordinator");
+      assert.equal(view.coordinatorKind, "native_chat");
+      assert.equal(view.coordinationMode, "agent_native_chat");
+      assert.match(view.detail, new RegExp(`Native chat ${handle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+      assert.doesNotMatch(view.detail, /Terminal/);
+    }
   });
 
   it("external_coordinator notes when the viewer's coordinator is bound elsewhere", () => {
@@ -295,22 +305,30 @@ describe("evaluateRunOwnership (pure)", () => {
       { running: true, runId: "run_other", coordinatorHandle: "term_mine" },
     );
     assert.equal(view.state, "external_coordinator");
+    assert.equal(view.coordinatorKind, "external_terminal");
+    assert.equal(view.coordinationMode, "agent_terminal");
     assert.match(view.detail, /another Run/);
   });
 
   it("unbound: the Run record names no coordinator", () => {
     const view = evaluateRunOwnership({ id: "run_a", coordinator_handle: null, consumer_generation: 0 }, idle);
     assert.equal(view.state, "unbound");
+    assert.equal(view.coordinatorKind, "none");
+    assert.equal(view.coordinationMode, "unbound");
   });
 
   it("unbound also wins over whitespace-only handles (never renders a fake handle)", () => {
     const view = evaluateRunOwnership({ id: "run_a", coordinator_handle: "   ", consumer_generation: 0 }, idle);
     assert.equal(view.state, "unbound");
+    assert.equal(view.coordinatorKind, "none");
+    assert.equal(view.coordinationMode, "unbound");
   });
 
   it("unverifiable: the Run record could not be read", () => {
     const view = evaluateRunOwnership(null, idle);
     assert.equal(view.state, "unverifiable");
+    assert.equal(view.coordinatorKind, "unknown");
+    assert.equal(view.coordinationMode, "unknown");
     assert.equal(evaluateRunOwnership(null, { running: true, runId: "run_x", coordinatorHandle: "t" }).state, "unverifiable");
   });
 });
@@ -447,15 +465,26 @@ describe("GET /api/run-health", () => {
 
   it("reports an external coordinator from the run-show binding", async () => {
     writeScript({
-      runsById: { run_ext: { id: "run_ext", coordinator_handle: "term_user", consumer_generation: 7 } },
-      tasksByRun: { run_ext: [localTask()] },
+      runsById: {
+        run_ext: { id: "run_ext", coordinator_handle: "term_user", consumer_generation: 7 },
+        run_ext_chat: { id: "run_ext_chat", coordinator_handle: "orca_session_id:chat_9", consumer_generation: 2 },
+      },
+      tasksByRun: { run_ext: [localTask()], run_ext_chat: [] },
     });
     const { status, health } = await getHealth("run_ext");
     assert.equal(status, 200);
     assert.equal(health.ownership, "external_coordinator");
+    assert.equal(health.coordinatorKind, "external_terminal");
+    assert.equal(health.coordinationMode, "agent_terminal");
     assert.equal(health.coordinatorHandle, "term_user");
     assert.equal(health.consumerGeneration, 7);
     assert.equal((health.counts as Record<string, unknown>).tasks, 1);
+
+    const chatRes = await getHealth("run_ext_chat");
+    assert.equal(chatRes.status, 200);
+    assert.equal(chatRes.health.ownership, "external_coordinator");
+    assert.equal(chatRes.health.coordinatorKind, "native_chat");
+    assert.equal(chatRes.health.coordinationMode, "agent_native_chat");
   });
 
   it("reports an unbound Run", async () => {

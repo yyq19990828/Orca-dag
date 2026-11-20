@@ -324,9 +324,10 @@ export function NodePanel({
   const detailMatch = workerWorktree?.dispatchId === dispatchId ? workerWorktree : null;
   const actualWorktree =
     detailMatch?.path ??
+    worker?.launchEvidence?.worktree ??
     workerWorkspaceLabel(worker?.projection?.workspace) ??
     worker?.projection?.launch?.worktree ?? null;
-  const actualBranch = detailMatch?.branch ?? null;
+  const actualBranch = detailMatch?.branch ?? worker?.launchEvidence?.branch ?? null;
   const worktreeLoading = dispatchId && !detailMatch;
   const worktreeError = Boolean(detailMatch?.error);
 
@@ -341,11 +342,13 @@ export function NodePanel({
     ? detailMatch?.model ??
       worker?.projection?.launch?.model ??
       worker?.projection?.provider?.model ??
+      worker?.launchEvidence?.model ??
       null
     : null;
   const recordedEffort = permanentLock
     ? detailMatch?.effort ??
       worker?.projection?.launch?.effort ??
+      worker?.launchEvidence?.effort ??
       null
     : null;
 

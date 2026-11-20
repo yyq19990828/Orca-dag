@@ -1,4 +1,5 @@
 import { ApiError, fetchCoordinatorControl, type CoordinatorControl } from "../api";
+import { classifyControlTargetMode } from "../coordinationMode";
 import { useT } from "../i18n";
 import { useDecisionDialog } from "./DecisionDialog";
 
@@ -12,9 +13,21 @@ export function useCoordinatorControl() {
     } catch (error) {
       if (!(error instanceof ApiError) || error.code !== "coordinator_control_required") throw error;
       const control = await fetchCoordinatorControl(runId);
+      const targetKind = classifyControlTargetMode(control.coordinatorHandle);
+      const modeLabel =
+        targetKind === "native_chat"
+          ? t("mode.agent_native_chat.label")
+          : targetKind === "external_terminal"
+            ? t("mode.agent_terminal.label")
+            : t("mode.unbound.label");
       const accepted = await dialog.confirm({
         title: t("control.title"),
-        message: t("control.message", { run: runId, handle: control.coordinatorHandle ?? t("worker.unknown"), generation: String(control.consumerGeneration ?? t("worker.unknown")) }),
+        message: t("control.messageTyped", {
+          run: runId,
+          mode: modeLabel,
+          handle: control.coordinatorHandle ?? t("ide.runs.unbound"),
+          generation: String(control.consumerGeneration ?? t("worker.unknown")),
+        }),
         confirmLabel: t("control.confirm"),
         tone: "danger",
       });

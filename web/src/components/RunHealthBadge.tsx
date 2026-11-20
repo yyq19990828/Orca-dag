@@ -1,62 +1,28 @@
 import { useEffect, useRef, useState } from "react";
 import { Popover } from "radix-ui";
 import "./run-health-popover.css";
-import { fetchRemovedWork, fetchRunHealth } from "../api";
-import { t, useT, type TranslationKey } from "../i18n";
-import type { RemovedWorkEntryView, RemovedWorkPageView, RunHealthView, RunOwnershipState } from "../types";
-import { usePageVisible } from "../visibility";
+import { fetchRemovedWork } from "../api";
+import { COORDINATION_MODE_META, resolveCoordinationMode } from "../coordinationMode";
+import { t, useT } from "../i18n";
+import type { RemovedWorkEntryView, RemovedWorkPageView, RunHealthView } from "../types";
+import { useRunHealth } from "../useRunHealth";
+import { CoordinationModeIcon } from "./CoordinationModeIcon";
 
 /**
- * Compact Run ownership/health indicator (operations epic O2, Phase 1).
+ * Compact Run orchestration-mode & health indicator (operations epic O2).
  *
- * Sits next to the Run selector and answers the first operational question —
- * who owns this Run, and is anything visibly wrong — without raw JSON:
- *  - ownership comes from Orca's Run record (run-show) combined with this
- *    viewer's process-local coordinator state, so an externally-bound Run is
- *    named as external rather than silently looking editable;
- *  - warnings are evidence-based on the server side; this component only
- *    renders them. A failed read shows as "unknown", never as a zero.
+ * Sits next to the Run selector (full workbench topbar and narrow Orca sidebar)
+ * and answers two operational questions at a glance:
+ *  - which coordination mode is active (Human · Panel, Agent · Orca Native Chat,
+ *    Agent · External Terminal PTY, Panel mismatch, Unbound, or Unknown), and
+ *    whether this panel is active control or read-only observation;
+ *  - whether any evidence-backed health warnings exist (a failed read renders
+ *    as "unknown", never as a reassuring zero).
  *
- * Polls slower than the DAG (5s) because each health projection fans out to
- * five Orca reads; the server additionally shares a short cache. Paused
- * entirely while the tab is hidden — five fan-out reads per tick is exactly
- * the work nobody needs from a background page — and the effect re-run on
- * becoming visible delivers the single immediate refresh before the next
- * interval tick.
+ * Accepts an optional parent-owned `health` snapshot so App / SidebarApp share
+ * a single `/api/run-health` poll; falls back to its own `useRunHealth` poll
+ * when mounted standalone.
  */
-
-const OWNERSHIP_META: Record<
-  RunOwnershipState,
-  { label: TranslationKey; tone: "ok" | "warn" | "bad" | "muted"; brief: TranslationKey }
-> = {
-  viewer_coordinator: {
-    label: "health.ownership.viewer.label",
-    tone: "ok",
-    brief: "health.ownership.viewer.brief",
-  },
-  viewer_coordinator_other_run: {
-    label: "health.ownership.otherRun.label",
-    tone: "warn",
-    brief: "health.ownership.otherRun.brief",
-  },
-  external_coordinator: {
-    label: "health.ownership.external.label",
-    tone: "warn",
-    brief: "health.ownership.external.brief",
-  },
-  unbound: {
-    label: "health.ownership.unbound.label",
-    tone: "muted",
-    brief: "health.ownership.unbound.brief",
-  },
-  unverifiable: {
-    label: "health.ownership.unverifiable.label",
-    tone: "bad",
-    brief: "health.ownership.unverifiable.brief",
-  },
-};
-
-const POLL_MS = 5_000;
 
 function formatCounts(health: RunHealthView): string {
   // A failed read renders as "—" (unknown), never as a reassuring zero. The
@@ -75,9 +41,23 @@ function formatCounts(health: RunHealthView): string {
   });
 }
 
-export function RunHealthBadge({ runId }: { runId: string }) {
+export function RunHealthBadge({
+  runId,
+  health: providedHealth,
+  compact = false,
+  align = "end",
+}: {
+  runId: string;
+  /** Optional shared snapshot from parent `useRunHealth`; omits duplicate polling when passed. */
+  health?: RunHealthView | null;
+  /** Compact variant for narrow containers (e.g. Orca right-sidebar panel). */
+  compact?: boolean;
+  align?: "start" | "center" | "end";
+}) {
   const t = useT();
-  const [health, setHealth] = useState<RunHealthView | null>(null);
+  const pollOwn = providedHealth === undefined;
+  const { health: polledHealth } = useRunHealth(runId, pollOwn);
+  const health = pollOwn ? polledHealth : providedHealth;
   const [open, setOpen] = useState(false);
   const [showRemoved, setShowRemoved] = useState(false);
   const [removedPages, setRemovedPages] = useState<RemovedWorkEntryView[]>([]);
@@ -90,34 +70,7 @@ export function RunHealthBadge({ runId }: { runId: string }) {
   const seenCursors = useRef(new Set<string>());
   const inFlightPage = useRef<{ runId: string; cursor: string | undefined } | null>(null);
 
-  const visible = usePageVisible();
   useEffect(() => {
-    // Paused while hidden: no health fan-out reads from a background page.
-    // The effect re-run on becoming visible is the one immediate refresh.
-    if (!runId || !visible) {
-      if (!runId) setHealth(null);
-      return;
-    }
-    let alive = true;
-    const load = async () => {
-      try {
-        const next = await fetchRunHealth(runId);
-        // A Run switch must not paint the previous Run's health.
-        if (alive) setHealth(next);
-      } catch {
-        // Polling noise (viewer restarting, Orca busy) keeps the last known
-        // state; the badge never invents an ownership verdict from an error.
-      }
-    };
-    void load();
-    const timer = window.setInterval(load, POLL_MS);
-    return () => {
-      alive = false;
-      window.clearInterval(timer);
-    };
-  }, [runId, visible]);
-  useEffect(() => {
-    setHealth(null);
     requestGeneration.current += 1;
     setShowRemoved(false);
     setRemovedPages([]);
@@ -169,10 +122,10 @@ export function RunHealthBadge({ runId }: { runId: string }) {
     }
   };
 
-
   if (!runId || !health) return null;
 
-  const meta = OWNERSHIP_META[health.ownership];
+  const mode = resolveCoordinationMode(health);
+  const meta = COORDINATION_MODE_META[mode];
   const warningCount = health.warnings.filter((w) => w.severity === "warning").length;
   const infoCount = health.warnings.length - warningCount;
 
@@ -182,25 +135,49 @@ export function RunHealthBadge({ runId }: { runId: string }) {
       <Popover.Trigger asChild>
         <button
           type="button"
-          className={`runhealth__chip runhealth__chip--${meta.tone}`}
-          title={`${t(meta.brief)}\n${health.ownershipDetail}`}
+          className={`runhealth__chip runhealth__chip--${meta.tone}${compact ? " runhealth__chip--compact" : ""}`}
+          title={`${t(meta.label)} — ${t(meta.brief)}\n${health.ownershipDetail}`}
         >
-          {t(meta.label)}
+          <CoordinationModeIcon mode={mode} size={compact ? 11 : 13} />
+          <span>{t(meta.shortLabel)}</span>
           {warningCount > 0 && <b className="runhealth__flag">{warningCount}</b>}
           {warningCount === 0 && infoCount > 0 && <span className="runhealth__info-dot">i</span>}
         </button>
       </Popover.Trigger>
       <Popover.Portal>
-        <Popover.Content className="runhealth__panel runhealth__panel--popover" role="region" aria-label={t("health.panelAria")} sideOffset={8} align="end" collisionPadding={12}>
+        <Popover.Content
+          className="runhealth__panel runhealth__panel--popover"
+          role="region"
+          aria-label={t("health.panelAria")}
+          sideOffset={8}
+          align={align}
+          collisionPadding={12}
+        >
           <div className="runhealth__row">
-            <span className="runhealth__key">{t("health.ownershipKey")}</span>
+            <span className="runhealth__key">{t("health.modeKey")}</span>
+            <span className="runhealth__val runhealth__val--mode">
+              <CoordinationModeIcon mode={mode} size={13} />
+              <strong>{t(meta.label)}</strong>
+            </span>
+          </div>
+          <div className="runhealth__row">
+            <span className="runhealth__key">{t("health.carrierKey")}</span>
             <span className="runhealth__val">
-              {t(meta.label)}
-              {health.coordinatorHandle ? ` · ${health.coordinatorHandle}` : ""}
+              {t(meta.carrier)}
+              {health.coordinatorHandle ? (
+                <>
+                  {" · "}
+                  <code className="runhealth__handle">{health.coordinatorHandle}</code>
+                </>
+              ) : null}
               {health.consumerGeneration !== null
                 ? t("health.generation", { n: health.consumerGeneration })
                 : ""}
             </span>
+          </div>
+          <div className="runhealth__row">
+            <span className="runhealth__key">{t("health.panelRoleKey")}</span>
+            <span className="runhealth__val">{t(meta.panelRole)}</span>
           </div>
           <div className="runhealth__row">
             <span className="runhealth__key">{t("health.evidenceKey")}</span>
@@ -251,7 +228,8 @@ export function RunHealthBadge({ runId }: { runId: string }) {
               </div>
             )}
           </section>
-          <p className="runhealth__detail">{health.ownershipDetail}</p>
+          <p className="runhealth__detail">{t(meta.brief)}</p>
+          <p className="runhealth__detail runhealth__detail--verbatim">{health.ownershipDetail}</p>
           {health.warnings.length > 0 ? (
             <ul className="runhealth__warnings">
               {health.warnings.map((w) => (

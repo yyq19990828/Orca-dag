@@ -1,7 +1,10 @@
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { useReactFlow, useStore, useStoreApi } from "@xyflow/react";
+import { COORDINATION_MODE_META } from "../coordinationMode";
 import { NODE_H, NODE_W } from "../layout";
 import { useT } from "../i18n";
+import type { RunCoordinationMode } from "../types";
+import { CoordinationModeIcon } from "./CoordinationModeIcon";
 import type {
   CanvasCommsMode,
   CanvasCommsPill,
@@ -43,6 +46,7 @@ export interface CanvasCommsOverlayProps {
   coordinatorPhaseLabel: string;
   coordinatorAwaitingInput: boolean;
   coordinatorHandle: string | null;
+  coordinationMode?: RunCoordinationMode | null;
   activeWorkerCount: number;
   maxConcurrency: number | null;
   activePulses: readonly CanvasCommsPulse[];
@@ -71,6 +75,7 @@ export const CanvasCommsOverlay = memo(function CanvasCommsOverlay({
   coordinatorPhaseLabel,
   coordinatorAwaitingInput,
   coordinatorHandle,
+  coordinationMode = null,
   activeWorkerCount,
   maxConcurrency,
   activePulses,
@@ -409,6 +414,39 @@ export const CanvasCommsOverlay = memo(function CanvasCommsOverlay({
 
   const hasWaiting = coordinatorAwaitingInput || pendingByTask.size > 0;
   const hubSecondRow = canvasWidth > 0 && canvasWidth < 1260;
+  const modeMeta = coordinationMode ? COORDINATION_MODE_META[coordinationMode] : null;
+  const isExternalChat = coordinationMode === "agent_native_chat";
+  const isExternalTerm = coordinationMode === "agent_terminal";
+  const hubTitleText = modeMeta ? t(modeMeta.hubLabel) : t("ide.canvas.hubTitle");
+  const hubBadgeText = isExternalChat || isExternalTerm
+    ? t("ide.coord.readOnly")
+    : coordinationMode === "unbound" && !coordinatorRunning
+      ? t("mode.unbound.short")
+      : coordinatorPhaseLabel;
+  const hubBadgeClass = hasWaiting
+    ? " is-waiting"
+    : coordinatorRunning
+      ? " is-running"
+      : isExternalChat
+        ? " is-chat"
+        : isExternalTerm
+          ? " is-term"
+          : "";
+  const hubDotColor = hasWaiting
+    ? "var(--st-dispatched)"
+    : coordinatorRunning
+      ? "var(--st-completed)"
+      : isExternalChat
+        ? "var(--st-blocked)"
+        : isExternalTerm
+          ? "var(--st-dispatched)"
+          : "var(--fg-tertiary)";
+  const hubTooltipText = modeMeta
+    ? t("ide.canvas.hubTooltipMode", {
+        mode: t(modeMeta.label),
+        role: t(modeMeta.panelRole),
+      })
+    : t("ide.canvas.hubTooltip");
   const slotsText =
     maxConcurrency !== null
       ? t("ide.canvas.hubSlots", { active: activeWorkerCount, max: maxConcurrency })
@@ -486,8 +524,8 @@ export const CanvasCommsOverlay = memo(function CanvasCommsOverlay({
         }${hubBroadcastActive ? " is-broadcast" : ""}`}
         title={
           coordinatorHandle
-            ? `${t("ide.canvas.hubTooltip")} (${coordinatorHandle})`
-            : t("ide.canvas.hubTooltip")
+            ? `${hubTooltipText} (${coordinatorHandle})`
+            : hubTooltipText
         }
         onMouseEnter={() => setHubHovered(true)}
         onMouseLeave={() => setHubHovered(false)}
@@ -501,25 +539,14 @@ export const CanvasCommsOverlay = memo(function CanvasCommsOverlay({
             className={`odag-pulse-dot${
               coordinatorRunning && active && !motionPaused ? " odag-pulse-dot--live" : ""
             }`}
-            style={
-              {
-                "--dot-color": hasWaiting
-                  ? "var(--st-dispatched)"
-                  : coordinatorRunning
-                    ? "var(--st-completed)"
-                    : "var(--fg-tertiary)",
-              } as CSSProperties
-            }
+            style={{ "--dot-color": hubDotColor } as CSSProperties}
             aria-hidden="true"
           />
-          {t("ide.canvas.hubTitle")}
+          {coordinationMode && <CoordinationModeIcon mode={coordinationMode} size={12} />}
+          {hubTitleText}
         </span>
-        <span
-          className={`odag-coord-hub__badge${
-            hasWaiting ? " is-waiting" : coordinatorRunning ? " is-running" : ""
-          }`}
-        >
-          {coordinatorPhaseLabel}
+        <span className={`odag-coord-hub__badge${hubBadgeClass}`}>
+          {hubBadgeText}
         </span>
         <span className="odag-coord-hub__meta mono">{slotsText}</span>
         <span className="odag-coord-hub__port" aria-hidden="true" />

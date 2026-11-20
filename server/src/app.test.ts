@@ -2066,4 +2066,213 @@ process.stdout.write(JSON.stringify(out));
     assert.equal(afterClose.status, 200);
   });
 
+  it("retains model, effort, worktree name and branch on GET /api/workers after workers settle, without writing disk or trusting requestedLaunch", async () => {
+    const runId = "run_worker_persist";
+    const launchesPath = join(wsReal, WORKSPACE_STATE_FILES.launches);
+    const launchesBefore = existsSync(launchesPath) ? readFileSync(launchesPath, "utf8") : null;
+
+    // Step 1: live fleet observation carries provider.model + workspace selector
+    writeScript({
+      worktrees: [
+        {
+          id: "id:repo_1::/tmp/wt-feature-auth",
+          repoId: "repo_1",
+          path: "/tmp/wt-feature-auth",
+          displayName: "wt-auth",
+          branch: "feat/oauth-pkce",
+          hostId: "local",
+          isMainWorktree: false,
+        },
+      ],
+      workers: [
+        {
+          dispatchId: "ctx_persist_live",
+          taskId: "task_persist_live",
+          runId,
+          workerState: "running",
+          supervision: "supervised",
+          dispatchStatus: "dispatched",
+          agentTerminalHandle: "term_live",
+          terminalState: "active",
+          projection: {
+            workspace: { id: "id:repo_1::/tmp/wt-feature-auth", kind: "worktree" },
+            outcome: null,
+            liveness: { verdict: "live", reason: null },
+            stage: { worker: "supervised", dispatch: "dispatched", detail: "editing", activity: "working" },
+            nextAction: null,
+            attention: null,
+            launch: { agent: "claude", effort: "high", worktree: "id:repo_1::/tmp/wt-feature-auth" },
+            provider: { id: "claude", model: "anthropic/claude-sonnet-4-6" },
+          },
+        },
+      ],
+    });
+    const liveRes = await rpc("GET", `/api/workers?run=${runId}`);
+    assert.equal(liveRes.status, 200);
+    const liveWorkers = liveRes.json.workers as Array<{ dispatchId: string; launchEvidence?: Record<string, unknown> | null }>;
+    assert.deepEqual(liveWorkers[0]?.launchEvidence, {
+      agent: "claude",
+      model: "anthropic/claude-sonnet-4-6",
+      effort: "high",
+      worktree: "id:repo_1::/tmp/wt-feature-auth",
+      worktreeName: "wt-auth",
+      branch: "feat/oauth-pkce",
+      source: "fleet",
+    });
+
+    // Step 2: once settled, Orca worker-list omits projection.launch and projection.provider;
+    // GET /api/workers still retains observed model/effort/worktree/branch AND recovers
+    // settled workers via worker-show while never promoting requestedLaunch when effective is null.
+    const showShowReceipt = workerShowReceipt({
+      dispatchId: "ctx_persist_show",
+      runId,
+      taskId: "task_persist_show",
+      dispatchStatus: "completed",
+      terminal: {
+        handle: "term_done",
+        title: "codex",
+        connected: false,
+        orphaned: false,
+        worktreePath: "/tmp/wt-feature-auth",
+        branch: "feat/oauth-pkce-rebased",
+      },
+    });
+    showShowReceipt.worker = {
+      ...(showShowReceipt.worker as Record<string, unknown>),
+      startOptions: {
+        launch: {
+          requested: { agent: "codex", model: "openai/gpt-5.4" },
+          effective: { agent: "codex", model: "openai/gpt-5.4", effort: "medium" },
+        },
+      },
+    };
+    const showReqOnlyReceipt = workerShowReceipt({
+      dispatchId: "ctx_persist_req",
+      runId,
+      taskId: "task_persist_req",
+      dispatchStatus: "completed",
+      terminal: null,
+    });
+    showReqOnlyReceipt.worker = {
+      ...(showReqOnlyReceipt.worker as Record<string, unknown>),
+      startOptions: {
+        launch: {
+          requested: { agent: "claude", model: "anthropic/claude-opus-4-6", effort: "high" },
+          effective: null,
+        },
+      },
+    };
+
+    writeScript({
+      worktrees: [
+        {
+          id: "id:repo_1::/tmp/wt-feature-auth",
+          repoId: "repo_1",
+          path: "/tmp/wt-feature-auth",
+          displayName: "wt-auth",
+          branch: "feat/oauth-pkce",
+          hostId: "local",
+          isMainWorktree: false,
+        },
+      ],
+      workers: [
+        {
+          dispatchId: "ctx_persist_live",
+          taskId: "task_persist_live",
+          runId,
+          workerState: "succeeded",
+          supervision: "supervised",
+          dispatchStatus: "completed",
+          agentTerminalHandle: null,
+          terminalState: "released",
+          projection: {
+            launch: null,
+            provider: null,
+            workspace: null,
+            outcome: "succeeded",
+            liveness: { verdict: "exited", reason: null },
+            stage: { worker: "succeeded", dispatch: "completed", detail: null, activity: "unknown" },
+            nextAction: null,
+            attention: null,
+          },
+        },
+        {
+          dispatchId: "ctx_persist_show",
+          taskId: "task_persist_show",
+          runId,
+          workerState: "succeeded",
+          supervision: "supervised",
+          dispatchStatus: "completed",
+          agentTerminalHandle: null,
+          terminalState: "released",
+          projection: {
+            launch: null,
+            provider: null,
+            outcome: "succeeded",
+            liveness: { verdict: "exited", reason: null },
+            stage: { worker: "succeeded", dispatch: "completed", detail: null, activity: "unknown" },
+            nextAction: null,
+            attention: null,
+          },
+        },
+        {
+          dispatchId: "ctx_persist_req",
+          taskId: "task_persist_req",
+          runId,
+          workerState: "succeeded",
+          supervision: "supervised",
+          dispatchStatus: "completed",
+          agentTerminalHandle: null,
+          terminalState: "released",
+          projection: {
+            launch: null,
+            provider: null,
+            outcome: "succeeded",
+            liveness: { verdict: "exited", reason: null },
+            stage: { worker: "succeeded", dispatch: "completed", detail: null, activity: "unknown" },
+            nextAction: null,
+            attention: null,
+          },
+        },
+      ],
+      workerShow: {
+        ctx_persist_show: showShowReceipt,
+        ctx_persist_req: showReqOnlyReceipt,
+      },
+    });
+
+    const settledRes = await rpc("GET", `/api/workers?run=${runId}`);
+    assert.equal(settledRes.status, 200);
+    const byId = new Map(
+      (settledRes.json.workers as Array<{ dispatchId: string; launchEvidence?: Record<string, unknown> | null }>)
+        .map((w) => [w.dispatchId, w.launchEvidence ?? null]),
+    );
+    assert.deepEqual(byId.get("ctx_persist_live"), {
+      agent: "claude",
+      model: "anthropic/claude-sonnet-4-6",
+      effort: "high",
+      worktree: "id:repo_1::/tmp/wt-feature-auth",
+      worktreeName: "wt-auth",
+      branch: "feat/oauth-pkce",
+      source: "viewer-launch",
+    });
+    assert.deepEqual(byId.get("ctx_persist_show"), {
+      agent: "codex",
+      model: "openai/gpt-5.4",
+      effort: "medium",
+      worktree: "/tmp/wt-feature-auth",
+      worktreeName: "wt-auth",
+      branch: "feat/oauth-pkce-rebased",
+      source: "worker-show",
+    });
+    assert.equal(
+      byId.get("ctx_persist_req"),
+      null,
+      "requestedLaunch must never be promoted into launchEvidence when effective/terminal evidence is absent",
+    );
+
+    const launchesAfter = existsSync(launchesPath) ? readFileSync(launchesPath, "utf8") : null;
+    assert.equal(launchesAfter, launchesBefore, "GET /api/workers must remain strictly read-only on launches.jsonl");
+  });
+
 });

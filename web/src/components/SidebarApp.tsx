@@ -49,6 +49,8 @@ import type {
   TaskStatus,
   WorkerRowView,
 } from "../types";
+import { formatCoordinatorHandleShort } from "../coordinationMode";
+import { useRunHealth } from "../useRunHealth";
 import { usePageVisible } from "../visibility";
 import { ChatPanel } from "./ChatPanel";
 import { useDecisionDialog } from "./DecisionDialog";
@@ -56,6 +58,7 @@ import { EmptyRunState } from "./EmptyRunState";
 import { ExecControls } from "./ExecControls";
 import { HarnessAvatar } from "./HarnessAvatar";
 import { NodeSessionPanel } from "./NodeSessionPanel";
+import { RunHealthBadge } from "./RunHealthBadge";
 import { RunPicker, type RunListReadState } from "./RunPicker";
 import { StatusGlyph, isGatePending, statusTokenVars } from "./statusUi";
 import { useCoordinatorControl } from "./useCoordinatorControl";
@@ -164,6 +167,7 @@ export default function SidebarApp() {
   const [status, setStatus] = useState<RunStatus | null>(null);
   const [activity, setActivity] = useState<ActivitySnapshot | null>(null);
   const [startingRunId, setStartingRunId] = useState<string | null>(null);
+  const { health: runHealth, refresh: refreshRunHealth } = useRunHealth(runId);
   const [tab, setTab] = useState<SidebarTab>("tasks");
   const [filter, setFilter] = useState<TaskFilter>("all");
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -638,6 +642,7 @@ export default function SidebarApp() {
           readyCount={counts.ready}
           startingRunId={startingRunId}
           status={status}
+          runHealth={runHealth}
           workerHistoryLoading={workersLoading}
           workerHistoryError={workersError}
           onRunStarting={(id) => setStartingRunId(id)}
@@ -645,8 +650,12 @@ export default function SidebarApp() {
             setStartingRunId(null);
             if (next) setStatus(next);
             void refreshAll();
+            void refreshRunHealth();
           }}
-          onRunStopped={() => refreshAll()}
+          onRunStopped={() => {
+            void refreshAll();
+            void refreshRunHealth();
+          }}
           actionHost={execActionHost}
           launchHost={execActionHost}
         />
@@ -689,6 +698,19 @@ export default function SidebarApp() {
 
         {runId && (
           <div className="odag-sb__progress-row">
+            {runHealth && (
+              <div className="odag-sb__mode-row">
+                <RunHealthBadge runId={runId} health={runHealth} compact align="start" />
+                {runHealth.coordinatorHandle && (
+                  <span
+                    className="odag-sb__mode-handle"
+                    title={runHealth.coordinatorHandle}
+                  >
+                    {formatCoordinatorHandleShort(runHealth.coordinatorHandle, 20)}
+                  </span>
+                )}
+              </div>
+            )}
             <div className="odag-sb__progress-meta">
               <progress
                 className="odag-sb__progress"

@@ -906,9 +906,49 @@ const state: State = {
   checkSequence: 0,
 };
 
+const LAUNCH_META_CACHE_MAX = 5_000;
+const recordedLaunchMeta = new Map<string, string>();
+
+async function recordLaunchEvidenceIfChanged(record: {
+  runId: string;
+  taskId: string;
+  dispatchId: string;
+  harness: string;
+  model?: string | null;
+  effort?: string | null;
+  worktree?: string | null;
+  source: "viewer-launch" | "worker-show";
+}): Promise<void> {
+  if (!record.dispatchId || !record.harness) return;
+  const worktree = positiveSelector(record.worktree) ? record.worktree : null;
+  const model = record.model?.trim() || null;
+  const effort = record.effort?.trim() || null;
+  const fingerprint = JSON.stringify([record.harness, model, effort, worktree, record.source]);
+  const key = `${record.runId}:${record.taskId}:${record.dispatchId}`;
+  if (recordedLaunchMeta.get(key) === fingerprint) return;
+  try {
+    await new LaunchHistory(getOrcaRuntime().workspace.dir).record({
+      runId: record.runId,
+      taskId: record.taskId,
+      dispatchId: record.dispatchId,
+      harness: record.harness,
+      model,
+      effort,
+      worktree,
+      source: record.source,
+    });
+    if (recordedLaunchMeta.size >= LAUNCH_META_CACHE_MAX) recordedLaunchMeta.clear();
+    recordedLaunchMeta.set(key, fingerprint);
+  } catch {
+    // Orca remains the lifecycle authority; worker-show can recover
+    // supervised launch identity even when this local write failed.
+  }
+}
+
 /** Reset every coordinator field. Test scaffolding only — never call while a loop is live. */
 export function resetCoordinatorForTests(): void {
   resetReadinessCacheForTests();
+  recordedLaunchMeta.clear();
   state.running = false;
   state.phase = "idle";
   state.runId = null;
@@ -4422,18 +4462,49 @@ async function reconcile(): Promise<void> {
       attempt.host = row.projection?.host ?? attempt.host;
       // The start receipt may omit its normalized effective fields even when
       // Orca's durable fleet projection later reports the applied launch.
-      // Fold that runtime echo into the attempt so each check receipt can name
-      // the observed agent/model/effort without falling back to user intent.
+      // Fold that runtime echo (including provider default model & resolved
+      // workspace) into the attempt so each check receipt and launch history
+      // entry retain observed agent/model/effort/worktree after settlement.
       const launch = row.projection?.launch;
-      if (launch) {
+      const provider = row.projection?.provider;
+      const rawWs: unknown = row.projection?.workspace;
+      const wsId =
+        typeof rawWs === "string"
+          ? rawWs
+          : rawWs && typeof rawWs === "object" && typeof (rawWs as { id?: unknown }).id === "string"
+            ? (rawWs as { id: string }).id
+            : null;
+      const positiveWs = positiveSelector(launch?.worktree)
+        ? launch!.worktree!
+        : positiveSelector(wsId)
+          ? wsId
+          : null;
+      if (launch || provider?.model || positiveWs) {
         attempt.effective = {
-          agent: launch.agent ?? attempt.effective?.agent ?? null,
-          model: launch.model ?? attempt.effective?.model ?? null,
-          effort: launch.effort ?? attempt.effective?.effort ?? null,
-          worktree: launch.worktree ?? attempt.effective?.worktree ?? null,
-          terminal: launch.terminal ?? attempt.effective?.terminal ?? null,
-          on: launch.on ?? attempt.effective?.on ?? null,
+          agent: launch?.agent ?? provider?.id ?? attempt.effective?.agent ?? null,
+          model: launch?.model ?? provider?.model ?? attempt.effective?.model ?? null,
+          effort: launch?.effort ?? attempt.effective?.effort ?? null,
+          worktree: positiveWs ?? attempt.effective?.worktree ?? null,
+          terminal: launch?.terminal ?? attempt.effective?.terminal ?? null,
+          on: launch?.on ?? attempt.effective?.on ?? null,
         };
+      }
+      const observedAgent = attempt.effective?.agent ?? (!attempt.adopted ? attempt.harness : null);
+      if (
+        attempt.dispatchId &&
+        observedAgent &&
+        (attempt.effective?.model || attempt.effective?.effort || positiveSelector(attempt.effective?.worktree))
+      ) {
+        void recordLaunchEvidenceIfChanged({
+          runId,
+          taskId: attempt.taskId,
+          dispatchId: attempt.dispatchId,
+          harness: observedAgent,
+          model: attempt.effective?.model ?? null,
+          effort: attempt.effective?.effort ?? null,
+          worktree: positiveSelector(attempt.effective?.worktree) ? attempt.effective!.worktree : null,
+          source: "viewer-launch",
+        });
       }
     } else if (attempt.requested.on) {
       // Phase 6 disconnect rule: a REMOTE Dispatch with no fleet row means the
@@ -5921,19 +5992,22 @@ async function startOne(
     // This is presentation evidence, never a reason to settle a Dispatch, so
     // an unwritable history file must not turn a launched worker into a failure.
     const launchedAgent = attempt.effective?.agent ?? (reuseTerminal ? null : attempt.harness);
+    const launchedModel = attempt.effective?.model ?? (reuseTerminal ? null : attempt.requested.model ?? null);
+    const launchedEffort = attempt.effective?.effort ?? (reuseTerminal ? null : attempt.requested.effort ?? null);
+    const initialWorktree = positiveSelector(attempt.effective?.worktree)
+      ? attempt.effective!.worktree
+      : (!reuseTerminal && positiveSelector(attempt.requested.worktree) ? attempt.requested.worktree : null);
     if (started.dispatchId && launchedAgent) {
-      try {
-        await new LaunchHistory(getOrcaRuntime().workspace.dir).record({
-          runId,
-          taskId: task.id,
-          dispatchId: started.dispatchId,
-          harness: launchedAgent,
-          source: "viewer-launch",
-        });
-      } catch {
-        // Orca remains the lifecycle authority; worker-show can recover
-        // supervised launch identity even when this local write failed.
-      }
+      await recordLaunchEvidenceIfChanged({
+        runId,
+        taskId: task.id,
+        dispatchId: started.dispatchId,
+        harness: launchedAgent,
+        model: launchedModel,
+        effort: launchedEffort,
+        worktree: initialWorktree,
+        source: "viewer-launch",
+      });
     }
     // Worktree lanes: this start may be the lane's CREATION event — capture
     // the workspace identity from positive evidence only, in honesty order:
@@ -5959,6 +6033,18 @@ async function startOne(
               `identity — later lane tasks refuse to start until Orca evidence names the workspace`,
           );
         }
+      }
+      if (lane.selector && positiveSelector(lane.selector) && started.dispatchId && launchedAgent && lane.selector !== initialWorktree) {
+        await recordLaunchEvidenceIfChanged({
+          runId,
+          taskId: task.id,
+          dispatchId: started.dispatchId,
+          harness: launchedAgent,
+          model: launchedModel,
+          effort: launchedEffort,
+          worktree: lane.selector,
+          source: "viewer-launch",
+        });
       }
     }
     attempt.startRequestId = null; // outcome known — the id is no longer pending
